@@ -22,6 +22,12 @@ Based on the line-comment experience of [herdr-reviewr](https://github.com/persi
 ## Install
 
 ```sh
+cargo install akapen
+```
+
+Or from source:
+
+```sh
 cargo build --release
 # binary: target/release/akapen
 ```

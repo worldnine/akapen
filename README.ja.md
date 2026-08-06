@@ -88,6 +88,12 @@ ANSI パレットの既定色にフォールバックします。ソースモー
 ## インストール / ビルド
 
 ```sh
+cargo install akapen
+```
+
+ソースからビルドする場合:
+
+```sh
 cargo build --release
 # バイナリ: target/release/akapen
 ```
