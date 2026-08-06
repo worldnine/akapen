@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""akapen2hunk — akapen のエクスポートを hunk のライブセッションコメントに変換・適用する。
+
+akapen の出力ブロック（stdin）:
+
+    path/to/file.md:12-14
+    12: 行12のテキスト
+    13:
+    14: 行14のテキスト
+    コメント本文
+
+を hunk session comment apply --repo <root> --stdin の JSON
+({"comments": [{"filePath", "newLine", "summary"}, ...]}) に変換して適用する。
+
+使い方:
+
+    akapen doc.md --send-cmd 'akapen2hunk [--repo <root>] [--focus] [--dry-run]'
+
+- --repo: repo root。省略時はカレントディレクトリの git root
+- ブロックの区切りは空行、スニペット行数は location の start-end から確定するので
+  本文が「12: 」で始まっても誤爆しない（akapen の番号付きスニペット形式に依存）
+- コメント範囲は hunk 側に複数行の概念が無いため newLine=start にピン留めし、
+  本文はそのまま summary にする
+"""
+
+# str | None 注釈は def 時に評価される — 遅延評価にしないと macOS 標準の
+# Python 3.9 (`/usr/bin/python3`) で起動すらできない
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+LOC_RE = re.compile(r"^(?P<path>.+):(?P<start>\d+)(?:-(?P<end>\d+))?$")
+
+
+def parse(text: str) -> list[dict]:
+    """akapen エクスポート → [{path, start, end, summary}]."""
+    comments = []
+    for block in text.split("\n\n"):
+        block = block.strip("\n")
+        if not block.strip():
+            continue
+        lines = block.split("\n")
+        m = LOC_RE.match(lines[0])
+        if not m:
+            sys.stderr.write(f"akapen2hunk: cannot parse location line: {lines[0]!r}\n")
+            sys.exit(1)
+        path = m.group("path")
+        start = int(m.group("start"))
+        end = int(m.group("end") or m.group("start"))
+        n = end - start + 1
+        summary = "\n".join(lines[1 + n:]).strip()
+        comments.append({"path": path, "start": start, "end": end, "summary": summary})
+    return comments
+
+
+def repo_root(explicit: str | None) -> str:
+    # realpath 統一: git の --show-toplevel は symlink 解決済みの実パスを
+    # 返すので、こちら側も実パスに揃えないと macOS の /tmp（→ /private/tmp）
+    # 等で relpath が誤って ".." になる
+    if explicit:
+        return os.path.realpath(explicit)
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=os.getcwd(), capture_output=True, text=True,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except FileNotFoundError:
+        pass
+    return os.path.realpath(os.getcwd())
+
+
+def file_path_for(path: str, root: str, cwd: str) -> str:
+    """起動時パス → repo root からの相対パス（hunk の filePath 形式）。"""
+    p = path if os.path.isabs(path) else os.path.join(cwd, path)
+    rel = os.path.relpath(os.path.realpath(p), root)
+    if rel.startswith(".."):
+        sys.stderr.write(
+            f"akapen2hunk: warning: {path!r} is outside repo {root!r}; "
+            "hunk will reject it (file not in the review)\n"
+        )
+        return path
+    return rel
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--repo", help="repo root (default: git root of cwd)")
+    ap.add_argument("--focus", action="store_true", help="jump to the first new note")
+    ap.add_argument("--dry-run", action="store_true", help="print JSON and exit")
+    args = ap.parse_args()
+
+    text = sys.stdin.read()
+    comments = parse(text)
+    if not comments:
+        return 0
+
+    root = repo_root(args.repo)
+    cwd = os.getcwd()
+    items = [
+        {"filePath": file_path_for(c["path"], root, cwd), "newLine": c["start"], "summary": c["summary"]}
+        for c in comments
+    ]
+    payload = json.dumps({"comments": items})
+
+    if args.dry_run:
+        print(payload)
+        return 0
+
+    cmd = ["hunk", "session", "comment", "apply", "--repo", root]
+    if args.focus:
+        cmd.append("--focus")
+    cmd.append("--stdin")
+    try:
+        r = subprocess.run(cmd, input=payload, capture_output=True, text=True)
+    except FileNotFoundError:
+        # 生の traceback は akapen の alt screen に直接描かれてしまう
+        sys.stderr.write("akapen2hunk: hunk not found on PATH\n")
+        return 1
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr)
+        return r.returncode
+    # 成功時は何も出力しない: send-cmd の stdout/stderr は akapen の
+    # TUI（alternate screen）に継承されていて、書くと画面が汚れる。
+    # 成功の合図は akapen 側のトーストが出す
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,495 @@
+"---"|Style::new().light_yellow()
+"title: akapen テストデータ"|Style::new().light_yellow()
+"author: nagata"|Style::new().light_yellow()
+"date: 2026-08-01"|Style::new().light_yellow()
+"tags: [markdown, test, tui, テスト]"|Style::new().light_yellow()
+"---"|Style::new().light_yellow()
+
+"🚀 見出しレベル1 (H1)"|Style::new().fg(Color::Rgb(243, 139, 168)).bold().underlined()
+
+"見出しレベル 1〜6 の描画テスト。表・コード・画像の表示確認。"|Style::new()
+
+"見出しレベル2 (H2)"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"見出しレベル3 (H3)"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"見出しレベル4 (H4)"|Style::new().fg(Color::Rgb(166, 227, 161)).italic()
+
+"見出しレベル5 (H5)"|Style::new().fg(Color::Rgb(116, 199, 236)).italic()
+
+"見出しレベル6 (H6)"|Style::new().fg(Color::Rgb(180, 190, 254)).italic()
+
+"見出しに "|Style::new().fg(Color::Rgb(250, 179, 135)).bold();;"インラインコード"|Style::new().white().on_black().bold();;" と "|Style::new().fg(Color::Rgb(250, 179, 135)).bold();;"リンク"|Style::new().fg(Color::Rgb(137, 180, 250)).bold();;" ("|Style::new().fg(Color::Rgb(250, 179, 135)).bold();;"https://example.com"|Style::new().fg(Color::Rgb(137, 180, 250)).bold();;")"|Style::new().fg(Color::Rgb(250, 179, 135)).bold();;" が入るパターン"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"<!-- HTML コメントはレンダラで消えるはず。ソース上には残るので行コメント対象にな"|Style::new().dim()
+"る -->"|Style::new().dim()
+
+"段落とインライン書式"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"太字"|Style::new().bold();;"、"|Style::new();;"斜体"|Style::new().italic();;"、"|Style::new();;"太字斜体"|Style::new().bold().italic();;"、"|Style::new();;"打ち消し"|Style::new().crossed_out();;"、"|Style::new();;"インラインコード"|Style::new().white().on_black();;"、"|Style::new();;" "|Style::new();;"<sub>"|Style::new().dim();;"下付き"|Style::new();;"</sub>"|Style::new().dim();;"、"|Style::new();;"<sup>"|Style::new().dim();;"上付"|Style::new();;"き"|Style::new()
+"</sup>"|Style::new().dim();;"、"|Style::new();;"<mark>"|Style::new().dim();;"マーク"|Style::new();;"</mark>"|Style::new().dim();;"、改行"|Style::new();;"<br>"|Style::new().dim();;"タグ。"|Style::new()
+
+"日本語の文章 + English mixed テスト。全角文字（あいうえお漢字カタカナ）と"|Style::new();;" "|Style::new();;"半角英"|Style::new()
+"数字の混在で折り返しが崩れないことを確認するための長めの文章です。"|Style::new();;" "|Style::new();;"この行はかな"|Style::new();;"り"|Style::new()
+"長くて、画面幅を超えたときにコメントモードでの折り返しが"|Style::new();;" "|Style::new();;"正しくインデントされる"|Style::new();;"か"|Style::new()
+"を確認するためのものです。Lorem ipsum dolor sit"|Style::new();;" "|Style::new();;"amet, consectetur adipiscing eli"|Style::new()
+"t, sed do eiusmod tempor incididunt ut labore"|Style::new();;" "|Style::new();;"et dolore magna aliqua. 記号 !@#"|Style::new();;"$"|Style::new();;"%"|Style::new()
+"^"|Style::new();;"&"|Style::new();;"*"|Style::new();;"()"|Style::new();;"_"|Style::new();;"+{}|:\""|Style::new();;"<"|Style::new();;">?"|Style::new();;"`"|Style::new();;"~"|Style::new();;"-="|Style::new();;"["|Style::new();;"]"|Style::new();;";',./ と数字 0123456789。"|Style::new()
+
+"行末に半角スペース2つを置くと"|Style::new()
+"ハード改行になります。"|Style::new()
+
+"タブ文字        が含まれる行。8桁タブストップで展開されるはず。"|Style::new()
+
+"リンク"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"インラインリンク: "|Style::new();;"GitHub"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"https://github.com"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"タイトル付き: "|Style::new();;"example"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"https://exa"|Style::new().fg(Color::Rgb(137, 180, 250))
+"mple.com"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"参照スタイル: "|Style::new();;"reference"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"https://example.com/ref"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"自動リンク: "|Style::new();;"https://"|Style::new().fg(Color::Rgb(137, 180, 250))
+"rust-lang.org"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"https://rust-lang.org"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"メール自動リンク: "|Style::new();;"mailto:test@example.com"|Style::new().fg(Color::Rgb(137, 180, 250));;" "|Style::new()
+"("|Style::new();;"mailto:test@example.com"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"相対リンク: "|Style::new();;"README"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"./README.md"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" と "|Style::new();;"design"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"design.md"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new()
+" "|Style::new();;"同一ファイル内アンカー: "|Style::new();;"先頭へ"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"#🚀-見出しレベル1-h1"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"リンクの URL だけを並べた"|Style::new()
+"長い行: https://example.com/very/long/path/with/many/segments/abcdefghijklmnopqr"|Style::new()
+"stuvwxyz/1234567890?query=value&another=value#fragment"|Style::new()
+
+""|Style::new()
+"画像"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"インライン画像（タイトル付き）:"|Style::new()
+
+"[img] "|Style::new().dim().italic();;"代替テキスト"|Style::new().dim().italic()
+
+"[img] "|Style::new().dim().italic();;"alt only"|Style::new().dim().italic()
+
+"参照スタイルの画像:"|Style::new()
+
+"[img] "|Style::new().dim().italic();;"参照画像"|Style::new().dim().italic()
+
+""|Style::new()
+"画像リンク（画像をクリックでリンク先へ飛ぶやつ）:"|Style::new()
+
+"[img] "|Style::new().fg(Color::Rgb(137, 180, 250)).dim().italic();;"クリック可能な画像"|Style::new().fg(Color::Rgb(137, 180, 250)).dim().italic();;" ("|Style::new();;"https://example.com"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new()
+
+"存在しない相対パスの画像:"|Style::new()
+
+"[img] "|Style::new().dim().italic();;"./images/not-found.png"|Style::new().dim().italic()
+
+"SVG 画像:"|Style::new()
+
+"[img] "|Style::new().dim().italic();;"svg"|Style::new().dim().italic()
+
+"HTML の img タグ（サイズ指定）:"|Style::new()
+
+"<img src=\"https://placehold.co/400x150.png\" width=\"400\" alt=\"html img\">"|Style::new().dim()
+
+"コードブロック"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"フェンス付きコード (rust)"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"use"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"std"|Style::new().fg(Color::Rgb(205, 214, 244));;"::"|Style::new().fg(Color::Rgb(148, 226, 213));;"collections"|Style::new().fg(Color::Rgb(205, 214, 244));;"::"|Style::new().fg(Color::Rgb(148, 226, 213));;"HashMap"|Style::new().fg(Color::Rgb(205, 214, 244));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"///"|Style::new().fg(Color::Rgb(147, 153, 178));;" ドキュメントコメント付きのサンプル関数"|Style::new().fg(Color::Rgb(147, 153, 178))
+"fn"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"main"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"->"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"Result"|Style::new().fg(Color::Rgb(250, 179, 135));;"<"|Style::new().fg(Color::Rgb(148, 226, 213));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;", "|Style::new().fg(Color::Rgb(250, 179, 135));;"Box"|Style::new().fg(Color::Rgb(250, 179, 135));;"<"|Style::new().fg(Color::Rgb(148, 226, 213));;"dyn "|Style::new().fg(Color::Rgb(250, 179, 135));;"std"|Style::new().fg(Color::Rgb(250, 179, 135));;"::"|Style::new().fg(Color::Rgb(148, 226, 213));;"error"|Style::new().fg(Color::Rgb(250, 179, 135));;"::"|Style::new().fg(Color::Rgb(148, 226, 213));;"Error"|Style::new().fg(Color::Rgb(250, 179, 135));;">"|Style::new().fg(Color::Rgb(148, 226, 213));;">"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"let"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"mut"|Style::new().fg(Color::Rgb(203, 166, 247));;" map"|Style::new().fg(Color::Rgb(205, 214, 244));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"HashMap"|Style::new().fg(Color::Rgb(250, 179, 135));;"<"|Style::new().fg(Color::Rgb(148, 226, 213));;"String, "|Style::new().fg(Color::Rgb(250, 179, 135));;"Vec"|Style::new().fg(Color::Rgb(250, 179, 135));;"<"|Style::new().fg(Color::Rgb(148, 226, 213));;"u8"|Style::new().fg(Color::Rgb(203, 166, 247));;">"|Style::new().fg(Color::Rgb(148, 226, 213));;">"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"HashMap"|Style::new().fg(Color::Rgb(205, 214, 244));;"::"|Style::new().fg(Color::Rgb(148, 226, 213));;"new"|Style::new().fg(Color::Rgb(205, 214, 244));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    map."|Style::new().fg(Color::Rgb(205, 214, 244));;"insert"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"key"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"."|Style::new().fg(Color::Rgb(205, 214, 244));;"to_string"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"vec!"|Style::new().fg(Color::Rgb(137, 180, 250));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"1"|Style::new().fg(Color::Rgb(250, 179, 135));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"2"|Style::new().fg(Color::Rgb(250, 179, 135));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"3"|Style::new().fg(Color::Rgb(250, 179, 135));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"for"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"k"|Style::new().fg(Color::Rgb(205, 214, 244));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" v"|Style::new().fg(Color::Rgb(205, 214, 244));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"in"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"&"|Style::new().fg(Color::Rgb(148, 226, 213));;"map "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"        "|Style::new().fg(Color::Rgb(205, 214, 244));;"println!"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"{k}"|Style::new().fg(Color::Rgb(245, 194, 231));;": "|Style::new().fg(Color::Rgb(166, 227, 161));;"{v:?}"|Style::new().fg(Color::Rgb(245, 194, 231));;"  ← 日本語コメント"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"//"|Style::new().fg(Color::Rgb(147, 153, 178));;" インラインの `コード` を含む行"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"let"|Style::new().fg(Color::Rgb(203, 166, 247));;" s "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"文字列の中に ``` や ` が入るパターン"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"Ok"|Style::new().fg(Color::Rgb(249, 226, 175));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"フェンス付きコード (python)"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"def"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"fibonacci"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"n"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"int"|Style::new().fg(Color::Rgb(203, 166, 247));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"->"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"int"|Style::new().fg(Color::Rgb(203, 166, 247));;":"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"\"\"\""|Style::new().fg(Color::Rgb(147, 153, 178));;"フィボナッチ数列の計算"|Style::new().fg(Color::Rgb(147, 153, 178));;"\"\"\""|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"a"|Style::new().fg(Color::Rgb(205, 214, 244));;", "|Style::new().fg(Color::Rgb(205, 214, 244));;"b"|Style::new().fg(Color::Rgb(205, 214, 244));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"0"|Style::new().fg(Color::Rgb(250, 179, 135));;", "|Style::new().fg(Color::Rgb(205, 214, 244));;"1"|Style::new().fg(Color::Rgb(250, 179, 135))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"for"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"_"|Style::new().fg(Color::Rgb(205, 214, 244));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"in"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"range"|Style::new().fg(Color::Rgb(250, 179, 135));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"n"|Style::new().fg(Color::Rgb(205, 214, 244));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;":"|Style::new().fg(Color::Rgb(147, 153, 178))
+"        "|Style::new().fg(Color::Rgb(205, 214, 244));;"a"|Style::new().fg(Color::Rgb(205, 214, 244));;", "|Style::new().fg(Color::Rgb(205, 214, 244));;"b"|Style::new().fg(Color::Rgb(205, 214, 244));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"b"|Style::new().fg(Color::Rgb(205, 214, 244));;", "|Style::new().fg(Color::Rgb(205, 214, 244));;"a"|Style::new().fg(Color::Rgb(205, 214, 244));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"+"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"b"|Style::new().fg(Color::Rgb(205, 214, 244))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"return"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"a"|Style::new().fg(Color::Rgb(205, 214, 244))
+
+"#"|Style::new().fg(Color::Rgb(147, 153, 178));;" 長い行のテスト: この行は意図的に非常に長くして、コメントモードでの折り返しと行"|Style::new().fg(Color::Rgb(147, 153, 178))
+"番号ガターのインデントが揃うことを確認するためのものです"|Style::new().fg(Color::Rgb(147, 153, 178))
+"print"|Style::new().fg(Color::Rgb(250, 179, 135));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"fibonacci"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"10"|Style::new().fg(Color::Rgb(250, 179, 135));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"フェンス付きコード (javascript)"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"//"|Style::new().fg(Color::Rgb(147, 153, 178));;" コメント"|Style::new().fg(Color::Rgb(147, 153, 178))
+"const"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"handler"|Style::new().fg(Color::Rgb(137, 180, 250));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"req"|Style::new().fg(Color::Rgb(235, 160, 172));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"res"|Style::new().fg(Color::Rgb(235, 160, 172));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"=>"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"const"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"data"|Style::new().fg(Color::Rgb(205, 214, 244));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"ok"|Style::new().fg(Color::Rgb(205, 214, 244));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"true"|Style::new().fg(Color::Rgb(250, 179, 135));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"items"|Style::new().fg(Color::Rgb(205, 214, 244));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"1"|Style::new().fg(Color::Rgb(250, 179, 135));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"2"|Style::new().fg(Color::Rgb(250, 179, 135));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"3"|Style::new().fg(Color::Rgb(250, 179, 135));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"name"|Style::new().fg(Color::Rgb(205, 214, 244));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"テスト"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"}"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"res"|Style::new().fg(Color::Rgb(205, 214, 244));;"."|Style::new().fg(Color::Rgb(148, 226, 213));;"json"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"data"|Style::new().fg(Color::Rgb(205, 214, 244));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"/*"|Style::new().fg(Color::Rgb(147, 153, 178));;" 複数行"|Style::new().fg(Color::Rgb(147, 153, 178))
+"   コメント "|Style::new().fg(Color::Rgb(147, 153, 178));;"*/"|Style::new().fg(Color::Rgb(147, 153, 178))
+"export"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"default"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"handler"|Style::new().fg(Color::Rgb(235, 160, 172));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"フェンス付きコード (bash)"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"#"|Style::new().fg(Color::Rgb(147, 153, 178));;"!/usr/bin/env bash"|Style::new().fg(Color::Rgb(147, 153, 178))
+"set"|Style::new().fg(Color::Rgb(137, 180, 250));;" -euo pipefail"|Style::new().fg(Color::Rgb(205, 214, 244))
+
+"for"|Style::new().fg(Color::Rgb(203, 166, 247));;" file "|Style::new().fg(Color::Rgb(205, 214, 244));;"in"|Style::new().fg(Color::Rgb(203, 166, 247));;" src/"|Style::new().fg(Color::Rgb(205, 214, 244));;"*"|Style::new().fg(Color::Rgb(148, 226, 213));;".rs"|Style::new().fg(Color::Rgb(205, 214, 244));;";"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"do"|Style::new().fg(Color::Rgb(203, 166, 247))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"echo"|Style::new().fg(Color::Rgb(137, 180, 250));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"processing "|Style::new().fg(Color::Rgb(166, 227, 161));;"$"|Style::new().fg(Color::Rgb(243, 139, 168));;"file"|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"grep"|Style::new().fg(Color::Rgb(137, 180, 250));;" -"|Style::new().fg(Color::Rgb(147, 153, 178));;"n"|Style::new().fg(Color::Rgb(235, 160, 172));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"TODO"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"$"|Style::new().fg(Color::Rgb(243, 139, 168));;"file"|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"||"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"true"|Style::new().fg(Color::Rgb(137, 180, 250))
+"done"|Style::new().fg(Color::Rgb(203, 166, 247))
+
+"フェンス付きコード (json)"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"name"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"akapen"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;","|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"version"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"0.1.0"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;","|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"dependencies"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"ratatui"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"^0.30"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;","|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"mdcat"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"^2"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"}"|Style::new().fg(Color::Rgb(147, 153, 178));;","|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"日本語キー"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"日本語の値"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"フェンス付きコード (diff)"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"---"|Style::new().fg(Color::Rgb(137, 180, 250));;" a/README.md"|Style::new().fg(Color::Rgb(137, 180, 250))
+"+++"|Style::new().fg(Color::Rgb(137, 180, 250));;" b/README.md"|Style::new().fg(Color::Rgb(137, 180, 250))
+"@@"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"-1,5 +1,6"|Style::new().fg(Color::Rgb(205, 214, 244));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"@@"|Style::new().fg(Color::Rgb(147, 153, 178))
+" # akapen"|Style::new().fg(Color::Rgb(205, 214, 244))
+"+"|Style::new().fg(Color::Rgb(147, 153, 178))
+"+"|Style::new().fg(Color::Rgb(147, 153, 178));;"新しい行が追加された"|Style::new().fg(Color::Rgb(166, 227, 161))
+
+"その他の言語いろいろ"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"SELECT"|Style::new().fg(Color::Rgb(203, 166, 247));;" id, name, created_at"|Style::new().fg(Color::Rgb(205, 214, 244))
+"FROM"|Style::new().fg(Color::Rgb(203, 166, 247));;" comments"|Style::new().fg(Color::Rgb(205, 214, 244))
+"WHERE"|Style::new().fg(Color::Rgb(203, 166, 247));;" user_id "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"42"|Style::new().fg(Color::Rgb(250, 179, 135))
+"ORDER BY"|Style::new().fg(Color::Rgb(203, 166, 247));;" created_at "|Style::new().fg(Color::Rgb(205, 214, 244));;"DESC"|Style::new().fg(Color::Rgb(203, 166, 247))
+"LIMIT"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"10"|Style::new().fg(Color::Rgb(250, 179, 135));;";"|Style::new().fg(Color::Rgb(205, 214, 244))
+
+"<"|Style::new().fg(Color::Rgb(148, 226, 213));;"div"|Style::new().fg(Color::Rgb(137, 180, 250));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"class"|Style::new().fg(Color::Rgb(249, 226, 175));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"card"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;">"|Style::new().fg(Color::Rgb(148, 226, 213))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"<"|Style::new().fg(Color::Rgb(148, 226, 213));;"h2"|Style::new().fg(Color::Rgb(137, 180, 250));;">"|Style::new().fg(Color::Rgb(148, 226, 213));;"タイトル"|Style::new().fg(Color::Rgb(205, 214, 244));;"</"|Style::new().fg(Color::Rgb(148, 226, 213));;"h2"|Style::new().fg(Color::Rgb(137, 180, 250));;">"|Style::new().fg(Color::Rgb(148, 226, 213))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"<"|Style::new().fg(Color::Rgb(148, 226, 213));;"p"|Style::new().fg(Color::Rgb(137, 180, 250));;">"|Style::new().fg(Color::Rgb(148, 226, 213));;"本文です"|Style::new().fg(Color::Rgb(205, 214, 244));;"</"|Style::new().fg(Color::Rgb(148, 226, 213));;"p"|Style::new().fg(Color::Rgb(137, 180, 250));;">"|Style::new().fg(Color::Rgb(148, 226, 213))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"<"|Style::new().fg(Color::Rgb(148, 226, 213));;"img"|Style::new().fg(Color::Rgb(137, 180, 250));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"src"|Style::new().fg(Color::Rgb(249, 226, 175));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"image.png"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"alt"|Style::new().fg(Color::Rgb(249, 226, 175));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"画像"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;">"|Style::new().fg(Color::Rgb(148, 226, 213))
+"</"|Style::new().fg(Color::Rgb(148, 226, 213));;"div"|Style::new().fg(Color::Rgb(137, 180, 250));;">"|Style::new().fg(Color::Rgb(148, 226, 213))
+
+"."|Style::new().fg(Color::Rgb(147, 153, 178));;"card"|Style::new().fg(Color::Rgb(249, 226, 175));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"display"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"flex"|Style::new().fg(Color::Rgb(205, 214, 244));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"gap"|Style::new().fg(Color::Rgb(205, 214, 244));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"8"|Style::new().fg(Color::Rgb(250, 179, 135));;"px"|Style::new().fg(Color::Rgb(203, 166, 247));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"padding"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"16"|Style::new().fg(Color::Rgb(250, 179, 135));;"px"|Style::new().fg(Color::Rgb(203, 166, 247));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"@"|Style::new().fg(Color::Rgb(203, 166, 247));;"media"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"max-width"|Style::new().fg(Color::Rgb(249, 226, 175));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"600"|Style::new().fg(Color::Rgb(250, 179, 135));;"px"|Style::new().fg(Color::Rgb(203, 166, 247));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"."|Style::new().fg(Color::Rgb(147, 153, 178));;"card"|Style::new().fg(Color::Rgb(249, 226, 175));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"flex-direction"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"column"|Style::new().fg(Color::Rgb(205, 214, 244));;";"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"[package]"|Style::new()
+"name = \"akapen\""|Style::new()
+"version = \"0.1.0\""|Style::new()
+"edition = \"2021\""|Style::new()
+
+"name"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"akapen"|Style::new().fg(Color::Rgb(166, 227, 161))
+"version"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"0.1.0"|Style::new().fg(Color::Rgb(250, 179, 135))
+"dependencies"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"●"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"ratatui"|Style::new().fg(Color::Rgb(166, 227, 161))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"●"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"mdcat"|Style::new().fg(Color::Rgb(166, 227, 161))
+
+"package"|Style::new().fg(Color::Rgb(203, 166, 247));;" main"|Style::new().fg(Color::Rgb(205, 214, 244))
+
+"import"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"fmt"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161))
+
+"func"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"main"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    fmt"|Style::new().fg(Color::Rgb(205, 214, 244));;"."|Style::new().fg(Color::Rgb(148, 226, 213));;"Println"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"こんにちは、世界"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;")"|Style::new().fg(Color::Rgb(147, 153, 178))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"#include"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"<"|Style::new().fg(Color::Rgb(166, 227, 161));;"stdio.h"|Style::new().fg(Color::Rgb(166, 227, 161));;">"|Style::new().fg(Color::Rgb(166, 227, 161))
+
+"int"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"main"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"void"|Style::new().fg(Color::Rgb(203, 166, 247));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"/*"|Style::new().fg(Color::Rgb(147, 153, 178));;" コメント "|Style::new().fg(Color::Rgb(147, 153, 178));;"*/"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"printf"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"Hello, World!"|Style::new().fg(Color::Rgb(166, 227, 161));;"\\n"|Style::new().fg(Color::Rgb(245, 194, 231));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"return"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"0"|Style::new().fg(Color::Rgb(250, 179, 135));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"#include"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"<"|Style::new().fg(Color::Rgb(166, 227, 161));;"iostream"|Style::new().fg(Color::Rgb(166, 227, 161));;">"|Style::new().fg(Color::Rgb(166, 227, 161))
+"#include"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"<"|Style::new().fg(Color::Rgb(166, 227, 161));;"vector"|Style::new().fg(Color::Rgb(166, 227, 161));;">"|Style::new().fg(Color::Rgb(166, 227, 161))
+
+"int"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"main"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    std"|Style::new().fg(Color::Rgb(205, 214, 244));;"::"|Style::new().fg(Color::Rgb(148, 226, 213));;"vector"|Style::new().fg(Color::Rgb(205, 214, 244));;"<"|Style::new().fg(Color::Rgb(147, 153, 178));;"int"|Style::new().fg(Color::Rgb(203, 166, 247));;">"|Style::new().fg(Color::Rgb(147, 153, 178));;" v"|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178));;"1"|Style::new().fg(Color::Rgb(250, 179, 135));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"2"|Style::new().fg(Color::Rgb(250, 179, 135));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"3"|Style::new().fg(Color::Rgb(250, 179, 135));;"}"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"for"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"auto"|Style::new().fg(Color::Rgb(203, 166, 247));;" x "|Style::new().fg(Color::Rgb(205, 214, 244));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" v"|Style::new().fg(Color::Rgb(205, 214, 244));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"        std"|Style::new().fg(Color::Rgb(205, 214, 244));;"::"|Style::new().fg(Color::Rgb(148, 226, 213));;"cout "|Style::new().fg(Color::Rgb(205, 214, 244));;"<<"|Style::new().fg(Color::Rgb(148, 226, 213));;" x "|Style::new().fg(Color::Rgb(205, 214, 244));;"<<"|Style::new().fg(Color::Rgb(148, 226, 213));;" std"|Style::new().fg(Color::Rgb(205, 214, 244));;"::"|Style::new().fg(Color::Rgb(148, 226, 213));;"endl"|Style::new().fg(Color::Rgb(205, 214, 244));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"return"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"0"|Style::new().fg(Color::Rgb(250, 179, 135));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"interface User {"|Style::new()
+"  id: number;"|Style::new()
+"  name: string;"|Style::new()
+"  tags: string[];"|Style::new()
+"}"|Style::new()
+
+"const user: User = { id: 1, name: \"太郎\", tags: [\"a\", \"b\"] };"|Style::new()
+
+"import Foundation"|Style::new()
+
+"struct Comment: Codable {"|Style::new()
+"    let id: Int"|Style::new()
+"    let text: String"|Style::new()
+"}"|Style::new()
+
+"let comments = try JSONDecoder().decode([Comment].self, from: data)"|Style::new()
+
+"class"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"Greeter"|Style::new().fg(Color::Rgb(249, 226, 175))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"def"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"initialize"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"name"|Style::new().fg(Color::Rgb(235, 160, 172));;")"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"@"|Style::new().fg(Color::Rgb(205, 214, 244));;"name"|Style::new().fg(Color::Rgb(205, 214, 244));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"name"|Style::new().fg(Color::Rgb(243, 139, 168))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"end"|Style::new().fg(Color::Rgb(203, 166, 247))
+
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"def"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"greet"|Style::new().fg(Color::Rgb(137, 180, 250))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"puts"|Style::new().fg(Color::Rgb(243, 139, 168));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"Hello, "|Style::new().fg(Color::Rgb(166, 227, 161));;"#{"|Style::new().fg(Color::Rgb(147, 153, 178));;"@"|Style::new().fg(Color::Rgb(205, 214, 244));;"name"|Style::new().fg(Color::Rgb(205, 214, 244));;"}"|Style::new().fg(Color::Rgb(147, 153, 178));;"!"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"end"|Style::new().fg(Color::Rgb(203, 166, 247))
+"end"|Style::new().fg(Color::Rgb(203, 166, 247))
+
+"graph TD"|Style::new()
+"    A[開始] --> B{条件分岐}"|Style::new()
+"    B -->|はい| C[処理1]"|Style::new()
+"    B -->|いいえ| D[処理2]"|Style::new()
+"    C --> E[終了]"|Style::new()
+"    D --> E"|Style::new()
+
+"言語指定なし（プレーン）"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"プレーンなコードブロック。ハイライトなし。"|Style::new()
+"日本語も含む。タブ      入り。| パイプや * アスタリスク。"|Style::new()
+
+"インデントコードブロック"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"インデント4つのコードブロック"|Style::new();;"def hello():"|Style::new();;"    print(\"indented\")"|Style::new();;"タブ      も入れて"|Style::new()
+"おく"|Style::new()
+
+"空のコードブロック"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+
+
+"タブを含むコード"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"fn"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"main"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178))
+"        "|Style::new().fg(Color::Rgb(205, 214, 244));;"println!"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"タブを含む行"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"        "|Style::new().fg(Color::Rgb(205, 214, 244));;"let"|Style::new().fg(Color::Rgb(203, 166, 247));;" x "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"1"|Style::new().fg(Color::Rgb(250, 179, 135));;";"|Style::new().fg(Color::Rgb(147, 153, 178));;"      "|Style::new().fg(Color::Rgb(205, 214, 244));;"//"|Style::new().fg(Color::Rgb(147, 153, 178));;" タブで整列"|Style::new().fg(Color::Rgb(147, 153, 178))
+"        "|Style::new().fg(Color::Rgb(205, 214, 244));;"//"|Style::new().fg(Color::Rgb(147, 153, 178));;" ここは行頭タブ"|Style::new().fg(Color::Rgb(147, 153, 178))
+"        "|Style::new().fg(Color::Rgb(205, 214, 244));;"let"|Style::new().fg(Color::Rgb(203, 166, 247));;" long_variable_name "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"42"|Style::new().fg(Color::Rgb(250, 179, 135));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"長いコード行（折り返しテスト）"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"def"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"very_long_function_name_with_many_words"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"argument_one"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"argument_two"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"int"|Style::new().fg(Color::Rgb(203, 166, 247))
+","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"argument_three"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"list"|Style::new().fg(Color::Rgb(203, 166, 247));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"argument_four"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"dict"|Style::new().fg(Color::Rgb(203, 166, 247));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;", "|Style::new().fg(Color::Rgb(235, 160, 172));;"Any"|Style::new().fg(Color::Rgb(235, 160, 172));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"|"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"None"|Style::new().fg(Color::Rgb(250, 179, 135));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"None"|Style::new().fg(Color::Rgb(250, 179, 135));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"->"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"tup"|Style::new().fg(Color::Rgb(203, 166, 247))
+"le"|Style::new().fg(Color::Rgb(203, 166, 247));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"int"|Style::new().fg(Color::Rgb(203, 166, 247));;", "|Style::new().fg(Color::Rgb(205, 214, 244));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"#"|Style::new().fg(Color::Rgb(147, 153, 178));;" コメントモードで折り返しを確認するための非常に長い行"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"return"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"argument_two"|Style::new().fg(Color::Rgb(205, 214, 244));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"argument_one"|Style::new().fg(Color::Rgb(205, 214, 244));;")"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+"リスト"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"番号なしリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"● "|Style::new();;"りんご"|Style::new()
+"● "|Style::new();;"バナナ"|Style::new()
+"● "|Style::new();;"みかん"|Style::new()
+"    ● "|Style::new();;"ネスト レベル1"|Style::new()
+"        ● "|Style::new();;"ネスト レベル2"|Style::new()
+"● "|Style::new();;"最後の項目"|Style::new()
+
+"番号付きリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"1. "|Style::new().light_blue();;"最初の項目"|Style::new()
+"2. "|Style::new().light_blue();;"二番目の項目"|Style::new()
+"    1. "|Style::new().light_blue();;"ネスト a"|Style::new()
+"    2. "|Style::new().light_blue();;"ネスト b"|Style::new()
+"3. "|Style::new().light_blue();;"三番目の項目"|Style::new()
+"4. "|Style::new().light_blue();;"四番目の項目。この項目のテキストは意図的に少し長くして、折り返しがどうなるか"|Style::new();;"を"|Style::new()
+"確認するためのものです。"|Style::new()
+"5. "|Style::new().light_blue();;"五番目の項目"|Style::new()
+
+"タスクリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"● [x] "|Style::new();;"完了したタスク"|Style::new()
+"● [ ] "|Style::new();;"未完了のタスク"|Style::new()
+"● [ ] "|Style::new();;"未完了のタスクその2"|Style::new()
+"    ● [x] "|Style::new();;"ネスト済みタスク"|Style::new()
+
+"リスト内のコードと複数段落"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"● "|Style::new();;"項目1。リスト内の "|Style::new();;"インラインコード"|Style::new().white().on_black()
+
+"リスト内のフェンスドコードブロック"|Style::new();;"インデントされるはず"|Style::new()
+"● "|Style::new();;"項目2"|Style::new()
+
+"リスト内の複数段落（インデント付き）。"|Style::new()
+""|Style::new()
+"● "|Style::new();;"項目3 複数行"|Style::new();;" "|Style::new();;"にまたがるテキスト。"|Style::new();;" "|Style::new();;"これも続き。"|Style::new()
+
+"空行入りリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
+
+"● "|Style::new();;"a"|Style::new()
+""|Style::new()
+"● "|Style::new();;"b"|Style::new()
+""|Style::new()
+"● "|Style::new();;"c"|Style::new()
+
+"表"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"┌──────┬────────┬──────┐"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"名前"|Style::new().cyan().bold();;" "|Style::new().cyan().bold();;"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"役割"|Style::new().cyan().bold();;"   "|Style::new().cyan().bold();;"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"状態"|Style::new().cyan().bold();;" "|Style::new().cyan().bold();;"│"|Style::new().dark_gray()
+"├──────┼────────┼──────┤"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"田中"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"開発"|Style::new();;"   "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"✅"|Style::new();;"   "|Style::new();;"│"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"佐藤"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"設計"|Style::new();;"   "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"❌"|Style::new();;"   "|Style::new();;"│"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"鈴木"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"テスト"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"⚠\u{fe0f}"|Style::new();;"   "|Style::new();;"│"|Style::new().dark_gray()
+"└──────┴────────┴──────┘"|Style::new().dark_gray()
+
+"整列指定付きの表:"|Style::new()
+
+"┌──────────┬──────────┬──────────────────────────────┐"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"左揃え"|Style::new().cyan().bold();;"   "|Style::new().cyan().bold();;"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"中央揃え"|Style::new().cyan().bold();;" "|Style::new().cyan().bold();;"│"|Style::new().dark_gray();;"                       "|Style::new().cyan().bold();;"右揃え"|Style::new().cyan().bold();;" "|Style::new().cyan().bold();;"│"|Style::new().dark_gray()
+"├──────────┼──────────┼──────────────────────────────┤"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"a"|Style::new();;"        "|Style::new();;"│"|Style::new().dark_gray();;"    "|Style::new();;"b"|Style::new();;"     "|Style::new();;"│"|Style::new().dark_gray();;"                            "|Style::new();;"c"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"長いセル"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray();;"   "|Style::new();;"中央"|Style::new();;"   "|Style::new();;"│"|Style::new().dark_gray();;"                         "|Style::new();;"1000"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"コード"|Style::new().white().on_black();;"   "|Style::new();;"│"|Style::new().dark_gray();;"   "|Style::new();;"太字"|Style::new().bold();;"   "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"リンク"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"https://example.com"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray()
+"└──────────┴──────────┴──────────────────────────────┘"|Style::new().dark_gray()
+
+"日本語長文・改行入りの表:"|Style::new()
+
+"┌────────────────────────────────────────────────────────────────────┬──────────"|Style::new().dark_gray()
+"┬──────────┐"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"Column 1"|Style::new().cyan().bold();;"                                                           "|Style::new().cyan().bold();;"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"Column 2"|Style::new().cyan().bold();;" "|Style::new().cyan().bold()
+"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"Column 3"|Style::new().cyan().bold();;" "|Style::new().cyan().bold();;"│"|Style::new().dark_gray()
+"├────────────────────────────────────────────────────────────────────┼──────────"|Style::new().dark_gray()
+"┼──────────┤"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"日本語の長いテキストが入るセル。折り返しはどうなるか確認するため。"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"中央"|Style::new();;"     "|Style::new()
+"│"|Style::new().dark_gray();;" "|Style::new();;"x"|Style::new();;"        "|Style::new();;"│"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"複数行にしたい場合は"|Style::new();;"<br>"|Style::new().dim();;"br タグを使う"|Style::new();;"                              "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"2"|Style::new();;"        "|Style::new()
+"│"|Style::new().dark_gray();;" "|Style::new();;"y"|Style::new();;"        "|Style::new();;"│"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"セル内に "|Style::new();;"[img] "|Style::new().dim().italic();;"img"|Style::new().dim().italic();;" を入れる"|Style::new();;"                                        "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"3"|Style::new();;"        "|Style::new()
+"│"|Style::new().dark_gray();;" "|Style::new();;"z"|Style::new();;"        "|Style::new();;"│"|Style::new().dark_gray()
+"└────────────────────────────────────────────────────────────────────┴──────────"|Style::new().dark_gray()
+"┴──────────┘"|Style::new().dark_gray()
+
+"引用"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"これは引用です。"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"複数行にわたる引用。"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"空行を挟んだ引用の続き。"|Style::new().fg(Color::Rgb(245, 194, 231))
+
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"ネストした引用"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"内側の引用"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;">"|Style::new().fg(Color::Rgb(245, 194, 231));;">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"さらに内側の引用"|Style::new().fg(Color::Rgb(245, 194, 231))
+
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"引用内のコード:"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231))
+"fn"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"main"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"{"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"println!"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"quote"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;";"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"}"|Style::new().fg(Color::Rgb(147, 153, 178))
+
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"引用内のリスト:"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"● "|Style::new().fg(Color::Rgb(245, 194, 231));;"item1"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"● "|Style::new().fg(Color::Rgb(245, 194, 231));;"item2"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"引用内の "|Style::new().fg(Color::Rgb(245, 194, 231));;"太字"|Style::new().fg(Color::Rgb(245, 194, 231)).bold();;" と "|Style::new().fg(Color::Rgb(245, 194, 231));;"コード"|Style::new().white().on_black();;"。"|Style::new().fg(Color::Rgb(245, 194, 231))
+
+"水平線"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"---"|Style::new()
+
+"---"|Style::new()
+
+"---"|Style::new()
+
+"数式"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"インライン数式: "|Style::new();;"$E = mc^2$"|Style::new().magenta().italic();;" と "|Style::new();;"$\\alpha + \\beta$"|Style::new().magenta().italic()
+
+"ブロック数式:"|Style::new()
+
+"$$"|Style::new().magenta()
+"\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}"|Style::new().magenta()
+"$$"|Style::new().magenta()
+
+"脚注"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"ここに脚注がある文章です"|Style::new();;"[1]"|Style::new().dim().italic();;"。もう一つの脚注"|Style::new();;"[2]"|Style::new().dim().italic();;"。"|Style::new()
+
+"[1]: "|Style::new().dim();;"脚注の内容その1"|Style::new().dim()
+
+"[2]: "|Style::new().dim();;"脚注の内容その2。複数行にまたがる場合は"|Style::new().dim();;" "|Style::new().dim();;"インデントで続ける。"|Style::new().dim()
+
+"エスケープ"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"*アスタリスク"|Style::new();;"*、"|Style::new();;"_アンダースコア"|Style::new();;"_、"|Style::new();;"# シャープ、"|Style::new();;"`"|Style::new();;" バッククォート、"|Style::new();;" "|Style::new();;"\\ バックスラッ"|Style::new();;"シ"|Style::new()
+"ュ、"|Style::new();;"<山括弧"|Style::new();;">"|Style::new()
+
+"特殊文字・絵文字"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"✅ ❌ ⚠\u{fe0f} 🚀 📝 🔥 日本語の記号「」『』（）・ー〜 全角英数 ＡＢＣ１２３"|Style::new()
+
+"ゼロ幅スペース\u{3000}\u{200b}\u{3000}と結合文字 e\u{301}（e + U+0301）と RTL 文字 עברית العربية のテスト。"|Style::new()
+
+"空行・空白のみの行のテスト"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"ここから下は空行・空白行のテストです。"|Style::new()
+
+"（上の行はスペースのみの行。この下は空行）"|Style::new()
+
+"（この上に空行が2つあるはず）"|Style::new()
+
+"長いURL・長い行（折り返しテスト）"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"https://example.com/some/very/long/url/path/that/exceeds/the/typical/terminal/wi"|Style::new()
+"dth/of/80/characters/and/keeps/going/for/a/while?query=param1&param2=value2&para"|Style::new()
+"m3=value3#fragment-section"|Style::new()
+
+"unbrokenlongstringabcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz"|Style::new()
+"0123456789abcdefghijklmnopqrstuvwxyz"|Style::new()
+
+"┌──────────────────────────────────────────────────────┬────────────────┬───────"|Style::new().dark_gray()
+"───────────────────────────────────┐"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"とても長い単語の連続"|Style::new().cyan().bold();;"                                 "|Style::new().cyan().bold();;"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"もっと長い単語"|Style::new().cyan().bold();;" "|Style::new().cyan().bold();;"│"|Style::new().dark_gray();;" "|Style::new().cyan().bold();;"さらに"|Style::new().cyan().bold()
+"長い単語"|Style::new().cyan().bold();;"                           "|Style::new().cyan().bold();;"│"|Style::new().dark_gray()
+"├──────────────────────────────────────────────────────┼────────────────┼───────"|Style::new().dark_gray()
+"───────────────────────────────────┤"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"中央"|Style::new();;"           "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"右"|Style::new();;"    "|Style::new()
+"                                   "|Style::new();;"│"|Style::new().dark_gray()
+"│"|Style::new().dark_gray();;" "|Style::new();;"短い"|Style::new();;"                                                 "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"中央"|Style::new();;"           "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"123456"|Style::new()
+"7890123456789012345678901234567890"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray()
+"└──────────────────────────────────────────────────────┴────────────────┴───────"|Style::new().dark_gray()
+"───────────────────────────────────┘"|Style::new().dark_gray()
+
+"HTML ブロック"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"<div align=\"center\">"|Style::new().dim()
+"  <h3>HTML ブロック</h3>"|Style::new().dim()
+"  <p>これは raw HTML ブロックのテスト。</p>"|Style::new().dim()
+"  <table>"|Style::new().dim()
+"    <tr><th>HTML 表</th><th>列2</th></tr>"|Style::new().dim()
+"    <tr><td>セル1</td><td>セル2</td></tr>"|Style::new().dim()
+"  </table>"|Style::new().dim()
+"</div>"|Style::new().dim()
+
+"インライン HTML: "|Style::new();;"<span style=\"color:red\">"|Style::new().dim();;"赤い文字"|Style::new();;"</span>"|Style::new().dim();;" と "|Style::new();;"<kbd>"|Style::new().dim();;"Ctrl"|Style::new();;"</kbd>"|Style::new().dim();;"+"|Style::new();;"<kbd"|Style::new().dim()
+">"|Style::new().dim();;"V"|Style::new();;"</kbd>"|Style::new().dim();;"、"|Style::new();;"<b>"|Style::new().dim();;"太字"|Style::new();;"</b>"|Style::new().dim();;"。"|Style::new()
+
+"定義リスト風"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"<dl>"|Style::new().dim()
+"  <dt>ターミナル</dt>"|Style::new().dim()
+"  <dd>コンピュータを操作するための文字ベースの画面</dd>"|Style::new().dim()
+"  <dt>TUI</dt>"|Style::new().dim()
+"  <dd>ターミナル・ユーザー・インターフェース</dd>"|Style::new().dim()
+"</dl>"|Style::new().dim()
+
+"行コメント練習用セクション"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"ここは akapen で実際に行コメントを付ける練習用です。各行が短いので"|Style::new();;" "|Style::new();;"カーソル移動"|Style::new();;"（"|Style::new()
+"j/k/g/G など）の動作確認に使えます。"|Style::new()
+
+"1行目。特に意味はない。"|Style::new();;" "|Style::new();;"2行目。"|Style::new();;" "|Style::new();;"3行目。"|Style::new();;" "|Style::new();;"4行目。"|Style::new();;" "|Style::new();;"5行目。"|Style::new();;" "|Style::new();;"6行目。"|Style::new();;" "|Style::new();;"7行目。"|Style::new();;" "|Style::new();;"8行目。"|Style::new();;" "|Style::new()
+"9行目。"|Style::new();;" "|Style::new();;"10行目。"|Style::new();;" "|Style::new();;"11行目。"|Style::new();;" "|Style::new();;"12行目。"|Style::new();;" "|Style::new();;"13行目。"|Style::new();;" "|Style::new();;"14行目。"|Style::new();;" "|Style::new();;"15行目。"|Style::new();;" "|Style::new();;"16行目。"|Style::new();;" "|Style::new();;"17行目。"|Style::new();;" "|Style::new()
+"18行目。"|Style::new();;" "|Style::new();;"19行目。"|Style::new();;" "|Style::new();;"20行目。"|Style::new()
+
+"おわり"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
+
+"これで終わり。最後の行です。"|Style::new()

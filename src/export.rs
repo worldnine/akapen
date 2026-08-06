@@ -1,0 +1,435 @@
+//! Formatting comments for export and copying them to the clipboard.
+//!
+//! A comment becomes a block of `location`, the anchored snippet, then the
+//! comment text — the same structure as herdr-reviewr's `export.rs`
+//! (MIT, Dmitry Persiyanov), minus the diff side markers: akapen
+//! anchors to plain source lines.
+//!
+//! Export is non-destructive: comments stay in the list after a copy so the
+//! user can re-output or send them again (delete is explicit, `d`).
+
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+use anyhow::{Context, Result, bail};
+
+use crate::comment::Comment;
+
+/// One comment as its export block: location, numbered snippet, then text.
+pub fn format_comment(comment: &Comment) -> String {
+    format!(
+        "{}\n{}\n{}",
+        comment.location(),
+        numbered_snippet(comment),
+        normalize_text(&comment.text)
+    )
+}
+
+/// The anchored snippet with a `n: ` line-number prefix per line (design
+/// 2026-08-01): each line shows its real file line number, so a blank line
+/// inside the selection renders as `13: ` and can never be confused with the
+/// blank-line block separator. The snippet's line count comes from the
+/// location's `start-end` alone (short `lines` are padded, extra parts
+/// dropped) — adapters like scripts/akapen2hunk rely on that to split
+/// the snippet from the comment text.
+fn numbered_snippet(comment: &Comment) -> String {
+    let parts: Vec<&str> = comment.lines.split('\n').collect();
+    let count = (comment.end - comment.start + 1) as usize;
+    (0..count)
+        .map(|i| {
+            let n = comment.start + i as u32;
+            let text = parts.get(i).copied().unwrap_or("");
+            format!("{n}: {text}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Comment text for export: drop `\r`, trim trailing space per line, and
+/// drop blank lines so a multi-line comment can never introduce the
+/// blank-line block separator.
+fn normalize_text(text: &str) -> String {
+    text.replace('\r', "")
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Many comments, sorted by file then start line, one blank line between
+/// blocks (reviewr's `format_all`).
+pub fn format_all(comments: &[Comment]) -> String {
+    let mut sorted: Vec<&Comment> = comments.iter().collect();
+    sorted.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.start.cmp(&b.start)));
+    sorted
+        .iter()
+        .map(|c| format_comment(c))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// A clipboard tool and the args that make it read stdin into the system
+/// clipboard, tried in order — the first one on `PATH` wins. macOS ships
+/// `pbcopy`; Linux needs `wl-copy` (Wayland) or `xclip`/`xsel` (X11).
+const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[
+    ("pbcopy", &[]),
+    ("wl-copy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("xsel", &["--clipboard", "--input"]),
+];
+
+/// Whether `name` resolves to an executable on `PATH` (dependency-free which).
+fn which(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+}
+
+/// Copy `text` into the system clipboard. Errors mention installing one of
+/// the Linux clipboard tools, since macOS ships pbcopy.
+pub fn copy_to_clipboard(text: &str) -> Result<()> {
+    let (cmd, args) = select_tool(CLIPBOARD_TOOLS, which)
+        .context("no clipboard tool found (install wl-clipboard, xclip, or xsel)")?;
+    copy_via(cmd, args, text)
+}
+
+/// Pipe `text` into `cmd`'s stdin and wait for success.
+fn copy_via(cmd: &str, args: &[&str], text: &str) -> Result<()> {
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawning {cmd}"))?;
+    child
+        .stdin
+        .as_mut()
+        .with_context(|| format!("{cmd} stdin unavailable"))?
+        .write_all(text.as_bytes())
+        .with_context(|| format!("writing to {cmd}"))?;
+    if !child
+        .wait()
+        .with_context(|| format!("waiting for {cmd}"))?
+        .success()
+    {
+        bail!("{cmd} exited non-zero");
+    }
+    Ok(())
+}
+
+/// Pipe `text` into a shell command's stdin via `sh -c`. The command
+/// receives the formatted export on stdin.
+pub fn send_command(cmd: &str, text: &str) -> Result<()> {
+    let mut child = Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("spawning send command")?;
+    child
+        .stdin
+        .as_mut()
+        .context("send command stdin unavailable")?
+        .write_all(text.as_bytes())
+        .context("writing to send command")?;
+    if !child
+        .wait()
+        .context("waiting for send command")?
+        .success()
+    {
+        bail!("send command exited non-zero");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// herdr auto-resolution (`--send-agent`): find the sole agent in the
+// CURRENT TAB (else the sole workspace agent) and submit the export as a
+// positional argument — no shell involved, so no quoting problems.
+// ---------------------------------------------------------------------------
+
+/// Resolve the agent pane to send to: the sole agent in this tab, else
+/// the sole workspace agent (the same resolution herdr-reviewr ships —
+/// see its `specs/herdr-host.md`, MIT, credited in the README). A
+/// refusal is an error whose message the toast shows (`no agent here` /
+/// `several agents here`); the clipboard copy already happened either
+/// way. `--send-agent` opts in explicitly, so no env probing is needed.
+pub fn resolve_agent_pane() -> Result<String> {
+    let list = herdr_json(&["agent", "list"])?;
+    let agents = parse_agents(&list)?;
+    let tab = std::env::var("HERDR_TAB_ID").ok();
+    let ws = std::env::var("HERDR_WORKSPACE_ID").ok();
+    let me = std::env::var("HERDR_PANE_ID").ok();
+    pick_agent(&agents, tab.as_deref(), ws.as_deref(), me.as_deref())
+}
+
+fn herdr_json(args: &[&str]) -> Result<String> {
+    let out = Command::new("herdr")
+        .args(args)
+        .output()
+        .with_context(|| format!("running herdr {args:?}"))?;
+    if !out.status.success() {
+        bail!(
+            "herdr {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The agents array from `herdr agent list`: a bare array, `result.agents`,
+/// or `agents` (the envelope is not pinned; reviewr accepts all three).
+fn parse_agents(json: &str) -> Result<Vec<serde_json::Value>> {
+    let value: serde_json::Value = serde_json::from_str(json).context("parsing agent list")?;
+    if let Some(array) = value.as_array() {
+        return Ok(array.clone());
+    }
+    value
+        .get("result")
+        .and_then(|r| r.get("agents"))
+        .or_else(|| value.get("agents"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .context("agent list has no agents array")
+}
+
+/// The sole agent in this tab, else the sole workspace agent. Anything
+/// else refuses with a reason the toast can show.
+fn pick_agent(
+    agents: &[serde_json::Value],
+    tab: Option<&str>,
+    ws: Option<&str>,
+    me: Option<&str>,
+) -> Result<String> {
+    let in_tab = candidates(agents, "tab_id", tab, me);
+    if let [agent] = in_tab.as_slice() {
+        return pane_id(agent).context("agent entry has no pane_id");
+    }
+    match candidates(agents, "workspace_id", ws, me).as_slice() {
+        [agent] => pane_id(agent).context("agent entry has no pane_id"),
+        [] if in_tab.is_empty() => bail!("no agent here"),
+        _ => bail!("several agents here"),
+    }
+}
+
+/// The real agents whose `key` equals `want`, ignoring our own pane: only
+/// entries carrying an `agent` field count (`herdr agent list` returns
+/// every pane; plugin sidebars and plain shells have no `agent` field).
+fn candidates<'a>(
+    agents: &'a [serde_json::Value],
+    key: &str,
+    want: Option<&str>,
+    me: Option<&str>,
+) -> Vec<&'a serde_json::Value> {
+    let Some(want) = want else { return Vec::new() };
+    agents
+        .iter()
+        .filter(|a| a.get("agent").and_then(serde_json::Value::as_str).is_some())
+        .filter(|a| a.get(key).and_then(serde_json::Value::as_str) == Some(want))
+        .filter(|a| pane_id(a).as_deref() != me)
+        .collect()
+}
+
+/// The `pane_id` of an agent entry.
+fn pane_id(agent: &serde_json::Value) -> Option<String> {
+    agent
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
+}
+
+/// Submit `text` to a herdr agent via `herdr agent prompt <target> <text>`
+/// (the text is a positional argument, so no shell quoting issues). A
+/// missing `herdr` binary or a failed submission is an error the UI
+/// surfaces as a red toast without losing the clipboard copy.
+pub fn send_to_agent(target: &str, text: &str) -> Result<()> {
+    let out = Command::new("herdr")
+        .args(["agent", "prompt", target, text])
+        .output()
+        .context("spawning herdr")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("herdr agent prompt failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
+/// The first clipboard tool `present` accepts, preserving list order.
+fn select_tool(
+    tools: &'static [(&'static str, &'static [&'static str])],
+    present: impl Fn(&str) -> bool,
+) -> Option<(&'static str, &'static [&'static str])> {
+    tools.iter().copied().find(|(cmd, _)| present(cmd))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLIPBOARD_TOOLS, format_all, format_comment, select_tool};
+    use crate::comment::Comment;
+
+    fn comment(file: &str, start: u32, end: u32, lines: &str, text: &str) -> Comment {
+        Comment {
+            file_path: std::path::PathBuf::from(file),
+            start,
+            end,
+            lines: lines.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn block_is_location_numbered_snippet_text() {
+        let c = comment(
+            "wiki/cases/aozora-plan.md",
+            31,
+            33,
+            "一覧に出ない」は仕様 → 利用手引の更新を確認\n\nここ、手引の文言と実装のズレがまだ残ってる。",
+            "このコメント、利用手引の該当箇所も直して。",
+        );
+        assert_eq!(
+            format_comment(&c),
+            "wiki/cases/aozora-plan.md:31-33\n31: 一覧に出ない」は仕様 → 利用手引の更新を確認\n32: \n33: ここ、手引の文言と実装のズレがまだ残ってる。\nこのコメント、利用手引の該当箇所も直して。"
+        );
+    }
+
+    #[test]
+    fn single_line_location() {
+        let c = comment("doc.md", 12, 12, "line", "note");
+        assert_eq!(format_comment(&c), "doc.md:12\n12: line\nnote");
+    }
+
+    #[test]
+    fn blank_selection_line_still_gets_its_number() {
+        // The design's core case: an empty selected line renders as `n: `
+        // (with the trailing space), never as a bare blank line.
+        let c = comment("doc.md", 7, 7, "", "note");
+        assert_eq!(format_comment(&c), "doc.md:7\n7: \nnote");
+        // A run of blank lines numbers every one of them.
+        let c = comment("doc.md", 12, 14, "\n", "note");
+        assert_eq!(format_comment(&c), "doc.md:12-14\n12: \n13: \n14: \nnote");
+    }
+
+    #[test]
+    fn snippet_line_count_is_pinned_to_the_location_range() {
+        // Adapters derive the snippet length from `start-end`; extra
+        // `lines` parts (unreachable via Source::snippet) must not extend
+        // the numbering past `end` and leak into the comment text.
+        let c = comment("doc.md", 3, 4, "a\nb\nc", "note");
+        assert_eq!(format_comment(&c), "doc.md:3-4\n3: a\n4: b\nnote");
+    }
+
+    #[test]
+    fn multiline_text_keeps_breaks_but_drops_blank_lines() {
+        let c = comment("a.md", 1, 1, "+x", "first line\n\n  \nsecond line\n");
+        assert_eq!(format_comment(&c), "a.md:1\n1: +x\nfirst line\nsecond line");
+    }
+
+    #[test]
+    fn all_sorts_by_file_then_start_with_blank_separator() {
+        let b = comment("b.md", 5, 5, "x", "two");
+        let a2 = comment("a.md", 20, 20, "x", "later");
+        let a1 = comment("a.md", 3, 3, "x", "earlier");
+        let out = format_all(&[b, a2, a1]);
+        assert_eq!(
+            out,
+            "a.md:3\n3: x\nearlier\n\na.md:20\n20: x\nlater\n\nb.md:5\n5: x\ntwo"
+        );
+    }
+
+    #[test]
+    fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
+        assert!(select_tool(CLIPBOARD_TOOLS, |_| false).is_none());
+        assert_eq!(
+            select_tool(CLIPBOARD_TOOLS, |c| c == "xclip"),
+            Some(("xclip", &["-selection", "clipboard"][..]))
+        );
+        assert_eq!(
+            select_tool(CLIPBOARD_TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(c, _)| c),
+            Some("pbcopy")
+        );
+    }
+
+    #[test]
+    fn copy_via_fails_on_missing_tool() {
+        // A non-existent command must fail cleanly, not panic.
+        assert!(super::copy_via("definitely-not-a-real-tool-xyz", &[], "x").is_err());
+    }
+
+    fn agent(pane: &str, tab: &str, ws: &str, is_agent: bool) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "pane_id": pane, "tab_id": tab, "workspace_id": ws,
+        });
+        if is_agent {
+            v["agent"] = serde_json::json!("claude");
+        }
+        v
+    }
+
+    #[test]
+    fn pick_agent_prefers_the_tab_then_the_workspace() {
+        use super::pick_agent;
+        let a = agent("p1", "t1", "w1", true);
+        let b = agent("p2", "t2", "w1", true);
+        let me = agent("p0", "t1", "w1", false); // 自分(非エージェント)
+        let list = vec![a, b, me];
+        // タブ内に唯一のエージェント → それ。
+        assert_eq!(
+            pick_agent(&list, Some("t1"), Some("w1"), Some("p0")).unwrap(),
+            "p1"
+        );
+        // タブ内ゼロ・ワークスペースに唯一 → それ。
+        assert_eq!(
+            pick_agent(&list[1..2], Some("t9"), Some("w1"), Some("p0")).unwrap(),
+            "p2"
+        );
+        // ワークスペースに複数 → 曖昧で拒否。
+        let err = pick_agent(&list, Some("t9"), Some("w1"), Some("p0")).unwrap_err();
+        assert!(err.to_string().contains("several"));
+        // どこにも居ない → no agent。
+        let err = pick_agent(&[], Some("t1"), Some("w1"), None).unwrap_err();
+        assert!(err.to_string().contains("no agent"));
+    }
+
+    #[test]
+    fn non_agent_panes_do_not_make_the_tab_ambiguous() {
+        use super::pick_agent;
+        // A tab full of plain shells / plugin sidebars (no `agent` field)
+        // plus ONE real agent must resolve — pane count alone is not
+        // ambiguity (reviewr parity).
+        let list = vec![
+            agent("p1", "t1", "w1", true),
+            agent("p2", "t1", "w1", false),
+            agent("p3", "t1", "w1", false),
+            agent("p4", "t1", "w1", false),
+        ];
+        assert_eq!(
+            pick_agent(&list, Some("t1"), Some("w1"), Some("p2")).unwrap(),
+            "p1"
+        );
+    }
+
+    #[test]
+    fn missing_herdr_env_refuses_cleanly() {
+        use super::pick_agent;
+        // Outside herdr (no HERDR_* env) there is no tab/ws to match:
+        // a clean "no agent here" instead of a wrong guess.
+        let list = vec![agent("p1", "t1", "w1", true)];
+        let err = pick_agent(&list, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("no agent"));
+    }
+
+    #[test]
+    fn parse_agents_accepts_all_envelopes() {
+        use super::parse_agents;
+        assert_eq!(parse_agents(r#"[{"pane_id":"p"}]"#).unwrap().len(), 1);
+        assert_eq!(
+            parse_agents(r#"{"agents":[{"pane_id":"p"}]}"#).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            parse_agents(r#"{"result":{"agents":[{"pane_id":"p"}]}}"#)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(parse_agents(r#"{"nope":1}"#).is_err());
+    }
+}

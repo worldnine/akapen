@@ -1,0 +1,24 @@
+[package]
+name = "akapen"
+version = "0.1.0"
+edition = "2024"
+description = "Markdown line-comment TUI for agent workflows: read rendered markdown, mark up lines like a red pen, send comments to your agent."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+ratatui = "0.30"
+serde_json = "1.0.151"
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+tui-markdown = { path = "third_party/tui-markdown" }
+two-face = { version = "0.5.1", default-features = false, features = ["syntect-fancy"] }
+similar = "2"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"

@@ -1,0 +1,5 @@
+/target
+pi-session-*.html
+# vendored crate 内で cargo を実行した際の生成物（親のビルドは親の lock を使う）
+/third_party/tui-markdown/target
+/third_party/tui-markdown/Cargo.lock
