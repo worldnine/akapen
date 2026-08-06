@@ -1,9 +1,10 @@
 [package]
-name = "tui-markdown"
+name = "akapen-tui-markdown"
 version = "0.3.9"
 edition = "2021"
-description = "A simple library for converting markdown to a Ratatui Text value — vendored from crates.io 0.3.9 (MIT OR Apache-2.0) and instrumented with source-line attribution for mdcomment"
+description = "Fork of tui-markdown 0.3.9 instrumented with source-line attribution, for akapen"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/worldnine/akapen"
 
 # Vendored from crates.io tui-markdown 0.3.9 (MIT OR Apache-2.0).
 # Deviations from upstream:
