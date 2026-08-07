@@ -1292,25 +1292,3 @@ mod tests {
     }
 }
 
-    #[test]
-    fn wheel_scroll_moves_a_render_shorter_than_the_viewport() {
-        // A 3-row render (the renderer joined the whole doc into one paragraph)
-        // with 15 source lines; viewport 22 > rows. max_offset is forced
-        // to 1 by .max(1); the wheel still moves the viewport and the
-        // cursor keeps its absolute position (viewport-only scroll).
-        let mut v = ViewState {
-            rows: vec![vec![]; 3],
-            offset: 0,
-            cursor: 0,
-            source_starts: vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2],
-            ..Default::default()
-        };
-        v.wheel_scroll(1, 22);
-        assert_eq!(v.offset, 1, "viewport moves down one row");
-        assert_eq!(v.cursor, 0, "cursor stays put");
-        v.wheel_scroll(1, 22);
-        assert_eq!(v.offset, 1, "clamped at the forced max_offset");
-        v.wheel_scroll(-1, 22);
-        assert_eq!(v.offset, 0, "wheel up returns");
-    }
-

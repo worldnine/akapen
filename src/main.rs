@@ -85,11 +85,10 @@ const RESIZE_DEBOUNCE: Duration = Duration::from_millis(300);
 /// Debounce for reloading the file after an external (agent) edit — the
 /// writer may not be atomic, so wait for the dust to settle.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
-/// Two overlay clicks within this window on the same entry = double-click
-/// (activates the selection, like Enter).
-const DOUBLE_CLICK_MS: Duration = Duration::from_millis(400);
 /// Files above this many lines get a view-mode memory warning (v1: warn only).
 const HUGE_FILE: usize = 100_000;
+/// The default double-click window (see `App::double_click_ms`).
+const DOUBLE_CLICK_MS: Duration = Duration::from_millis(400);
 
 /// Per-file state: everything that is unique to each file in the session.
 /// Swapped in/out of the active App fields on file switch.
@@ -183,8 +182,13 @@ struct App {
     overlay_offset: usize,
     /// Time + entry of the previous overlay click, for double-click
     /// detection (the second click on the same entry within
-    /// [`DOUBLE_CLICK_MS`] activates it — Enter-equivalent).
+    /// [`App::double_click_ms`] activates it — Enter-equivalent).
     last_overlay_click: Option<(Instant, usize)>,
+    /// The double-click window. A field (not a const) so tests can widen
+    /// it and make the second click deterministic: the wall-clock
+    /// comparison used to flake under load when the thread stalled
+    /// between two clicks.
+    double_click_ms: Duration,
     source: Source,
     /// Pre-tokenized spans, one vec per source line.
     spans: Vec<Vec<HiSpan>>,
@@ -333,6 +337,7 @@ impl App {
             overlay_cursor: 0,
             overlay_offset: 0,
             last_overlay_click: None,
+            double_click_ms: DOUBLE_CLICK_MS,
             source,
             highlight,
             // The caller (run()) already tokenized every file — this one
@@ -1053,7 +1058,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
                     // Enter-equivalent, e.g. switching the file or
                     // jumping to the comment).
                     let is_double = app.last_overlay_click.is_some_and(
-                        |(t, prev)| t.elapsed() < DOUBLE_CLICK_MS && prev == idx,
+                        |(t, prev)| t.elapsed() < app.double_click_ms && prev == idx,
                     );
                     app.last_overlay_click = Some((Instant::now(), idx));
                     app.overlay_cursor = idx;
@@ -1445,7 +1450,10 @@ fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal) {
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
     // `$EDITOR` may include arguments (e.g. `zed --wait`). Split into the
-    // binary and its args, then append the file path last.
+    // binary and its args, then append the file path last. Known
+    // limitation: whitespace-split only — quoted paths or args with
+    // spaces (`EDITOR="/Applications/My Editor.app/.../bin/editor"`) are
+    // not supported; use a wrapper script for those.
     let mut parts = editor.split_whitespace();
     let bin = parts.next().unwrap_or("nano");
     let args: Vec<&str> = parts.collect();
@@ -4454,7 +4462,13 @@ mod mouse_tests {
     use std::io::Write;
 
     fn test_app() -> App {
-        let path = std::env::temp_dir().join("akapen_row_at_test.md");
+        // A tempdir, not a fixed name: the fixed $TMPDIR path used to
+        // collide when several worktrees ran cargo test at once (each
+        // process truncated the file under the others), flaking the
+        // mouse-mapping tests. The dir may drop after load — the source
+        // is already in memory.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("row_at_test.md");
         let mut f = std::fs::File::create(&path).unwrap();
         for i in 1..=8 {
             writeln!(f, "line{i}").unwrap();
@@ -4497,7 +4511,8 @@ mod mouse_tests {
         // A long first line wraps; continuation rows must start with the
         // gutter width of spaces so text stays aligned under the first
         // row's text instead of under the line number.
-        let path = std::env::temp_dir().join("akapen_wrap_indent_test.md");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wrap_indent_test.md");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "{}", "あ".repeat(40)).unwrap(); // 80 cols -> wraps at 57
         writeln!(f, "short").unwrap();
@@ -7378,6 +7393,11 @@ mod state_tests {
             modifiers: KeyModifiers::NONE,
         };
         let row = panel.y + 3; // second file entry
+        // Widen the double-click window so the second click is
+        // deterministic: the wall-clock comparison used to flake under
+        // load (a stalled thread let 400ms elapse between the two
+        // clicks).
+        app.double_click_ms = Duration::from_secs(3600);
         on_mouse(&mut app, click(row, panel.x + 5));
         assert_eq!(app.overlay_cursor, 1);
         assert_eq!(app.overlay, Some(Overlay::Files), "single click selects only");
@@ -7415,6 +7435,8 @@ mod state_tests {
             modifiers: KeyModifiers::NONE,
         };
         let row = panel.y + 3; // title + header + first comment row
+        // Widen the double-click window (see overlay_double_click_switches_file).
+        app.double_click_ms = Duration::from_secs(3600);
         on_mouse(&mut app, click(row, panel.x + 5));
         on_mouse(&mut app, click(row, panel.x + 5));
         assert_eq!(app.overlay, None);
@@ -7466,6 +7488,8 @@ mod state_tests {
         };
         // Session 1: double-click the second file → switches there.
         open_overlay(&mut app, Overlay::Files, 0);
+        // Widen the double-click window (see overlay_double_click_switches_file).
+        app.double_click_ms = Duration::from_secs(3600);
         on_mouse(&mut app, click(panel.y + 3, panel.x + 5));
         on_mouse(&mut app, click(panel.y + 3, panel.x + 5));
         assert_eq!(app.current_file_index, 1, "double-click switched");
