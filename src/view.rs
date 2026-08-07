@@ -42,6 +42,70 @@ pub fn border_color(light: bool) -> Color {
     if light { Color::Rgb(180, 180, 190) } else { Color::Rgb(127, 132, 156) }
 }
 
+/// View-mode scrollbar thumb color: a step brighter than the border on
+/// dark themes (so the thumb reads against the `│` track), a step darker
+/// on light themes.
+const SCROLLBAR_THUMB_DARK: Color = Color::Rgb(170, 174, 200);
+const SCROLLBAR_THUMB_LIGHT: Color = Color::Rgb(105, 105, 115);
+
+pub fn scrollbar_thumb(light: bool) -> Color {
+    if light { SCROLLBAR_THUMB_LIGHT } else { SCROLLBAR_THUMB_DARK }
+}
+
+/// The scrollbar's geometry when the content overflows the viewport:
+/// `(max_pos, thumb_len, thumb_max)` — the last scrollable offset, the
+/// thumb length in track rows, and the last track row the thumb can start
+/// on. `None` when the content fits (no scrollbar, the border stays
+/// clean).
+fn scroll_geometry(content_len: usize, viewport: usize) -> Option<(usize, usize, usize)> {
+    if content_len <= viewport || viewport == 0 {
+        return None;
+    }
+    let max_pos = content_len - viewport;
+    let thumb_len = (viewport * viewport / content_len).clamp(1, viewport);
+    let thumb_max = viewport - thumb_len;
+    Some((max_pos, thumb_len, thumb_max))
+}
+
+/// The scrollbar thumb over the track, as `(start row, length)` in track
+/// rows — or `None` when the content fits the viewport. `position` is the
+/// scroll offset, clamped to the last scrollable row. The thumb length is
+/// proportional to the visible fraction (`viewport² / content`), the start
+/// maps the offset range onto the track so the thumb sits at the bottom
+/// at max offset.
+pub fn scroll_thumb(content_len: usize, viewport: usize, position: usize) -> Option<(usize, usize)> {
+    let (max_pos, thumb_len, thumb_max) = scroll_geometry(content_len, viewport)?;
+    let pos = position.min(max_pos);
+    let start = (pos * thumb_max / max_pos).min(thumb_max);
+    Some((start, thumb_len))
+}
+
+/// The scroll offset a track click lands on: the thumb's start moves to
+/// the clicked row (clamped so the thumb stays on the track). `None` when
+/// the content fits.
+pub fn scroll_offset_at(content_len: usize, viewport: usize, track_row: usize) -> Option<usize> {
+    let (max_pos, _, thumb_max) = scroll_geometry(content_len, viewport)?;
+    Some(track_row.min(thumb_max) * max_pos / thumb_max)
+}
+
+/// The scroll offset while dragging the thumb: the thumb follows the
+/// pointer 1:1 in track rows from the drag start (the pointer may leave
+/// the track; the row is clamped). `start_track_row`/`start_offset` are
+/// the drag anchor. `None` when the content fits.
+pub fn scroll_offset_drag(
+    content_len: usize,
+    viewport: usize,
+    start_track_row: usize,
+    start_offset: usize,
+    track_row: usize,
+) -> Option<usize> {
+    let (max_pos, _, thumb_max) = scroll_geometry(content_len, viewport)?;
+    let start_thumb = start_offset * thumb_max / max_pos;
+    let thumb = (start_thumb as isize + track_row as isize - start_track_row as isize)
+        .clamp(0, thumb_max as isize) as usize;
+    Some(thumb * max_pos / thumb_max)
+}
+
 /// A 1-column marker cell drawn over the frame's left border (see
 /// [`ViewState::visible_text`]): `>` marks the cursor row, `▌` a
 /// comment-covered row; rows with no marker reproduce the border's `│`,
@@ -596,7 +660,7 @@ impl ViewState {
 
 #[cfg(test)]
 mod tests {
-    use super::{selected_bg, Span, ViewState};
+    use super::{scroll_offset_at, scroll_offset_drag, scroll_thumb, selected_bg, Span, ViewState};
     use crate::highlight::Highlighter;
     use ratatui::style::Color;
     use crate::source::Source;
@@ -981,6 +1045,68 @@ mod tests {
             source_starts: (0..rows).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn scroll_thumb_hides_when_content_fits() {
+        assert_eq!(scroll_thumb(10, 10, 0), None, "exactly one viewport");
+        assert_eq!(scroll_thumb(5, 10, 0), None, "content shorter than the viewport");
+        assert_eq!(scroll_thumb(0, 10, 0), None, "empty content");
+        assert_eq!(scroll_thumb(10, 0, 0), None, "zero viewport");
+    }
+
+    #[test]
+    fn scroll_thumb_proportional_length_and_position() {
+        // 100 rows in a 10-row viewport: a 1-row thumb that walks the
+        // track from top to bottom as the offset goes 0 → 90.
+        assert_eq!(scroll_thumb(100, 10, 0), Some((0, 1)), "at the top");
+        assert_eq!(scroll_thumb(100, 10, 90), Some((9, 1)), "at the bottom");
+        assert_eq!(scroll_thumb(100, 10, 45), Some((4, 1)), "midway");
+        // Half the content visible: a half-track thumb.
+        assert_eq!(scroll_thumb(20, 10, 0), Some((0, 5)));
+        assert_eq!(scroll_thumb(20, 10, 10), Some((5, 5)));
+    }
+
+    #[test]
+    fn scroll_thumb_clamps_position_and_length() {
+        // Position past the last scrollable row clamps to the bottom.
+        assert_eq!(scroll_thumb(20, 10, 999), Some((5, 5)));
+        // A huge content keeps the thumb at least 1 row, never over the
+        // track, and the start never pushes the thumb off it.
+        let (start, len) = scroll_thumb(100_000, 10, 50_000).unwrap();
+        assert!((1..=10).contains(&len));
+        assert!(start + len <= 10);
+    }
+
+    #[test]
+    fn scroll_offset_at_jumps_the_thumb_to_the_click() {
+        // 100 rows in a 10-row viewport: 1-row thumb, the track maps
+        // linearly onto the offset range 0..=90.
+        assert_eq!(scroll_offset_at(100, 10, 0), Some(0), "top of the track");
+        assert_eq!(scroll_offset_at(100, 10, 9), Some(90), "bottom of the track");
+        assert_eq!(scroll_offset_at(100, 10, 4), Some(40), "midway");
+        // Half the content visible: a half-track thumb, the clickable
+        // range stops at thumb_max (the thumb must stay on the track).
+        assert_eq!(scroll_offset_at(20, 10, 5), Some(10), "thumb-max row");
+        assert_eq!(scroll_offset_at(20, 10, 9), Some(10), "past thumb-max clamps");
+        assert_eq!(scroll_offset_at(10, 10, 3), None, "content fits: no scrollbar");
+    }
+
+    #[test]
+    fn scroll_offset_drag_follows_the_pointer_1to1() {
+        // 100 rows / 10-row viewport: dragging the thumb down 3 track
+        // rows from the top moves the offset 0 → 30.
+        assert_eq!(scroll_offset_drag(100, 10, 0, 0, 3), Some(30));
+        assert_eq!(scroll_offset_drag(100, 10, 0, 0, 9), Some(90), "bottom");
+        // Started mid-track: the offset follows the delta, not the row.
+        assert_eq!(scroll_offset_drag(100, 10, 4, 40, 1), Some(10));
+        assert_eq!(scroll_offset_drag(100, 10, 4, 40, 4), Some(40), "no move");
+        assert_eq!(scroll_offset_drag(100, 10, 4, 40, 7), Some(70));
+        // Dragging past the ends clamps (the pointer can leave the track).
+        assert_eq!(scroll_offset_drag(100, 10, 4, 40, 0), Some(0));
+        assert_eq!(scroll_offset_drag(100, 10, 4, 40, 99), Some(90));
+        // Content fits: no scrollbar.
+        assert_eq!(scroll_offset_drag(10, 10, 0, 0, 5), None);
     }
 
     #[test]
