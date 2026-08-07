@@ -26,6 +26,12 @@ pub struct Source {
 
 impl Source {
     /// Load `path`, split into lines, and compute the gutter width.
+    ///
+    /// Deliberately STRICT UTF-8 (no `from_utf8_lossy`): a binary file or
+    /// a Shift-JIS/mid-write edit must fail loudly instead of becoming
+    /// mojibake that the reviewer would happily attach line-numbered
+    /// comments to. The reload path toasts the error and keeps the old
+    /// content; startup's eager load failure is handled separately.
     pub fn load(path: PathBuf) -> Result<Self> {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
