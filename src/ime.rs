@@ -5,8 +5,10 @@
 //! composer closes we switch back to ASCII so j/k navigation is never
 //! swallowed by the IME afterwards. Backed by a tiny Swift helper (Carbon
 //! TIS API — no accessibility permission needed), compiled once into
-//! `~/.cache/akapen/ime`. On non-macOS (or when swiftc is missing) every
-//! call degrades to a no-op, so the TUI stays usable.
+//! `~/.cache/akapen/ime-<hash>`, where `<hash>` derives from the Swift
+//! source so a helper from an older release is never silently reused.
+//! On non-macOS (or when swiftc is missing) every call degrades to a
+//! no-op, so the TUI stays usable.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -14,14 +16,47 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const IME_SWIFT: &str = include_str!("../scripts/ime.swift");
 
+/// FNV-1a 64-bit hash. Hand-rolled so the build needs no extra
+/// dependency; not cryptographic, which is fine — the hash only picks a
+/// cache file name.
+fn fnv1a(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// `ime-<hash8>` file name for a helper built from `src`. Only the low 32
+/// bits of the hash (8 hex digits) are used: a collision between two
+/// sources merely rebuilds the helper under the same name, harmless for a
+/// local cache — and with the source checked in, the chance of a real
+/// mismatch is ≈2^-32, negligible here.
+fn bin_name_for(src: &str) -> String {
+    format!("ime-{:08x}", (fnv1a(src.as_bytes()) & 0xffff_ffff) as u32)
+}
+
+/// File name for the helper built from the embedded [`IME_SWIFT`].
+fn helper_bin_name() -> String {
+    bin_name_for(IME_SWIFT)
+}
+
 fn ime_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".cache").join("akapen")
 }
 
 /// The compiled helper's path, `Some` only once the build has produced it.
+///
+/// The name embeds the source hash, so a stale binary can never outlive
+/// its contract: when a future release changes `scripts/ime.swift`, the
+/// hash changes and the next launch builds a new helper under a fresh
+/// name instead of reusing the old one with a mismatched CLI. Old
+/// binaries stay behind in `~/.cache` (throwaway by nature; the name
+/// never collides, so there is nothing to clean up).
 fn bin_path() -> Option<PathBuf> {
-    let bin = ime_dir().join("ime");
+    let bin = ime_dir().join(helper_bin_name());
     bin.is_file().then_some(bin)
 }
 
@@ -48,7 +83,7 @@ pub fn start_background_build() {
 /// calls it, so it never blocks the TUI.
 fn ensure_binary() -> Option<PathBuf> {
     let dir = ime_dir();
-    let bin = dir.join("ime");
+    let bin = dir.join(helper_bin_name());
     if bin.exists() {
         return Some(bin);
     }
@@ -192,5 +227,33 @@ mod tests {
         assert!(IME_SWIFT.contains("case \"abc\""));
         assert!(IME_SWIFT.contains("case \"jp\""));
         assert!(IME_SWIFT.contains("TISSelectInputSource"));
+    }
+
+    #[test]
+    fn source_hash_is_deterministic() {
+        // Same input → same output, different input → different output:
+        // the helper's file name derives from the hash, so determinism is
+        // what keeps `bin_path` stable across launches. The known vectors
+        // also pin the FNV-1a implementation itself.
+        assert_eq!(fnv1a(b"get\nabc\njp\nset"), fnv1a(b"get\nabc\njp\nset"));
+        assert_ne!(fnv1a(b"get\nabc\njp\nset"), fnv1a(b"get\nabc\njp\nset <id>"));
+        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a(b"foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    #[test]
+    fn helper_bin_name_embeds_the_source_hash() {
+        // The name must be derived from the embedded source (never fixed),
+        // so editing scripts/ime.swift changes the binary name and the
+        // next launch rebuilds instead of reusing a stale helper.
+        // `bin_name_for` keeps this testable without depending on HOME,
+        // which `ime_dir` needs.
+        assert_eq!(helper_bin_name(), bin_name_for(IME_SWIFT));
+        assert!(helper_bin_name().starts_with("ime-"));
+        assert_eq!(helper_bin_name().len(), "ime-".len() + 8);
+        assert!(helper_bin_name().chars().skip(4).all(|c| c.is_ascii_hexdigit()));
+        // A changed source must map to a different name.
+        assert_ne!(bin_name_for("abc"), bin_name_for("abd"));
     }
 }
