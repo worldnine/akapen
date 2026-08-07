@@ -21,6 +21,7 @@ mod view;
 
 
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,7 +43,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::comment::{Comment, Selection};
 use similar::{ChangeTag, TextDiff};
-use crate::config::{Action, Config};
+use crate::config::{Action, Config, EscQuit};
 use crate::highlight::{Highlighter, Span as HiSpan, syntax_for, wrap_spans};
 use crate::source::Source;
 use crate::view::{border_color, changed_bg, selected_bg, ViewState};
@@ -132,6 +133,10 @@ fn main() -> Result<()> {
                  \x20 --dark            force dark mode\n\
                  \x20 --callback <cmd>  shell command to spawn on exit\n\
                  \x20                   (e.g. return to a file-picker after quit)\n\
+                 \x20 --esc-quit <auto|always|never> whether Esc may quit\n\
+                 \x20                   (default auto: only with --callback;\n\
+                 \x20                   always = unconditionally, never = Esc\n\
+                 \x20                   stays a pure cancel)\n\
                  \n\
                  keys:\n\
                  \x20 view mode:    j/k/arrows scroll, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
@@ -828,7 +833,9 @@ fn on_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
 /// only when it overflows the panel (content that fits never scrolls).
 /// Esc / q / `?` close it.
 fn on_help_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
-    let max = help_rows().len().saturating_sub(overlay_visible_rows());
+    let max = help_rows(app.esc_quit_enabled())
+        .len()
+        .saturating_sub(overlay_visible_rows());
     match key {
         KeyCode::Char('j') | KeyCode::Down => {
             app.overlay_cursor = (app.overlay_cursor + 1).min(max);
@@ -994,7 +1001,9 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             }
             MouseEventKind::ScrollDown => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows().len().saturating_sub(overlay_visible_rows());
+                    let max = help_rows(app.esc_quit_enabled())
+                        .len()
+                        .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = (app.overlay_cursor + 1).min(max);
                 }
                 Some(Overlay::Files) => {
@@ -1013,7 +1022,9 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             },
             MouseEventKind::ScrollUp => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows().len().saturating_sub(overlay_visible_rows());
+                    let max = help_rows(app.esc_quit_enabled())
+                        .len()
+                        .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = app.overlay_cursor.saturating_sub(1).min(max);
                 }
                 _ => {
@@ -1789,14 +1800,23 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
         KeyCode::Esc => {
             // View is the home mode: Esc cancels the quit confirmation
             // first, then a pending selection (parallel to source mode).
+            // With esc-quit enabled the confirmation is the topmost
+            // layer — Esc closes it for real, like a second q — and
+            // with nothing pending Esc falls through to the quit path.
             if app.confirm_quit {
-                app.confirm_quit = false;
-                app.flash("quit cancelled");
+                if app.esc_quit_enabled() {
+                    app.running = false;
+                } else {
+                    app.confirm_quit = false;
+                    app.flash("quit cancelled");
+                }
             } else if app.confirm_edit {
                 app.confirm_edit = false;
                 app.flash("edit cancelled");
             } else if app.selection.take().is_some() {
                 app.flash("selection cancelled");
+            } else if app.esc_quit_enabled() {
+                request_quit(app);
             }
         }
         _ => {}
@@ -1997,19 +2017,28 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
             }
         }
         KeyCode::Esc => {
-            // The quit confirmation is the most urgent state: Esc cancels it
-            // before anything else (a pending selection otherwise swallows
-            // the first Esc and the prompt feels stuck). Esc never switches
-            // modes — Tab is the one toggle (a mode flip from a reflexive
-            // Esc lost the reading position).
+            // The quit confirmation is the most urgent state: Esc resolves
+            // it before anything else (a pending selection otherwise
+            // swallows the first Esc and the prompt feels stuck). With
+            // esc-quit enabled the confirmation is the topmost layer —
+            // Esc closes it for real, like a second q — and with nothing
+            // pending Esc falls through to the quit path. Esc never
+            // switches modes — Tab is the one toggle (a mode flip from a
+            // reflexive Esc lost the reading position).
             if app.confirm_quit {
-                app.confirm_quit = false;
-                app.flash("quit cancelled");
+                if app.esc_quit_enabled() {
+                    app.running = false;
+                } else {
+                    app.confirm_quit = false;
+                    app.flash("quit cancelled");
+                }
             } else if app.confirm_edit {
                 app.confirm_edit = false;
                 app.flash("edit cancelled");
             } else if app.selection.take().is_some() {
                 app.flash("selection cancelled");
+            } else if app.esc_quit_enabled() {
+                request_quit(app);
             }
         }
         KeyCode::PageDown => {
@@ -2572,6 +2601,7 @@ enum TitleHit {
 /// Title-bar layout: the x extents of every clickable element, computed
 /// once and shared by [`draw_title`] and the mouse hit-testing so a click
 /// always lands exactly on what is drawn.
+#[derive(Debug)]
 struct TitleMetrics {
     /// The change badge (⚡ / +N/-M) and its width.
     change: String,
@@ -2593,6 +2623,11 @@ struct TitleMetrics {
     indicator: String,
     indicator_x: u16,
     indicator_w: u16,
+    /// The `esc close` badge (esc-quit enabled only, not clickable) and
+    /// its x/width. Flush right, to the right of the counter.
+    esc_close: String,
+    esc_close_x: u16,
+    esc_close_w: u16,
 }
 
 /// The layout math for the title bar, shared by drawing and hit-testing
@@ -2604,6 +2639,16 @@ fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         format!(" ▌ {} ", app.comments.len())
     };
     let indicator_w = UnicodeWidthStr::width(indicator.as_str()) as u16;
+    // `esc close`: the esc-quit affordance, shown only while it is real
+    // (esc-quit enabled, and not composing — Esc cancels the composer
+    // there). It is the top-right element, right of the comment counter;
+    // the path yields to it before the y/s hint does.
+    let esc_close = if app.esc_quit_enabled() && app.mode != Mode::Input {
+        " esc close ".to_string()
+    } else {
+        String::new()
+    };
+    let esc_close_w = UnicodeWidthStr::width(esc_close.as_str()) as u16;
     // The y/s explainer reads the room: with no comments there is nothing
     // to copy or send (both keys flash "no comments yet"), and without a
     // send target (--send-cmd or --send-agent) there is nothing to send —
@@ -2620,13 +2665,13 @@ fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         format!(" {}", parts.join(" · "))
     };
     let ys_w = UnicodeWidthStr::width(ys.as_str()) as u16;
-    let cluster_w = indicator_w + ys_w + 1;
+    let cluster_w = indicator_w + ys_w + esc_close_w + 1;
     let ys_x = width.saturating_sub(cluster_w);
     let show_ys = ys_w > 0 && ys_x >= 16;
     let path_area_end = if show_ys {
         ys_x
     } else {
-        width.saturating_sub(indicator_w)
+        width.saturating_sub(indicator_w + esc_close_w)
     };
     // While an external edit is pending the title shows ⚡; after a reload
     // it shows the +N/-M from that reload until the next change.
@@ -2666,9 +2711,12 @@ fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         ys,
         ys_w,
         show_ys,
-        indicator_x: width.saturating_sub(indicator_w),
+        indicator_x: width.saturating_sub(indicator_w + esc_close_w),
         indicator,
         indicator_w,
+        esc_close_x: width.saturating_sub(esc_close_w),
+        esc_close,
+        esc_close_w,
     }
 }
 
@@ -2689,10 +2737,11 @@ fn title_hit_at(app: &App, width: u16, x: u16) -> Option<TitleHit> {
 
 /// The title is file-centric: path + change state + session position. The
 /// mode badge lives in the footer (statusline convention). The top-right
-/// corner carries the comment-presence indicator; the y/s explainer sits
-/// between (low priority, vanishes when the path needs the room). The
-/// path, the file counter, and the comment counter are clickable buttons
-/// (see on_mouse).
+/// corner carries the comment-presence indicator with the `esc close`
+/// badge to its right (esc-quit only); the y/s explainer sits between
+/// (low priority, vanishes when the path needs the room). The path, the
+/// file counter, and the comment counter are clickable buttons (see
+/// on_mouse).
 fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     let m = title_metrics(app, area.width);
     if m.change_w > 0 {
@@ -2758,6 +2807,22 @@ fn draw_title(f: &mut Frame, area: Rect, app: &App) {
                 x: area.x + m.indicator_x,
                 y: area.y,
                 width: m.indicator_w,
+                height: 1,
+            },
+        );
+    }
+    // The esc-quit affordance: a filled badge (dark gray background) at
+    // the very top-right. It is not clickable; Esc does the work itself.
+    if m.esc_close_w > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                m.esc_close,
+                Style::default().fg(Color::Black).bg(Color::DarkGray),
+            ))),
+            Rect {
+                x: area.x + m.esc_close_x,
+                y: area.y,
+                width: m.esc_close_w,
                 height: 1,
             },
         );
@@ -2969,14 +3034,19 @@ fn draw_toast(f: &mut Frame, app: &App) {
 
 /// The persistent prompt text, if any: quit confirmation, edit
 /// confirmation, or a pending file change. Priority: quit > edit >
-/// change (the old footer order).
-fn prompt_message(app: &App) -> Option<&'static str> {
+/// change (the old footer order). The quit line advertises the Esc
+/// binding that is actually active.
+fn prompt_message(app: &App) -> Option<Cow<'static, str>> {
     if app.confirm_quit {
-        Some("unsent comments — q to quit, Esc to cancel")
+        if app.esc_quit_enabled() {
+            Some("unsent comments — Esc/q to quit".into())
+        } else {
+            Some("unsent comments — q to quit, Esc to cancel".into())
+        }
     } else if app.confirm_edit {
-        Some("unsent comments — e again to edit & clear, Esc to cancel")
+        Some("unsent comments — e again to edit & clear, Esc to cancel".into())
     } else if app.file_changed {
-        Some("file changed — r reload · i ignore")
+        Some("file changed — r reload · i ignore".into())
     } else {
         None
     }
@@ -2987,7 +3057,7 @@ fn prompt_message(app: &App) -> Option<&'static str> {
 /// the two never clash.
 fn draw_prompt(f: &mut Frame, app: &App) {
     if let Some(msg) = prompt_message(app) {
-        draw_banner(f, f.area(), 1, msg, false);
+        draw_banner(f, f.area(), 1, &msg, false);
     }
 }
 
@@ -3002,8 +3072,10 @@ fn draw_overlay(f: &mut Frame, app: &App) {
 }
 
 /// The help reference rows (label, keys). Shared by the drawer and the
-/// scroll clamp, so the list never scrolls past its own end.
-fn help_rows() -> Vec<(&'static str, &'static str)> {
+/// scroll clamp, so the list never scrolls past its own end; scrollable
+/// with j/k or the wheel (small screens), closed by Esc / q / `?` or a
+/// click outside the panel. The quit row reflects the active Esc binding.
+fn help_rows(esc_quit: bool) -> Vec<(&'static str, &'static str)> {
     vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
         ("file", "]/[ · ^p files"),
@@ -3012,7 +3084,7 @@ fn help_rows() -> Vec<(&'static str, &'static str)> {
         ("output", "y copy · s send"),
         ("list", "l comments · ? help"),
         ("reload", "r reload · i ignore · e edit"),
-        ("quit", "q quit · Esc cancel"),
+        ("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }),
     ]
 }
 
@@ -3030,7 +3102,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
         .fg(Color::LightBlue)
         .add_modifier(Modifier::BOLD);
 
-    let rows = help_rows();
+    let rows = help_rows(app.esc_quit_enabled());
     let visible = overlay_visible_rows();
     // Scroll only when the reference overflows the panel; a reference
     // that fits stays put (j/k are no-ops there).
@@ -3856,6 +3928,18 @@ impl App {
         self.mode == Mode::View
             || (self.mode == Mode::Input && self.composer_return == Mode::View)
     }
+
+    /// Whether `Esc` may quit the app in normal mode (see [`EscQuit`]):
+    /// `always` unconditionally; `auto` when a `--callback` is set — the
+    /// app is a step in a loop then, so quitting is a return to the
+    /// caller rather than a dead end. `never` keeps Esc a pure cancel.
+    fn esc_quit_enabled(&self) -> bool {
+        match self.config.esc_quit {
+            EscQuit::Always => true,
+            EscQuit::Never => false,
+            EscQuit::Auto => self.config.callback.is_some(),
+        }
+    }
 }
 #[cfg(test)]
 mod bar_tests {
@@ -4010,7 +4094,7 @@ mod bar_tests {
 mod mouse_tests {
     use super::*;
     use crate::comment::Comment;
-    use crate::config::Config;
+    use crate::config::{Config, EscQuit};
     use crate::highlight::Highlighter;
     use crate::ime::ImeMode;
     use crate::view::ViewState;
@@ -4030,6 +4114,7 @@ mod mouse_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -4066,6 +4151,7 @@ mod mouse_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -4136,7 +4222,7 @@ mod mouse_tests {
 mod state_tests {
     use super::*;
     use crate::comment::Selection;
-    use crate::config::Config;
+    use crate::config::{Config, EscQuit};
     use crate::highlight::Highlighter;
     use crate::ime::ImeMode;
     use crate::source::Source;
@@ -4159,6 +4245,7 @@ mod state_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -4189,6 +4276,7 @@ mod state_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -4237,6 +4325,110 @@ mod state_tests {
         on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(app.running);
         assert!(!app.confirm_quit, "Esc clears the confirmation");
+    }
+
+    #[test]
+    fn esc_quits_with_callback_in_auto_mode() {
+        let mut app = make_app(5, Mode::Source);
+        app.config.callback = Some("fzf".into());
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(!app.running, "auto + callback: Esc quits with no comments");
+    }
+
+    #[test]
+    fn esc_quits_with_callback_in_view_mode() {
+        let mut app = make_app(5, Mode::View);
+        app.config.callback = Some("fzf".into());
+        on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(!app.running, "auto + callback: Esc quits from view too");
+    }
+
+    #[test]
+    fn esc_arms_then_confirms_the_quit_with_callback() {
+        let mut app = make_app(5, Mode::Source);
+        app.config.callback = Some("fzf".into());
+        add_comment(&mut app, 2, 2, "note");
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(app.running);
+        assert!(app.confirm_quit, "first Esc arms the confirmation");
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(!app.running, "armed Esc confirms the quit, not cancels");
+    }
+
+    #[test]
+    fn esc_never_quits_with_callback_in_never_mode() {
+        let mut app = make_app(5, Mode::Source);
+        app.config.callback = Some("fzf".into());
+        app.config.esc_quit = EscQuit::Never;
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(app.running, "never: Esc stays a pure cancel");
+        add_comment(&mut app, 2, 2, "note");
+        request_quit(&mut app);
+        assert!(app.confirm_quit);
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(app.running);
+        assert!(!app.confirm_quit, "never: armed Esc still cancels");
+    }
+
+    #[test]
+    fn esc_always_quits_without_callback() {
+        let mut app = make_app(5, Mode::View);
+        app.config.esc_quit = EscQuit::Always;
+        on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(!app.running, "always: Esc quits even without callback");
+    }
+
+    #[test]
+    fn esc_cancels_selection_before_quitting() {
+        let mut app = make_app(5, Mode::Source);
+        app.config.callback = Some("fzf".into());
+        app.selection = Some(Selection {
+            anchor: 1,
+            cursor: 2,
+        });
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(app.running, "a pending selection cancels first");
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn overlay_esc_closes_the_overlay_not_the_app() {
+        let mut app = make_app(5, Mode::Source);
+        app.config.callback = Some("fzf".into());
+        open_overlay(&mut app, Overlay::Help, 0);
+        on_overlay_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.running);
+        assert!(app.overlay.is_none(), "overlay Esc never quits");
+    }
+
+    #[test]
+    fn prompt_message_reflects_the_esc_binding() {
+        let mut app = make_app(5, Mode::Source);
+        add_comment(&mut app, 2, 2, "note");
+        request_quit(&mut app);
+        assert_eq!(
+            prompt_message(&app).as_deref(),
+            Some("unsent comments — q to quit, Esc to cancel")
+        );
+        app.config.callback = Some("fzf".into());
+        assert_eq!(
+            prompt_message(&app).as_deref(),
+            Some("unsent comments — Esc/q to quit")
+        );
+    }
+
+    #[test]
+    fn help_rows_reflect_the_esc_binding() {
+        let rows = help_rows(false);
+        assert!(
+            rows.iter().any(|(l, k)| *l == "quit" && *k == "q quit · Esc cancel"),
+            "default help advertises Esc as cancel"
+        );
+        let rows = help_rows(true);
+        assert!(
+            rows.iter().any(|(l, k)| *l == "quit" && *k == "Esc/q quit"),
+            "esc-quit help advertises Esc/q as quit"
+        );
     }
 
     #[test]
@@ -4574,6 +4766,7 @@ mod state_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -5273,6 +5466,7 @@ mod state_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -5591,6 +5785,7 @@ mod state_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(config.files[0].clone()).unwrap();
         let highlight = Highlighter::new(None, false);
@@ -6052,6 +6247,38 @@ mod state_tests {
     }
 
     #[test]
+    fn title_esc_close_badge_tracks_esc_quit() {
+        let (mut app, _dir) = make_session();
+        // Default (no callback): no badge — Esc is not a close key.
+        assert_eq!(title_metrics(&app, 80).esc_close, "");
+        // With the esc-quit affordance live, the filled badge appears at
+        // the top-right, right of the comment counter.
+        app.config.callback = Some("fzf".into());
+        let m = title_metrics(&app, 80);
+        assert_eq!(m.esc_close, " esc close ");
+        assert_eq!(m.esc_close_x + m.esc_close_w, 80, "flush right");
+        assert!(
+            m.indicator_x + m.indicator_w <= m.esc_close_x,
+            "badge sits right of the comment counter"
+        );
+        // While composing, Esc cancels the composer instead: hide it.
+        app.mode = Mode::Input;
+        assert_eq!(title_metrics(&app, 80).esc_close, "");
+    }
+
+    #[test]
+    fn title_esc_close_badge_keeps_room_over_the_path() {
+        let (mut app, _dir) = make_session();
+        app.config.callback = Some("fzf".into());
+        let m = title_metrics(&app, 20);
+        assert_eq!(m.esc_close, " esc close ", "badge survives narrow widths");
+        assert!(
+            m.path_w + m.esc_close_w <= 20,
+            "the path yields to the badge: {m:?}"
+        );
+    }
+
+    #[test]
     fn files_overlay_shows_the_change_bolt() {
         // The picker carries the title bar's ⚡ for files whose on-disk
         // state differs from what was loaded — background files included
@@ -6300,18 +6527,21 @@ mod state_tests {
         app.confirm_edit = true;
         app.file_changed = true;
         assert_eq!(
-            prompt_message(&app),
+            prompt_message(&app).as_deref(),
             Some("unsent comments — q to quit, Esc to cancel")
         );
         app.confirm_quit = false;
         assert_eq!(
-            prompt_message(&app),
+            prompt_message(&app).as_deref(),
             Some("unsent comments — e again to edit & clear, Esc to cancel")
         );
         app.confirm_edit = false;
-        assert_eq!(prompt_message(&app), Some("file changed — r reload · i ignore"));
+        assert_eq!(
+            prompt_message(&app).as_deref(),
+            Some("file changed — r reload · i ignore")
+        );
         app.file_changed = false;
-        assert_eq!(prompt_message(&app), None);
+        assert_eq!(prompt_message(&app).as_deref(), None);
     }
 
     #[test]
@@ -6834,6 +7064,7 @@ mod mouse_view_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(path.into()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -6939,6 +7170,7 @@ mod handoff_tests {
             ime: ImeMode::Off,
             light: None,
             callback: None,
+            esc_quit: EscQuit::Auto,
         };
         let source = Source::load(path.into()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);

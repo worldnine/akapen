@@ -39,6 +39,7 @@ No external binaries required — rendering is built in. On macOS the optional I
 ```
 akapen <file...> [--send-cmd <cmd> | --send-agent] [--theme <name>]
                  [--ime <off|ascii|jp>] [--light|--dark] [--callback <cmd>]
+                 [--esc-quit <auto|always|never>]
 ```
 
 | Flag | Meaning |
@@ -49,6 +50,7 @@ akapen <file...> [--send-cmd <cmd> | --send-agent] [--theme <name>]
 | `--ime <off\|ascii\|jp>` | macOS input-source control around the comment composer (default `ascii`) |
 | `--light` / `--dark` | force the UI palette (default: auto-detect the terminal background via OSC 11) |
 | `--callback <cmd>` | shell command spawned on exit (e.g. return to a file picker) |
+| `--esc-quit <auto\|always\|never>` | whether `Esc` may quit (default `auto`: only with `--callback`; `always` = unconditionally, `never` = Esc stays a pure cancel) |
 
 Typical loop with a picker (see the companion tool [ashiato](https://github.com/worldnine/ashiato), an mtime-sorted file picker):
 
@@ -76,7 +78,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `s` | send via `--send-cmd` / `--send-agent` (comments are cleared only on success) |
 | `d` | delete the comment under the cursor |
 | `q` | quit (confirms if there are unsent comments) |
-| `Esc` | cancel input / clear selection (never switches modes) |
+| `Esc` | cancel input / clear selection (never switches modes). With `--esc-quit` enabled it also quits like `q` — but only when nothing is pending (confirmation still guards unsent comments, and the prompt advertises `Esc/q to quit`) |
 
 Mouse: wheel scrolls the view without moving the cursor; click moves the cursor; drag selects a line range; click the title-bar path to copy the full path; click `1/3 files` or the yellow `▌ N` badge to open the overlays.
 

@@ -1,7 +1,7 @@
 //! Command-line configuration.
 //!
 //! `akapen <file...> [--send-cmd <cmd>] [--theme <syntect-theme>]
-//!              [--ime <off|ascii|jp>] [--light|--dark]`
+//!              [--ime <off|ascii|jp>] [--light|--dark] [--esc-quit <auto|always|never>]`
 //! Positional arguments are the files to open (one or more). Unknown flags
 //! are ignored (reviewr-style). `--help`/`--version` short-circuit before parsing.
 
@@ -10,6 +10,37 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 
 use crate::ime::ImeMode;
+
+/// Whether `Esc` may quit the app (in normal mode, when nothing more
+/// urgent is pending — overlays and the composer always cancel first).
+///
+/// `Auto` ties the ability to `--callback`: when the app is spawned as a
+/// step in a loop (e.g. a file picker that re-runs akapen), quitting via
+/// `Esc` is a "return to the loop", not a dead end, so the lightest key
+/// becomes available. `Always` opts into `Esc`-to-quit without a callback
+/// (e.g. a wrapper script that loops itself); `Never` keeps `Esc` as a
+/// pure cancel even when a callback is set (e.g. callback used as an
+/// exit hook, not a loop transition).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EscQuit {
+    /// `Esc` quits only when `--callback` is set.
+    #[default]
+    Auto,
+    /// `Esc` quits unconditionally.
+    Always,
+    /// `Esc` never quits; it only cancels (the pre-callback behavior).
+    Never,
+}
+
+impl EscQuit {
+    pub fn parse(s: &str) -> EscQuit {
+        match s {
+            "always" => EscQuit::Always,
+            "never" => EscQuit::Never,
+            _ => EscQuit::Auto, // "auto" and unknown values fall back
+        }
+    }
+}
 
 /// What the process should do, resolved from argv.
 pub enum Action {
@@ -44,6 +75,8 @@ pub struct Config {
     /// `--callback <cmd>`: shell command to spawn on exit (e.g. to return
     /// to a file picker). Runs after the TUI is fully shut down.
     pub callback: Option<String>,
+    /// `--esc-quit <auto|always|never>`: whether `Esc` may quit the app.
+    pub esc_quit: EscQuit,
 }
 
 impl Config {
@@ -60,6 +93,7 @@ impl Config {
         let mut ime = ImeMode::Ascii;
         let mut light: Option<bool> = None;
         let mut callback: Option<String> = None;
+        let mut esc_quit = EscQuit::Auto;
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -68,6 +102,11 @@ impl Config {
                 "--light" => light = Some(true),
                 "--dark" => light = Some(false),
                 "--callback" => callback = it.next(),
+                "--esc-quit" => {
+                    if let Some(v) = it.next() {
+                        esc_quit = EscQuit::parse(&v);
+                    }
+                }
                 "--send-cmd" => send_cmd = it.next(),
                 "--send-agent" => send_agent = true,
                 "--theme" => theme = it.next(),
@@ -98,6 +137,7 @@ impl Config {
             ime,
             light,
             callback,
+            esc_quit,
         }))
     }
 
@@ -109,7 +149,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Config};
+    use super::{Action, Config, EscQuit};
 
     fn parse(args: &[&str]) -> Action {
         Config::parse(args.iter().map(|s| (*s).to_string())).unwrap()
@@ -202,6 +242,36 @@ mod tests {
             Some(false)
         );
         assert_eq!(cfg(&parse(&["x.md"])).ime, ImeMode::Ascii);
+    }
+
+    #[test]
+    fn esc_quit_defaults_to_auto() {
+        assert_eq!(cfg(&parse(&["x.md"])).esc_quit, EscQuit::Auto);
+        assert_eq!(
+            cfg(&parse(&["x.md", "--callback", "fzf"])).esc_quit,
+            EscQuit::Auto
+        );
+    }
+
+    #[test]
+    fn esc_quit_parses_all_three_values() {
+        assert_eq!(
+            cfg(&parse(&["x.md", "--esc-quit", "always"])).esc_quit,
+            EscQuit::Always
+        );
+        assert_eq!(
+            cfg(&parse(&["x.md", "--esc-quit", "never"])).esc_quit,
+            EscQuit::Never
+        );
+        assert_eq!(
+            cfg(&parse(&["x.md", "--esc-quit", "auto"])).esc_quit,
+            EscQuit::Auto
+        );
+        // Unknown values fall back to the neutral default.
+        assert_eq!(
+            cfg(&parse(&["x.md", "--esc-quit", "bogus"])).esc_quit,
+            EscQuit::Auto
+        );
     }
 
     #[test]

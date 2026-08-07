@@ -17,7 +17,7 @@ English README is [here](README.md).
 
 ```
 akapen <file...> [--send-cmd <cmd>] [--theme <name>] [--ime <off|ascii|jp>]
-                    [--light|--dark] [--callback <cmd>]
+                    [--light|--dark] [--callback <cmd>] [--esc-quit <auto|always|never>]
 ```
 
 - 引数に**1つ以上のファイル**を渡します（yazi の `%S` などから複数選択をそのまま渡せます）
@@ -122,7 +122,7 @@ cargo build --release
 | s | `--send-cmd` で送信（成功時のみクリア。**失敗時はコメント保持**で再送可能） |
 | d | カーソル位置のコメントを削除 |
 | q | 終了（未送信コメントがあれば確認プロンプト） |
-| Esc | 入力中=キャンセル / 選択中=選択解除（**モードは変わらない**。切替は Tab のみ） |
+| Esc | 入力中=キャンセル / 選択中=選択解除（**モードは変わらない**。切替は Tab のみ）。`--esc-quit` 有効時（既定 `auto` = `--callback` 指定時のみ。`always` で無条件、`never` で無効化）は、ペンディングが何もないときに q と同じく終了へ進む。未送信コメントがあれば確認プロンプトを挟み、プロンプト中の Esc は q と同じ「確定」（`Esc/q to quit` と表示） |
 
 ### オーバーレイ（ミニウインドウ）
 
@@ -310,7 +310,7 @@ hunk の watch モードと akapen の `⚡` 再読込は同じエージェン�
 
 ```
 src/main.rs        — エントリ、モード状態機械、イベントループ、オーバーレイ、描画
-src/config.rs      — CLI 引数パース（位置引数=files, --send-cmd, --theme, --ime, --light|--dark, --callback）
+src/config.rs      — CLI 引数パース（位置引数=files, --send-cmd, --theme, --ime, --light|--dark, --callback, --esc-quit）
 src/render.rs      — ネイティブ markdown レンダリング（tui-markdown → 表示行 + ソース行マッピング）
 src/view.rs        — 表示行の保持・スクロール・カーソル
 src/source.rs      — ファイル読込、行分割、行番号・幅計算（unicode-width）
