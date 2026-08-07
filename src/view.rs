@@ -372,6 +372,38 @@ impl ViewState {
         if self.rows.is_empty() {
             return (Text::default(), Vec::new());
         }
+        // A row-group is the set of source lines sharing one start row
+        // (merged paragraphs, wrapped continuations, blank lines): the row
+        // is marked when any member is comment-covered. Fold the three
+        // flag slices into per-group ORs up front (source_starts is
+        // sorted, so a group is a run of equal entries): the per-row
+        // backward scan made a single 100k-line paragraph cost
+        // O(viewport × paragraph size) per frame, breaking the O(viewport)
+        // redraw invariant above. One linear pass over the whole document
+        // stays well under a millisecond at 100k lines, so no caching is
+        // needed.
+        let group_or = |flags: &[bool]| -> Vec<bool> {
+            let mut out = vec![false; self.source_starts.len()];
+            if flags.is_empty() {
+                return out;
+            }
+            let mut acc = false;
+            let mut group_start = 0usize;
+            for i in 0..self.source_starts.len() {
+                acc |= flags.get(i).copied().unwrap_or(false);
+                if i + 1 == self.source_starts.len()
+                    || self.source_starts[i + 1] != self.source_starts[i]
+                {
+                    out[group_start..=i].fill(acc);
+                    acc = false;
+                    group_start = i + 1;
+                }
+            }
+            out
+        };
+        let group_marked = group_or(marked);
+        let group_changed = group_or(changed);
+        let group_deleted = group_or(deleted);
         let end = (self.offset + viewport).min(self.rows.len());
         let mut start = self.cursor_row();
         let mut c_end = self
@@ -432,31 +464,11 @@ impl ViewState {
                 src += 1;
             }
             let cursor_row = abs >= start && abs < c_end;
-            // A row-group is the set of source lines sharing one start row
-            // (merged paragraphs, wrapped continuations, blank lines). The
-            // row is marked when any member is comment-covered.
-            let row_start = self.source_starts[src];
-            let mut marked_row = false;
-            for i in (0..=src).rev() {
-                marked_row |= marked.get(i).copied().unwrap_or(false);
-                if i == 0 || self.source_starts[i - 1] != row_start {
-                    break;
-                }
-            }
-            let mut changed_row = false;
-            for i in (0..=src).rev() {
-                changed_row |= changed.get(i).copied().unwrap_or(false);
-                if i == 0 || self.source_starts[i - 1] != row_start {
-                    break;
-                }
-            }
-            let mut deleted_row = false;
-            for i in (0..=src).rev() {
-                deleted_row |= deleted.get(i).copied().unwrap_or(false);
-                if i == 0 || self.source_starts[i - 1] != row_start {
-                    break;
-                }
-            }
+            // The precomputed per-group OR: one lookup per flag instead of
+            // a backward scan (see the fold above).
+            let marked_row = group_marked[src];
+            let changed_row = group_changed[src];
+            let deleted_row = group_deleted[src];
             // The selection is a LINE range; the row span is the rows
             // those lines render on (merged rows can share one). The exact
             // gray highlights a span exactly when its byte range
@@ -1204,6 +1216,79 @@ mod tests {
         assert_eq!(v.offset, 1, "clamped at the forced max_offset");
         v.wheel_scroll(-1, 22);
         assert_eq!(v.offset, 0, "wheel up returns");
+    }
+
+    #[test]
+    fn merged_group_markers_propagate_across_groups_and_flags() {
+        // Three groups: a merged paragraph (lines 0-2 share row 0, rows
+        // 0..3), a second merge (lines 3-4 share row 3, rows 3..5), and a
+        // wrapped line (line 5 spans rows 5..7). Each group is flagged by
+        // a DIFFERENT member and a different flag — marked on a mid-group
+        // line, changed on the group's last line, deleted on a wrap — and
+        // every row of the group must carry its marker, exactly like
+        // `marker_covers_the_whole_line_block` but across several groups.
+        let view = ViewState {
+            rows: vec![vec![]; 8],
+            offset: 0,
+            cursor: 0,
+            source_starts: vec![0, 0, 0, 3, 3, 5, 7],
+            ..Default::default()
+        };
+        let marked = vec![false, true, false, false, false, false, false];
+        let changed = vec![false, false, false, false, true, false, false];
+        let deleted = vec![false, false, false, false, false, true, false];
+        let (_, gutter) = view.visible_text(
+            10,
+            &marked,
+            &changed,
+            &deleted,
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[0].glyph, ">", "cursor row shows the > marker");
+        assert_eq!(gutter[1].glyph, "▌", "marked paragraph row keeps the marker");
+        assert_eq!(gutter[2].glyph, "▌", "marked paragraph row keeps the marker");
+        assert_eq!(gutter[3].glyph, "▌", "changed group rows are marked");
+        assert_eq!(gutter[4].glyph, "▌", "changed group rows are marked");
+        assert_eq!(gutter[5].glyph, "▌", "deleted wrap rows are marked");
+        assert_eq!(gutter[6].glyph, "▌", "deleted wrap rows are marked");
+        assert_eq!(gutter[7].glyph, "│", "unflagged line keeps the border");
+        assert_eq!(gutter[1].style.fg, Some(Color::Yellow), "marked rows are yellow");
+        assert_eq!(gutter[3].style.fg, Some(Color::Green), "changed rows are green");
+        assert_eq!(gutter[5].style.fg, Some(Color::Red), "deleted rows are red");
+        assert_eq!(gutter[7].style.fg, None, "border rows carry the border style");
+    }
+
+    #[test]
+    fn marker_flags_propagate_across_a_huge_merged_group() {
+        // A 1000-line paragraph (every source line shares row 0): the
+        // per-group fold must mark the whole group from one flagged member
+        // — the old per-row backward scan made this O(viewport × 1000) per
+        // frame, the fold is one linear pass. All rendered rows of the
+        // group carry the marker wherever the flag sits.
+        let view = ViewState {
+            rows: vec![vec![]; 3],
+            offset: 0,
+            cursor: 0,
+            source_starts: vec![0; 1000],
+            ..Default::default()
+        };
+        let mut marked = vec![false; 1000];
+        marked[500] = true; // a mid-group member is comment-covered
+        let (_, gutter) = view.visible_text(
+            10,
+            &marked,
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[0].glyph, ">", "cursor row shows the > marker");
+        assert_eq!(gutter[1].glyph, "▌", "the merged block is marked");
+        assert_eq!(gutter[2].glyph, "▌", "the merged block is marked");
+        assert_eq!(gutter[1].style.fg, Some(Color::Yellow), "marked rows are yellow");
     }
 }
 
