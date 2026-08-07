@@ -3103,11 +3103,13 @@ fn footer_hints(app: &App) -> String {
             let p = pos(app.view.cursor, app.source.len());
             // With a selection active, j/k EXTENDS it (the parallel model —
             // same as source mode); the footer must say so, or "j/k
-            // scroll" silently grows the range after a Tab handoff.
+            // scroll" silently grows the range after a Tab handoff. Esc
+            // cancels the selection — spelled out, since it is the way
+            // out of the SELECT state.
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
-                    format!("{p} · {}–{} · j/k extend · Esc c · ? help", a + 1, b + 1)
+                    format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
                 None => format!("{p} · j/k scroll · v select · c comment · ? help"),
             }
@@ -3117,7 +3119,7 @@ fn footer_hints(app: &App) -> String {
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
-                    format!("{p} · {}–{} · j/k extend · Esc c · ? help", a + 1, b + 1)
+                    format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
                 None => format!("{p} · j/k move · v select · c comment · ? help"),
             }
@@ -3133,11 +3135,21 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     // The mode badge leads the footer (statusline convention): the title
     // above is file-centric, this is where the mode is read at a glance.
     // Color semantics: gray = view (calm reading), blue = source (the raw
-    // editor), cyan = input (same as the composer bubble). Yellow is
+    // editor), cyan = comment input (same as the composer bubble), magenta
+    // = selection active (the transient `v` state — the badge flips to
+    // SELECT so the mode is unmissable, and Esc cancels it). Yellow is
     // comments only, everywhere (the count lives in the top-right `▌ N`
     // indicator). All badges are width 8, so the hints never shift when
     // the mode changes.
     let (badge, badge_style) = match app.mode {
+        Mode::Input => (
+            format!("{:^8}", "COMMENT"),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ),
+        Mode::View | Mode::Source if app.selection.is_some() => (
+            format!("{:^8}", "SELECT"),
+            Style::default().fg(Color::Black).bg(Color::LightMagenta),
+        ),
         Mode::View => (
             format!("{:^8}", "VIEW"),
             Style::default().fg(Color::Black).bg(Color::DarkGray),
@@ -3145,10 +3157,6 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Mode::Source => (
             format!("{:^8}", "SOURCE"),
             Style::default().fg(Color::Black).bg(Color::LightBlue),
-        ),
-        Mode::Input => (
-            format!("{:^8}", "INPUT"),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
     spans.insert(0, Span::styled(badge, badge_style));
@@ -3248,7 +3256,7 @@ fn help_rows(esc_quit: bool) -> Vec<(&'static str, &'static str)> {
     vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
         ("file", "]/[ · ^p files"),
-        ("comment", "v select · c add · d delete · n/N jump"),
+        ("comment", "v select · Esc cancel · c add · d delete · n/N jump"),
         ("mode", "Tab view⇄source"),
         ("output", "y copy · s send"),
         ("list", "l comments · ? help"),
@@ -6803,6 +6811,11 @@ mod state_tests {
         app.selection = Some(Selection::new(3));
         assert!(footer_hints(&app).contains("4–4"));
         assert!(footer_hints(&app).contains("j/k extend"));
+        assert!(
+            footer_hints(&app).contains("Esc cancel"),
+            "the selection state spells out the way out: {}",
+            footer_hints(&app)
+        );
         let mut app2 = make_app(10, Mode::Source);
         assert!(footer_hints(&app2).contains("L1/10"));
         app2.cursor = 9;
@@ -6812,6 +6825,50 @@ mod state_tests {
         // An empty file reports L0/0 instead of an out-of-range line.
         let app3 = make_app(0, Mode::Source);
         assert!(footer_hints(&app3).contains("L0/0"));
+    }
+
+    #[test]
+    fn footer_badge_shows_the_state_not_just_the_mode() {
+        // The badge leads the footer and flips with the transient states:
+        // SELECT while a selection is active (both modes — the selection
+        // is shared), COMMENT while the composer is open. Esc is the way
+        // out of both, spelled out in the hints.
+        let footer_badge = |app: &mut App| -> String {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let buf = terminal.backend().buffer();
+            let row: String = buf.content[23 * 80..24 * 80]
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row[..8].to_string()
+        };
+        let mut app = make_app(10, Mode::View);
+        assert!(footer_badge(&mut app).contains("VIEW"), "view shows VIEW");
+        app.selection = Some(Selection::new(3));
+        assert!(footer_badge(&mut app).contains("SELECT"), "selection flips the badge");
+        assert!(
+            !footer_badge(&mut app).contains("VIEW"),
+            "the badge is not the plain mode badge anymore"
+        );
+        app.mode = Mode::Source;
+        assert!(
+            footer_badge(&mut app).contains("SELECT"),
+            "the selection badge carries over to source mode"
+        );
+        // While composing, the selection is still held (it is consumed on
+        // Enter) — the badge must show COMMENT, not SELECT.
+        app.mode = Mode::Input;
+        assert!(
+            footer_badge(&mut app).contains("COMMENT"),
+            "composing shows COMMENT"
+        );
+        assert!(
+            footer_hints(&app).contains("Enter confirm"),
+            "the composer hint keeps the confirm/cancel pair"
+        );
+        assert!(footer_hints(&app).contains("Esc cancel"));
     }
 
     #[test]
