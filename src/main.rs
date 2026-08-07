@@ -449,6 +449,46 @@ impl App {
             self.offset = end.saturating_sub(height);
         }
     }
+
+    /// While the composer is open, keep its bar on screen. The bar's
+    /// height is already folded into `line_rows` (it grows as you type),
+    /// so the scroll anchor is the bar's BOTTOM row, not the cursor line:
+    /// on the last line the bar cannot fit below the content, and a plain
+    /// [`App::keep_cursor_visible`] run on the pre-composer layout leaves
+    /// it clipped off-screen. Called every frame while Input is active
+    /// (Input mode has no scrolling keys, so a per-frame nudge cannot
+    /// fight the user).
+    fn keep_composer_visible(&mut self, height: usize) {
+        if self.source.is_empty()
+            || self.line_rows.is_empty()
+            || self.input_end >= self.line_rows.len()
+        {
+            return;
+        }
+        let end = self.row_of(self.input_end) + self.rows_of(self.input_end);
+        let height = height.max(1);
+        if end > self.offset + height {
+            self.offset = end.saturating_sub(height);
+        }
+    }
+
+    /// View-mode pendant of [`App::keep_composer_visible`]: the composer
+    /// bar is spliced below the selection's end block, so the view's
+    /// scrollable extent is the document PLUS the bar — the bottom stop
+    /// extends by the bar's height, or a comment on the LAST line could
+    /// never reveal its bar (the old clamp at the document's last row hid
+    /// it entirely). Called every frame while the view-origin composer is
+    /// open, from [`draw_view`] — before the visible window is built, so
+    /// the splice below lands on the adjusted offset.
+    fn keep_composer_visible_view(&mut self, height: usize) {
+        let height = height.max(1);
+        let full_width = view_content_width(self);
+        let h = composer_line_count(&self.input, self.input_cursor, full_width);
+        let anchor = view_composer_anchor(self);
+        let min_offset = (anchor + 1 + h).saturating_sub(height);
+        let max_off = self.view.rows.len().saturating_sub(height) + h;
+        self.view.offset = self.view.offset.max(min_offset).min(max_off);
+    }
 }
 
 /// When stdin is not a terminal (xargs gives children /dev/null; scripts
@@ -1695,20 +1735,12 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
             // Comment the view selection (or the cursor line — the exact
             // line, matching the line-based navigation) without leaving
             // view mode: the composer is drawn inline in the rendered view
-            // and Enter/Esc return here.
+            // and Enter/Esc return here. The draw pass keeps the bar on
+            // screen (keep_composer_visible_view) — including on the last
+            // line, where the bar extends past the document's last row.
             app.selection
                 .get_or_insert_with(|| Selection::new(app.view.cursor));
             open_composer(app, Mode::View);
-            // Scroll the view so the inline composer fits below the
-            // selection's block (its bottom line's rendered block, so an
-            // upward selection or a merged last line still anchors at the
-            // block bottom).
-            let viewport = app.view_viewport_rows();
-            let full_width = view_content_width(app);
-            let h = composer_line_count(&app.input, app.input_cursor, full_width);
-            let min_offset = (view_composer_anchor(app) + 1 + h).saturating_sub(viewport);
-            let max_off = app.view.rows.len().saturating_sub(viewport);
-            app.view.offset = app.view.offset.max(min_offset).min(max_off);
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
             jump_comment(app, if key == KeyCode::Char('n') { 1 } else { -1 });
@@ -2251,7 +2283,10 @@ fn open_composer(app: &mut App, return_to: Mode) {
     // Optionally force Japanese for typing (--ime=jp); always back to
     // ASCII on close (dropped below) so j/k is never captured.
     app.ime_guard = Some(ime::ImeGuard::enter(app.config.ime));
-    // Keep the inline input box on screen.
+    // Keep the inline input box on screen (first approximation on the
+    // pre-composer layout; the draw pass's per-frame nudge —
+    // keep_composer_visible / keep_composer_visible_view — keeps the
+    // whole bar visible as the text grows, including on the last line).
     app.cursor = end;
     app.keep_cursor_visible(app.source_viewport_rows() as u16);
 }
@@ -2756,11 +2791,21 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     let sel = app.selection.map(|s| s.range());
     let changed = view_changed_flags(&app.last_added, app.source.len());
     let deleted = view_deleted_flags(&app.last_deleted_before, app.source.len());
-    let mut text = app.view.visible_text(inner.height as usize, &marked, &changed, &deleted, sel, app.ui_selected_bg);
     // The composer opened from view mode (`c` in view) is drawn inline
     // right under the cursor line, so the comment can be typed without
-    // leaving the rendered view.
-    if app.mode == Mode::Input && app.composer_return == Mode::View {
+    // leaving the rendered view. While it is open it is part of the
+    // layout: keep it on screen BEFORE the visible window is built, so
+    // the splice below lands on the adjusted offset. The bar extends the
+    // view's scrollable extent — a comment on the LAST line would
+    // otherwise clamp the scroll at the document's last row and hide the
+    // bar — and it grows as you type. Input mode has no scroll keys, so a
+    // per-frame nudge cannot fight the user.
+    let composing = app.mode == Mode::Input && app.composer_return == Mode::View;
+    if composing {
+        app.keep_composer_visible_view(inner.height as usize);
+    }
+    let mut text = app.view.visible_text(inner.height as usize, &marked, &changed, &deleted, sel, app.ui_selected_bg);
+    if composing {
         let full_width = inner.width as usize;
         // Below the selection's rendered block (its END line's block — an
         // upward selection anchors at the range bottom, and a merged last
@@ -3364,6 +3409,14 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
     }
     app.ensure_row_cache(content_width);
     app.refresh_line_rows();
+    // While the composer is open, keep its bar on screen: the bar's
+    // height is folded into line_rows (it grows as you type) and Input
+    // mode has no scrolling keys, so a per-frame nudge cannot fight the
+    // user — without it a comment on the last line left the bar below
+    // the pane. Wheel/keys keep their own keep_cursor_visible discipline.
+    if app.mode == Mode::Input {
+        app.keep_composer_visible(inner.height as usize);
+    }
     // The cursor is an absolute file position: wheel scroll moves the
     // viewport only, so don't yank the offset back every frame. Keyboard
     // j/k, c, and G call keep_cursor_visible themselves (herdr-review
@@ -4215,6 +4268,81 @@ mod state_tests {
     }
 
     #[test]
+    fn composer_on_the_last_line_stays_on_screen() {
+        // A comment on the LAST line used to push its bar off the bottom
+        // of the pane: the open-time keep_cursor_visible ran on the
+        // pre-composer row layout (the bar was not folded into line_rows
+        // yet), so nothing scrolled and the bar rendered below the fold,
+        // invisible. The draw pass folds the bar in and nudges the
+        // offset so the bar's bottom rule sits at the pane bottom.
+        let mut app = make_app(25, Mode::Source);
+        app.cursor = 24; // last line
+        app.offset = app.max_offset(22); // last line sits at the pane bottom
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        // The draw pass: fold the bar into line_rows, then nudge.
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        app.keep_composer_visible(22);
+        let start = app.row_of(24);
+        let end = start + app.rows_of(24);
+        assert_eq!(end, 28, "last line + top rule + body + bottom rule");
+        assert_eq!(app.offset, 6, "scrolled so the bar's bottom row is visible");
+        assert!(start >= app.offset, "the commented line is still visible");
+        assert!(end <= app.offset + 22, "the whole bar is inside the pane");
+        // As the input wraps to more rows, the per-frame nudge keeps the
+        // bar's bottom rule at the pane bottom (before, a growing bar
+        // clipped — nothing re-scrolled while typing).
+        app.input = "x".repeat(200); // 3 wrapped body rows at full width 78
+        app.input_cursor = app.input.len();
+        app.refresh_line_rows();
+        app.keep_composer_visible(22);
+        let end = app.row_of(24) + app.rows_of(24);
+        assert_eq!(end, 30, "5-row bar after wrapping");
+        assert_eq!(app.offset, 8);
+        assert!(end <= app.offset + 22, "the grown bar still fits");
+    }
+
+    #[test]
+    fn source_composer_on_the_last_line_renders_in_the_buffer() {
+        // End-to-end: with the cursor on the last line and the pane
+        // scrolled to the bottom, the composer bar must actually be
+        // painted inside the terminal buffer (the user-visible regression:
+        // the bar and its text were below the fold, invisible).
+        let mut app = make_app(25, Mode::Source);
+        app.cursor = 24; // last line
+        app.offset = app.max_offset(18); // pane bottom (TestBackend 20 rows − 2)
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        for ch in "最終行のコメント".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Wide glyphs (CJK) occupy two cells, the second a spacer; strip
+        // spaces so multi-cell sequences compare as one string.
+        let content: String = buf
+            .content
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .filter(|&c| c != ' ')
+            .collect();
+        assert!(
+            content.contains("comment·25"),
+            "the composer bar is visible for the last line"
+        );
+        assert!(
+            content.contains("最終行のコメント▏"),
+            "the typed comment text and cursor glyph are visible"
+        );
+        assert!(
+            content.contains("line24"),
+            "the commented line itself is still on screen"
+        );
+    }
+
+    #[test]
     fn enter_confirms_the_comment_and_returns_to_source_mode() {
         let mut app = make_app(8, Mode::Source);
         app.cursor = 1;
@@ -5040,6 +5168,90 @@ mod state_tests {
             "the composer bar renders inside the view"
         );
         assert!(content.contains('▏'), "the cursor glyph is in the bar");
+    }
+
+    #[test]
+    fn view_composer_on_the_last_line_stays_on_screen() {
+        // Commenting the LAST line used to clamp the view's scroll at the
+        // document's last row, pushing the composer bar below the pane —
+        // invisible. The bar extends the scrollable extent (max_off grows
+        // by the bar's height), so the nudge can always reveal it.
+        let mut app = make_app(25, Mode::View);
+        app.view.rows = (0..25).map(|_| vec![]).collect();
+        app.view.source_starts = (0..25).collect();
+        app.view.goto_source_line(24);
+        app.view.offset = app.view.rows.len().saturating_sub(20); // pane bottom
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        assert_eq!(app.input_end, 24);
+        app.keep_composer_visible_view(20);
+        assert_eq!(view_composer_anchor(&app), 24, "anchor at the last row");
+        let start_row = view_composer_anchor(&app).saturating_sub(app.view.offset) + 1;
+        assert_eq!(
+            start_row + 3,
+            20,
+            "the whole 3-row bar fits, ending at the pane bottom (start_row {start_row})"
+        );
+    }
+
+    #[test]
+    fn view_composer_typing_scrolls_to_keep_the_bar_on_screen() {
+        // As the input wraps to more rows, the per-frame nudge scrolls the
+        // view so the bar's bottom rule stays at the pane bottom (before,
+        // only the open-time scroll existed — a growing bar clipped).
+        let mut app = make_app(25, Mode::View);
+        app.view.rows = (0..25).map(|_| vec![]).collect();
+        app.view.source_starts = (0..25).collect();
+        app.view.goto_source_line(24);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        app.input = "x".repeat(200);
+        app.input_cursor = app.input.len();
+        app.keep_composer_visible_view(20);
+        let h = composer_line_count(&app.input, app.input_cursor, view_content_width(&app));
+        assert_eq!(h, 5, "top rule + 3 wrapped rows + bottom rule");
+        let start_row = view_composer_anchor(&app).saturating_sub(app.view.offset) + 1;
+        assert_eq!(
+            start_row + h,
+            20,
+            "the bar's bottom rule sits at the pane bottom (start_row {start_row})"
+        );
+    }
+
+    #[test]
+    fn view_composer_on_the_last_line_renders_in_the_buffer() {
+        // End-to-end: commenting the LAST line in view mode must paint the
+        // composer bar inside the terminal buffer (the regression: the
+        // scroll clamp at the document's last row left the bar below the
+        // pane, invisible).
+        let mut app = make_app(25, Mode::View);
+        app.view.rows = (0..25).map(|_| vec![]).collect();
+        app.view.source_starts = (0..25).collect();
+        app.view.goto_source_line(24);
+        app.view.offset = app.view.rows.len().saturating_sub(16); // pane bottom
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        for ch in "最終行".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Wide glyphs (CJK) occupy two cells, the second a spacer; strip
+        // spaces so multi-cell sequences compare as one string.
+        let content: String = buf
+            .content
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .filter(|&c| c != ' ')
+            .collect();
+        assert!(
+            content.contains("comment·25"),
+            "the composer bar is visible for the last line"
+        );
+        assert!(
+            content.contains("最終行▏"),
+            "the typed comment text and cursor glyph are visible"
+        );
     }
 
     #[test]
