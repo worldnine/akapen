@@ -1729,23 +1729,28 @@ fn view_deleted_flags(last_deleted_before: &HashSet<usize>, n_lines: usize) -> V
     deleted
 }
 
-/// Maximal runs of consecutive comment-covered lines for `current_file`.
+/// `n`/`N` jump targets: each comment on `current_file` as its own
+/// (0-based start, end) pair, sorted by start then end. Overlapping
+/// comments stay separate targets, so a jump never selects the merged
+/// union of several comments — only the lines one comment covers.
+/// Identical ranges (stacked comments on the same lines) count once:
+/// the selection would be the same either way.
 fn comment_regions(comments: &[Comment], n_lines: usize, current_file: &Path) -> Vec<(usize, usize)> {
-    let marked = view_marker_flags(comments, n_lines, current_file);
-    let mut regions = Vec::new();
-    let mut in_run = false;
-    for (i, m) in marked.iter().enumerate() {
-        if *m {
-            if !in_run {
-                regions.push((i, i));
-                in_run = true;
-            } else if let Some(last) = regions.last_mut() {
-                last.1 = i;
-            }
-        } else {
-            in_run = false;
-        }
+    if n_lines == 0 {
+        return Vec::new();
     }
+    let last = n_lines.saturating_sub(1);
+    let mut regions: Vec<(usize, usize)> = comments
+        .iter()
+        .filter(|c| c.file_path == current_file)
+        .map(|c| {
+            let start = (c.start.saturating_sub(1) as usize).min(last);
+            let end = (c.end.saturating_sub(1) as usize).min(last);
+            (start, end)
+        })
+        .collect();
+    regions.sort_unstable();
+    regions.dedup();
     regions
 }
 
@@ -1916,13 +1921,14 @@ fn extend_view_selection(app: &mut App, dir: isize) {
     app.view.goto_source_line(next);
     app.view.keep_cursor_visible(app.view_viewport_rows());
 }
-/// Move the cursor to the next (`n`) or previous (`N`) block of commented
-/// lines — the same block landing in both modes (a block is a maximal run
-/// of consecutive comment-covered lines; stacked comments on one line
-/// count once). The whole block becomes the selection (all its lines light
-/// up), so j/k can extend it and d/c act on the range. The cursor lands on
-/// the block's extent (bottom) — the selection model's invariant is
-/// cursor == selection extent.
+/// Move the cursor to the next (`n`) or previous (`N`) comment — the same
+/// comment landing in both modes. Each comment is its own target:
+/// overlapping comments are jumped to one by one, so the selection never
+/// spans the merged union of several comments (stacked comments on the
+/// same range count once). The comment becomes the selection (its lines
+/// light up), so j/k can extend it and d/c act on the range. The cursor
+/// lands on the comment's extent (bottom) — the selection model's
+/// invariant is cursor == selection extent.
 fn jump_comment(app: &mut App, dir: isize) {
     let regions = comment_regions(&app.comments, app.source.len(), app.current_file_path());
     if regions.is_empty() {
@@ -1944,16 +1950,20 @@ fn jump_comment(app: &mut App, dir: isize) {
         }
         None => (cur, cur),
     };
+    // Targets are individual comments sorted by (start, end), so a jump
+    // compares the full pair lexicographically: the next comment is the
+    // first one strictly after the current position — overlapping
+    // comments come out in line order instead of merging into one block.
     let target = if dir > 0 {
         regions
             .iter()
-            .find(|&&(s, _)| (s as isize) > high)
+            .find(|&&(s, e)| (s as isize, e as isize) > (low, high))
             .copied()
     } else {
         regions
             .iter()
             .rev()
-            .find(|&&(_, e)| (e as isize) < low)
+            .find(|&&(s, e)| (s as isize, e as isize) < (low, high))
             .copied()
     };
     match target {
@@ -3093,11 +3103,13 @@ fn footer_hints(app: &App) -> String {
             let p = pos(app.view.cursor, app.source.len());
             // With a selection active, j/k EXTENDS it (the parallel model —
             // same as source mode); the footer must say so, or "j/k
-            // scroll" silently grows the range after a Tab handoff.
+            // scroll" silently grows the range after a Tab handoff. Esc
+            // cancels the selection — spelled out, since it is the way
+            // out of the SELECT state.
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
-                    format!("{p} · {}–{} · j/k extend · Esc c · ? help", a + 1, b + 1)
+                    format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
                 None => format!("{p} · j/k scroll · v select · c comment · ? help"),
             }
@@ -3107,7 +3119,7 @@ fn footer_hints(app: &App) -> String {
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
-                    format!("{p} · {}–{} · j/k extend · Esc c · ? help", a + 1, b + 1)
+                    format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
                 None => format!("{p} · j/k move · v select · c comment · ? help"),
             }
@@ -3123,11 +3135,21 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     // The mode badge leads the footer (statusline convention): the title
     // above is file-centric, this is where the mode is read at a glance.
     // Color semantics: gray = view (calm reading), blue = source (the raw
-    // editor), cyan = input (same as the composer bubble). Yellow is
+    // editor), cyan = comment input (same as the composer bubble), magenta
+    // = selection active (the transient `v` state — the badge flips to
+    // SELECT so the mode is unmissable, and Esc cancels it). Yellow is
     // comments only, everywhere (the count lives in the top-right `▌ N`
     // indicator). All badges are width 8, so the hints never shift when
     // the mode changes.
     let (badge, badge_style) = match app.mode {
+        Mode::Input => (
+            format!("{:^8}", "COMMENT"),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ),
+        Mode::View | Mode::Source if app.selection.is_some() => (
+            format!("{:^8}", "SELECT"),
+            Style::default().fg(Color::Black).bg(Color::LightMagenta),
+        ),
         Mode::View => (
             format!("{:^8}", "VIEW"),
             Style::default().fg(Color::Black).bg(Color::DarkGray),
@@ -3135,10 +3157,6 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Mode::Source => (
             format!("{:^8}", "SOURCE"),
             Style::default().fg(Color::Black).bg(Color::LightBlue),
-        ),
-        Mode::Input => (
-            format!("{:^8}", "INPUT"),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
     spans.insert(0, Span::styled(badge, badge_style));
@@ -3238,7 +3256,7 @@ fn help_rows(esc_quit: bool) -> Vec<(&'static str, &'static str)> {
     vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
         ("file", "]/[ · ^p files"),
-        ("comment", "v select · c add · d delete · n/N jump"),
+        ("comment", "v select · Esc cancel · c add · d delete · n/N jump"),
         ("mode", "Tab view⇄source"),
         ("output", "y copy · s send"),
         ("list", "l comments · ? help"),
@@ -5440,9 +5458,9 @@ mod state_tests {
 
     #[test]
     fn n_n_jump_to_comment_block_heads() {
-        // Overlapping ranges merge into blocks: A(2-5) + B(4-6) = one block
-        // [1-5]; C(8-9) = a second block [7-8]. n/N jump to block heads, so
-        // nested comments don't fragment the jump.
+        // Overlapping ranges stay separate jump targets: A(2-5) and
+        // B(4-6) overlap but are jumped to one by one, so the selection
+        // never becomes their merged union; C(8-9) is the next target.
         let mut app = make_app(10, Mode::View);
         let cur = app.current_file_path().to_path_buf();
         let comments = vec![
@@ -5470,33 +5488,39 @@ mod state_tests {
         ];
         assert_eq!(
             comment_regions(&comments, 10, app.current_file_path()),
-            vec![(1, 5), (7, 8)],
-            "overlapping ranges merge into one block"
+            vec![(1, 4), (3, 5), (7, 8)],
+            "overlapping comments stay separate targets"
         );
         app.comments = comments;
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 5, "cursor lands on the block extent");
+        assert_eq!(app.view.cursor, 4, "cursor lands on the first comment's extent");
         assert_eq!(
             app.selection,
-            Some(Selection { anchor: 1, cursor: 5 }),
-            "the whole block becomes the selection"
+            Some(Selection { anchor: 1, cursor: 4 }),
+            "only the first comment becomes the selection"
         );
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 8, "n skips to the next block");
+        assert_eq!(app.view.cursor, 5, "n steps into the overlapping comment");
+        assert_eq!(app.selection, Some(Selection { anchor: 3, cursor: 5 }));
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.view.cursor, 8, "n skips to the last comment");
         assert_eq!(app.selection, Some(Selection { anchor: 7, cursor: 8 }));
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 8, "n at the last block flashes");
+        assert_eq!(app.view.cursor, 8, "n at the last comment flashes");
         assert!(app.status.is_some());
         on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 5, "N returns to the previous block");
-        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 5 }));
+        assert_eq!(app.view.cursor, 5, "N returns to the overlapping comment");
+        assert_eq!(app.selection, Some(Selection { anchor: 3, cursor: 5 }));
         on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 5, "N at the first block flashes");
+        assert_eq!(app.view.cursor, 4, "N returns to the first comment");
+        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 4 }));
+        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        assert_eq!(app.view.cursor, 4, "N at the first comment flashes");
         // Clearing the selection falls back to cursor-based navigation.
         on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(app.selection.is_none());
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 8, "n from a cleared cursor still finds the next block");
+        assert_eq!(app.view.cursor, 8, "n from a cleared cursor still finds the next comment");
     }
 
     #[test]
@@ -6787,6 +6811,11 @@ mod state_tests {
         app.selection = Some(Selection::new(3));
         assert!(footer_hints(&app).contains("4–4"));
         assert!(footer_hints(&app).contains("j/k extend"));
+        assert!(
+            footer_hints(&app).contains("Esc cancel"),
+            "the selection state spells out the way out: {}",
+            footer_hints(&app)
+        );
         let mut app2 = make_app(10, Mode::Source);
         assert!(footer_hints(&app2).contains("L1/10"));
         app2.cursor = 9;
@@ -6796,6 +6825,50 @@ mod state_tests {
         // An empty file reports L0/0 instead of an out-of-range line.
         let app3 = make_app(0, Mode::Source);
         assert!(footer_hints(&app3).contains("L0/0"));
+    }
+
+    #[test]
+    fn footer_badge_shows_the_state_not_just_the_mode() {
+        // The badge leads the footer and flips with the transient states:
+        // SELECT while a selection is active (both modes — the selection
+        // is shared), COMMENT while the composer is open. Esc is the way
+        // out of both, spelled out in the hints.
+        let footer_badge = |app: &mut App| -> String {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let buf = terminal.backend().buffer();
+            let row: String = buf.content[23 * 80..24 * 80]
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect();
+            row[..8].to_string()
+        };
+        let mut app = make_app(10, Mode::View);
+        assert!(footer_badge(&mut app).contains("VIEW"), "view shows VIEW");
+        app.selection = Some(Selection::new(3));
+        assert!(footer_badge(&mut app).contains("SELECT"), "selection flips the badge");
+        assert!(
+            !footer_badge(&mut app).contains("VIEW"),
+            "the badge is not the plain mode badge anymore"
+        );
+        app.mode = Mode::Source;
+        assert!(
+            footer_badge(&mut app).contains("SELECT"),
+            "the selection badge carries over to source mode"
+        );
+        // While composing, the selection is still held (it is consumed on
+        // Enter) — the badge must show COMMENT, not SELECT.
+        app.mode = Mode::Input;
+        assert!(
+            footer_badge(&mut app).contains("COMMENT"),
+            "composing shows COMMENT"
+        );
+        assert!(
+            footer_hints(&app).contains("Enter confirm"),
+            "the composer hint keeps the confirm/cancel pair"
+        );
+        assert!(footer_hints(&app).contains("Esc cancel"));
     }
 
     #[test]

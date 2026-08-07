@@ -67,7 +67,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `g` / `G`, `PgUp` / `PgDn`, `Ctrl+u` / `Ctrl+d` | jump / half-page moves |
 | `v` | start selecting lines |
 | `c` | comment on the selection (or cursor line). Re-selecting an existing comment's exact range edits it |
-| `n` / `N` | jump to the next / previous comment block (selects the whole block) |
+| `n` / `N` | jump to the next / previous comment (selects that comment only — overlapping comments stay separate) |
 | `]` / `[` | next / previous file in the session |
 | `l` | all-comments overlay |
 | `Ctrl+p` | file-list overlay |
