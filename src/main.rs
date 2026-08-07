@@ -305,7 +305,6 @@ impl App {
         view: ViewState,
         light: bool,
     ) -> Self {
-        let spans = highlight.highlight_with(&source.content, syntax_for(&config.files[0]));
         let ime_session = ime::SessionIme::new(config.ime);
         let files = config.files.clone();
         // Non-markdown files open in source mode (view is unavailable).
@@ -325,7 +324,10 @@ impl App {
             last_overlay_click: None,
             source,
             highlight,
-            spans,
+            // The caller (run()) already tokenized every file — this one
+            // included — and assigns `app.spans` right after construction;
+            // tokenizing again here would double the work for file 0.
+            spans: Vec::new(),
             view,
             mode: initial_mode,
             offset: 0,
@@ -569,6 +571,23 @@ fn rebind_to_controlling_pty() -> bool {
     false
 }
 
+/// Restores the terminal on drop: cursor, mouse capture, raw mode, and
+/// alternate screen. `run()` creates it immediately after
+/// `ratatui::init()`, so every early error return (a failed
+/// `terminal.size()`, an I/O error in `event_loop`) still leaves the
+/// shell usable. ratatui 0.30's `Terminal` has no Drop-based restore and
+/// the panic hook only fires on panics, so a plain `?` would otherwise
+/// exit the process with the terminal stuck in raw mode and echo off.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = execute!(std::io::stdout(), Show);
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        ratatui::restore();
+    }
+}
+
 fn run(config: Config) -> Result<()> {
     // A piped/redirected stdin must not kill the TUI (see above).
     ensure_terminal_stdin();
@@ -576,7 +595,19 @@ fn run(config: Config) -> Result<()> {
     // close never blocks on swiftc (see [`crate::ime::start_background_build`]).
     ime::start_background_build();
     let files = config.files.clone();
+
+    // Load every file BEFORE entering raw mode: a missing or non-UTF-8
+    // file fails here with the terminal untouched, so the anyhow error
+    // stays readable and no restore is needed.
+    let mut sources: Vec<Source> = Vec::with_capacity(files.len());
+    for f in &files {
+        sources.push(Source::load(f.clone())?);
+    }
+
     let mut terminal = ratatui::init();
+    // From here on the terminal is in raw mode + alternate screen; the
+    // guard's Drop restores it on every return path, early or normal.
+    let terminal_guard = TerminalGuard;
     // Light/dark resolution: --light/--dark win, else the terminal's
     // background is queried (OSC 11). Needs raw mode (init enables it)
     // and must run before the event loop consumes input; unanswerable
@@ -589,13 +620,19 @@ fn run(config: Config) -> Result<()> {
     let highlight = Highlighter::new(config.theme.as_deref(), light);
     let size = terminal.size()?;
 
-    // Load all files into FileState entries eagerly so spans/views are
-    // ready before the first frame.
+    // Build FileState entries eagerly so spans/views are ready before the
+    // first frame (the sources themselves were loaded above, pre-init).
     let mut file_states: Vec<FileState> = Vec::with_capacity(files.len());
-    for f in &files {
-        let source = Source::load(f.clone())?;
-        let view = render_view_with_cards(&source, view_render_width(size.width), &highlight, &[]);
+    for (f, source) in files.iter().zip(sources) {
         let spans = highlight.highlight_with(&source.content, syntax_for(f));
+        // Non-Markdown files are source-only, so their view is never
+        // shown; rendering it here would be discarded work at startup
+        // (a session of many large .rs files pays for it).
+        let view = if supports_view(f) {
+            render_view_with_cards(&source, view_render_width(size.width), &highlight, &[])
+        } else {
+            ViewState::default()
+        };
         let mut fs = FileState {
             source,
             spans,
@@ -642,12 +679,11 @@ fn run(config: Config) -> Result<()> {
     let _ = execute!(std::io::stdout(), Hide);
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let res = event_loop(&mut terminal, &mut app);
-    // Make sure the cursor is visible again after we leave raw mode.
-    let _ = execute!(std::io::stdout(), Show);
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
-    ratatui::restore();
-    // Spawn the `--callback` command (if any) after fully shutting down
-    // the TUI, so the callback inherits a clean terminal.
+    // The guard's Drop performs the whole shutdown (cursor, mouse capture,
+    // raw mode, alternate screen). Drop it explicitly BEFORE spawning the
+    // callback so the callback inherits a clean terminal; on early error
+    // returns the same Drop runs at scope exit instead.
+    drop(terminal_guard);
     if let Some(cmd) = &app.config.callback {
         let _ = Command::new("sh").arg("-c").arg(cmd).spawn();
     }
@@ -4362,6 +4398,11 @@ mod mouse_tests {
         let highlight = Highlighter::new(config.theme.as_deref(), false);
         let view = ViewState::render(&source, 75, &highlight);
         let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
         app.mode = Mode::Source;
         app.gutter_cols = 3; // 1 + gutter_width(1) + 1
         app.ensure_row_cache(75);
@@ -4399,6 +4440,11 @@ mod mouse_tests {
         let highlight = Highlighter::new(config.theme.as_deref(), false);
         let view = ViewState::render(&source, 57, &highlight);
         let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
         app.mode = Mode::Source;
         app.gutter_cols = 3;
         app.ensure_row_cache(57);
@@ -4479,6 +4525,11 @@ mod mouse_tests {
         let highlight = Highlighter::new(config.theme.as_deref(), false);
         let view = ViewState::render(&source, 75, &highlight);
         let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
         app.mode = Mode::Source;
         app.gutter_cols = 3;
         app.ensure_row_cache(source_content_width(&app));
@@ -4655,6 +4706,11 @@ mod state_tests {
         let highlight = Highlighter::new(config.theme.as_deref(), false);
         let view = ViewState::render(&source, 75, &highlight);
         let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
         app.mode = mode;
         app.gutter_cols = 3;
         app.ensure_row_cache(75);
@@ -4686,6 +4742,11 @@ mod state_tests {
         let highlight = Highlighter::new(config.theme.as_deref(), false);
         let view = ViewState::render(&source, 75, &highlight);
         let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
         app.mode = mode;
         app.gutter_cols = 3;
         app.ensure_row_cache(75);
@@ -6335,6 +6396,11 @@ mod state_tests {
         let highlight = Highlighter::new(None, false);
         let view = ViewState::render(&source, 75, &highlight);
         let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
         // Simulate run()'s per-file modes: a.md → View, b.rs → Source.
         app.file_states = vec![
             FileState {
@@ -7671,6 +7737,11 @@ mod mouse_view_tests {
         let highlight = Highlighter::new(config.theme.as_deref(), false);
         let view = ViewState::render(&source, 75, &highlight);
         let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
         app.mode = Mode::View;
         app.gutter_cols = 3;
         app.ensure_row_cache(75);
@@ -7777,6 +7848,11 @@ mod handoff_tests {
         let highlight = Highlighter::new(config.theme.as_deref(), false);
         let view = ViewState::render(&source, 75, &highlight);
         let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
         app.mode = Mode::View;
         app.gutter_cols = 3;
         app.ensure_row_cache(75);
