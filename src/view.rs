@@ -42,6 +42,23 @@ pub fn border_color(light: bool) -> Color {
     if light { Color::Rgb(180, 180, 190) } else { Color::Rgb(127, 132, 156) }
 }
 
+/// A 1-column marker cell drawn over the frame's left border (see
+/// [`ViewState::visible_text`]): `>` marks the cursor row, `▌` a
+/// comment-covered row; rows with no marker reproduce the border's `│`,
+/// so the column reads as the frame itself.
+#[derive(Debug, Clone)]
+pub struct GutterCell {
+    pub glyph: &'static str,
+    pub style: Style,
+}
+
+impl GutterCell {
+    /// The neutral cell: the frame's `│` with the border style.
+    pub fn border(style: Style) -> Self {
+        Self { glyph: "│", style }
+    }
+}
+
 /// The rendered view: one styled row per rendered output line.
 #[derive(Debug, Default)]
 pub struct ViewState {
@@ -193,7 +210,8 @@ impl ViewState {
     /// segment whose text occupies the column (a merged row holds several
     /// lines' phrases side by side, so clicking a phrase selects its own
     /// line), falling back to the row's attribution when the column misses
-    /// every segment (the gutter, a wrapped gap). Used by mouse clicks and
+    /// every segment (the marker column on the border, a wrapped gap).
+    /// Used by mouse clicks and
     /// drags so the selection follows source mode's line units.
     pub fn line_at_position(&self, display_row: usize, col: usize) -> Option<usize> {
         let text: String = self
@@ -251,9 +269,12 @@ impl ViewState {
     }
 
     /// The rows visible in a `viewport`-tall window starting at `offset`, as
-    /// a ratatui `Text`. Each row is prefixed with a 2-column gutter: `>`
-    /// marks the cursor row, a yellow `▌` a comment-covered row (`marked`
-    /// is indexed by source line). Rows inside `selection` (an inclusive
+    /// a ratatui `Text`, plus the matching marker column (one [`GutterCell`]
+    /// per visible row). The marker column is drawn over the frame's left
+    /// border by the caller (see `draw_view`): `>` marks the cursor row, a
+    /// yellow `▌` a comment-covered row (`marked` is indexed by source
+    /// line); rows without a marker carry the border's `│`. Rows inside
+    /// `selection` (an inclusive
     /// DISPLAY-ROW range — the view's selection is tracked by rows, immune
     /// to source-line mapping imprecision) and the cursor row get the calm
     /// DarkGray background ([`SELECTED_BG`]) — including blank lines inside
@@ -262,13 +283,18 @@ impl ViewState {
     /// built, so a per-frame redraw costs O(viewport) instead of re-cloning
     /// the whole rendered document (which matters for the 100k-line files
     /// the view keeps in memory).
-    /// Build the visible window (rows [`Self::offset`..]) with the gutter
-    /// (`>` cursor marker, `▌` comment marker) and the selection highlight.
+    /// Build the visible window (rows [`Self::offset`..]) and the marker
+    /// column (`>` cursor marker, `▌` comment marker, `│` elsewhere) and
+    /// the selection highlight. Every row is wrapped in a 1-column pad on
+    /// each side, so the text column floats off both borders; the pads
+    /// carry the highlight background on cursor/selection rows, keeping
+    /// the band unbroken from the marker to the frame.
     /// The selection is a LINE range (identical to source mode): a span is
     /// highlighted exactly when its text intersects a selected line's
     /// phrase segment (see [`Segment`]), so merged rows highlight only the
     /// selected lines' text — rows without segments (blanks, unattributed
     /// wraps) fall back to the row span.
+    #[allow(clippy::too_many_arguments)]
     pub fn visible_text(
         &self,
         viewport: usize,
@@ -277,9 +303,10 @@ impl ViewState {
         deleted: &[bool],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
-    ) -> Text<'static> {
+        border_style: Style,
+    ) -> (Text<'static>, Vec<GutterCell>) {
         if self.rows.is_empty() {
-            return Text::default();
+            return (Text::default(), Vec::new());
         }
         let end = (self.offset + viewport).min(self.rows.len());
         let mut start = self.cursor_row();
@@ -315,6 +342,7 @@ impl ViewState {
             c_end = g + 1;
         }
         let mut lines = Vec::with_capacity(end.saturating_sub(self.offset));
+        let mut gutter: Vec<GutterCell> = Vec::with_capacity(lines.capacity());
         // Walk the visible window; `src` tracks the source line each row
         // belongs to (source_starts is sorted, so one pointer suffices).
         let mut src = 0usize;
@@ -322,14 +350,18 @@ impl ViewState {
             // Inline comment cards render exactly as built: full-width rules
             // and text, no gutter, no cursor/selection background.
             if self.card_rows.get(abs).copied().unwrap_or(false) {
-                let spans: Vec<ratatui::text::Span> = self.rows[abs]
-                    .iter()
-                    .map(|s| ratatui::text::Span {
-                        content: s.text.clone().into(),
-                        style: s.style,
-                    })
-                    .collect();
+                // Inline cards float in the text column like every other
+                // row: one pad on each side.
+                let mut spans: Vec<ratatui::text::Span> =
+                    vec![ratatui::text::Span::raw(" ")];
+                spans.extend(self.rows[abs].iter().map(|s| ratatui::text::Span {
+                    content: s.text.clone().into(),
+                    style: s.style,
+                }));
+                spans.push(ratatui::text::Span::raw(" "));
                 lines.push(Line::from(spans));
+                // Inline cards keep the frame's border: no marker.
+                gutter.push(GutterCell::border(border_style));
                 continue;
             }
             while src + 1 < self.source_starts.len() && self.source_starts[src + 1] <= abs {
@@ -402,12 +434,16 @@ impl ViewState {
             let highlight_style = Style::default().bg(selected_bg);
             let gutter_hl = cursor_row || in_sel_row;
             let mut spans: Vec<ratatui::text::Span> = Vec::new();
-            // Gutter: `>` marks the cursor line's FIRST display row
-            // (parallel to source mode, where the marker sits on the first
-            // wrapped row only), `▌` a comment-covered row. The background
-            // extends over the whole gutter so cursor/selection rows read
-            // as one band. The cursor glyph is bold LightCyan — it must be
-            // findable at a glance (yellow is the comment marker's color).
+            // The marker column rides the frame's left border (drawn by
+            // `draw_view` over the border cells): `>` marks the cursor
+            // line's FIRST display row (parallel to source mode, where the
+            // marker sits on the first wrapped row only), `▌` a
+            // comment-covered row; rows without a marker reproduce the
+            // border's `│`. The selection background extends over the
+            // marker, so cursor/selection rows read as one band running to
+            // the page edge. The cursor glyph is bold LightCyan — it must
+            // be findable at a glance (yellow is the comment marker's
+            // color).
             let (glyph, mut marker_style) = if abs == start {
                 (
                     ">",
@@ -416,7 +452,8 @@ impl ViewState {
             } else if in_sel_row {
                 // Selected rows carry a cyan bar (the composer's color, the
                 // same width as the yellow comment bar): the pending range
-                // reads in the gutter, not just as the background band.
+                // reads in the marker column, not just as the background
+                // band.
                 ("▌", Style::default().fg(Color::Cyan))
             } else if marked_row {
                 ("▌", Style::default().fg(Color::Yellow))
@@ -425,20 +462,23 @@ impl ViewState {
             } else if deleted_row {
                 ("▌", Style::default().fg(Color::Red))
             } else {
-                (" ", Style::default())
+                ("│", border_style)
             };
             if gutter_hl {
                 marker_style = marker_style.bg(selected_bg);
             }
-            spans.push(ratatui::text::Span::styled(glyph, marker_style));
-            spans.push(ratatui::text::Span::styled(
-                " ",
-                if gutter_hl {
-                    highlight_style
-                } else {
-                    Style::default()
-                },
-            ));
+            gutter.push(GutterCell { glyph, style: marker_style });
+            // The text column floats one column off each border: a pad on
+            // both sides (the marker at the left border, the frame at the
+            // right). Cursor/selection rows carry the highlight background
+            // over the pads too, so the band runs unbroken from the marker
+            // to the frame.
+            let pad_style = if gutter_hl {
+                highlight_style
+            } else {
+                Style::default()
+            };
+            spans.push(ratatui::text::Span::styled(" ", pad_style));
             // Content spans, with the exact highlight background applied.
             let mut off = 0usize;
             let mut content: Vec<ratatui::text::Span> = self.rows[abs]
@@ -483,9 +523,10 @@ impl ViewState {
                 }
             }
             spans.extend(content);
+            spans.push(ratatui::text::Span::styled(" ", pad_style));
             lines.push(Line::from(spans));
         }
-        Text::from(lines)
+        (Text::from(lines), gutter)
     }
 
     /// The ghost assignments for this frame (display row → invisible source
@@ -587,13 +628,26 @@ mod tests {
         }
     }
 
-    /// The concatenated text of `visible_text`'s row `i` (gutter included).
+    /// The concatenated text of `visible_text`'s row `i` (content only —
+    /// the marker column is separate; see [`gutter_at`]).
     fn row_text(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> String {
-        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112)).lines[i]
+        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+            .0
+            .lines[i]
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect()
+    }
+
+    /// The marker glyph of `visible_text`'s row `i` (the cell drawn over
+    /// the frame's left border).
+    fn gutter_at(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> &'static str {
+        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+            .1
+            .get(i)
+            .map(|c| c.glyph)
+            .unwrap_or("")
     }
 
     #[test]
@@ -628,7 +682,10 @@ mod tests {
         );
         // The layout is untouched: same number of rows either way.
         assert_eq!(
-            view.visible_text(100, &[], &[], &[], None, Color::Rgb(88, 91, 112)).lines.len(),
+            view.visible_text(100, &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
+                .0
+                .lines
+                .len(),
             view.rows.len().min(100)
         );
     }
@@ -655,14 +712,15 @@ mod tests {
         // The `>` marker and the cursor band follow the ghost onto the
         // borrowed row — the marker points at the row that shows the line,
         // not at the last code line's content.
-        assert!(
-            text.starts_with('>'),
-            "the cursor marker sits on the ghost row: {text:?}"
+        assert_eq!(
+            gutter_at(&view, None, code_row + 1),
+            ">",
+            "the cursor marker sits on the ghost row"
         );
-        let code_text = row_text(&view, None, code_row);
-        assert!(
-            !code_text.starts_with('>'),
-            "the shared content row loses the marker: {code_text:?}"
+        assert_ne!(
+            gutter_at(&view, None, code_row),
+            ">",
+            "the shared content row loses the marker"
         );
     }
 
@@ -698,10 +756,13 @@ mod tests {
         let mut view = ViewState::render(&source, 40, &Highlighter::new(None, false));
         view.cursor = 2;
         let text = row_text(&view, None, view.source_starts[2]);
+        // The row carries one pad on each side; strip them before
+        // measuring the ghost itself.
+        let text = text.trim();
         assert!(text.ends_with('…'), "over-wide ghost is cut with an ellipsis");
         assert!(
-            UnicodeWidthStr::width(text.as_str()) <= 42,
-            "gutter (2) + ghost stays within the pane"
+            UnicodeWidthStr::width(text) <= 40,
+            "ghost stays within the text column"
         );
     }
 
@@ -810,7 +871,13 @@ mod tests {
         };
         // Can't easily inspect styles through Text, so just ensure the rows
         // render without panicking and the cursor row stays in bounds.
-        assert_eq!(view.visible_text(10, &[], &[], &[], None, Color::Rgb(88, 91, 112)).lines.len(), 2);
+        assert_eq!(
+            view.visible_text(10, &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
+                .0
+                .lines
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -827,25 +894,18 @@ mod tests {
             ..Default::default()
         };
         let marked = vec![true, false, false]; // line 0 is comment-covered
-        let text = view.visible_text(10, &marked, &[], &[], None, Color::Rgb(88, 91, 112));
-        let first: String = text.lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(first.starts_with('>'), "cursor row shows the > marker: {first:?}");
-        let cont: String = text.lines[1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(cont.starts_with('▌'), "continuation row keeps the marker");
-        let below: String = text.lines[2]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(!below.starts_with('▌'), "unrelated row below stays clean");
+        let (_, gutter) = view.visible_text(
+            10,
+            &marked,
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[0].glyph, ">", "cursor row shows the > marker");
+        assert_eq!(gutter[1].glyph, "▌", "continuation row keeps the marker");
+        assert_eq!(gutter[2].glyph, "│", "unrelated row below keeps the border");
     }
 
     #[test]
@@ -861,7 +921,15 @@ mod tests {
             source_starts: vec![0, 1, 2, 3, 4],
             ..Default::default()
         };
-        let text = view.visible_text(10, &[], &[], &[], Some((1, 3)), Color::Rgb(88, 91, 112));
+        let (text, gutter) = view.visible_text(
+            10,
+            &[],
+            &[],
+            &[],
+            Some((1, 3)),
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
         let has_bg = |i: usize| {
             text.lines[i]
                 .spans
@@ -870,21 +938,19 @@ mod tests {
         };
         assert!(!has_bg(0), "row outside the selection stays clean");
         assert!(has_bg(1) && has_bg(2), "selected rows are highlighted");
-        let row3: String = text.lines[3]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(row3.starts_with('>'), "cursor row carries the > marker");
+        assert_eq!(gutter[3].glyph, ">", "cursor row carries the > marker");
         assert!(has_bg(3), "the cursor row is highlighted too");
         // Without a selection the cursor row still shows `>`.
-        let text = view.visible_text(10, &[], &[], &[], None, Color::Rgb(88, 91, 112));
-        let row3: String = text.lines[3]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(row3.starts_with('>'), "standalone cursor keeps its marker");
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[3].glyph, ">", "standalone cursor keeps its marker");
     }
 
     #[test]

@@ -45,7 +45,7 @@ use similar::{ChangeTag, TextDiff};
 use crate::config::{Action, Config};
 use crate::highlight::{Highlighter, Span as HiSpan, syntax_for, wrap_spans};
 use crate::source::Source;
-use crate::view::{border_color, changed_bg, selected_bg, ViewState};
+use crate::view::{border_color, changed_bg, selected_bg, GutterCell, ViewState};
 
 /// The kind of overlay currently open (Ctrl+p = files, `l` = comments,
 /// `?` = help).
@@ -1140,9 +1140,11 @@ fn source_row_at(app: &App, content_row: usize, col: usize) -> Option<usize> {
     match app.mode {
         Mode::View => {
             let display = app.view.offset + content_row;
-            // The text column: the frame's left border and the 2-char
-            // gutter shift the text right of the mouse column.
-            let text_col = col.saturating_sub(1 + 2);
+            // The text column: the page's left margin, the frame's left
+            // border, and the text column's left pad shift the text right
+            // of the mouse column (the marker column rides the border
+            // itself).
+            let text_col = col.saturating_sub(1 + 1 + 1);
             app.view.line_at_position(display, text_col)
         }
         Mode::Source | Mode::Input => {
@@ -1160,12 +1162,13 @@ fn source_content_width(app: &App) -> u16 {
     w.saturating_sub(gutter_cols)
 }
 
-/// View-mode paragraph width: the terminal minus the frame's borders
-/// (the 2-column marker gutter is inside the rendered rows). Mirrors
-/// `draw_view`'s `inner.width`.
+/// View-mode paragraph width: the terminal minus the page's left margin,
+/// the frame's borders, and the text column's 1-column pads on each side
+/// (the marker column rides the frame's left border, reserving no width
+/// of its own). Mirrors `draw_view`'s `content.width`.
 fn view_content_width(_app: &App) -> usize {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    (w.saturating_sub(2)) as usize
+    (w.saturating_sub(5)) as usize
 }
 
 /// Source mode: which source line contains `display_row` (0-based content
@@ -1893,14 +1896,14 @@ fn mark_view_dirty(app: &mut App) {
 }
 
 /// The render width: the content pane width, i.e. the terminal width
-/// minus the 2 columns the frame borders take, minus the 2 columns of
-/// the comment-marker gutter the view always reserves (so the layout never
-/// shifts when the first comment is added). The render must wrap at exactly
-/// the width the pane displays, or the source-line mapping drifts by a
-/// couple of columns. Both call sites (startup and resize) go through this
-/// so they can never disagree.
+/// minus the page's left margin, the 2 columns the frame borders take,
+/// and the text column's 1-column pads on each side. The marker column
+/// rides the frame's left border, so it reserves no width of its own. The
+/// render must wrap at exactly the width the pane displays, or the
+/// source-line mapping drifts by a couple of columns. Both call sites
+/// (startup and resize) go through this so they can never disagree.
 fn view_render_width(terminal_width: u16) -> u16 {
-    terminal_width.saturating_sub(2).saturating_sub(2)
+    terminal_width.saturating_sub(2).saturating_sub(1).saturating_sub(2)
 }
 
 /// Re-render at the current terminal width, preserving the cursor fraction.
@@ -2771,19 +2774,41 @@ fn draw_title(f: &mut Frame, area: Rect, app: &App) {
 fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // View mode always draws the frame: the bordered "page" is the reading
     // mode's visual signature (source mode is the frameless raw editor).
+    // The page floats one column off the screen's left edge — a margin so
+    // the markers riding the border never touch the terminal edge (the
+    // title and footer strips stay full-width).
+    let margin = 1;
+    let frame = Rect {
+        x: area.x + margin,
+        y: area.y,
+        width: area.width.saturating_sub(margin),
+        height: area.height,
+    };
     let m = 1;
     let inner = Rect {
-        x: area.x + m,
-        y: area.y + m,
-        width: area.width.saturating_sub(m * 2),
-        height: area.height.saturating_sub(m * 2),
+        x: frame.x + m,
+        y: frame.y + m,
+        width: frame.width.saturating_sub(m * 2),
+        height: frame.height.saturating_sub(m * 2),
+    };
+    // The text column floats one column off each border: the marker on
+    // the left border needs a breath before the text (`> print(...)`), and
+    // the right edge gets the same gap, so the paragraph reads as a set
+    // column instead of a full-bleed block. The pads live INSIDE the
+    // rendered rows (see [`ViewState::visible_text`]); `content` is the
+    // width the rows (and the bars) are built at.
+    let content = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: inner.height,
     };
     // Which source lines carry comments → a per-line flag for the view's
-    // 2-column marker gutter (the render already reserves that gutter, so
-    // the layout never shifts when the first comment is added). Every line
-    // of a multi-line comment is flagged; the gutter renders one marker on
-    // each line's first display row only, so the range reads as a clean
-    // column instead of a noisy band.
+    // marker column (drawn over the frame's left border, so no render
+    // width is reserved and the layout never shifts when the first comment
+    // is added). Every line of a multi-line comment is flagged; the column
+    // renders one marker on each line's first display row only, so the
+    // range reads as a clean column instead of a noisy band.
     let marked = view_marker_flags(&app.comments, app.source.len(), app.current_file_path());
     // The selection is the LINE range itself (comment-identical);
     // `visible_text` resolves it to the exact spans via the phrase
@@ -2804,9 +2829,18 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     if composing {
         app.keep_composer_visible_view(inner.height as usize);
     }
-    let mut text = app.view.visible_text(inner.height as usize, &marked, &changed, &deleted, sel, app.ui_selected_bg);
+    let border_style = Style::default().fg(app.ui_border);
+    let (mut text, mut gutter) = app.view.visible_text(
+        inner.height as usize,
+        &marked,
+        &changed,
+        &deleted,
+        sel,
+        app.ui_selected_bg,
+        border_style,
+    );
     if composing {
-        let full_width = inner.width as usize;
+        let full_width = content.width as usize;
         // Below the selection's rendered block (its END line's block — an
         // upward selection anchors at the range bottom, and a merged last
         // line anchors below the whole paragraph).
@@ -2821,7 +2855,25 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
             app.editing_comment.is_some(),
         );
         if start_row <= text.lines.len() {
-            text.lines.splice(start_row..start_row, lines);
+            let n = lines.len();
+            // The bar floats in the text column like every other row: one
+            // pad on each side.
+            let padded: Vec<Line> = lines
+                .into_iter()
+                .map(|line| {
+                    let mut spans = vec![Span::raw(" ")];
+                    spans.extend(line.spans);
+                    spans.push(Span::raw(" "));
+                    Line::from(spans)
+                })
+                .collect();
+            text.lines.splice(start_row..start_row, padded);
+            // The composer rows carry no marker: keep the marker column
+            // aligned with the text rows (the border shows through).
+            gutter.splice(
+                start_row..start_row,
+                std::iter::repeat_n(GutterCell::border(border_style), n),
+            );
         }
         // Terminal-cursor position inside the bar: on the `▏` glyph (the
         // macOS IME anchors its inline composition window here), sharing
@@ -2831,7 +2883,7 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         let row = start_row + 1 + crow;
         if row < inner.height as usize {
             f.set_cursor_position(Position {
-                x: inner.x + ccol as u16,
+                x: content.x + ccol as u16,
                 y: inner.y + row as u16,
             });
         }
@@ -2846,7 +2898,19 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // so no Paragraph scroll is needed — the renderer only ever builds the
     // visible window.
     let p = Paragraph::new(text).block(block);
-    f.render_widget(p, area);
+    f.render_widget(p, frame);
+    // The marker column rides the frame's left border: `>` on the cursor
+    // row, `▌` on marked rows, the border's `│` everywhere else. Written
+    // over the border cells after the frame, so a marker replaces the
+    // border glyph in place; the selection background extends over it,
+    // running the cursor/selection band to the page edge.
+    let buf = f.buffer_mut();
+    for (i, cell) in gutter.iter().take(inner.height as usize).enumerate() {
+        if let Some(c) = buf.cell_mut((frame.x, inner.y + i as u16)) {
+            c.set_symbol(cell.glyph);
+            c.set_style(cell.style);
+        }
+    }
 }
 
 /// The footer's mode hint: the cursor's position as `L{line}/{total}`
@@ -4852,20 +4916,19 @@ mod state_tests {
             ..Default::default()
         };
         let marked = vec![false, true, false, false]; // line 1 (0-based) commented
-        let text = view.visible_text(10, &marked, &[], &[], None, Color::Rgb(88, 91, 112));
+        let (_, gutter) = view.visible_text(
+            10,
+            &marked,
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            ratatui::style::Style::default(),
+        );
         // Row 1 (source lines 1-3 merged) carries the marker glyph.
-        let row1: String = text.lines[1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(row1.starts_with('▌'), "merged row shows the marker: {row1:?}");
-        let row0: String = text.lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(!row0.starts_with('▌'), "unmarked row stays blank");
+        assert_eq!(gutter[1].glyph, "▌", "merged row shows the marker");
+        // Row 0 is unmarked; the cursor (line 0) shows `>` instead.
+        assert_ne!(gutter[0].glyph, "▌", "unmarked row shows no marker");
     }
 
     #[test]
@@ -5303,16 +5366,29 @@ mod state_tests {
             .flat_map(|(i, _)| view.rows[i].iter().map(|s| s.text.as_str()))
             .collect::<String>();
         assert!(card_text.contains("card body"), "the card text is in the view");
-        // Card rows render exactly as built: no gutter, no marker.
-        let text = view.visible_text(10, &[], &[], &[], None, Color::Rgb(88, 91, 112));
+        // Card rows float in the text column like every other row: one
+        // pad on each side (the title keeps its own leading space).
+        let (text, gutter) = view.visible_text(
+            10,
+            &[],
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            ratatui::style::Style::default(),
+        );
         let row: String = text.lines[first_card]
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
         assert!(
-            row.starts_with(" comment · 2-3 "),
-            "card row starts with its title, no gutter: {row:?}"
+            row.trim_start().starts_with("comment · 2-3 "),
+            "card row starts with its title: {row:?}"
+        );
+        assert_eq!(
+            gutter[first_card].glyph, "│",
+            "card rows keep the plain border"
         );
     }
 
@@ -6748,10 +6824,12 @@ mod width_tests {
     #[test]
     fn view_render_width_matches_the_pane() {
         // The view always draws its frame: the render width is the terminal
-        // minus the two border columns minus the 2-column marker gutter.
-        // The startup render and the resize re-render both go through
-        // this, so they can't disagree.
-        assert_eq!(view_render_width(100), 96);
+        // minus the page's left margin, the two border columns, and the
+        // text column's 1-column pads on each side (the marker column
+        // rides the left border, reserving no width). The startup render
+        // and the resize re-render both go through this, so they can't
+        // disagree.
+        assert_eq!(view_render_width(100), 95);
         assert_eq!(view_render_width(1), 0, "clamps at zero");
         assert_eq!(view_render_width(0), 0);
     }
