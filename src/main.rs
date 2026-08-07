@@ -297,6 +297,17 @@ enum Mode {
     Input,
 }
 
+/// Same error toast still on screen: the identical message was flashed
+/// as an error within STATUS_SECS, so [`App::flash_err`] skips the BEL
+/// (spamming a key that cannot work beeps once, not per keystroke). An
+/// info toast with the same text never counts — the beep is for errors.
+fn is_repeat_error(status: &Option<(String, Instant, bool)>, msg: &str) -> bool {
+    matches!(
+        status,
+        Some((prev, at, true)) if prev == msg && at.elapsed() < STATUS_SECS
+    )
+}
+
 impl App {
     fn new(
         config: Config,
@@ -381,13 +392,20 @@ impl App {
     /// errors too, and visual-bell settings are the user's choice).
     fn flash_err(&mut self, msg: impl Into<String>) {
         use std::io::Write;
-        // BEL must be FLUSHED: Rust's stdout is line-buffered, so without
-        // an explicit flush the beep would sit in the buffer forever
-        // (no newline ever arrives while the TUI owns the terminal).
-        let mut out = std::io::stdout();
-        let _ = out.write_all(b"\x07");
-        let _ = out.flush();
-        self.status = Some((msg.into(), Instant::now(), true));
+        let msg = msg.into();
+        // Beep only for a NEW error: the same message still on screen
+        // (e.g. mashing `s`/`d` with nothing to export/delete) must not
+        // ring the bell every keystroke — one beep per error is the
+        // signal. The toast itself still refreshes either way.
+        if !is_repeat_error(&self.status, &msg) {
+            // BEL must be FLUSHED: Rust's stdout is line-buffered, so without
+            // an explicit flush the beep would sit in the buffer forever
+            // (no newline ever arrives while the TUI owns the terminal).
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x07");
+            let _ = out.flush();
+        }
+        self.status = Some((msg, Instant::now(), true));
     }
 
     /// Rebuild the per-source-line wrap cache when the content width changes.
@@ -1874,6 +1892,18 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
             app.view.move_cursor_display(-((viewport / 2) as isize));
             app.view.keep_cursor_visible(viewport);
         }
+        // Ctrl+C is the hard interrupt: the same path as `q` — quit at
+        // once with no comments, one confirmation with comments — but
+        // written out here rather than delegated, so it never depends on
+        // config (Esc's quit needs esc-quit enabled; an interrupt must
+        // always do something, even while a send command is stalled).
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.confirm_quit || app.comments.is_empty() {
+                app.running = false;
+            } else {
+                app.confirm_quit = true;
+            }
+        }
         // Selection start, parallel to source mode: the cursor line.
         KeyCode::Char('v') => {
             app.selection = Some(Selection::new(app.view.cursor));
@@ -2125,6 +2155,18 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
         KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
             source_move_cursor_display(app, -((viewport / 2) as isize), viewport);
         }
+        // Ctrl+C is the hard interrupt: the same path as `q` — quit at
+        // once with no comments, one confirmation with comments — but
+        // written out here rather than delegated, so it never depends on
+        // config (Esc's quit needs esc-quit enabled; an interrupt must
+        // always do something, even while a send command is stalled).
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.confirm_quit || app.comments.is_empty() {
+                app.running = false;
+            } else {
+                app.confirm_quit = true;
+            }
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             if app.selection.is_some() {
                 extend_selection(app, 1, viewport);
@@ -2281,6 +2323,23 @@ fn input_move_line(s: &str, cursor: usize, dir: isize) -> usize {
     }
 }
 
+/// Discard the draft and return to the mode the composer was opened
+/// from — the shared Esc / Ctrl+C cancel. An interrupt must never type
+/// into the draft: raw mode delivers Ctrl+C as a key event, so without
+/// this arm the IME-safe catch-all below would insert a `c` instead.
+fn cancel_composer(app: &mut App) {
+    app.input.clear();
+    app.input_cursor = 0;
+    app.mode = app.composer_return;
+    app.ime_guard = None;
+    // A re-edit rendered the view without the edited card
+    // (open_composer / the Tab flip); cancelling puts it back.
+    if app.editing_comment.take().is_some() {
+        replace_view_preserving_cursor(app);
+    }
+    app.flash("comment cancelled");
+}
+
 /// Input mode: printable keys insert at the text cursor (IME-safe);
 /// arrows / Home / End (and Ctrl+a / Ctrl+e) move it, Backspace / Delete
 /// edit around it, Ctrl+j inserts a newline, Enter confirms, Esc cancels.
@@ -2333,18 +2392,7 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
             // Back to ASCII so j/k is never captured by the IME.
             app.ime_guard = None;
         }
-        KeyCode::Esc => {
-            app.input.clear();
-            app.input_cursor = 0;
-            app.mode = app.composer_return;
-            app.ime_guard = None;
-            // A re-edit rendered the view without the edited card
-            // (open_composer / the Tab flip); cancelling puts it back.
-            if app.editing_comment.take().is_some() {
-                replace_view_preserving_cursor(app);
-            }
-            app.flash("comment cancelled");
-        }
+        KeyCode::Esc => cancel_composer(app),
         KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' => {
             app.input.insert(app.input_cursor, '\n');
             app.input_cursor += 1;
@@ -2355,6 +2403,11 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
         }
         KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) && c == 'e' => {
             app.input_cursor = input_line_end(&app.input, app.input_cursor);
+        }
+        // Ctrl+C cancels like Esc — caught before the catch-all `Char(c)`
+        // arm below, which would otherwise insert a `c` into the draft.
+        KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) && c == 'c' => {
+            cancel_composer(app);
         }
         KeyCode::Home => {
             app.input_cursor = input_line_start(&app.input, app.input_cursor);
@@ -4012,9 +4065,24 @@ fn composer_body_rows(text: &str, cursor: usize, full_width: usize) -> Vec<Strin
 /// column). Row 0 is the first text row under the top rule.
 fn composer_cursor_pos(text: &str, cursor: usize, full_width: usize) -> (usize, usize) {
     let rows = composer_body_rows(text, cursor, full_width);
+    // The cursor glyph is the (n+1)-th `▏` in the display text, where n
+    // is the count of `▏` the user typed BEFORE the cursor (the glyph is
+    // inserted at `cursor`, so everything before it keeps its order). A
+    // plain find would grab the user's own glyph when the text contains
+    // `▏` before the cursor; rfind would grab it when one follows the
+    // cursor — counting picks the cursor glyph in both cases, so the IME
+    // anchor never drifts from the rendered cursor.
+    let before = text[..cursor.min(text.len())].matches('▏').count();
+    let mut seen = 0;
     for (i, row) in rows.iter().enumerate() {
-        if let Some(pos) = row.find('▏') {
-            return (i, UnicodeWidthStr::width(&row[..pos]));
+        let mut from = 0;
+        while let Some(pos) = row[from..].find('▏') {
+            let abs = from + pos;
+            seen += 1;
+            if seen == before + 1 {
+                return (i, UnicodeWidthStr::width(&row[..abs]));
+            }
+            from = abs + '▏'.len_utf8();
         }
     }
     (rows.len().saturating_sub(1), 0)
@@ -4290,6 +4358,13 @@ mod bar_tests {
         assert_eq!(composer_cursor_pos("ab\ncd", 4, 80), (1, 1));
         // CJK before the cursor counts display width, not chars.
         assert_eq!(composer_cursor_pos("あい", 3, 80), (0, 2));
+        // A user `▏` in the text must not displace the cursor anchor:
+        // with the cursor past it the rendered glyph is the LAST `▏`;
+        // with the cursor before it (arrows can move there) it is the
+        // FIRST — the anchor follows the cursor either way.
+        assert_eq!(composer_cursor_pos("x▏y", 5, 80), (0, 3));
+        assert_eq!(composer_cursor_pos("x▏y", 1, 80), (0, 1));
+        assert_eq!(composer_cursor_pos("x▏y", 4, 80), (0, 2));
     }
 
     #[test]
@@ -4790,6 +4865,82 @@ mod state_tests {
         on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(app.running);
         assert!(!app.confirm_quit, "Esc clears the confirmation");
+    }
+
+    #[test]
+    fn ctrl_c_quits_like_q_in_view_and_source_modes() {
+        // No comments: Ctrl+C exits at once (Esc would need esc-quit
+        // enabled — an interrupt must never be a no-op).
+        let mut app = make_app(5, Mode::Source);
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL, None);
+        assert!(!app.running, "source: no comments, quits at once");
+        let mut app = make_app(5, Mode::View);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL, None);
+        assert!(!app.running, "view: no comments, quits at once");
+        // With comments: first Ctrl+C arms the confirmation, second quits.
+        let mut app = make_app(5, Mode::Source);
+        add_comment(&mut app, 2, 2, "note");
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL, None);
+        assert!(app.running, "first Ctrl+C only arms the confirmation");
+        assert!(app.confirm_quit);
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL, None);
+        assert!(!app.running, "second Ctrl+C confirms the quit");
+        // Same from view mode.
+        let mut app = make_app(5, Mode::View);
+        add_comment(&mut app, 2, 2, "note");
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL, None);
+        assert!(app.running && app.confirm_quit);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL, None);
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn ctrl_c_cancels_the_composer_like_esc() {
+        let mut app = make_app(5, Mode::Source);
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        for ch in "abc".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        on_input_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.mode, Mode::Source, "back to the composer's origin");
+        assert!(app.input.is_empty(), "the draft is discarded");
+        assert!(app.comments.is_empty(), "nothing was added");
+        assert_eq!(app.input_cursor, 0);
+        assert!(app.ime_guard.is_none());
+        // The interrupt key must never reach the IME-safe catch-all: a
+        // `c` inserted into the draft would be exactly this bug.
+        assert!(!app.input.contains('c'));
+    }
+
+    #[test]
+    fn flash_err_beeps_once_per_error_message() {
+        // The BEL decision comes from the current status: the identical
+        // error still on screen within STATUS_SECS skips the bell, and
+        // anything else rings it (the toast itself refreshes either way).
+        let mut app = make_app(5, Mode::Source);
+        assert!(!is_repeat_error(&app.status, "boom"), "no toast yet");
+        app.flash_err("boom");
+        assert!(
+            is_repeat_error(&app.status, "boom"),
+            "the fresh toast makes the next identical error a repeat"
+        );
+        app.flash_err("boom");
+        assert!(
+            is_repeat_error(&app.status, "boom"),
+            "the toast was refreshed, not left stale"
+        );
+        // An info toast with the same text is not an error repeat.
+        app.flash("boom");
+        assert!(!is_repeat_error(&app.status, "boom"));
+        // A different message always beeps.
+        assert!(!is_repeat_error(&app.status, "bang"));
+        // After STATUS_SECS the same message is fresh again.
+        let stale = Some((
+            "boom".into(),
+            Instant::now() - STATUS_SECS - Duration::from_millis(1),
+            true,
+        ));
+        assert!(!is_repeat_error(&stale, "boom"));
     }
 
     #[test]

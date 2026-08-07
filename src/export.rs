@@ -10,6 +10,9 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -93,51 +96,79 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
     copy_via(cmd, args, text)
 }
 
-/// Pipe `text` into `cmd`'s stdin and wait for success.
-fn copy_via(cmd: &str, args: &[&str], text: &str) -> Result<()> {
+/// How long a clipboard/send child may run before it is killed. A tool
+/// that never reads its stdin (or waits forever) must not freeze the
+/// TUI: the event loop is single-threaded, so a blocked `wait` would
+/// leave every key dead, with no way to interrupt from inside the app.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Pipe `text` into a child's stdin and wait for its exit — but never
+/// longer than `timeout`. The write runs on a worker thread: a child
+/// that never reads fills the pipe buffer, and a write in the caller's
+/// thread would block forever. `try_wait` polling enforces the
+/// deadline; past it the child is killed and an error is returned, so
+/// the existing caller paths (the toast in `export_all`) show it
+/// unchanged. The worker's result comes back over a channel; the
+/// child's death closes the pipe, so the thread always finishes
+/// promptly.
+fn pipe_and_wait(
+    label: &str,
+    cmd: &str,
+    args: &[&str],
+    text: &str,
+    timeout: Duration,
+) -> Result<()> {
     let mut child = Command::new(cmd)
         .args(args)
         .stdin(Stdio::piped())
         .spawn()
-        .with_context(|| format!("spawning {cmd}"))?;
-    child
+        .with_context(|| format!("spawning {label}"))?;
+    let mut stdin = child
         .stdin
-        .as_mut()
-        .with_context(|| format!("{cmd} stdin unavailable"))?
-        .write_all(text.as_bytes())
-        .with_context(|| format!("writing to {cmd}"))?;
-    if !child
-        .wait()
-        .with_context(|| format!("waiting for {cmd}"))?
-        .success()
-    {
-        bail!("{cmd} exited non-zero");
+        .take()
+        .with_context(|| format!("{label} stdin unavailable"))?;
+    let (tx, rx) = mpsc::channel();
+    let text = text.to_string();
+    thread::spawn(move || {
+        let _ = tx.send(stdin.write_all(text.as_bytes()));
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().with_context(|| format!("waiting for {label}"))? {
+            Some(status) => {
+                // The child is gone, so its own stdin pipe is closed and
+                // the writer is finishing right now — collect its result
+                // (bounded, in case a grandchild inherited the pipe).
+                rx.recv_timeout(Duration::from_secs(1))
+                    .context("stdin writer did not finish")?
+                    .with_context(|| format!("writing to {label}"))?;
+                if !status.success() {
+                    bail!("{label} exited non-zero");
+                }
+                return Ok(());
+            }
+            None if Instant::now() >= deadline => {
+                // The child outlived its budget (e.g. a send command
+                // that never reads stdin) — kill it instead of blocking
+                // the UI forever, then reap it so it cannot linger.
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("{label} timed out after {}s", timeout.as_secs_f64());
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
     }
-    Ok(())
+}
+
+/// Pipe `text` into `cmd`'s stdin and wait for success.
+fn copy_via(cmd: &str, args: &[&str], text: &str) -> Result<()> {
+    pipe_and_wait(cmd, cmd, args, text, CHILD_TIMEOUT)
 }
 
 /// Pipe `text` into a shell command's stdin via `sh -c`. The command
 /// receives the formatted export on stdin.
 pub fn send_command(cmd: &str, text: &str) -> Result<()> {
-    let mut child = Command::new("sh")
-        .args(["-c", cmd])
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("spawning send command")?;
-    child
-        .stdin
-        .as_mut()
-        .context("send command stdin unavailable")?
-        .write_all(text.as_bytes())
-        .context("writing to send command")?;
-    if !child
-        .wait()
-        .context("waiting for send command")?
-        .success()
-    {
-        bail!("send command exited non-zero");
-    }
-    Ok(())
+    pipe_and_wait("send command", "sh", &["-c", cmd], text, CHILD_TIMEOUT)
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +295,7 @@ fn select_tool(
 mod tests {
     use super::{CLIPBOARD_TOOLS, format_all, format_comment, select_tool};
     use crate::comment::Comment;
+    use std::time::{Duration, Instant};
 
     fn comment(file: &str, start: u32, end: u32, lines: &str, text: &str) -> Comment {
         Comment {
@@ -351,6 +383,56 @@ mod tests {
     fn copy_via_fails_on_missing_tool() {
         // A non-existent command must fail cleanly, not panic.
         assert!(super::copy_via("definitely-not-a-real-tool-xyz", &[], "x").is_err());
+    }
+
+    #[test]
+    fn pipe_and_wait_succeeds_when_the_child_reads_stdin() {
+        // `cat` reads stdin to EOF then exits 0 — the happy path of both
+        // copy_via (pbcopy) and send_command (`cat >> review.txt`).
+        super::pipe_and_wait(
+            "cat",
+            "sh",
+            &["-c", "cat >/dev/null"],
+            "hello",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn pipe_and_wait_reports_a_non_zero_exit() {
+        let err = super::pipe_and_wait(
+            "send command",
+            "sh",
+            &["-c", "exit 3"],
+            "",
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exited non-zero"));
+    }
+
+    #[test]
+    fn pipe_and_wait_times_out_and_kills_the_child() {
+        // `sh -c "sleep 30"` never reads stdin: with 1MiB of text the
+        // pipe buffer fills and the write would block forever — the
+        // exact freeze the timeout exists to break. The injectable
+        // timeout keeps the test fast: the child is killed at 200ms,
+        // never waited for.
+        let start = Instant::now();
+        let err = super::pipe_and_wait(
+            "send command",
+            "sh",
+            &["-c", "sleep 30"],
+            &"x".repeat(1 << 20),
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the child must be killed, not waited for"
+        );
     }
 
     fn agent(pane: &str, tab: &str, ws: &str, is_agent: bool) -> serde_json::Value {
