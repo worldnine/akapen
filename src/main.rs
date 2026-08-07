@@ -1061,7 +1061,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
         app.line_rows.iter().sum()
     };
     let current_offset = if app.view_active() { app.view.offset } else { app.offset };
-    let on_track = mouse.column as usize + 1 == w as usize
+    let on_track = mouse.column as usize + 2 == w as usize
         && mouse.row as usize > if app.view_active() { 1 } else { 0 }
         && content_row < viewport
         && scroll_thumb(content_len, viewport, current_offset).is_some();
@@ -2978,20 +2978,27 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
             c.set_style(cell.style);
         }
     }
-    // The scrollbar rides the frame's right border: a `▐` thumb over the
-    // border's `│` track, mirroring the marker column on the left. The
-    // thumb tracks the VIEWPORT offset (wheel scroll moves the viewport
-    // only), so it always reflects what is on screen; when the content
-    // fits, no scrollbar is drawn and the border stays clean.
+    // The scrollbar sits one column inside the frame's right border: a
+    // `▐` thumb, mirroring the marker column on the left. The thumb
+    // tracks the VIEWPORT offset (wheel scroll moves the viewport only),
+    // so it always reflects what is on screen; when the content fits, no
+    // scrollbar is drawn and the border stays clean.
     if let Some((start, len)) =
         scroll_thumb(app.view.rows.len(), inner.height as usize, app.view.offset)
     {
-        let thumb_style = Style::default().fg(app.ui_scrollbar);
-        let right = frame.x + frame.width - 1;
+        let thumb_fg = app.ui_scrollbar;
+        let right = frame.x + frame.width - 2;
         for i in start..start + len {
             if let Some(c) = buf.cell_mut((right, inner.y + i as u16)) {
+                // Preserve the cell's current bg (the right pad's bg on
+                // selected/cursor rows) so the band runs unbroken.
+                let bg = c.style().bg;
                 c.set_symbol("▐");
-                c.set_style(thumb_style);
+                let mut style = Style::default().fg(thumb_fg);
+                if let Some(bg) = bg {
+                    style = style.bg(bg);
+                }
+                c.set_style(style);
             }
         }
     }
@@ -4298,12 +4305,12 @@ mod mouse_tests {
 
     /// A source-mode app with `n` single-line rows (no wrapping at any
     /// sane width), so the scrollbar track exists and `line_rows` sums to
-    /// exactly `n`.
-    fn scrollbar_app(n: usize) -> App {
+    /// exactly `n`. 1000 lines overflow any reasonable terminal height.
+    fn scrollbar_app() -> App {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scroll.md");
         let mut f = std::fs::File::create(&path).unwrap();
-        for i in 1..=n {
+        for i in 1..=1000 {
             writeln!(f, "line{i}").unwrap();
         }
         let config = Config {
@@ -4329,11 +4336,11 @@ mod mouse_tests {
     /// A view-mode app over `n` single-row paragraphs (blank lines keep
     /// the markdown renderer from merging them), so the scrollbar track
     /// exists. The mode is the one `.md` files start in: view.
-    fn scrollbar_view_app(n: usize) -> App {
+    fn scrollbar_view_app() -> App {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         let mut f = std::fs::File::create(&path).unwrap();
-        for i in 1..=n {
+        for i in 1..=1000 {
             writeln!(f, "line{i}\n").unwrap();
         }
         let config = Config {
@@ -4353,12 +4360,12 @@ mod mouse_tests {
 
     #[test]
     fn scrollbar_track_click_jumps_and_grabs() {
-        let mut app = scrollbar_app(200);
+        let mut app = scrollbar_app();
         let total: usize = app.line_rows.iter().sum();
         let viewport = app.source_viewport_rows();
         assert!(total > viewport, "the track must exist");
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let col = w - 1;
+        let col = w - 2;
         let down = |row: u16| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
@@ -4387,11 +4394,11 @@ mod mouse_tests {
 
     #[test]
     fn scrollbar_drag_scrubs_and_clamps() {
-        let mut app = scrollbar_app(200);
+        let mut app = scrollbar_app();
         let total: usize = app.line_rows.iter().sum();
         let viewport = app.source_viewport_rows();
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let col = w - 1;
+        let col = w - 2;
         let ev = |kind: MouseEventKind, row: u16, c: u16| MouseEvent {
             kind,
             column: c,
@@ -4433,12 +4440,12 @@ mod mouse_tests {
     fn scrollbar_works_in_view_mode_too() {
         // View mode: the track rides the frame's right border, one row
         // lower (title + frame top border).
-        let mut app = scrollbar_view_app(200);
+        let mut app = scrollbar_view_app();
         let total = app.view.rows.len();
         let viewport = app.view_viewport_rows();
         assert!(total > viewport, "the track must exist");
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let col = w - 1;
+        let col = w - 2;
         let ev = |kind: MouseEventKind, row: u16| MouseEvent {
             kind,
             column: col,
