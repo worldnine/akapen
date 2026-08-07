@@ -1061,7 +1061,11 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
         app.line_rows.iter().sum()
     };
     let current_offset = if app.view_active() { app.view.offset } else { app.offset };
-    let on_track = mouse.column as usize + 2 == w as usize
+    // The track column: view mode rides the frame's right border (one
+    // column inside it, where the right pad is); source mode has no frame,
+    // so the track is the pane's own rightmost column.
+    let track_col = if app.view_active() { w - 2 } else { w - 1 };
+    let on_track = mouse.column == track_col
         && mouse.row as usize > if app.view_active() { 1 } else { 0 }
         && content_row < viewport
         && scroll_thumb(content_len, viewport, current_offset).is_some();
@@ -1222,12 +1226,11 @@ fn source_row_at(app: &App, content_row: usize, col: usize) -> Option<usize> {
 
 /// Source-mode content width (mirrors `draw_source`'s computation;
 /// source mode draws no frame, so the whole terminal width is content
-/// except the scrollbar's track and the right margin one column in from
-/// the edge).
+/// except the scrollbar's track on the rightmost column).
 fn source_content_width(app: &App) -> u16 {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let gutter_cols = 1 + app.source.gutter_width as u16 + 1;
-    w.saturating_sub(gutter_cols + 2)
+    w.saturating_sub(gutter_cols + 1)
 }
 
 /// View-mode paragraph width: the terminal minus the page's left margin,
@@ -3559,7 +3562,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let gutter_cols = 1 + app.source.gutter_width as u16 + 1;
     app.gutter_cols = gutter_cols;
-    let content_width = inner.width.saturating_sub(gutter_cols + 2);
+    let content_width = inner.width.saturating_sub(gutter_cols + 1);
     if app.source.is_empty() {
         f.render_widget(Paragraph::new("(empty file)"), area);
         return;
@@ -3581,19 +3584,19 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
 
     let (text, composer_cursor) = build_rows(app, inner.height, content_width);
     f.render_widget(Paragraph::new(text), area);
-    // The scrollbar sits one column inside the right edge (the pane's
-    // own edge, source mode draws no frame). The rightmost column is a
-    // blank margin, mirroring the page margin in view mode. The thumb
-    // appears only when the content overflows the viewport; it tracks the
-    // viewport offset (wheel scroll moves the viewport only), so it
-    // always reflects what is on screen.
+    // The scrollbar rides the pane's own right edge (source mode draws no
+    // frame, so unlike view mode there is no border to sit inside — the
+    // thumb goes all the way to the last column). The thumb appears only
+    // when the content overflows the viewport; it tracks the viewport
+    // offset (wheel scroll moves the viewport only), so it always reflects
+    // what is on screen.
     if let Some((start, len)) = scroll_thumb(
         app.line_rows.iter().sum(),
         inner.height as usize,
         app.offset,
     ) {
         let thumb_fg = app.ui_scrollbar;
-        let right = area.x + area.width - 2;
+        let right = area.x + area.width - 1;
         let buf = f.buffer_mut();
         for i in start..start + len {
             if let Some(c) = buf.cell_mut((right, inner.y + i as u16)) {
@@ -4374,7 +4377,7 @@ mod mouse_tests {
         let viewport = app.source_viewport_rows();
         assert!(total > viewport, "the track must exist");
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let col = w - 2;
+        let col = w - 1;
         let down = |row: u16| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
@@ -4407,7 +4410,7 @@ mod mouse_tests {
         let total: usize = app.line_rows.iter().sum();
         let viewport = app.source_viewport_rows();
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let col = w - 2;
+        let col = w - 1;
         let ev = |kind: MouseEventKind, row: u16, c: u16| MouseEvent {
             kind,
             column: c,
@@ -4447,8 +4450,9 @@ mod mouse_tests {
 
     #[test]
     fn scrollbar_works_in_view_mode_too() {
-        // View mode: the track rides the frame's right border, one row
-        // lower (title + frame top border).
+        // View mode: the track rides the frame's right border, one column
+        // inside it (the right pad) and one row lower (title + frame top
+        // border).
         let mut app = scrollbar_view_app();
         let total = app.view.rows.len();
         let viewport = app.view_viewport_rows();
