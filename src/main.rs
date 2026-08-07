@@ -46,7 +46,10 @@ use similar::{ChangeTag, TextDiff};
 use crate::config::{Action, Config, EscQuit};
 use crate::highlight::{Highlighter, Span as HiSpan, syntax_for, wrap_spans};
 use crate::source::Source;
-use crate::view::{border_color, changed_bg, selected_bg, ViewState};
+use crate::view::{
+    border_color, changed_bg, scroll_offset_at, scroll_offset_drag, scroll_thumb,
+    scrollbar_thumb, selected_bg, GutterCell, ViewState,
+};
 
 /// The kind of overlay currently open (Ctrl+p = files, `l` = comments,
 /// `?` = help).
@@ -274,6 +277,11 @@ struct App {
     ui_selected_bg: Color,
     ui_changed_bg: Color,
     ui_border: Color,
+    ui_scrollbar: Color,
+    /// Active scrollbar drag: `(start track row, start scroll offset)` —
+    /// set on a thumb press, cleared on release (viewport-only scroll, so
+    /// the cursor keeps its absolute position).
+    scrollbar_drag: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -352,6 +360,8 @@ impl App {
             ui_selected_bg: selected_bg(light),
             ui_changed_bg: changed_bg(light),
             ui_border: border_color(light),
+            ui_scrollbar: scrollbar_thumb(light),
+            scrollbar_drag: None,
         }
     }
 
@@ -1041,6 +1051,66 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
     let content_row = mouse
         .row
         .saturating_sub(if app.view_active() { 2 } else { 1 }) as usize;
+    // The scrollbar track is the pane's rightmost column (in view mode it
+    // rides the frame's right border, in source mode the pane's own
+    // edge). A press on the track jumps the viewport to the clicked row
+    // and grabs the thumb; a drag scrubs it — the pointer may leave the
+    // column while grabbed (the row clamps). Wheel events fall through to
+    // the normal handling below. The track exists only while the content
+    // overflows; when everything fits, clicks on the column fall through
+    // to the content. Viewport-only scroll, like the wheel: the cursor
+    // keeps its absolute position.
+    let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+    let viewport = if app.view_active() {
+        app.view_viewport_rows()
+    } else {
+        app.source_viewport_rows()
+    };
+    let content_len = if app.view_active() {
+        app.view.rows.len()
+    } else {
+        app.line_rows.iter().sum()
+    };
+    let current_offset = if app.view_active() { app.view.offset } else { app.offset };
+    // The track column: view mode rides the frame's right border (one
+    // column inside it, where the right pad is); source mode has no frame,
+    // so the track is the pane's own rightmost column.
+    let track_col = if app.view_active() { w - 2 } else { w - 1 };
+    let on_track = mouse.column == track_col
+        && mouse.row as usize > if app.view_active() { 1 } else { 0 }
+        && content_row < viewport
+        && scroll_thumb(content_len, viewport, current_offset).is_some();
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) if on_track => {
+            let row = content_row.min(viewport - 1);
+            if let Some(target) = scroll_offset_at(content_len, viewport, row) {
+                if app.view_active() {
+                    app.view.offset = target;
+                } else {
+                    app.offset = target;
+                }
+                app.scrollbar_drag = Some((row, target));
+            }
+            return;
+        }
+        MouseEventKind::Drag(MouseButton::Left) if app.scrollbar_drag.is_some() => {
+            let (start_row, start_offset) = app.scrollbar_drag.unwrap();
+            let row = content_row.min(viewport - 1);
+            if let Some(target) = scroll_offset_drag(content_len, viewport, start_row, start_offset, row) {
+                if app.view_active() {
+                    app.view.offset = target;
+                } else {
+                    app.offset = target;
+                }
+            }
+            return;
+        }
+        MouseEventKind::Up(MouseButton::Left) if app.scrollbar_drag.is_some() => {
+            app.scrollbar_drag = None;
+            return;
+        }
+        _ => {}
+    }
     match mouse.kind {
         MouseEventKind::ScrollDown => {
             app.drag_anchor = None;
@@ -1151,9 +1221,11 @@ fn source_row_at(app: &App, content_row: usize, col: usize) -> Option<usize> {
     match app.mode {
         Mode::View => {
             let display = app.view.offset + content_row;
-            // The text column: the frame's left border and the 2-char
-            // gutter shift the text right of the mouse column.
-            let text_col = col.saturating_sub(1 + 2);
+            // The text column: the page's left margin, the frame's left
+            // border, and the text column's left pad shift the text right
+            // of the mouse column (the marker column rides the border
+            // itself).
+            let text_col = col.saturating_sub(1 + 1 + 1);
             app.view.line_at_position(display, text_col)
         }
         Mode::Source | Mode::Input => {
@@ -1164,19 +1236,21 @@ fn source_row_at(app: &App, content_row: usize, col: usize) -> Option<usize> {
 }
 
 /// Source-mode content width (mirrors `draw_source`'s computation;
-/// source mode draws no frame, so the whole terminal width is content).
+/// source mode draws no frame, so the whole terminal width is content
+/// except the scrollbar's track on the rightmost column).
 fn source_content_width(app: &App) -> u16 {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let gutter_cols = 1 + app.source.gutter_width as u16 + 1;
-    w.saturating_sub(gutter_cols)
+    w.saturating_sub(gutter_cols + 1)
 }
 
-/// View-mode paragraph width: the terminal minus the frame's borders
-/// (the 2-column marker gutter is inside the rendered rows). Mirrors
-/// `draw_view`'s `inner.width`.
+/// View-mode paragraph width: the terminal minus the page's left margin,
+/// the frame's borders, and the text column's 1-column pads on each side
+/// (the marker column rides the frame's left border, reserving no width
+/// of its own). Mirrors `draw_view`'s `content.width`.
 fn view_content_width(_app: &App) -> usize {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    (w.saturating_sub(2)) as usize
+    (w.saturating_sub(5)) as usize
 }
 
 /// Source mode: which source line contains `display_row` (0-based content
@@ -1913,14 +1987,14 @@ fn mark_view_dirty(app: &mut App) {
 }
 
 /// The render width: the content pane width, i.e. the terminal width
-/// minus the 2 columns the frame borders take, minus the 2 columns of
-/// the comment-marker gutter the view always reserves (so the layout never
-/// shifts when the first comment is added). The render must wrap at exactly
-/// the width the pane displays, or the source-line mapping drifts by a
-/// couple of columns. Both call sites (startup and resize) go through this
-/// so they can never disagree.
+/// minus the page's left margin, the 2 columns the frame borders take,
+/// and the text column's 1-column pads on each side. The marker column
+/// rides the frame's left border, so it reserves no width of its own. The
+/// render must wrap at exactly the width the pane displays, or the
+/// source-line mapping drifts by a couple of columns. Both call sites
+/// (startup and resize) go through this so they can never disagree.
 fn view_render_width(terminal_width: u16) -> u16 {
-    terminal_width.saturating_sub(2).saturating_sub(2)
+    terminal_width.saturating_sub(2).saturating_sub(1).saturating_sub(2)
 }
 
 /// Re-render at the current terminal width, preserving the cursor fraction.
@@ -2836,19 +2910,41 @@ fn draw_title(f: &mut Frame, area: Rect, app: &App) {
 fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // View mode always draws the frame: the bordered "page" is the reading
     // mode's visual signature (source mode is the frameless raw editor).
+    // The page floats one column off the screen's left edge — a margin so
+    // the markers riding the border never touch the terminal edge (the
+    // title and footer strips stay full-width).
+    let margin = 1;
+    let frame = Rect {
+        x: area.x + margin,
+        y: area.y,
+        width: area.width.saturating_sub(margin),
+        height: area.height,
+    };
     let m = 1;
     let inner = Rect {
-        x: area.x + m,
-        y: area.y + m,
-        width: area.width.saturating_sub(m * 2),
-        height: area.height.saturating_sub(m * 2),
+        x: frame.x + m,
+        y: frame.y + m,
+        width: frame.width.saturating_sub(m * 2),
+        height: frame.height.saturating_sub(m * 2),
+    };
+    // The text column floats one column off each border: the marker on
+    // the left border needs a breath before the text (`> print(...)`), and
+    // the right edge gets the same gap, so the paragraph reads as a set
+    // column instead of a full-bleed block. The pads live INSIDE the
+    // rendered rows (see [`ViewState::visible_text`]); `content` is the
+    // width the rows (and the bars) are built at.
+    let content = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: inner.height,
     };
     // Which source lines carry comments → a per-line flag for the view's
-    // 2-column marker gutter (the render already reserves that gutter, so
-    // the layout never shifts when the first comment is added). Every line
-    // of a multi-line comment is flagged; the gutter renders one marker on
-    // each line's first display row only, so the range reads as a clean
-    // column instead of a noisy band.
+    // marker column (drawn over the frame's left border, so no render
+    // width is reserved and the layout never shifts when the first comment
+    // is added). Every line of a multi-line comment is flagged; the column
+    // renders one marker on each line's first display row only, so the
+    // range reads as a clean column instead of a noisy band.
     let marked = view_marker_flags(&app.comments, app.source.len(), app.current_file_path());
     // The selection is the LINE range itself (comment-identical);
     // `visible_text` resolves it to the exact spans via the phrase
@@ -2869,9 +2965,18 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     if composing {
         app.keep_composer_visible_view(inner.height as usize);
     }
-    let mut text = app.view.visible_text(inner.height as usize, &marked, &changed, &deleted, sel, app.ui_selected_bg);
+    let border_style = Style::default().fg(app.ui_border);
+    let (mut text, mut gutter) = app.view.visible_text(
+        inner.height as usize,
+        &marked,
+        &changed,
+        &deleted,
+        sel,
+        app.ui_selected_bg,
+        border_style,
+    );
     if composing {
-        let full_width = inner.width as usize;
+        let full_width = content.width as usize;
         // Below the selection's rendered block (its END line's block — an
         // upward selection anchors at the range bottom, and a merged last
         // line anchors below the whole paragraph).
@@ -2886,7 +2991,25 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
             app.editing_comment.is_some(),
         );
         if start_row <= text.lines.len() {
-            text.lines.splice(start_row..start_row, lines);
+            let n = lines.len();
+            // The bar floats in the text column like every other row: one
+            // pad on each side.
+            let padded: Vec<Line> = lines
+                .into_iter()
+                .map(|line| {
+                    let mut spans = vec![Span::raw(" ")];
+                    spans.extend(line.spans);
+                    spans.push(Span::raw(" "));
+                    Line::from(spans)
+                })
+                .collect();
+            text.lines.splice(start_row..start_row, padded);
+            // The composer rows carry no marker: keep the marker column
+            // aligned with the text rows (the border shows through).
+            gutter.splice(
+                start_row..start_row,
+                std::iter::repeat_n(GutterCell::border(border_style), n),
+            );
         }
         // Terminal-cursor position inside the bar: on the `▏` glyph (the
         // macOS IME anchors its inline composition window here), sharing
@@ -2896,7 +3019,7 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         let row = start_row + 1 + crow;
         if row < inner.height as usize {
             f.set_cursor_position(Position {
-                x: inner.x + ccol as u16,
+                x: content.x + ccol as u16,
                 y: inner.y + row as u16,
             });
         }
@@ -2911,7 +3034,43 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // so no Paragraph scroll is needed — the renderer only ever builds the
     // visible window.
     let p = Paragraph::new(text).block(block);
-    f.render_widget(p, area);
+    f.render_widget(p, frame);
+    // The marker column rides the frame's left border: `>` on the cursor
+    // row, `▌` on marked rows, the border's `│` everywhere else. Written
+    // over the border cells after the frame, so a marker replaces the
+    // border glyph in place; the selection background extends over it,
+    // running the cursor/selection band to the page edge.
+    let buf = f.buffer_mut();
+    for (i, cell) in gutter.iter().take(inner.height as usize).enumerate() {
+        if let Some(c) = buf.cell_mut((frame.x, inner.y + i as u16)) {
+            c.set_symbol(cell.glyph);
+            c.set_style(cell.style);
+        }
+    }
+    // The scrollbar sits one column inside the frame's right border: a
+    // `▐` thumb, mirroring the marker column on the left. The thumb
+    // tracks the VIEWPORT offset (wheel scroll moves the viewport only),
+    // so it always reflects what is on screen; when the content fits, no
+    // scrollbar is drawn and the border stays clean.
+    if let Some((start, len)) =
+        scroll_thumb(app.view.rows.len(), inner.height as usize, app.view.offset)
+    {
+        let thumb_fg = app.ui_scrollbar;
+        let right = frame.x + frame.width - 2;
+        for i in start..start + len {
+            if let Some(c) = buf.cell_mut((right, inner.y + i as u16)) {
+                // Preserve the cell's current bg (the right pad's bg on
+                // selected/cursor rows) so the band runs unbroken.
+                let bg = c.style().bg;
+                c.set_symbol("▐");
+                let mut style = Style::default().fg(thumb_fg);
+                if let Some(bg) = bg {
+                    style = style.bg(bg);
+                }
+                c.set_style(style);
+            }
+        }
+    }
 }
 
 /// The footer's mode hint: the cursor's position as `L{line}/{total}`
@@ -3464,7 +3623,8 @@ fn draw_comments_overlay(f: &mut Frame, app: &App) {
 /// width-aware algorithm (ratatui Wrap would double-wrap or misalign CJK).
 fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
     // Source mode never draws a frame: every column goes to the source
-    // (the framed view is the reading mode's visual signature).
+    // (the framed view is the reading mode's visual signature). The
+    // rightmost column is the scrollbar's track.
     let m = 0;
     let inner = Rect {
         x: area.x + m,
@@ -3474,7 +3634,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let gutter_cols = 1 + app.source.gutter_width as u16 + 1;
     app.gutter_cols = gutter_cols;
-    let content_width = inner.width.saturating_sub(gutter_cols);
+    let content_width = inner.width.saturating_sub(gutter_cols + 1);
     if app.source.is_empty() {
         f.render_widget(Paragraph::new("(empty file)"), area);
         return;
@@ -3496,6 +3656,34 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
 
     let (text, composer_cursor) = build_rows(app, inner.height, content_width);
     f.render_widget(Paragraph::new(text), area);
+    // The scrollbar rides the pane's own right edge (source mode draws no
+    // frame, so unlike view mode there is no border to sit inside — the
+    // thumb goes all the way to the last column). The thumb appears only
+    // when the content overflows the viewport; it tracks the viewport
+    // offset (wheel scroll moves the viewport only), so it always reflects
+    // what is on screen.
+    if let Some((start, len)) = scroll_thumb(
+        app.line_rows.iter().sum(),
+        inner.height as usize,
+        app.offset,
+    ) {
+        let thumb_fg = app.ui_scrollbar;
+        let right = area.x + area.width - 1;
+        let buf = f.buffer_mut();
+        for i in start..start + len {
+            if let Some(c) = buf.cell_mut((right, inner.y + i as u16)) {
+                // Preserve the cell's current bg (the gutter's bg on
+                // selected/cursor rows) so the band runs unbroken.
+                let bg = c.style().bg;
+                c.set_symbol("▐");
+                let mut style = Style::default().fg(thumb_fg);
+                if let Some(bg) = bg {
+                    style = style.bg(bg);
+                }
+                c.set_style(style);
+            }
+        }
+    }
     // The logical cursor position is still published every frame even
     // though the hardware cursor is hidden: the macOS IME anchors its
     // inline composition window to this spot, so conversion stays inside
@@ -4211,6 +4399,168 @@ mod mouse_tests {
         app.refresh_line_rows();
         assert_eq!(source_line_at(&app, 75, 4), Some(4));
         assert_eq!(source_line_at(&app, 75, 5), Some(5));
+    }
+
+    /// A source-mode app with `n` single-line rows (no wrapping at any
+    /// sane width), so the scrollbar track exists and `line_rows` sums to
+    /// exactly `n`. 1000 lines overflow any reasonable terminal height.
+    fn scrollbar_app() -> App {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scroll.md");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 1..=1000 {
+            writeln!(f, "line{i}").unwrap();
+        }
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(path).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.mode = Mode::Source;
+        app.gutter_cols = 3;
+        app.ensure_row_cache(source_content_width(&app));
+        app.refresh_line_rows();
+        app
+    }
+
+    /// A view-mode app over `n` single-row paragraphs (blank lines keep
+    /// the markdown renderer from merging them), so the scrollbar track
+    /// exists. The mode is the one `.md` files start in: view.
+    fn scrollbar_view_app() -> App {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 1..=1000 {
+            writeln!(f, "line{i}\n").unwrap();
+        }
+        let config = Config {
+            files: vec![path],
+            send_cmd: None,
+            send_agent: false,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(config.files[0].clone()).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        App::new(config, source, highlight, view, false)
+    }
+
+    #[test]
+    fn scrollbar_track_click_jumps_and_grabs() {
+        let mut app = scrollbar_app();
+        let total: usize = app.line_rows.iter().sum();
+        let viewport = app.source_viewport_rows();
+        assert!(total > viewport, "the track must exist");
+        let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        let col = w - 1;
+        let down = |row: u16| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let up = |row: u16| MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // A click at content row 5 jumps the viewport there and grabs the
+        // thumb (the click row, the offset it landed on).
+        let expected = scroll_offset_at(total, viewport, 5).unwrap();
+        on_mouse(&mut app, down(1 + 5));
+        assert_eq!(app.offset, expected, "click jumps the viewport");
+        assert_eq!(app.scrollbar_drag, Some((5, expected)), "thumb grabbed");
+        // The title row is not the track: the click falls through.
+        on_mouse(&mut app, down(0));
+        assert_eq!(app.offset, expected, "title row is not the track");
+        // Release ends the grab.
+        on_mouse(&mut app, up(1 + 5));
+        assert_eq!(app.scrollbar_drag, None, "release clears the grab");
+    }
+
+    #[test]
+    fn scrollbar_drag_scrubs_and_clamps() {
+        let mut app = scrollbar_app();
+        let total: usize = app.line_rows.iter().sum();
+        let viewport = app.source_viewport_rows();
+        let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        let col = w - 1;
+        let ev = |kind: MouseEventKind, row: u16, c: u16| MouseEvent {
+            kind,
+            column: c,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Press at track row 5, drag to track row 15: the offset follows.
+        on_mouse(&mut app, ev(MouseEventKind::Down(MouseButton::Left), 6, col));
+        let start = app.offset;
+        on_mouse(&mut app, ev(MouseEventKind::Drag(MouseButton::Left), 16, col));
+        assert_eq!(
+            app.offset,
+            scroll_offset_drag(total, viewport, 5, start, 15).unwrap(),
+            "drag scrubs the thumb"
+        );
+        // The pointer may leave the column while grabbed.
+        on_mouse(&mut app, ev(MouseEventKind::Drag(MouseButton::Left), 11, 30));
+        assert_eq!(
+            app.offset,
+            scroll_offset_drag(total, viewport, 5, start, 10).unwrap(),
+            "a grabbed drag scrubs from anywhere"
+        );
+        // Dragging past the track end clamps to the bottom.
+        on_mouse(&mut app, ev(MouseEventKind::Drag(MouseButton::Left), 200, col));
+        assert_eq!(
+            app.offset,
+            scroll_offset_drag(total, viewport, 5, start, viewport - 1).unwrap(),
+            "past the track end clamps"
+        );
+        // Release; a later drag no longer scrubs (and the normal drag
+        // selection has no anchor to start from).
+        on_mouse(&mut app, ev(MouseEventKind::Up(MouseButton::Left), 16, col));
+        let before = app.offset;
+        on_mouse(&mut app, ev(MouseEventKind::Drag(MouseButton::Left), 10, col));
+        assert_eq!(app.offset, before, "no grab, no scrub");
+    }
+
+    #[test]
+    fn scrollbar_works_in_view_mode_too() {
+        // View mode: the track rides the frame's right border, one column
+        // inside it (the right pad) and one row lower (title + frame top
+        // border).
+        let mut app = scrollbar_view_app();
+        let total = app.view.rows.len();
+        let viewport = app.view_viewport_rows();
+        assert!(total > viewport, "the track must exist");
+        let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        let col = w - 2;
+        let ev = |kind: MouseEventKind, row: u16| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Click at content row 5 (screen row 2 + 5).
+        let expected = scroll_offset_at(total, viewport, 5).unwrap();
+        on_mouse(&mut app, ev(MouseEventKind::Down(MouseButton::Left), 2 + 5));
+        assert_eq!(app.view.offset, expected, "view-mode click jumps the viewport");
+        assert!(app.scrollbar_drag.is_some());
+        // Release ends the grab.
+        on_mouse(&mut app, ev(MouseEventKind::Up(MouseButton::Left), 2 + 5));
+        assert_eq!(app.scrollbar_drag, None);
     }
 }
 
@@ -5045,20 +5395,19 @@ mod state_tests {
             ..Default::default()
         };
         let marked = vec![false, true, false, false]; // line 1 (0-based) commented
-        let text = view.visible_text(10, &marked, &[], &[], None, Color::Rgb(88, 91, 112));
+        let (_, gutter) = view.visible_text(
+            10,
+            &marked,
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            ratatui::style::Style::default(),
+        );
         // Row 1 (source lines 1-3 merged) carries the marker glyph.
-        let row1: String = text.lines[1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(row1.starts_with('▌'), "merged row shows the marker: {row1:?}");
-        let row0: String = text.lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(!row0.starts_with('▌'), "unmarked row stays blank");
+        assert_eq!(gutter[1].glyph, "▌", "merged row shows the marker");
+        // Row 0 is unmarked; the cursor (line 0) shows `>` instead.
+        assert_ne!(gutter[0].glyph, "▌", "unmarked row shows no marker");
     }
 
     #[test]
@@ -5497,16 +5846,29 @@ mod state_tests {
             .flat_map(|(i, _)| view.rows[i].iter().map(|s| s.text.as_str()))
             .collect::<String>();
         assert!(card_text.contains("card body"), "the card text is in the view");
-        // Card rows render exactly as built: no gutter, no marker.
-        let text = view.visible_text(10, &[], &[], &[], None, Color::Rgb(88, 91, 112));
+        // Card rows float in the text column like every other row: one
+        // pad on each side (the title keeps its own leading space).
+        let (text, gutter) = view.visible_text(
+            10,
+            &[],
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            ratatui::style::Style::default(),
+        );
         let row: String = text.lines[first_card]
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
         assert!(
-            row.starts_with(" comment · 2-3 "),
-            "card row starts with its title, no gutter: {row:?}"
+            row.trim_start().starts_with("comment · 2-3 "),
+            "card row starts with its title: {row:?}"
+        );
+        assert_eq!(
+            gutter[first_card].glyph, "│",
+            "card rows keep the plain border"
         );
     }
 
@@ -6978,10 +7340,12 @@ mod width_tests {
     #[test]
     fn view_render_width_matches_the_pane() {
         // The view always draws its frame: the render width is the terminal
-        // minus the two border columns minus the 2-column marker gutter.
-        // The startup render and the resize re-render both go through
-        // this, so they can't disagree.
-        assert_eq!(view_render_width(100), 96);
+        // minus the page's left margin, the two border columns, and the
+        // text column's 1-column pads on each side (the marker column
+        // rides the left border, reserving no width). The startup render
+        // and the resize re-render both go through this, so they can't
+        // disagree.
+        assert_eq!(view_render_width(100), 95);
         assert_eq!(view_render_width(1), 0, "clamps at zero");
         assert_eq!(view_render_width(0), 0);
     }

@@ -26,15 +26,15 @@
 
 "段落とインライン書式"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
-"太字"|Style::new().bold();;"、"|Style::new();;"斜体"|Style::new().italic();;"、"|Style::new();;"太字斜体"|Style::new().bold().italic();;"、"|Style::new();;"打ち消し"|Style::new().crossed_out();;"、"|Style::new();;"インラインコード"|Style::new().white().on_black();;"、"|Style::new();;" "|Style::new();;"<sub>"|Style::new().dim();;"下付き"|Style::new();;"</sub>"|Style::new().dim();;"、"|Style::new();;"<sup>"|Style::new().dim();;"上付"|Style::new();;"き"|Style::new()
-"</sup>"|Style::new().dim();;"、"|Style::new();;"<mark>"|Style::new().dim();;"マーク"|Style::new();;"</mark>"|Style::new().dim();;"、改行"|Style::new();;"<br>"|Style::new().dim();;"タグ。"|Style::new()
+"太字"|Style::new().bold();;"、"|Style::new();;"斜体"|Style::new().italic();;"、"|Style::new();;"太字斜体"|Style::new().bold().italic();;"、"|Style::new();;"打ち消し"|Style::new().crossed_out();;"、"|Style::new();;"インラインコード"|Style::new().white().on_black();;"、"|Style::new();;" "|Style::new();;"<sub>"|Style::new().dim();;"下付き"|Style::new();;"</sub>"|Style::new().dim();;"、"|Style::new();;"<sup>"|Style::new().dim();;"上付"|Style::new()
+"き"|Style::new();;"</sup>"|Style::new().dim();;"、"|Style::new();;"<mark>"|Style::new().dim();;"マーク"|Style::new();;"</mark>"|Style::new().dim();;"、改行"|Style::new();;"<br>"|Style::new().dim();;"タグ。"|Style::new()
 
 "日本語の文章 + English mixed テスト。全角文字（あいうえお漢字カタカナ）と"|Style::new();;" "|Style::new();;"半角英"|Style::new()
-"数字の混在で折り返しが崩れないことを確認するための長めの文章です。"|Style::new();;" "|Style::new();;"この行はかな"|Style::new();;"り"|Style::new()
-"長くて、画面幅を超えたときにコメントモードでの折り返しが"|Style::new();;" "|Style::new();;"正しくインデントされる"|Style::new();;"か"|Style::new()
-"を確認するためのものです。Lorem ipsum dolor sit"|Style::new();;" "|Style::new();;"amet, consectetur adipiscing eli"|Style::new()
-"t, sed do eiusmod tempor incididunt ut labore"|Style::new();;" "|Style::new();;"et dolore magna aliqua. 記号 !@#"|Style::new();;"$"|Style::new();;"%"|Style::new()
-"^"|Style::new();;"&"|Style::new();;"*"|Style::new();;"()"|Style::new();;"_"|Style::new();;"+{}|:\""|Style::new();;"<"|Style::new();;">?"|Style::new();;"`"|Style::new();;"~"|Style::new();;"-="|Style::new();;"["|Style::new();;"]"|Style::new();;";',./ と数字 0123456789。"|Style::new()
+"数字の混在で折り返しが崩れないことを確認するための長めの文章です。"|Style::new();;" "|Style::new();;"この行はかな"|Style::new()
+"り長くて、画面幅を超えたときにコメントモードでの折り返しが"|Style::new();;" "|Style::new();;"正しくインデントされ"|Style::new()
+"るかを確認するためのものです。Lorem ipsum dolor sit"|Style::new();;" "|Style::new();;"amet, consectetur adipiscing"|Style::new()
+" elit, sed do eiusmod tempor incididunt ut labore"|Style::new();;" "|Style::new();;"et dolore magna aliqua. 記号 !"|Style::new()
+"@#"|Style::new();;"$"|Style::new();;"%"|Style::new();;"^"|Style::new();;"&"|Style::new();;"*"|Style::new();;"()"|Style::new();;"_"|Style::new();;"+{}|:\""|Style::new();;"<"|Style::new();;">?"|Style::new();;"`"|Style::new();;"~"|Style::new();;"-="|Style::new();;"["|Style::new();;"]"|Style::new();;";',./ と数字 0123456789。"|Style::new()
 
 "行末に半角スペース2つを置くと"|Style::new()
 "ハード改行になります。"|Style::new()
@@ -301,8 +301,8 @@
 "    1. "|Style::new().light_blue();;"ネスト a"|Style::new()
 "    2. "|Style::new().light_blue();;"ネスト b"|Style::new()
 "3. "|Style::new().light_blue();;"三番目の項目"|Style::new()
-"4. "|Style::new().light_blue();;"四番目の項目。この項目のテキストは意図的に少し長くして、折り返しがどうなるか"|Style::new();;"を"|Style::new()
-"確認するためのものです。"|Style::new()
+"4. "|Style::new().light_blue();;"四番目の項目。この項目のテキストは意図的に少し長くして、折り返しがどうなるか"|Style::new()
+"を確認するためのものです。"|Style::new()
 "5. "|Style::new().light_blue();;"五番目の項目"|Style::new()
 
 "タスクリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
@@ -419,8 +419,8 @@
 
 "エスケープ"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
-"*アスタリスク"|Style::new();;"*、"|Style::new();;"_アンダースコア"|Style::new();;"_、"|Style::new();;"# シャープ、"|Style::new();;"`"|Style::new();;" バッククォート、"|Style::new();;" "|Style::new();;"\\ バックスラッ"|Style::new();;"シ"|Style::new()
-"ュ、"|Style::new();;"<山括弧"|Style::new();;">"|Style::new()
+"*アスタリスク"|Style::new();;"*、"|Style::new();;"_アンダースコア"|Style::new();;"_、"|Style::new();;"# シャープ、"|Style::new();;"`"|Style::new();;" バッククォート、"|Style::new();;" "|Style::new();;"\\ バックスラッ"|Style::new()
+"シュ、"|Style::new();;"<山括弧"|Style::new();;">"|Style::new()
 
 "特殊文字・絵文字"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
@@ -483,8 +483,8 @@
 
 "行コメント練習用セクション"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
-"ここは akapen で実際に行コメントを付ける練習用です。各行が短いので"|Style::new();;" "|Style::new();;"カーソル移動"|Style::new();;"（"|Style::new()
-"j/k/g/G など）の動作確認に使えます。"|Style::new()
+"ここは akapen で実際に行コメントを付ける練習用です。各行が短いので"|Style::new();;" "|Style::new();;"カーソル移動"|Style::new()
+"（j/k/g/G など）の動作確認に使えます。"|Style::new()
 
 "1行目。特に意味はない。"|Style::new();;" "|Style::new();;"2行目。"|Style::new();;" "|Style::new();;"3行目。"|Style::new();;" "|Style::new();;"4行目。"|Style::new();;" "|Style::new();;"5行目。"|Style::new();;" "|Style::new();;"6行目。"|Style::new();;" "|Style::new();;"7行目。"|Style::new();;" "|Style::new();;"8行目。"|Style::new();;" "|Style::new()
 "9行目。"|Style::new();;" "|Style::new();;"10行目。"|Style::new();;" "|Style::new();;"11行目。"|Style::new();;" "|Style::new();;"12行目。"|Style::new();;" "|Style::new();;"13行目。"|Style::new();;" "|Style::new();;"14行目。"|Style::new();;" "|Style::new();;"15行目。"|Style::new();;" "|Style::new();;"16行目。"|Style::new();;" "|Style::new();;"17行目。"|Style::new();;" "|Style::new()

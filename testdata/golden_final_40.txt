@@ -30,28 +30,28 @@
 "段落とインライン書式"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
 "太字"|Style::new().bold();;"、"|Style::new();;"斜体"|Style::new().italic();;"、"|Style::new();;"太字斜体"|Style::new().bold().italic();;"、"|Style::new();;"打ち消し"|Style::new().crossed_out();;"、"|Style::new();;"インライ"|Style::new().white().on_black()
-"ンコード"|Style::new().white().on_black();;"、"|Style::new();;" "|Style::new();;"<sub>"|Style::new().dim();;"下付き"|Style::new();;"</sub>"|Style::new().dim();;"、"|Style::new();;"<sup>"|Style::new().dim();;"上付"|Style::new();;"き"|Style::new()
-"</sup>"|Style::new().dim();;"、"|Style::new();;"<mark>"|Style::new().dim();;"マーク"|Style::new();;"</mark>"|Style::new().dim();;"、改行"|Style::new();;"<br>"|Style::new().dim();;"タ"|Style::new();;"グ"|Style::new()
-"。"|Style::new()
+"ンコード"|Style::new().white().on_black();;"、"|Style::new();;" "|Style::new();;"<sub>"|Style::new().dim();;"下付き"|Style::new();;"</sub>"|Style::new().dim();;"、"|Style::new();;"<sup>"|Style::new().dim();;"上付"|Style::new()
+"き"|Style::new();;"</sup>"|Style::new().dim();;"、"|Style::new();;"<mark>"|Style::new().dim();;"マーク"|Style::new();;"</mark>"|Style::new().dim();;"、改行"|Style::new();;"<br>"|Style::new().dim()
+"タグ。"|Style::new()
 
-"日本語の文章 + English mixed テスト。全"|Style::new();;"角"|Style::new()
-"文字（あいうえお漢字カタカナ）と"|Style::new();;" "|Style::new();;"半角英"|Style::new();;"数"|Style::new()
-"字の混在で折り返しが崩れないことを確認す"|Style::new()
-"るための長めの文章です。"|Style::new();;" "|Style::new();;"この行はかなり"|Style::new();;"長"|Style::new()
-"くて、画面幅を超えたときにコメントモード"|Style::new()
-"での折り返しが"|Style::new();;" "|Style::new();;"正しくインデントされるか"|Style::new();;"を"|Style::new()
-"確認するためのものです。Lorem ipsum dolo"|Style::new()
-"r sit"|Style::new();;" "|Style::new();;"amet, consectetur adipiscing elit,"|Style::new()
-" sed do eiusmod tempor incididunt ut lab"|Style::new()
-"ore"|Style::new();;" "|Style::new();;"et dolore magna aliqua. 記号 !@#"|Style::new();;"$"|Style::new();;"%"|Style::new();;"^"|Style::new();;"&"|Style::new()
-"*"|Style::new();;"()"|Style::new();;"_"|Style::new();;"+{}|:\""|Style::new();;"<"|Style::new();;">?"|Style::new();;"`"|Style::new();;"~"|Style::new();;"-="|Style::new();;"["|Style::new();;"]"|Style::new();;";',./ と数字 01234567"|Style::new()
-"89。"|Style::new()
+"日本語の文章 + English mixed テスト。全"|Style::new()
+"角文字（あいうえお漢字カタカナ）と"|Style::new();;" "|Style::new();;"半角"|Style::new()
+"英数字の混在で折り返しが崩れないことを確"|Style::new()
+"認するための長めの文章です。"|Style::new();;" "|Style::new();;"この行はか"|Style::new()
+"なり長くて、画面幅を超えたときにコメント"|Style::new()
+"モードでの折り返しが"|Style::new();;" "|Style::new();;"正しくインデントさ"|Style::new()
+"れるかを確認するためのものです。Lorem ip"|Style::new()
+"sum dolor sit"|Style::new();;" "|Style::new();;"amet, consectetur adipisci"|Style::new()
+"ng elit, sed do eiusmod tempor incididun"|Style::new()
+"t ut labore"|Style::new();;" "|Style::new();;"et dolore magna aliqua. 記号"|Style::new()
+" !@#"|Style::new();;"$"|Style::new();;"%"|Style::new();;"^"|Style::new();;"&"|Style::new();;"*"|Style::new();;"()"|Style::new();;"_"|Style::new();;"+{}|:\""|Style::new();;"<"|Style::new();;">?"|Style::new();;"`"|Style::new();;"~"|Style::new();;"-="|Style::new();;"["|Style::new();;"]"|Style::new();;";',./ と数字 "|Style::new()
+"0123456789。"|Style::new()
 
 "行末に半角スペース2つを置くと"|Style::new()
 "ハード改行になります。"|Style::new()
 
-"タブ文字        が含まれる行。8桁タブス"|Style::new();;"ト"|Style::new()
-"ップで展開されるはず。"|Style::new()
+"タブ文字        が含まれる行。8桁タブス"|Style::new()
+"トップで展開されるはず。"|Style::new()
 
 "リンク"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
@@ -63,12 +63,12 @@
 "ール自動リンク: "|Style::new();;"mailto:test@example.com"|Style::new().fg(Color::Rgb(137, 180, 250));;" "|Style::new()
 "("|Style::new();;"mailto:test@example.com"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"相対リンク: "|Style::new();;"RE"|Style::new().fg(Color::Rgb(137, 180, 250))
 "ADME"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"./README.md"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" と "|Style::new();;"design"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"design.md"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new()
-" "|Style::new();;"同一ファイル内アンカー: "|Style::new();;"先頭へ"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"#🚀-見"|Style::new().fg(Color::Rgb(137, 180, 250));;"出"|Style::new().fg(Color::Rgb(137, 180, 250))
-"しレベル1-h1"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"リンクの URL だけを並べた"|Style::new();;"長"|Style::new()
-"い行: https://example.com/very/long/path"|Style::new()
-"/with/many/segments/abcdefghijklmnopqrst"|Style::new()
-"uvwxyz/1234567890?query=value&another=va"|Style::new()
-"lue#fragment"|Style::new()
+" "|Style::new();;"同一ファイル内アンカー: "|Style::new();;"先頭へ"|Style::new().fg(Color::Rgb(137, 180, 250));;" ("|Style::new();;"#🚀-見"|Style::new().fg(Color::Rgb(137, 180, 250))
+"出しレベル1-h1"|Style::new().fg(Color::Rgb(137, 180, 250));;")"|Style::new();;" "|Style::new();;"リンクの URL だけを並べ"|Style::new()
+"た長い行: https://example.com/very/long/"|Style::new()
+"path/with/many/segments/abcdefghijklmnop"|Style::new()
+"qrstuvwxyz/1234567890?query=value&anothe"|Style::new()
+"r=value#fragment"|Style::new()
 
 ""|Style::new()
 "画像"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
@@ -124,8 +124,8 @@
 "    "|Style::new().fg(Color::Rgb(205, 214, 244));;"}"|Style::new().fg(Color::Rgb(147, 153, 178))
 
 "    "|Style::new().fg(Color::Rgb(205, 214, 244));;"//"|Style::new().fg(Color::Rgb(147, 153, 178));;" インラインの `コード` を含む行"|Style::new().fg(Color::Rgb(147, 153, 178))
-"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"let"|Style::new().fg(Color::Rgb(203, 166, 247));;" s "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"文字列の中に ``` や ` が入"|Style::new().fg(Color::Rgb(166, 227, 161));;"る"|Style::new().fg(Color::Rgb(166, 227, 161))
-"パターン"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
+"    "|Style::new().fg(Color::Rgb(205, 214, 244));;"let"|Style::new().fg(Color::Rgb(203, 166, 247));;" s "|Style::new().fg(Color::Rgb(205, 214, 244));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;"文字列の中に ``` や ` が入"|Style::new().fg(Color::Rgb(166, 227, 161))
+"るパターン"|Style::new().fg(Color::Rgb(166, 227, 161));;"\""|Style::new().fg(Color::Rgb(166, 227, 161));;";"|Style::new().fg(Color::Rgb(147, 153, 178))
 "    "|Style::new().fg(Color::Rgb(205, 214, 244));;"Ok"|Style::new().fg(Color::Rgb(249, 226, 175));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;")"|Style::new().fg(Color::Rgb(147, 153, 178))
 "}"|Style::new().fg(Color::Rgb(147, 153, 178))
 
@@ -318,8 +318,8 @@
 "rds"|Style::new().fg(Color::Rgb(137, 180, 250));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"argument_one"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"argument_two"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"int"|Style::new().fg(Color::Rgb(203, 166, 247))
 ","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"argument_three"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"list"|Style::new().fg(Color::Rgb(203, 166, 247));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"argument_fo"|Style::new().fg(Color::Rgb(235, 160, 172))
 "ur"|Style::new().fg(Color::Rgb(235, 160, 172));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"dict"|Style::new().fg(Color::Rgb(203, 166, 247));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;", "|Style::new().fg(Color::Rgb(235, 160, 172));;"Any"|Style::new().fg(Color::Rgb(235, 160, 172));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"|"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"None"|Style::new().fg(Color::Rgb(250, 179, 135));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"="|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(235, 160, 172));;"None"|Style::new().fg(Color::Rgb(250, 179, 135));;")"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"->"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"tup"|Style::new().fg(Color::Rgb(203, 166, 247))
-"le"|Style::new().fg(Color::Rgb(203, 166, 247));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"int"|Style::new().fg(Color::Rgb(203, 166, 247));;", "|Style::new().fg(Color::Rgb(205, 214, 244));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"#"|Style::new().fg(Color::Rgb(147, 153, 178));;" コメントモードで折り返"|Style::new().fg(Color::Rgb(147, 153, 178));;"し"|Style::new().fg(Color::Rgb(147, 153, 178))
-"を確認するための非常に長い行"|Style::new().fg(Color::Rgb(147, 153, 178))
+"le"|Style::new().fg(Color::Rgb(203, 166, 247));;"["|Style::new().fg(Color::Rgb(147, 153, 178));;"int"|Style::new().fg(Color::Rgb(203, 166, 247));;", "|Style::new().fg(Color::Rgb(205, 214, 244));;"str"|Style::new().fg(Color::Rgb(203, 166, 247));;"]"|Style::new().fg(Color::Rgb(147, 153, 178));;":"|Style::new().fg(Color::Rgb(147, 153, 178));;"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"#"|Style::new().fg(Color::Rgb(147, 153, 178));;" コメントモードで折り返"|Style::new().fg(Color::Rgb(147, 153, 178))
+"しを確認するための非常に長い行"|Style::new().fg(Color::Rgb(147, 153, 178))
 "    "|Style::new().fg(Color::Rgb(205, 214, 244));;"return"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"("|Style::new().fg(Color::Rgb(147, 153, 178));;"argument_two"|Style::new().fg(Color::Rgb(205, 214, 244));;","|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"argument_one"|Style::new().fg(Color::Rgb(205, 214, 244));;")"|Style::new().fg(Color::Rgb(147, 153, 178))
 
 "リスト"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
@@ -340,9 +340,9 @@
 "    1. "|Style::new().light_blue();;"ネスト a"|Style::new()
 "    2. "|Style::new().light_blue();;"ネスト b"|Style::new()
 "3. "|Style::new().light_blue();;"三番目の項目"|Style::new()
-"4. "|Style::new().light_blue();;"四番目の項目。この項目のテキストは意"|Style::new();;"図"|Style::new()
-"的に少し長くして、折り返しがどうなるかを"|Style::new()
-"確認するためのものです。"|Style::new()
+"4. "|Style::new().light_blue();;"四番目の項目。この項目のテキストは意"|Style::new()
+"図的に少し長くして、折り返しがどうなるか"|Style::new()
+"を確認するためのものです。"|Style::new()
 "5. "|Style::new().light_blue();;"五番目の項目"|Style::new()
 
 "タスクリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
@@ -469,8 +469,8 @@
 
 "脚注"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
-"ここに脚注がある文章です"|Style::new();;"[1]"|Style::new().dim().italic();;"。もう一つの"|Style::new();;"脚"|Style::new()
-"注"|Style::new();;"[2]"|Style::new().dim().italic();;"。"|Style::new()
+"ここに脚注がある文章です"|Style::new();;"[1]"|Style::new().dim().italic();;"。もう一つの"|Style::new()
+"脚注"|Style::new();;"[2]"|Style::new().dim().italic();;"。"|Style::new()
 
 "[1]: "|Style::new().dim();;"脚注の内容その1"|Style::new().dim()
 
@@ -480,13 +480,13 @@
 "エスケープ"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
 "*アスタリスク"|Style::new();;"*、"|Style::new();;"_アンダースコア"|Style::new();;"_、"|Style::new();;"# シャ"|Style::new()
-"ープ、"|Style::new();;"`"|Style::new();;" バッククォート、"|Style::new();;" "|Style::new();;"\\ バックスラッ"|Style::new();;"シ"|Style::new()
-"ュ、"|Style::new();;"<山括弧"|Style::new();;">"|Style::new()
+"ープ、"|Style::new();;"`"|Style::new();;" バッククォート、"|Style::new();;" "|Style::new();;"\\ バックスラッ"|Style::new()
+"シュ、"|Style::new();;"<山括弧"|Style::new();;">"|Style::new()
 
 "特殊文字・絵文字"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
-"✅ ❌ ⚠\u{fe0f} 🚀 📝 🔥 日本語の記号「」『』（"|Style::new();;"）"|Style::new()
-"・ー〜 全角英数 ＡＢＣ１２３"|Style::new()
+"✅ ❌ ⚠\u{fe0f} 🚀 📝 🔥 日本語の記号「」『』（"|Style::new()
+"）・ー〜 全角英数 ＡＢＣ１２３"|Style::new()
 
 "ゼロ幅スペース\u{3000}\u{200b}\u{3000}と結合文字 e\u{301}（e + U+03"|Style::new()
 "01）と RTL 文字 עברית العربية のテスト。"|Style::new()
@@ -563,14 +563,14 @@
 "行コメント練習用セクション"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
 "ここは akapen で実際に行コメントを付ける"|Style::new()
-"練習用です。各行が短いので"|Style::new();;" "|Style::new();;"カーソル移動"|Style::new();;"（"|Style::new()
-"j/k/g/G など）の動作確認に使えます。"|Style::new()
+"練習用です。各行が短いので"|Style::new();;" "|Style::new();;"カーソル移動"|Style::new()
+"（j/k/g/G など）の動作確認に使えます。"|Style::new()
 
 "1行目。特に意味はない。"|Style::new();;" "|Style::new();;"2行目。"|Style::new();;" "|Style::new();;"3行目。"|Style::new();;" "|Style::new()
 "4行目。"|Style::new();;" "|Style::new();;"5行目。"|Style::new();;" "|Style::new();;"6行目。"|Style::new();;" "|Style::new();;"7行目。"|Style::new();;" "|Style::new();;"8行目。"|Style::new();;" "|Style::new()
-"9行目。"|Style::new();;" "|Style::new();;"10行目。"|Style::new();;" "|Style::new();;"11行目。"|Style::new();;" "|Style::new();;"12行目。"|Style::new();;" "|Style::new();;"13行"|Style::new();;"目"|Style::new()
-"。"|Style::new();;" "|Style::new();;"14行目。"|Style::new();;" "|Style::new();;"15行目。"|Style::new();;" "|Style::new();;"16行目。"|Style::new();;" "|Style::new();;"17行目。"|Style::new();;" "|Style::new();;"1"|Style::new()
-"8行目。"|Style::new();;" "|Style::new();;"19行目。"|Style::new();;" "|Style::new();;"20行目。"|Style::new()
+"9行目。"|Style::new();;" "|Style::new();;"10行目。"|Style::new();;" "|Style::new();;"11行目。"|Style::new();;" "|Style::new();;"12行目。"|Style::new();;" "|Style::new();;"13行"|Style::new()
+"目。"|Style::new();;" "|Style::new();;"14行目。"|Style::new();;" "|Style::new();;"15行目。"|Style::new();;" "|Style::new();;"16行目。"|Style::new();;" "|Style::new();;"17行目。"|Style::new()
+" "|Style::new();;"18行目。"|Style::new();;" "|Style::new();;"19行目。"|Style::new();;" "|Style::new();;"20行目。"|Style::new()
 
 "おわり"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
