@@ -160,7 +160,7 @@ impl Highlighter {
     pub fn new(theme_name: Option<&str>, light: bool) -> Self {
         let mut theme = theme_name
             .and_then(|name| {
-                if name.ends_with(".tmTheme") {
+                if name.to_ascii_lowercase().ends_with(".tmtheme") {
                     // A file path: load the theme directly from disk.
                     ThemeSet::get_theme(name).ok()
                 } else {

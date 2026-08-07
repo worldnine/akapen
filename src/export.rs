@@ -82,10 +82,30 @@ const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[
     ("xsel", &["--clipboard", "--input"]),
 ];
 
-/// Whether `name` resolves to an executable on `PATH` (dependency-free which).
+/// Whether `name` resolves to an executable on `PATH` (dependency-free
+/// which). The file must be executable, not merely present: a
+/// non-executable file in PATH would pass the existence check and fail
+/// at spawn with a confusing error.
 fn which(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| is_executable(&dir.join(name)))
+    })
+}
+
+/// Whether `path` is an executable file (Unix: any execute bit set).
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && path
+            .metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// Copy `text` into the system clipboard. Errors mention installing one of
