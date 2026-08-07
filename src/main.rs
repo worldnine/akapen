@@ -226,6 +226,8 @@ struct App {
     confirm_quit: bool,
     /// Pending external-edit confirmation when unsent comments exist (`e`).
     confirm_edit: bool,
+    /// Pending reload confirmation when unsent comments exist (`r`).
+    confirm_reload: bool,
     /// Export text to print to stdout at the next loop turn (`s`): the TUI
     /// restores the terminal, prints, and re-enters raw mode.
     /// Cached wrapped row count per source line, for the current width.
@@ -339,6 +341,7 @@ impl App {
             status: None,
             confirm_quit: false,
             confirm_edit: false,
+            confirm_reload: false,
             line_rows: Vec::new(),
             base_rows: Vec::new(),
             content_width: 0,
@@ -1333,17 +1336,35 @@ fn notify_file_changed(app: &mut App) {
 }
 
 /// Manual reload (`r`), Vim's `:e` model: the user decides when the
-/// external edits replace the in-memory content.
+/// external edits replace the in-memory content. Unsent comments on THIS
+/// file? Require a second `r` (same pattern as edit/quit); the persistent
+/// prompt banner (prompt_message) carries the message.
 fn reload_now(app: &mut App) {
-    if reload_source(app) {
-        // Refresh the on-disk stamp so the next poll_file_change won't
-        // re-detect the same edit as a pending change.
-        if let Ok(meta) = std::fs::metadata(app.current_file_path()) {
-            let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
-            app.file_stamp = Some(stamp);
-            app.last_loaded_stamp = Some(stamp);
+    // The reload clears this file's comments (stale anchors), so a
+    // confirmation protects them exactly like `e` and `q` protect theirs.
+    let current = app.current_file_path().to_path_buf();
+    let has_comments = app.comments.iter().any(|c| c.file_path == current);
+    if has_comments && !app.confirm_reload {
+        app.confirm_reload = true;
+        return;
+    }
+    app.confirm_reload = false;
+
+    match reload_source(app) {
+        Ok(()) => {
+            // Refresh the on-disk stamp so the next poll_file_change won't
+            // re-detect the same edit as a pending change.
+            if let Ok(meta) = std::fs::metadata(app.current_file_path()) {
+                let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
+                app.file_stamp = Some(stamp);
+                app.last_loaded_stamp = Some(stamp);
+            }
+            app.file_changed = false;
         }
-        app.file_changed = false;
+        // The read failed (non-UTF-8 content, e.g. a binary write or a
+        // mid-write agent edit): toast the reason and keep the in-memory
+        // content — the ⚡ prompt stays up and the next `r` retries.
+        Err(e) => app.flash_err(format!("reload failed: {e:#}")),
     }
 }
 
@@ -1436,20 +1457,20 @@ fn line_change_counts(old: &[String], new: &[String]) -> (usize, usize) {
     (new.len() - p - s, old.len() - p - s)
 }
 
-/// Re-read the file after an external (agent) edit. Returns true when the
-/// file was handled (read successfully — even if the content is unchanged);
-/// false when the read failed mid-write, so the next attempt retries.
+/// Re-read the file after an external (agent) edit. Returns `Ok(())` when
+/// the file was handled (read successfully — even if the content is
+/// unchanged); `Err(e)` when the read failed mid-write (e.g. non-UTF-8
+/// bytes), so the caller can surface the reason and the next attempt
+/// retries.
 ///
 /// On content change: the old vs new diff is computed for line-level
 /// highlighting, all comments are cleared (anchors are stale), and the
 /// view re-renders at the same width preserving the cursor fraction.
 /// Triggered by `r` only — never while Input is open.
-fn reload_source(app: &mut App) -> bool {
-    let Ok(new_source) = Source::load(app.current_file_path().to_path_buf()) else {
-        return false;
-    };
+fn reload_source(app: &mut App) -> anyhow::Result<()> {
+    let new_source = Source::load(app.current_file_path().to_path_buf())?;
     if new_source.content == app.source.content {
-        return true; // touched but unchanged
+        return Ok(()); // touched but unchanged
     }
     let old_content = app.source.content.clone();
     let old_lines = std::mem::take(&mut app.source.lines);
@@ -1526,7 +1547,7 @@ fn reload_source(app: &mut App) -> bool {
         String::new()
     };
     app.flash(format!("reloaded (+{added}/-{removed}){cleared}"));
-    true
+    Ok(())
 }
 
 /// The last display row of the rendered block source line `end` belongs
@@ -1837,7 +1858,10 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
         }
         KeyCode::Tab => {
             // View is only reachable for Markdown-family files; a source
-            // file (e.g. .rs) never leaves source mode.
+            // file (e.g. .rs) never leaves source mode. A mode flip
+            // cancels a pending reload confirmation: the prompt's context
+            // is the pane the user was looking at.
+            app.confirm_reload = false;
             if supports_view(app.current_file_path()) {
                 enter_source_mode(app);
             } else {
@@ -1892,6 +1916,9 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
             } else if app.confirm_edit {
                 app.confirm_edit = false;
                 app.flash("edit cancelled");
+            } else if app.confirm_reload {
+                app.confirm_reload = false;
+                app.flash("reload cancelled");
             } else if app.selection.take().is_some() {
                 app.flash("selection cancelled");
             } else if app.esc_quit_enabled() {
@@ -2094,6 +2121,9 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
         KeyCode::Tab => {
             // Non-Markdown files are source-only: Tab is a no-op with a
             // toast instead of rendering raw source as fake markdown.
+            // A mode flip cancels a pending reload confirmation: the
+            // prompt's context is the pane the user was looking at.
+            app.confirm_reload = false;
             if supports_view(app.current_file_path()) {
                 enter_view_mode(app);
             } else {
@@ -2119,6 +2149,9 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
             } else if app.confirm_edit {
                 app.confirm_edit = false;
                 app.flash("edit cancelled");
+            } else if app.confirm_reload {
+                app.confirm_reload = false;
+                app.flash("reload cancelled");
             } else if app.selection.take().is_some() {
                 app.flash("selection cancelled");
             } else if app.esc_quit_enabled() {
@@ -3210,9 +3243,9 @@ fn draw_toast(f: &mut Frame, app: &App) {
 }
 
 /// The persistent prompt text, if any: quit confirmation, edit
-/// confirmation, or a pending file change. Priority: quit > edit >
-/// change (the old footer order). The quit line advertises the Esc
-/// binding that is actually active.
+/// confirmation, reload confirmation, or a pending file change.
+/// Priority: quit > edit > reload > change (the old footer order). The
+/// quit line advertises the Esc binding that is actually active.
 fn prompt_message(app: &App) -> Option<Cow<'static, str>> {
     if app.confirm_quit {
         if app.esc_quit_enabled() {
@@ -3222,6 +3255,8 @@ fn prompt_message(app: &App) -> Option<Cow<'static, str>> {
         }
     } else if app.confirm_edit {
         Some("unsent comments — e again to edit & clear, Esc to cancel".into())
+    } else if app.confirm_reload {
+        Some("unsent comments — r again to reload & clear, Esc to cancel".into())
     } else if app.file_changed {
         Some("file changed — r reload · i ignore".into())
     } else {
@@ -4081,6 +4116,7 @@ impl App {
         self.current_file_index = new_index;
         self.confirm_quit = false;
         self.confirm_edit = false;
+        self.confirm_reload = false;
         self.drag_anchor = None;
         self.view_dirty = false;
         self.view_dirty_since = None;
@@ -5558,7 +5594,7 @@ mod state_tests {
         for i in 1..=7 {
             writeln!(f, "line{i}").unwrap();
         }
-        assert!(reload_source(&mut app));
+        assert!(reload_source(&mut app).is_ok());
         assert_eq!(app.source.len(), 7);
         assert_eq!(app.cursor, 6, "cursor clamps to the new last line");
         assert!(
@@ -5598,12 +5634,134 @@ mod state_tests {
     }
 
     #[test]
+    fn r_with_comments_requires_a_second_r() {
+        // The reload clears this file's comments, so `r` asks first — the
+        // same two-press pattern as `e`/`q`. The agent's rewrite is the
+        // most frequent action; the comments it invalidated must not
+        // vanish on one stray key.
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        add_comment(&mut app, 2, 2, "note");
+        // The agent appends a line.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(app.current_file_path())
+            .unwrap();
+        writeln!(f, "line6").unwrap();
+        // Simulate the poll's detection of the external edit.
+        app.file_changed = true;
+        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        assert!(app.confirm_reload, "first r only arms the confirmation");
+        assert_eq!(app.source.len(), 5, "no reload yet");
+        assert_eq!(app.comments.len(), 1, "comments untouched");
+        assert!(app.file_changed, "the pending prompt stays up");
+        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        assert!(!app.confirm_reload, "second r confirms");
+        assert_eq!(app.source.len(), 6, "second r reloads");
+        assert!(app.comments.is_empty(), "comments cleared on reload");
+        assert!(!app.file_changed, "the pending prompt clears");
+    }
+
+    #[test]
+    fn r_without_comments_reloads_in_one_press() {
+        // No comments to lose: one `r` reloads immediately (the pre-fix
+        // behavior stays for the common no-comment case).
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(app.current_file_path())
+            .unwrap();
+        writeln!(f, "line6").unwrap();
+        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        assert!(!app.confirm_reload, "no confirmation needed");
+        assert_eq!(app.source.len(), 6, "one r reloads with no comments");
+    }
+
+    #[test]
+    fn esc_cancels_the_reload_confirmation() {
+        // Esc must abort the armed reload: comments AND file content stay
+        // exactly as they were (nothing reloaded, nothing cleared).
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        add_comment(&mut app, 2, 2, "note");
+        let content_before = app.source.content.clone();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(app.current_file_path())
+            .unwrap();
+        writeln!(f, "line6").unwrap();
+        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        assert!(app.confirm_reload);
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(!app.confirm_reload, "Esc clears the confirmation");
+        assert_eq!(app.source.content, content_before, "content unchanged");
+        assert_eq!(app.comments.len(), 1, "comments kept");
+        // Esc in view mode cancels the same way.
+        let (mut app, _dir) = make_app_keep(5, Mode::View);
+        add_comment(&mut app, 2, 2, "note");
+        on_view_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        assert!(app.confirm_reload);
+        on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(!app.confirm_reload);
+    }
+
+    #[test]
+    fn switching_file_cancels_the_reload_confirmation() {
+        // ]/[ (and Tab's mode flip) move the user's context away from the
+        // pending reload; the armed confirmation must not fire on a later
+        // `r` in the new context.
+        let (mut app, _dir) = make_session();
+        add_comment(&mut app, 1, 1, "note");
+        assert_eq!(app.mode, Mode::View, "a.md opens in view mode");
+        on_view_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        assert!(app.confirm_reload);
+        on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        assert!(!app.confirm_reload, "file switch cancels the confirmation");
+        assert_eq!(app.current_file_index, 1);
+        // Back on a.md (view mode), arm again: Tab's mode flip cancels
+        // too — the prompt's context is the pane the user looked at.
+        on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
+        assert_eq!(app.current_file_index, 0);
+        assert_eq!(app.mode, Mode::View, "a.md restores to view mode");
+        on_view_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        assert!(app.confirm_reload);
+        on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
+        assert!(!app.confirm_reload, "mode switch cancels the confirmation");
+        assert_eq!(app.mode, Mode::Source);
+    }
+
+    #[test]
+    fn r_on_non_utf8_file_toasts_an_error_and_keeps_content() {
+        // A binary write or a mid-write agent edit breaks UTF-8; `r` must
+        // not fail silently (the ⚡ prompt staying up forever with a dead
+        // `r` was the bug) — it toasts the reason and keeps the content.
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        std::fs::write(app.current_file_path(), [0xff, 0xfe, b'a', b'\n']).unwrap();
+        // Simulate the poll's detection of the external edit.
+        app.file_changed = true;
+        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        let (msg, _, is_error) = app.status.as_ref().expect("a toast fires");
+        assert!(*is_error, "the failure is an error toast: {msg}");
+        assert!(msg.contains("reload failed"), "toast names the failure: {msg}");
+        assert!(msg.contains("reading"), "toast names the file read: {msg}");
+        assert_eq!(app.source.len(), 5, "the old content stays");
+        assert!(app.file_changed, "the pending prompt stays up for a retry");
+        // A successful reload after the file recovers clears the error.
+        std::fs::write(
+            app.current_file_path(),
+            "line1\nline2\nline3\nline4\nline5\nline6\n",
+        )
+        .unwrap();
+        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
+        assert_eq!(app.source.len(), 6, "r retries after the file recovers");
+        assert!(!app.file_changed);
+    }
+
+    #[test]
     fn reload_skips_identical_content_but_handles_touches() {
         let (mut app, _dir) = make_app_keep(5, Mode::Source);
         // touch the file: same content, new mtime
         let file = app.current_file_path().to_path_buf();
         std::fs::write(&file, std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert!(reload_source(&mut app), "a touch is handled");
+        assert!(reload_source(&mut app).is_ok(), "a touch is handled");
         assert_eq!(app.last_change, None, "no diff to report");
     }
 
@@ -6327,7 +6485,7 @@ mod state_tests {
             text: "on b".into(),
         });
         std::fs::write(&a, "# a\n\nchanged\n").unwrap();
-        assert!(reload_source(&mut app));
+        assert!(reload_source(&mut app).is_ok());
         assert_eq!(app.comments.len(), 1, "only a.md's comment is cleared");
         assert_eq!(app.comments[0].text, "on b");
     }
@@ -6956,10 +7114,11 @@ mod state_tests {
     }
 
     #[test]
-    fn prompt_priority_quit_over_edit_over_change() {
+    fn prompt_priority_quit_over_edit_over_reload_over_change() {
         let mut app = make_app(10, Mode::Source);
         app.confirm_quit = true;
         app.confirm_edit = true;
+        app.confirm_reload = true;
         app.file_changed = true;
         assert_eq!(
             prompt_message(&app).as_deref(),
@@ -6971,6 +7130,11 @@ mod state_tests {
             Some("unsent comments — e again to edit & clear, Esc to cancel")
         );
         app.confirm_edit = false;
+        assert_eq!(
+            prompt_message(&app).as_deref(),
+            Some("unsent comments — r again to reload & clear, Esc to cancel")
+        );
+        app.confirm_reload = false;
         assert_eq!(
             prompt_message(&app).as_deref(),
             Some("file changed — r reload · i ignore")
