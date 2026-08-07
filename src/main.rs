@@ -7317,3 +7317,4 @@ mod handoff_tests {
         assert_eq!(app.cursor, 45, "ラウンドトリップで行が動かない");
     }
 }
+// scratch reproduction — appended as a test

@@ -292,9 +292,9 @@ pub fn wrap_spans(spans: &[Span], width: usize) -> Vec<Vec<Span>> {
             }
             let (take, take_w) = take_fit(rest, col, width - col);
             if take.is_empty() {
-                // The next character is a tab too wide for the rest of
-                // this row: flush and retry from column 0, where the tab
-                // expands like a terminal's line-leading tab.
+                // The next character cannot fit in the rest of this row
+                // (a wide char at the row's last column, or a tab): flush
+                // and retry from column 0, where it fits.
                 rows.push(std::mem::take(&mut row));
                 col = 0;
                 continue;
@@ -348,9 +348,9 @@ pub fn wrap_spans_tagged(
             }
             let (take, take_w) = take_fit(rest, col, width - col);
             if take.is_empty() {
-                // The next character is a tab too wide for the rest of
-                // this row: flush and retry from column 0, where the tab
-                // expands like a terminal's line-leading tab.
+                // The next character cannot fit in the rest of this row
+                // (a wide char at the row's last column, or a tab): flush
+                // and retry from column 0, where it fits.
                 rows.push((std::mem::take(&mut row), std::mem::take(&mut row_lines)));
                 col = 0;
                 continue;
@@ -381,11 +381,11 @@ pub fn wrap_spans_tagged(
 /// row already holds `col` columns. Returns the prefix and the display
 /// width it occupies (tabs measured at 8-column stops).
 ///
-/// A first character wider than `avail` is still taken (narrow-pane
-/// safety, so the loop always makes progress) — except a tab in a
-/// non-empty row, which returns an empty prefix: the caller flushes the
-/// row and retries from column 0, where the tab expands like a terminal's
-/// line-leading tab instead of overflowing the row by up to 7 columns.
+/// A first character wider than `avail` is still taken when the row is
+/// EMPTY (narrow-pane safety, so the loop always makes progress); in a
+/// non-empty row it returns an empty prefix instead — the caller flushes
+/// the row and retries from column 0, where a wide char or a line-leading
+/// tab fits without overflowing the row.
 fn take_fit(s: &str, col: usize, avail: usize) -> (&str, usize) {
     let mut w = 0usize;
     let mut last = 0usize;
@@ -397,13 +397,18 @@ fn take_fit(s: &str, col: usize, avail: usize) -> (&str, usize) {
                 // the next row.
                 break;
             }
-            if ch == '\t' && col > 0 {
-                // A tab that cannot fit in a non-empty row: push it to the
-                // next row instead of overflowing this one.
+            if col > 0 {
+                // The next character cannot fit in the rest of a NON-EMPTY
+                // row (a wide char at the row's last column, or a tab):
+                // flush the row and retry from column 0. Taking it here
+                // would overflow the row by one cell — the old code took
+                // it whenever the current call had taken nothing yet, so a
+                // wide char at the exact boundary pushed the row past the
+                // pane width and the text collided with the scrollbar.
                 return ("", 0);
             }
-            // A first character wider than the row (wide char, or a tab at
-            // the start of an empty row): take it anyway.
+            // A first character wider than an EMPTY row (narrow-pane
+            // safety): take it anyway, so the loop always makes progress.
         }
         w += cw;
         last = i + ch.len_utf8();
@@ -650,6 +655,32 @@ mod tests {
         for r in &rows {
             let t: String = r.iter().map(|s| s.text.as_str()).collect();
             assert!(t.chars().all(|c| "あいうえお".contains(c)));
+        }
+    }
+
+    #[test]
+    fn wrap_wide_char_at_the_row_boundary_never_overflows() {
+        // Regression: a wide char landing exactly at the last column of a
+        // row (here: あい = 4 cells at width 5, う cannot fit in the
+        // remaining 1) used to be taken anyway, producing a 6-cell row
+        // that collided with the scrollbar column. Rows must never exceed
+        // the width.
+        for (text, pane) in [
+            ("あいうえお", 5),
+            ("これは日本語の文章です", 21),
+            ("ab日本語cd", 5),
+            ("日本語abc日本語", 7),
+        ] {
+            let rows = wrap_spans(&[span(text)], pane);
+            let joined: String = rows.iter().flatten().map(|s| s.text.as_str()).collect();
+            assert_eq!(joined, text, "text is preserved at width {pane}");
+            for r in &rows {
+                let t: String = r.iter().map(|s| s.text.as_str()).collect();
+                assert!(
+                    width(&t) <= pane,
+                    "row {t:?} exceeds width {pane} at {text:?}"
+                );
+            }
         }
     }
 
