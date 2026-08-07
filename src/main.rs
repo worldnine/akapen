@@ -1729,23 +1729,28 @@ fn view_deleted_flags(last_deleted_before: &HashSet<usize>, n_lines: usize) -> V
     deleted
 }
 
-/// Maximal runs of consecutive comment-covered lines for `current_file`.
+/// `n`/`N` jump targets: each comment on `current_file` as its own
+/// (0-based start, end) pair, sorted by start then end. Overlapping
+/// comments stay separate targets, so a jump never selects the merged
+/// union of several comments — only the lines one comment covers.
+/// Identical ranges (stacked comments on the same lines) count once:
+/// the selection would be the same either way.
 fn comment_regions(comments: &[Comment], n_lines: usize, current_file: &Path) -> Vec<(usize, usize)> {
-    let marked = view_marker_flags(comments, n_lines, current_file);
-    let mut regions = Vec::new();
-    let mut in_run = false;
-    for (i, m) in marked.iter().enumerate() {
-        if *m {
-            if !in_run {
-                regions.push((i, i));
-                in_run = true;
-            } else if let Some(last) = regions.last_mut() {
-                last.1 = i;
-            }
-        } else {
-            in_run = false;
-        }
+    if n_lines == 0 {
+        return Vec::new();
     }
+    let last = n_lines.saturating_sub(1);
+    let mut regions: Vec<(usize, usize)> = comments
+        .iter()
+        .filter(|c| c.file_path == current_file)
+        .map(|c| {
+            let start = (c.start.saturating_sub(1) as usize).min(last);
+            let end = (c.end.saturating_sub(1) as usize).min(last);
+            (start, end)
+        })
+        .collect();
+    regions.sort_unstable();
+    regions.dedup();
     regions
 }
 
@@ -1916,13 +1921,14 @@ fn extend_view_selection(app: &mut App, dir: isize) {
     app.view.goto_source_line(next);
     app.view.keep_cursor_visible(app.view_viewport_rows());
 }
-/// Move the cursor to the next (`n`) or previous (`N`) block of commented
-/// lines — the same block landing in both modes (a block is a maximal run
-/// of consecutive comment-covered lines; stacked comments on one line
-/// count once). The whole block becomes the selection (all its lines light
-/// up), so j/k can extend it and d/c act on the range. The cursor lands on
-/// the block's extent (bottom) — the selection model's invariant is
-/// cursor == selection extent.
+/// Move the cursor to the next (`n`) or previous (`N`) comment — the same
+/// comment landing in both modes. Each comment is its own target:
+/// overlapping comments are jumped to one by one, so the selection never
+/// spans the merged union of several comments (stacked comments on the
+/// same range count once). The comment becomes the selection (its lines
+/// light up), so j/k can extend it and d/c act on the range. The cursor
+/// lands on the comment's extent (bottom) — the selection model's
+/// invariant is cursor == selection extent.
 fn jump_comment(app: &mut App, dir: isize) {
     let regions = comment_regions(&app.comments, app.source.len(), app.current_file_path());
     if regions.is_empty() {
@@ -1944,16 +1950,20 @@ fn jump_comment(app: &mut App, dir: isize) {
         }
         None => (cur, cur),
     };
+    // Targets are individual comments sorted by (start, end), so a jump
+    // compares the full pair lexicographically: the next comment is the
+    // first one strictly after the current position — overlapping
+    // comments come out in line order instead of merging into one block.
     let target = if dir > 0 {
         regions
             .iter()
-            .find(|&&(s, _)| (s as isize) > high)
+            .find(|&&(s, e)| (s as isize, e as isize) > (low, high))
             .copied()
     } else {
         regions
             .iter()
             .rev()
-            .find(|&&(_, e)| (e as isize) < low)
+            .find(|&&(s, e)| (s as isize, e as isize) < (low, high))
             .copied()
     };
     match target {
@@ -5440,9 +5450,9 @@ mod state_tests {
 
     #[test]
     fn n_n_jump_to_comment_block_heads() {
-        // Overlapping ranges merge into blocks: A(2-5) + B(4-6) = one block
-        // [1-5]; C(8-9) = a second block [7-8]. n/N jump to block heads, so
-        // nested comments don't fragment the jump.
+        // Overlapping ranges stay separate jump targets: A(2-5) and
+        // B(4-6) overlap but are jumped to one by one, so the selection
+        // never becomes their merged union; C(8-9) is the next target.
         let mut app = make_app(10, Mode::View);
         let cur = app.current_file_path().to_path_buf();
         let comments = vec![
@@ -5470,33 +5480,39 @@ mod state_tests {
         ];
         assert_eq!(
             comment_regions(&comments, 10, app.current_file_path()),
-            vec![(1, 5), (7, 8)],
-            "overlapping ranges merge into one block"
+            vec![(1, 4), (3, 5), (7, 8)],
+            "overlapping comments stay separate targets"
         );
         app.comments = comments;
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 5, "cursor lands on the block extent");
+        assert_eq!(app.view.cursor, 4, "cursor lands on the first comment's extent");
         assert_eq!(
             app.selection,
-            Some(Selection { anchor: 1, cursor: 5 }),
-            "the whole block becomes the selection"
+            Some(Selection { anchor: 1, cursor: 4 }),
+            "only the first comment becomes the selection"
         );
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 8, "n skips to the next block");
+        assert_eq!(app.view.cursor, 5, "n steps into the overlapping comment");
+        assert_eq!(app.selection, Some(Selection { anchor: 3, cursor: 5 }));
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.view.cursor, 8, "n skips to the last comment");
         assert_eq!(app.selection, Some(Selection { anchor: 7, cursor: 8 }));
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 8, "n at the last block flashes");
+        assert_eq!(app.view.cursor, 8, "n at the last comment flashes");
         assert!(app.status.is_some());
         on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 5, "N returns to the previous block");
-        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 5 }));
+        assert_eq!(app.view.cursor, 5, "N returns to the overlapping comment");
+        assert_eq!(app.selection, Some(Selection { anchor: 3, cursor: 5 }));
         on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 5, "N at the first block flashes");
+        assert_eq!(app.view.cursor, 4, "N returns to the first comment");
+        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 4 }));
+        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        assert_eq!(app.view.cursor, 4, "N at the first comment flashes");
         // Clearing the selection falls back to cursor-based navigation.
         on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(app.selection.is_none());
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.view.cursor, 8, "n from a cleared cursor still finds the next block");
+        assert_eq!(app.view.cursor, 8, "n from a cleared cursor still finds the next comment");
     }
 
     #[test]
