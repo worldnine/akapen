@@ -1222,11 +1222,12 @@ fn source_row_at(app: &App, content_row: usize, col: usize) -> Option<usize> {
 
 /// Source-mode content width (mirrors `draw_source`'s computation;
 /// source mode draws no frame, so the whole terminal width is content
-/// except the scrollbar's track on the rightmost column).
+/// except the scrollbar's track and the right margin one column in from
+/// the edge).
 fn source_content_width(app: &App) -> u16 {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let gutter_cols = 1 + app.source.gutter_width as u16 + 1;
-    w.saturating_sub(gutter_cols + 1)
+    w.saturating_sub(gutter_cols + 2)
 }
 
 /// View-mode paragraph width: the terminal minus the page's left margin,
@@ -3558,7 +3559,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let gutter_cols = 1 + app.source.gutter_width as u16 + 1;
     app.gutter_cols = gutter_cols;
-    let content_width = inner.width.saturating_sub(gutter_cols + 1);
+    let content_width = inner.width.saturating_sub(gutter_cols + 2);
     if app.source.is_empty() {
         f.render_widget(Paragraph::new("(empty file)"), area);
         return;
@@ -3580,23 +3581,31 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
 
     let (text, composer_cursor) = build_rows(app, inner.height, content_width);
     f.render_widget(Paragraph::new(text), area);
-    // The scrollbar rides the right edge: a `▐` thumb on the last column
-    // (source mode draws no frame, so the track is the pane's own edge).
-    // It appears only when the content overflows the viewport; the thumb
-    // tracks the viewport offset (wheel scroll moves the viewport only),
-    // so it always reflects what is on screen.
+    // The scrollbar sits one column inside the right edge (the pane's
+    // own edge, source mode draws no frame). The rightmost column is a
+    // blank margin, mirroring the page margin in view mode. The thumb
+    // appears only when the content overflows the viewport; it tracks the
+    // viewport offset (wheel scroll moves the viewport only), so it
+    // always reflects what is on screen.
     if let Some((start, len)) = scroll_thumb(
         app.line_rows.iter().sum(),
         inner.height as usize,
         app.offset,
     ) {
-        let thumb_style = Style::default().fg(app.ui_scrollbar);
-        let right = area.x + area.width - 1;
+        let thumb_fg = app.ui_scrollbar;
+        let right = area.x + area.width - 2;
         let buf = f.buffer_mut();
         for i in start..start + len {
             if let Some(c) = buf.cell_mut((right, inner.y + i as u16)) {
+                // Preserve the cell's current bg (the gutter's bg on
+                // selected/cursor rows) so the band runs unbroken.
+                let bg = c.style().bg;
                 c.set_symbol("▐");
-                c.set_style(thumb_style);
+                let mut style = Style::default().fg(thumb_fg);
+                if let Some(bg) = bg {
+                    style = style.bg(bg);
+                }
+                c.set_style(style);
             }
         }
     }
@@ -7317,4 +7326,3 @@ mod handoff_tests {
         assert_eq!(app.cursor, 45, "ラウンドトリップで行が動かない");
     }
 }
-// scratch reproduction — appended as a test
