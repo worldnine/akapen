@@ -2146,7 +2146,7 @@ fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     let width = view_render_width(w);
     let mut view = render_view_with_cards(&app.source, width, &app.highlight, comments);
     if let Some(os) = &app.old_side {
-        view.apply_old_side(&old_side_view_rows(os), os.range, os.owner);
+        view.apply_old_side(&old_side_view_rows(app, os), os.range, os.owner);
     }
     view
 }
@@ -2154,18 +2154,18 @@ fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
 /// The old-side block as raw view rows (3-2): the old lines wrapped at
 /// the view's text width in a dim style — raw source, visually distinct
 /// from the rendered markdown around it.
-fn old_side_view_rows(os: &OldSide) -> Vec<Vec<HiSpan>> {
+fn old_side_view_rows(app: &App, os: &OldSide) -> Vec<Vec<HiSpan>> {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    let width = view_render_width(w) as usize;
-    let mut rows = Vec::new();
-    for line in &os.old_lines {
-        let spans = vec![HiSpan {
-            text: line.clone(),
-            style: Style::default().fg(Color::DarkGray),
-        }];
-        rows.extend(wrap_spans(&spans, width));
-    }
-    rows
+    let width = view_render_width(w);
+    let mut content = os.old_lines.join("\n");
+    content.push('\n');
+    let fragment = Source {
+        path: PathBuf::new(),
+        content,
+        lines: os.old_lines.clone(),
+        gutter_width: 1,
+    };
+    render::render(&fragment, width as usize, &app.highlight).rows
 }
 
 /// Rebuild the source-mode layout and the rendered view after the `o`
@@ -9580,7 +9580,14 @@ mod git_tests {
             .flatten()
             .map(|s| s.text.as_str())
             .collect();
-        assert!(block_text.contains("# four"), "old content spliced in: {block_text}");
+        assert!(
+            block_text.contains("four"),
+            "old content spliced in (rendered): {block_text}"
+        );
+        assert!(
+            !block_text.contains("# four"),
+            "rendered, not raw source: {block_text}"
+        );
         assert!(!block_text.contains("CHANGED"), "new content replaced");
         assert_eq!(
             app.view.source_starts[3], range.start,
@@ -9622,6 +9629,41 @@ mod git_tests {
     }
 
     #[test]
+    fn old_side_in_view_renders_markdown_not_raw_source() {
+        // View mode's old side renders like the view itself: `**bold**`
+        // and `# ` syntax is consumed, not shown raw (the fragment render
+        // keeps the display closed within the hunk).
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["# Title", "", "**old** text"]);
+        overwrite(&path, &["# Title", "", "**new** text"]);
+        let mut app = git_app(path, Mode::View);
+        app.view.goto_source_line(2);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        let range = app.view.old_side_rows.clone();
+        assert!(!range.is_empty());
+        let block_text: String = app.view.rows[range]
+            .iter()
+            .flatten()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(block_text.contains("old"), "the old text shows: {block_text}");
+        assert!(
+            !block_text.contains("**"),
+            "markdown syntax is consumed: {block_text}"
+        );
+        assert!(!block_text.contains("new"), "the new content is replaced");
+        // Source mode keeps the RAW old lines (it is the raw pane).
+        on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Source);
+        let rows = source_rows(&app);
+        assert!(
+            rows.iter().any(|r| r.contains("**old**")),
+            "source mode shows the raw old line"
+        );
+    }
+
+    #[test]
     fn drawing_with_the_old_side_toggled_does_not_panic() {
         // Smoke: the full draw path (title, view/source panes, footer)
         // runs with the block spliced in, and the old content actually
@@ -9652,14 +9694,14 @@ mod git_tests {
                 .collect()
         };
         let view = capture(&mut app);
-        assert!(view.contains("#four"), "old content in the view: {view}");
+        assert!(view.contains("four"), "old content rendered in the view: {view}");
         assert!(!view.contains("CHANGED"), "new content hidden: {view}");
         assert!(view.contains('~'), "the old-side marker is drawn");
         // Same pane in source mode: the block renders with old numbers.
         on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
         assert_eq!(app.mode, Mode::Source);
         let source = capture(&mut app);
-        assert!(source.contains("#four"), "old content in source mode: {source}");
+        assert!(source.contains("four"), "old content in source mode: {source}");
         assert!(!source.contains("CHANGED"));
         assert!(source.contains('~'));
     }
