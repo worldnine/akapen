@@ -16,7 +16,7 @@ English README is [here](README.md).
 **常にセッションモード**です。1ファイルでも複数ファイルでも同じキーバインドで動作します。
 
 ```
-akapen <file...> [--send-cmd <cmd>] [--theme <name>] [--ime <off|ascii|jp>]
+akapen <file...> [--send-cmd <cmd>] [--send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>]
                     [--light|--dark] [--callback <cmd>] [--esc-quit <auto|always|never>]
 ```
 
@@ -270,6 +270,26 @@ akapen %S --send-agent
 ```
 
 **`--send-cmd <cmd>`（汎用）**: フォーマット済みテキストをコマンドの **stdin にパイプ**します。
+
+## リプライモード — エージェントの会話出力に赤ペン（akp）
+
+`--reply` は akapen を「エージェントが会話中に貼ったコード例示・markdown」への即席赤ペンに変えます（ファイルには一切触れない）:
+
+```sh
+akapen ... --send-agent --reply
+```
+
+- **送信形式**: ファイル/行番号の参照を省き、選択スニペットを GitHub 風の `> ` 引用にする。コメントは空行の後に置く（CommonMark の lazy continuation で引用に飲み込まれないため）。**バッチ送信時は引用に番号**（`1. > 引用` + インデントしたコメント）が付き、受信エージェントは「順番に対応すべき個別指摘のリスト」と読める。番号は `> ` マーカーの**前**にあるので、引用内容にリスト番号が含まれても衝突しない
+- **自動リロード・diff なし**: ドキュメントが変わると自動でリロードされ、diff は計算しない（reply モードのドキュメントは1メッセージ丸ごと置換されるため）
+- **reply 用 UI**: タイトルは `reply`（一時ファイルパスは出さない）、`]`/`[` で直近メッセージを移動、`e`（編集）とファイルピッカーは無効化
+
+`scripts/akp`（`akp` として配置）がドキュメント一式を組み立てます: カレントタブの唯一エージェントを解決し、セッショントランスクリプト（pi/claude はセッションID検索の JSONL、hermes は SQLite）から直近の text を含むアシスタントメッセージを抽出して akapen で開きます。再実行するとその場でリフレッシュされます。
+
+### herdr プラグイン
+
+このリポジトリはそのまま [herdr プラグイン](herdr-plugin.toml) です: `herdr plugin link <このリポジトリ>` で3つのアクション — `akp.open`（下分割）/ `akp.open-side`（横分割）/ `akp.open-float`（セッションポップアップ）— が登録され、コマンドパレットから選べます。各配置はトグル（タブに1つ、akapen を抜けると pane ごと自動クローズ）で、分割はフォーカス中 pane ではなく**タブのエージェント pane** 基準に行われます。
+
+**流儀**: herdr 連携コードはツールのリポジトリに plugin として同居させる（`herdr plugin link`）。新規連携は `~/.local/bin` にスクリプトを置かず、リポジトリの `herdr-plugin.toml` に追加すること。
 特定の agent に固定で送りたい場合や、herdr 以外の宛先に使います:
 
 ```bash

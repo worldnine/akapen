@@ -37,7 +37,7 @@ No external binaries required — rendering is built in. On macOS the optional I
 ## Usage
 
 ```
-akapen <file...> [--send-cmd <cmd> | --send-agent] [--theme <name>]
+akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>]
                  [--ime <off|ascii|jp>] [--light|--dark] [--callback <cmd>]
                  [--esc-quit <auto|always|never>]
 ```
@@ -46,6 +46,7 @@ akapen <file...> [--send-cmd <cmd> | --send-agent] [--theme <name>]
 |---|---|
 | `--send-cmd <cmd>` | `s` pipes the formatted export to this shell command's stdin |
 | `--send-agent` | `s` sends to the sole herdr agent in the current tab (needs `herdr` on PATH) |
+| `--reply` | reply mode: export as `> quote` + comment (no file/line references), auto-reload on external change, no diff — see [Reply mode](#reply-mode--mark-up-the-agents-chat-output-akp) |
 | `--theme <name>` | two-face theme name (default `Catppuccin Mocha`; `Solarized (light)` when light is detected) or a path to a `.tmTheme` file |
 | `--ime <off\|ascii\|jp>` | macOS input-source control around the comment composer (default `ascii`) |
 | `--light` / `--dark` | force the UI palette (default: auto-detect the terminal background via OSC 11) |
@@ -129,6 +130,26 @@ On failure (non-zero exit) the comments are **kept** and can be re-sent; on succ
 ```sh
 akapen doc.md --send-cmd 'akapen2hunk [--repo <root>] [--focus]'
 ```
+
+## Reply mode — mark up the agent's chat output (akp)
+
+`--reply` turns akapen into a quick red-pen for the agent's *conversation* output — the code examples and markdown the agent pasted into chat, which never touch a file:
+
+```sh
+akapen ... --send-agent --reply
+```
+
+- **Export format**: the file/line references are dropped and the selected snippet is quoted GitHub-style (`> ` lines); the comment sits on its own line after a blank line (the blank line keeps the comment out of the blockquote — CommonMark lazy continuation). Batches of comments are numbered (`1. > quote` + indented comment), so the receiving agent reads them as a list of distinct points to address in order. The number sits before the `> ` marker, so quoted content that itself contains list markers can never collide.
+- **Auto-reload, no diff**: the document reloads automatically when it changes on disk, and the reload skips the diff — in reply mode the doc is a single agent message, so every refresh replaces the whole content.
+- **Reply-mode UI**: the title shows `reply` (not the temp path), `]`/`[` moves between the recent messages, `e` (edit) and the file picker are disabled.
+
+The companion script [`scripts/akp`](scripts/akp) builds the document set: it resolves the sole agent in the current herdr tab, extracts the most recent text-bearing assistant messages from the session transcript (pi/claude JSONL located by session id, hermes SQLite), and opens akapen on them. Re-invoking refreshes the documents in place.
+
+### herdr plugin
+
+The repository is also a [herdr plugin](herdr-plugin.toml): `herdr plugin link <this repo>` registers three actions — `akp.open` (bottom split), `akp.open-side` (side split), `akp.open-float` (session popup) — all selectable from the command palette. Each placement toggles (one pane per tab; the pane closes itself when akapen exits) and splits relative to the tab's *agent* pane, not the focused pane.
+
+Convention: herdr integration code lives in the tool's own repo as a plugin (`herdr plugin link`) — new integrations go there, not in `~/.local/bin`.
 
 ## Design
 
