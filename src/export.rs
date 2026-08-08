@@ -108,6 +108,12 @@ fn snippet_parts(comment: &Comment) -> Vec<&str> {
 /// dropped) — adapters like scripts/akapen2hunk rely on that to split
 /// the snippet from the comment text.
 fn numbered_snippet(comment: &Comment) -> String {
+    // A hunk comment carries the raw diff text as its snippet: export it
+    // as-is (the agent reads the change itself — `@@` header, `-`/`+`
+    // prefixes; numbering the diff lines would only add noise).
+    if comment.hunk {
+        return comment.lines.clone();
+    }
     snippet_parts(comment)
         .iter()
         .enumerate()
@@ -121,6 +127,14 @@ fn numbered_snippet(comment: &Comment) -> String {
 /// reference nothing without a file) would be noise. Blank lines in the
 /// selection render as `> ` so they still read as quoted.
 fn quoted_snippet(comment: &Comment) -> String {
+    if comment.hunk {
+        return comment
+            .lines
+            .split('\n')
+            .map(|l| format!("> {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
     snippet_parts(comment)
         .iter()
         .map(|text| format!("> {text}"))
@@ -423,6 +437,7 @@ mod tests {
             start,
             end,
             lines: lines.into(),
+            hunk: false,
             text: text.into(),
         }
     }

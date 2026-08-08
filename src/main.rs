@@ -286,6 +286,10 @@ struct App {
     /// The 0-based range the input box is anchored to (mode == Input).
     input_start: usize,
     input_end: usize,
+    /// The git hunk's raw diff text when the composer targets a hunk
+    /// (`c` on a changed line, no selection): the new comment's `lines`
+    /// becomes the hunk as-is. `None` for line/selection comments.
+    composer_hunk: Option<String>,
     /// The mode to return to when the composer closes: source-mode `c`
     /// returns to Comment, view-mode `c` stays in View (the composer is
     /// drawn inline in the rendered view).
@@ -434,6 +438,7 @@ impl App {
             editing_comment: None,
             input_start: 0,
             input_end: 0,
+            composer_hunk: None,
             composer_return: Mode::Source,
             comments: Vec::new(),
             status: None,
@@ -2718,8 +2723,6 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
             // and Enter/Esc return here. The draw pass keeps the bar on
             // screen (keep_composer_visible_view) — including on the last
             // line, where the bar extends past the document's last row.
-            app.selection
-                .get_or_insert_with(|| Selection::new(app.view.cursor));
             open_composer(app, Mode::View);
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -3153,6 +3156,7 @@ fn input_move_line(s: &str, cursor: usize, dir: isize) -> usize {
 fn cancel_composer(app: &mut App) {
     app.input.clear();
     app.input_cursor = 0;
+    app.composer_hunk = None;
     app.mode = app.composer_return;
     app.ime_guard = None;
     // A re-edit rendered the view without the edited card
@@ -3183,21 +3187,33 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                 return;
             }
             if let Some(idx) = app.editing_comment {
-                // Re-edit: replace the existing comment (and refresh its
-                // snippet from the current source).
+                // Re-edit: replace the comment text only — the snippet
+                // (a hunk comment's raw diff, or a line comment's source
+                // lines) stays as it was.
                 if let Some(c) = app.comments.get_mut(idx) {
                     c.text = text;
-                    c.lines = app.source.snippet(c.start, c.end);
+                    if !c.hunk {
+                        c.lines = app.source.snippet(c.start, c.end);
+                    }
                 }
+                app.composer_hunk = None;
                 app.flash(format!("comment updated ({} total)", app.comments.len()));
             } else {
+                let hunk_text = app.composer_hunk.take();
+                let (lines, hunk) = match &hunk_text {
+                    Some(text) => (text.clone(), true),
+                    None => (
+                        app.source
+                            .snippet(app.input_start as u32 + 1, app.input_end as u32 + 1),
+                        false,
+                    ),
+                };
                 app.comments.push(Comment {
                     file_path: app.current_file_path().to_path_buf(),
                     start: app.input_start as u32 + 1,
                     end: app.input_end as u32 + 1,
-                    lines: app
-                        .source
-                        .snippet(app.input_start as u32 + 1, app.input_end as u32 + 1),
+                    lines,
+                    hunk,
                     text,
                 });
                 app.flash(format!("comment added ({} total)", app.comments.len()));
@@ -3301,15 +3317,59 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
 /// Open the inline composer anchored to the current selection (or cursor
 /// line). Shared by source-mode `c` and view-mode `c` (which selects the
 /// line first).
+/// The comment target when there is no selection: the cursor line —
+/// unless it sits on a git hunk, where the WHOLE hunk is the natural
+/// target (the same range `F7` selects). Commenting a single line still
+/// works via `v`; unchanged lines keep the cursor-line behavior. This
+/// also makes `c` while the old side is displayed anchor to the hunk
+/// instead of the old block's merged first line. The second element is
+/// the hunk's raw diff text for hunk targets (`None` otherwise): the
+/// comment's snippet becomes the hunk as-is, so the agent sees the
+/// change itself — deletions included.
+fn comment_target(app: &App) -> ((usize, usize), Option<String>) {
+    let line = if app.mode == Mode::View {
+        app.view.cursor
+    } else {
+        app.cursor
+    };
+    let new_len = app.source.len();
+    match app.git_diff.as_ref().and_then(|d| d.hunk_at(line, new_len)) {
+        Some(h) => {
+            let hunk = &app.git_diff.as_ref().unwrap().hunks[h];
+            let range = match hunk.new_range() {
+                Some(r) => r,
+                None => {
+                    let o = hunk.owner(new_len);
+                    (o, o)
+                }
+            };
+            (range, Some(hunk.diff_text()))
+        }
+        None => ((line, line), None),
+    }
+}
+
 fn open_composer(app: &mut App, return_to: Mode) {
     if app.source.is_empty() {
         app.flash_err("empty file — nothing to comment");
         return;
     }
-    let (start, end) = app
-        .selection
-        .map(|s| s.range())
-        .unwrap_or((app.cursor, app.cursor));
+    let ((start, end), hunk_text) = match app.selection {
+        Some(s) => (s.range(), None),
+        None => {
+            let t = comment_target(app);
+            // View mode selects the target so the highlight band shows
+            // while composing (source mode keeps its cursor-row band).
+            if app.mode == Mode::View {
+                app.selection = Some(Selection {
+                    anchor: t.0 .0,
+                    cursor: t.0 .1,
+                });
+            }
+            t
+        }
+    };
+    app.composer_hunk = hunk_text;
     // An EXACT range match flips the composer into re-edit mode: the
     // comment's text is prefilled and Enter replaces it instead of adding
     // a stacked duplicate. Any other range adds a new comment.
@@ -5355,6 +5415,7 @@ impl App {
         // Close the composer if it was open.
         self.input.clear();
         self.input_cursor = 0;
+        self.composer_hunk = None;
         self.editing_comment = None;
         self.mode = if self.mode == Mode::Input { self.composer_return } else { self.mode };
         self.ime_guard = None;
@@ -5466,6 +5527,7 @@ mod bar_tests {
             end: 2,
             text: text.into(),
             lines: text.into(),
+            hunk: false,
         }
     }
 
@@ -5661,6 +5723,7 @@ mod mouse_tests {
             end: 5,
             text: "テスト".into(),
             lines: "テスト".into(),
+            hunk: false,
         });
         app.refresh_line_rows();
         app
@@ -6026,6 +6089,7 @@ mod state_tests {
             start: start as u32,
             end: end as u32,
             lines: app.source.snippet(start as u32, end as u32),
+            hunk: false,
             text: text.into(),
         });
     }
@@ -6860,6 +6924,7 @@ mod state_tests {
             start: 3,
             end: 3,
             lines: "line3".into(),
+            hunk: false,
             text: "c1".into(),
         });
         app.comments.push(Comment {
@@ -6867,6 +6932,7 @@ mod state_tests {
             start: 7,
             end: 7,
             lines: "line7".into(),
+            hunk: false,
             text: "c2".into(),
         });
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
@@ -6995,6 +7061,7 @@ mod state_tests {
                 start: 3,
                 end: 5,
                 lines: String::new(),
+                hunk: false,
                 text: "c1".into(),
             },
             Comment {
@@ -7002,6 +7069,7 @@ mod state_tests {
                 start: 9,
                 end: 9,
                 lines: String::new(),
+                hunk: false,
                 text: "c2".into(),
             },
         ];
@@ -7026,6 +7094,7 @@ mod state_tests {
                 start: 2,
                 end: 5,
                 lines: String::new(),
+                hunk: false,
                 text: "c1".into(),
             },
             Comment {
@@ -7033,6 +7102,7 @@ mod state_tests {
                 start: 4,
                 end: 6,
                 lines: String::new(),
+                hunk: false,
                 text: "c2".into(),
             },
             Comment {
@@ -7040,6 +7110,7 @@ mod state_tests {
                 start: 8,
                 end: 9,
                 lines: String::new(),
+                hunk: false,
                 text: "c3".into(),
             },
         ];
@@ -7125,6 +7196,7 @@ mod state_tests {
             start: 9,
             end: 10,
             lines: String::new(),
+            hunk: false,
             text: "c".into(),
         });
         // The agent rewrites the file down to 7 lines.
@@ -7333,6 +7405,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: String::new(),
+            hunk: false,
             text: "c".into(),
         });
         on_source_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, None);
@@ -7350,6 +7423,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: String::new(),
+            hunk: false,
             text: "c".into(),
         });
         on_view_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, None);
@@ -7372,6 +7446,7 @@ mod state_tests {
             start: 2,
             end: 4,
             lines: String::new(),
+            hunk: false,
             text: "c1".into(),
         });
         app.comments.push(Comment {
@@ -7379,6 +7454,7 @@ mod state_tests {
             start: 7,
             end: 7,
             lines: String::new(),
+            hunk: false,
             text: "c2".into(),
         });
         app.comments.push(Comment {
@@ -7386,6 +7462,7 @@ mod state_tests {
             start: 7,
             end: 7,
             lines: String::new(),
+            hunk: false,
             text: "c3".into(),
         });
         on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
@@ -7547,6 +7624,7 @@ mod state_tests {
             start: 2,
             end: 3,
             lines: String::new(),
+            hunk: false,
             text: "card body".into(),
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -7656,6 +7734,7 @@ mod state_tests {
             start: 2,
             end: 2,
             lines: String::new(),
+            hunk: false,
             text: "card".into(),
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -7731,6 +7810,7 @@ mod state_tests {
             start: 3,
             end: 4,
             lines: String::new(),
+            hunk: false,
             text: "mid-block".into(),
         }];
         let base = ViewState::render(&source, 60, &highlight);
@@ -8042,6 +8122,7 @@ mod state_tests {
             start: 2,
             end: 2,
             lines: "line2".into(),
+            hunk: false,
             text: "on a".into(),
         });
         app.comments.push(Comment {
@@ -8049,6 +8130,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "fn main".into(),
+            hunk: false,
             text: "on b".into(),
         });
         on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
@@ -8070,6 +8152,7 @@ mod state_tests {
             start: 3,
             end: 3,
             lines: "line3".into(),
+            hunk: false,
             text: "note".into(),
         });
         // Start on b.rs (index 1); jump via the list back to a.md line 3.
@@ -8096,6 +8179,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "on a".into(),
         });
         app.comments.push(Comment {
@@ -8103,6 +8187,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "y".into(),
+            hunk: false,
             text: "on b".into(),
         });
         std::fs::write(&a, "# a\n\nchanged\n").unwrap();
@@ -8193,6 +8278,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "one".into(),
         });
         app.comments.push(Comment {
@@ -8200,6 +8286,7 @@ mod state_tests {
             start: 2,
             end: 2,
             lines: "x".into(),
+            hunk: false,
             text: "two".into(),
         });
         app.comments.push(Comment {
@@ -8207,6 +8294,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "y".into(),
+            hunk: false,
             text: "three".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -8258,6 +8346,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "c".into(),
         });
         assert!(capture(&mut app).contains("▌ 1"), "indicator appears with comments");
@@ -8351,6 +8440,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "c".into(),
         });
         assert!(capture(&mut app, 80).contains("y copy"));
@@ -8372,6 +8462,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "c".into(),
         });
         let click = |row: u16, col: u16| MouseEvent {
@@ -8534,6 +8625,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "one".into(),
         });
         app.comments.push(Comment {
@@ -8541,6 +8633,7 @@ mod state_tests {
             start: 2,
             end: 2,
             lines: "x".into(),
+            hunk: false,
             text: "two".into(),
         });
         app.comments.push(Comment {
@@ -8548,6 +8641,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "y".into(),
+            hunk: false,
             text: "three".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -8724,6 +8818,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "c".into(),
         });
         request_quit(&mut app); // arms the confirmation + a toast
@@ -8822,6 +8917,7 @@ mod state_tests {
             start: 3,
             end: 3,
             lines: "line3".into(),
+            hunk: false,
             text: "note".into(),
         });
         // Start on b.rs (index 1), open the comment list.
@@ -8924,6 +9020,7 @@ mod state_tests {
             start: 3,
             end: 5,
             lines: "line3\nline4\nline5".into(),
+            hunk: false,
             text: "old".into(),
         });
         app.selection = Some(Selection {
@@ -8956,6 +9053,7 @@ mod state_tests {
             start: 3,
             end: 5,
             lines: String::new(),
+            hunk: false,
             text: "existing".into(),
         });
         app.selection = Some(Selection {
@@ -8982,6 +9080,7 @@ mod state_tests {
             start: 3,
             end: 3,
             lines: String::new(),
+            hunk: false,
             text: "old".into(),
         });
         app.selection = Some(Selection::new(2));
@@ -9084,6 +9183,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "a1".into(),
         });
         app.comments.push(Comment {
@@ -9091,6 +9191,7 @@ mod state_tests {
             start: 1,
             end: 1,
             lines: "x".into(),
+            hunk: false,
             text: "b1".into(),
         });
         app.comments.push(Comment {
@@ -9098,6 +9199,7 @@ mod state_tests {
             start: 2,
             end: 2,
             lines: "x".into(),
+            hunk: false,
             text: "a2".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -9123,6 +9225,7 @@ mod state_tests {
             start: 3,
             end: 5,
             lines: "line3\nline4\nline5".into(),
+            hunk: false,
             text: "old".into(),
         });
         app.selection = Some(Selection {
@@ -9171,6 +9274,7 @@ mod state_tests {
             start: 3,
             end: 5,
             lines: "line3\nline4\nline5".into(),
+            hunk: false,
             text: "old".into(),
         });
         replace_view_preserving_cursor(&mut app); // fold the card in
@@ -10016,6 +10120,62 @@ mod git_tests {
         assert!(app.old_side.is_none());
         let (msg, _, _) = app.status.as_ref().expect("a flash explains");
         assert!(msg.contains("untracked"), "message names the case: {msg}");
+    }
+
+    #[test]
+    fn c_on_a_hunk_line_comments_the_whole_hunk() {
+        // `c` with no selection on a line inside a git hunk anchors the
+        // comment to the WHOLE hunk (the range F7 selects) — a bare `c`
+        // used to produce a single-line comment that read like a line
+        // note, not a change note. `v` still overrides with a custom
+        // range; unchanged lines keep the cursor-line behavior.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three", "four", "five"]);
+        overwrite(&path, &["one", "two", "CHANGED", "four", "five"]);
+        let mut app = git_app(path.clone(), Mode::Source);
+        app.cursor = 2; // the changed line, no selection
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        // 5-line file, change at line 3: the hunk covers the whole file.
+        assert_eq!((app.input_start, app.input_end), (0, 4), "the hunk range");
+        for ch in "note".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        on_input_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.comments.len(), 1);
+        assert_eq!((app.comments[0].start, app.comments[0].end), (1, 5));
+        // The comment carries the hunk's raw diff as its snippet: the
+        // agent sees the change itself, deletions included.
+        let c = &app.comments[0];
+        assert_eq!((c.start, c.end), (1, 5), "the hunk range");
+        assert!(c.hunk, "flagged as a hunk comment");
+        assert!(
+            c.lines.contains("@@ -1,5 +1,5 @@"),
+            "the raw diff header: {}",
+            c.lines
+        );
+        assert!(c.lines.contains("-three"), "deleted lines ride along: {}", c.lines);
+        assert!(c.lines.contains("+CHANGED"), "added lines ride along: {}", c.lines);
+        let out = export::format_all(&app.comments);
+        assert!(out.contains("doc.md:1-5"), "the hunk range location: {out}");
+        assert!(out.contains("@@ -1,5 +1,5 @@"), "exported as-is: {out}");
+        assert!(!out.contains("1: @"), "no line numbering on the diff: {out}");
+        // Reply mode blockquotes the raw diff the same way.
+        let reply = export::format_all_reply(&app.comments);
+        assert!(reply.contains("> @@ -1,5 +1,5 @@"), "blockquoted diff: {reply}");
+        assert!(reply.contains("> -three"), "blockquoted deletions: {reply}");
+        // A v-selection still wins (single line).
+        app.selection = Some(Selection::new(2));
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!((app.input_start, app.input_end), (2, 2));
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // View mode: c on a hunk line also targets the hunk.
+        let mut app = git_app(path.clone(), Mode::View);
+        app.view.goto_source_line(2);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        assert_eq!((app.input_start, app.input_end), (0, 4), "view c targets the hunk");
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     }
 
     #[test]

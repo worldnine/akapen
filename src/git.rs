@@ -135,6 +135,24 @@ impl Hunk {
         (added, deleted)
     }
 
+    /// The hunk as raw unified-diff text — the snippet for hunk-targeted
+    /// comments (the agent reads the change itself, deletions included).
+    pub fn diff_text(&self) -> String {
+        let mut out =
+            format!("@@ -{},{} +{},{} @@", self.old_start, self.old_len, self.new_start, self.new_len);
+        for l in &self.body {
+            let prefix = match l.tag {
+                Tag::Context => " ",
+                Tag::Add => "+",
+                Tag::Delete => "-",
+            };
+            out.push('\n');
+            out.push_str(prefix);
+            out.push_str(&l.text);
+        }
+        out
+    }
+
     /// The preview line for a changes-list row: the first ADDED line of
     /// the hunk (what the file now contains), else the first deleted
     /// line for a pure deletion.
