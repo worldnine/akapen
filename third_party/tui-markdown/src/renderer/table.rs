@@ -8,7 +8,10 @@
 //! width an enclosing list marker or blockquote prefix takes), a table whose natural width does
 //! not fit shrinks its columns (proportional to the natural widths, floored at each column's
 //! widest unsplittable token) and wraps cell content across multiple rows instead of overflowing.
-//! Wrapped cell lines keep the source-line attribution of the spans they carry.
+//! Wrapped cell lines keep the source-line attribution of the spans they carry. A width-constrained
+//! table also draws a separator between every pair of body rows, so the boundaries of multi-line
+//! wrapped rows stay readable; a table at its natural width keeps the light look (header separator
+//! only).
 //!
 //! The central renderer dispatches events and owns shared inline state. This module owns the table
 //! event handlers, buffered table state, list-aware output placement, and final table layout.
