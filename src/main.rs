@@ -2163,7 +2163,41 @@ fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
 fn old_side_view_rows(app: &App, os: &OldSide) -> Vec<Vec<HiSpan>> {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let width = view_render_width(w);
-    let mut content = os.old_lines.join("\n\n");
+    // A body-only table fragment (the hunk cut the table's header or
+    // delimiter off) can never render as a markdown table — synthesize
+    // the missing structure so the old side shows table frames instead
+    // of raw pipe text: a leading delimiter (useless without its header)
+    // is dropped, then a missing delimiter is inserted after the first
+    // row, which becomes the header.
+    let mut frag_lines: Vec<String> = os.old_lines.clone();
+    let all_pipe = frag_lines.iter().all(|l| l.starts_with('|'));
+    if all_pipe {
+        if frag_lines.first().is_some_and(|l| is_table_delimiter_row(l)) {
+            frag_lines.remove(0);
+        }
+        if !frag_lines.iter().any(|l| is_table_delimiter_row(l)) && !frag_lines.is_empty() {
+            let cols = frag_lines[0].matches('|').count().saturating_sub(1).max(1);
+            // `|---`.repeat + one closing `|`: repeating the full
+            // `|---|` cell would double the middle pipe.
+            frag_lines.insert(1, format!("{}|", "|---".repeat(cols)));
+        }
+    }
+    // Join with blank lines so consecutive lines never merge into one
+    // run-on paragraph — EXCEPT between consecutive table rows
+    // (`|`-leading lines): a table needs its rows adjacent, and a blank
+    // line would break it into raw pipe text.
+    let mut content = String::new();
+    for (i, line) in frag_lines.iter().enumerate() {
+        if i > 0 {
+            let prev = &frag_lines[i - 1];
+            if prev.starts_with('|') && line.starts_with('|') {
+                content.push('\n');
+            } else {
+                content.push_str("\n\n");
+            }
+        }
+        content.push_str(line);
+    }
     content.push('\n');
     // The renderer attributes rows to source lines by index, so `lines`
     // must match the content exactly (the blank separators count).
@@ -2175,6 +2209,18 @@ fn old_side_view_rows(app: &App, os: &OldSide) -> Vec<Vec<HiSpan>> {
         gutter_width: 1,
     };
     render::render(&fragment, width as usize, &app.highlight).rows
+}
+fn is_table_delimiter_row(line: &str) -> bool {
+    line.trim()
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .all(|cell| {
+            let cell = cell.trim();
+            !cell.is_empty()
+                && cell.contains('-')
+                && cell.chars().all(|c| c == '-' || c == ':')
+        })
 }
 
 /// Rebuild the source-mode layout and the rendered view after the `o`
@@ -9635,6 +9681,98 @@ mod git_tests {
         assert!(app.old_side.is_none());
         assert_eq!(app.view.rows.len(), before_len, "rows restored");
         assert_eq!(app.view.source_starts, before_starts, "mapping restored");
+    }
+
+    #[test]
+    fn old_side_in_view_renders_tables_as_tables() {
+        // A table in the old side must render as a table (box frames),
+        // not raw pipe text — the blank-line join would break it (the
+        // regression: the key table showed `| ? | キーリファレンス |`).
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &[
+                "| Key | 動作 |",
+                "|---|---|",
+                "| j / k | 移動 |",
+                "| o | old side トグル |",
+            ],
+        );
+        // A row added to the table: the hunk covers the table's end.
+        overwrite(
+            &path,
+            &[
+                "| Key | 動作 |",
+                "|---|---|",
+                "| j / k | 移動 |",
+                "| o | old side トグル |",
+                "| F7 | 次の変更へ |",
+            ],
+        );
+        let mut app = git_app(path, Mode::View);
+        app.view.goto_source_line(3);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let range = app.view.old_side_rows.clone();
+        assert!(!range.is_empty());
+        let rows: Vec<String> = app.view.rows[range]
+            .iter()
+            .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect();
+        assert!(
+            rows.iter().any(|r| r.contains('┌') || r.contains('├')),
+            "the table renders with box frames: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.trim_start().starts_with("| ")),
+            "no raw pipe text: {rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.contains("old side トグル")));
+        // The USER's case: the hunk cuts the table mid-body (the header
+        // and delimiter are outside it) — the body-only fragment must
+        // still render as a table (the first row becomes the header).
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &[
+                "| Key | 動作 |",
+                "|---|---|",
+                "| ? | キーリファレンス |",
+                "| r / i | 再読込 / 無視 |",
+                "| e | 編集 |",
+                "| y | コピー |",
+            ],
+        );
+        overwrite(
+            &path,
+            &[
+                "| Key | 動作 |",
+                "|---|---|",
+                "| ? | キーリファレンス |",
+                "| r / i | 再読込 / 無視 |",
+                "| o | old side トグル |",
+                "| F7 | 次の変更へ |",
+                "| e | 編集 |",
+                "| y | コピー |",
+            ],
+        );
+        let mut app = git_app(path, Mode::View);
+        app.view.goto_source_line(3); // 挿入位置直前のコンテキスト行
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let range = app.view.old_side_rows.clone();
+        assert!(!range.is_empty());
+        let rows: Vec<String> = app.view.rows[range]
+            .iter()
+            .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect();
+        assert!(
+            rows.iter().any(|r| r.contains('┌') || r.contains('├')),
+            "body-only fragment still renders as a table: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.trim_start().starts_with("| ")),
+            "no raw pipe text: {rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.contains("キーリファレンス")));
     }
 
     #[test]
