@@ -2731,17 +2731,21 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
             // line, where the bar extends past the document's last row.
             open_composer(app, Mode::View);
         }
-        // n/N: the next/previous change hunk — the standard diff-tool
-        // keys (delta, less, magit), reachable on any layout: no F-keys,
-        // no `[`/`]`, no Alt. Comment jumping moved to Ctrl+n/Ctrl+p.
-        KeyCode::Char('n') if modifiers.is_empty() => jump_hunk(app, 1),
-        KeyCode::Char('N') if modifiers.is_empty() => jump_hunk(app, -1),
         // Ctrl+n/Ctrl+N and Ctrl+p/Ctrl+P jump between comments: n and
         // p move forward (next), the shifted variants backward (prev).
+        // The hunk jumps below come AFTER the Ctrl arms, so the shifted
+        // keys stay unambiguous.
         KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
         KeyCode::Char('N') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
         KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
         KeyCode::Char('P') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
+        // n/N: the next/previous change hunk — the standard diff-tool
+        // keys (delta, less, magit), reachable on any layout: no F-keys,
+        // no `[`/`]`, no Alt. No modifier guard: some terminals report
+        // Shift+N as 'N' WITH the SHIFT flag set, which the is_empty
+        // guard would drop.
+        KeyCode::Char('n') => jump_hunk(app, 1),
+        KeyCode::Char('N') => jump_hunk(app, -1),
         KeyCode::Tab => {
             // View is only reachable for Markdown-family files; a source
             // file (e.g. .rs) never leaves source mode. A mode flip
@@ -3098,17 +3102,21 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
                 open_editor(app, t);
             }
         }
-        // n/N: the next/previous change hunk — the standard diff-tool
-        // keys (delta, less, magit), reachable on any layout: no F-keys,
-        // no `[`/`]`, no Alt. Comment jumping moved to Ctrl+n/Ctrl+p.
-        KeyCode::Char('n') if modifiers.is_empty() => jump_hunk(app, 1),
-        KeyCode::Char('N') if modifiers.is_empty() => jump_hunk(app, -1),
         // Ctrl+n/Ctrl+N and Ctrl+p/Ctrl+P jump between comments: n and
         // p move forward (next), the shifted variants backward (prev).
+        // The hunk jumps below come AFTER the Ctrl arms, so the shifted
+        // keys stay unambiguous.
         KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
         KeyCode::Char('N') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
         KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
         KeyCode::Char('P') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
+        // n/N: the next/previous change hunk — the standard diff-tool
+        // keys (delta, less, magit), reachable on any layout: no F-keys,
+        // no `[`/`]`, no Alt. No modifier guard: some terminals report
+        // Shift+N as 'N' WITH the SHIFT flag set, which the is_empty
+        // guard would drop.
+        KeyCode::Char('n') => jump_hunk(app, 1),
+        KeyCode::Char('N') => jump_hunk(app, -1),
         // `]`/`[` arm the chord: alone they switch files (when the
         // [`CHORD_MS`] window expires, or on the next non-chord key); `c`
         // within the window jumps to the next/previous change instead
@@ -10243,6 +10251,12 @@ mod git_tests {
         assert_eq!(app.cursor, 14, "n: next hunk");
         on_source_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
         assert_eq!(app.cursor, 4, "N: previous hunk");
+        // Some terminals report Shift+N as 'N' WITH the SHIFT flag set:
+        // the jump must not be dropped by a modifier guard.
+        on_source_key(&mut app, KeyCode::Char('N'), KeyModifiers::SHIFT, None);
+        assert_eq!(app.cursor, 4, "N with the SHIFT flag still jumps back");
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::SHIFT, None);
+        assert_eq!(app.cursor, 14, "n with the SHIFT flag still jumps forward");
         // Alt+j / Alt+k: the same jumps, for layouts where the terminal
         // eats Alt and layouts without F7/`[`/`]` on the base layer.
         on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::ALT, None);
