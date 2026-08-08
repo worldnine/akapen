@@ -2220,7 +2220,12 @@ fn substitute_old_side(app: &App, os: &OldSide) -> (Source, usize, usize, usize)
     for (i, line) in os.old_lines.iter().enumerate() {
         if i > 0 {
             let prev = &os.old_lines[i - 1];
-            if !(prev.starts_with('|') && line.starts_with('|')) {
+            let table_row = prev.starts_with('|') && line.starts_with('|');
+            // An indented line continues the previous block (a list
+            // item's wrapped continuation, a code line) — separating it
+            // would break a bullet into orphan fragments.
+            let continuation = line.starts_with(' ') || line.starts_with('\t');
+            if !table_row && !continuation {
                 block.push(String::new());
             }
         }
@@ -9725,6 +9730,61 @@ mod git_tests {
         assert!(app.old_side.is_none());
         assert_eq!(app.view.rows.len(), before_len, "rows restored");
         assert_eq!(app.view.source_starts, before_starts, "mapping restored");
+    }
+
+    #[test]
+    fn old_side_keeps_list_item_continuations_together() {
+        // An old bullet split across INDENTED continuation lines must
+        // stay one list item — blank-separating the continuations
+        // rendered them as orphan fragments ("、"/"o で確認します）").
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &[
+                "- **変更行マーク（3-1）**: 追加・変更行は再読込 diff と同じ緑 `+` ガター / `▌` マーカーで",
+                "  表示（両者はマージされ、セッション内の変更と git の変更が同じ信号に統合）。",
+                "  削除行は**位置に薄いマークのみ**（削除ブロック直後の行に赤 `-`。内容は出さず、",
+                "  `o` で確認します）",
+                "",
+                "次の段落。",
+            ],
+        );
+        overwrite(
+            &path,
+            &[
+                "- **変更行マーク（3-1）**: 追加・変更行は再読込 diff と同じ緑 `+` ガター / `▌` マーカーで",
+                "  表示（両者はマージされ、セッション内の変更と git の変更が同じ信号に統合）。",
+                "  削除行は**位置に薄いマークのみ**（削除ブロック直後の行に赤 `-`。内容は出さず、",
+                "  `o` で確認できます）",
+                "",
+                "次の段落。",
+            ],
+        );
+        let mut app = git_app(path, Mode::View);
+        app.view.goto_source_line(3); // the changed line (bullet's tail)
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let range = app.view.old_side_rows.clone();
+        assert!(!range.is_empty());
+        let rows: Vec<String> = app.view.rows[range]
+            .iter()
+            .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect();
+        let start = rows
+            .iter()
+            .position(|r| r.contains("変更行マーク"))
+            .expect("the bullet's first row");
+        let end = rows
+            .iter()
+            .position(|r| r.contains("確認します"))
+            .expect("the bullet's last row");
+        assert!(
+            start < end,
+            "the bullet spans rows {start}..={end}: {rows:?}"
+        );
+        assert!(
+            rows[start..=end].iter().all(|r| !r.trim().is_empty()),
+            "no blank rows inside the bullet: {rows:?}"
+        );
     }
 
     #[test]
