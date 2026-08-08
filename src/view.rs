@@ -590,7 +590,7 @@ impl ViewState {
             // parse to a single empty-text span, so "no visible text" is
             // the test, not "no spans".
             let has_text = content.iter().any(|s| !s.content.is_empty());
-            if !has_text {
+            if !has_text || frame {
                 if let Some(text) = ghosts.get(&abs).and_then(|l| self.ghost_text(*l)) {
                     let mut style = Style::default()
                         .fg(Color::Gray)
@@ -598,11 +598,15 @@ impl ViewState {
                     if cursor_row || in_sel_row {
                         style = style.bg(selected_bg);
                     }
+                    // The ghost replaces the row: a blank row's filler, or
+                    // a table frame's glyphs (the delimiter's own
+                    // rendering — the frame is synthesized structure).
+                    content.clear();
                     content.push(ratatui::text::Span {
                         content: text.into(),
                         style,
                     });
-                } else if cursor_row || in_sel_row {
+                } else if !has_text && (cursor_row || in_sel_row) {
                     content.push(ratatui::text::Span {
                         content: " ".to_string().into(),
                         style: highlight_style,
@@ -618,12 +622,13 @@ impl ViewState {
 
     /// The ghost assignments for this frame (display row → invisible source
     /// line): a line that rendered no text and is touched by the cursor or
-    /// the selection paints its raw source onto a nearby blank row — its
-    /// own start row, or the row just below (a closing fence shares the
-    /// last code row, so it borrows the spacer beneath). Best-effort by
-    /// design: one ghost per row, the cursor's line first, and a line with
-    /// no free blank row nearby is skipped silently. Paint-time only —
-    /// the mapping and the layout are never touched.
+    /// the selection paints its raw source onto a nearby row — its own
+    /// start row, a blank row, or a synthesized table frame (a table's
+    /// delimiter line maps onto the header separator, exactly where its
+    /// raw source belongs). Best-effort by design: one ghost per row, the
+    /// cursor's line first, and a line with no free row nearby is skipped
+    /// silently. Paint-time only — the mapping and the layout are never
+    /// touched.
     fn ghost_rows(&self, selection: Option<(usize, usize)>, end: usize) -> HashMap<usize, usize> {
         let mut ghosts: HashMap<usize, usize> = HashMap::new();
         let place = |line: usize, ghosts: &mut HashMap<usize, usize>| {
@@ -636,7 +641,8 @@ impl ViewState {
                     continue;
                 }
                 let blank = self.rows[row].iter().all(|s| s.text.is_empty());
-                if blank && !ghosts.contains_key(&row) {
+                let frame = is_table_frame(&self.rows[row]);
+                if (blank || frame) && !ghosts.contains_key(&row) {
                     ghosts.insert(row, line);
                     return;
                 }
@@ -1151,6 +1157,49 @@ mod tests {
                 "row {line}: borders stay clean: {hl:?}"
             );
         }
+    }
+
+    #[test]
+    fn table_delimiter_row_ghosts_onto_the_header_separator() {
+        // The delimiter row (`|---|---|`) renders nothing of its own and
+        // maps onto the header separator frame. Putting the cursor (or a
+        // selection) on the delimiter paints its raw source there — the
+        // separator row shows the exact source line instead of the
+        // synthesized frame.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "| A | B |\n|---|---|\n| a | b |\n").unwrap();
+        let source = Source::load(path).unwrap();
+        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let frame_row = (0..view.rows.len())
+            .find(|&r| {
+                view.rows[r]
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<String>()
+                    .starts_with('├')
+            })
+            .expect("the header separator frame row");
+        let frame: String = view.rows[frame_row].iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(frame, "├───┼───┤");
+        // Cursor elsewhere: the separator renders normally.
+        view.cursor = 0;
+        assert_eq!(row_text(&view, None, frame_row), format!(" {frame} "));
+        // Cursor on the delimiter (source line 1): the raw source replaces
+        // the frame.
+        view.cursor = 1;
+        assert_eq!(
+            row_text(&view, None, frame_row),
+            " |---|---| ",
+            "the delimiter's raw source appears on the separator row"
+        );
+        // A selection covering the delimiter triggers the ghost too.
+        view.cursor = 0;
+        assert_eq!(
+            row_text(&view, Some((1, 2)), frame_row),
+            " |---|---| ",
+            "the selection paints the ghost as well"
+        );
     }
 
     #[test]
