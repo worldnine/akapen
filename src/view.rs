@@ -9,6 +9,7 @@
 //! handoff between view mode and source mode.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
@@ -151,6 +152,15 @@ pub struct ViewState {
     /// The wrap width the rows were rendered at (ghost text is truncated
     /// to it).
     pub width: usize,
+    /// Display rows that show the toggled old-side block (3-2): raw old
+    /// lines spliced in place of the hunk's new lines. These rows carry a
+    /// faint `~` marker and no comment/change marks.
+    pub old_side_rows: Range<usize>,
+    /// The source-line range the old-side block covers (inclusive; a
+    /// pure-deletion block covers its anchor line only). Rows of every
+    /// member line map to the block's first row — the cursor on any of
+    /// them sits on the block, and its visible extent is the block's.
+    pub old_side_lines: Option<(usize, usize)>,
 }
 
 impl ViewState {
@@ -174,7 +184,69 @@ impl ViewState {
             card_rows,
             ghost,
             width: columns as usize,
+            old_side_rows: 0..0,
+            old_side_lines: None,
         }
+    }
+
+    /// Splice the old-side block into the rendered rows (3-2): the block
+    /// replaces the rows of the hunk's new lines, or inserts before the
+    /// owner line for a pure deletion. Merged markdown rows (a changed
+    /// line inside a paragraph shares its row with lines outside the
+    /// hunk) are replaced as a whole group, so the display never shows a
+    /// fragment of a row — the block covers the group. The hunk's lines
+    /// (and a pure deletion's owner) all map to the block's first row
+    /// (merged-block semantics); lines below shift by the row-count
+    /// delta. Callers re-render from scratch, so the splice never
+    /// accumulates.
+    pub fn apply_old_side(
+        &mut self,
+        block_rows: &[Vec<Span>],
+        range: Option<(usize, usize)>,
+        owner: usize,
+    ) {
+        let (a, b) = match range {
+            Some((ra, rb)) => {
+                // Expand to the merged-row group boundaries.
+                let sa = self.source_starts.get(ra).copied().unwrap_or(0);
+                let head = self.source_starts.partition_point(|&s| s < sa);
+                let sb = self.source_starts.get(rb).copied().unwrap_or(sa);
+                let tail = self
+                    .source_starts
+                    .partition_point(|&s| s <= sb)
+                    .saturating_sub(1)
+                    .max(head);
+                (head, tail)
+            }
+            None => (owner, owner),
+        };
+        let start_row = self.source_starts.get(a).copied().unwrap_or(0);
+        let end_row = match range {
+            Some(_) => self
+                .source_starts
+                .get(b + 1)
+                .copied()
+                .unwrap_or(self.rows.len()),
+            None => start_row,
+        };
+        let delta = block_rows.len() as isize - (end_row - start_row) as isize;
+        self.rows.splice(start_row..end_row, block_rows.iter().cloned());
+        self.card_rows
+            .splice(start_row..end_row, std::iter::repeat_n(false, block_rows.len()));
+        // The block rows have no phrase attribution: cursor/selection
+        // highlighting falls back to the whole row instead of stale
+        // segments from the replaced content.
+        self.row_segments
+            .splice(start_row..end_row, std::iter::repeat_n(Vec::new(), block_rows.len()));
+        for (i, s) in self.source_starts.iter_mut().enumerate() {
+            if i >= a && i <= b {
+                *s = start_row;
+            } else if *s >= end_row {
+                *s = (*s as isize + delta).max(0) as usize;
+            }
+        }
+        self.old_side_rows = start_row..start_row + block_rows.len();
+        self.old_side_lines = Some((a, b));
     }
 
     /// Move the cursor by *display* rows: j/k step through the rendered
@@ -239,14 +311,24 @@ impl ViewState {
     /// merged lines keep their whole extent inside the viewport). Mirrors
     /// `text()`'s extent logic: merged source lines share a row, so the
     /// span is at least one row even when the next line starts on the
-    /// same rendered row (end <= start).
+    /// same rendered row (end <= start). A cursor inside the toggled
+    /// old-side block (3-2) spans the whole block instead.
     pub fn cursor_end_row(&self) -> usize {
         let start = self.cursor_row();
-        let mut end = self
-            .source_starts
-            .get(self.cursor + 1)
-            .copied()
-            .unwrap_or(self.rows.len());
+        let mut end = if let Some((a, b)) = self.old_side_lines
+            && self.cursor >= a
+            && self.cursor <= b
+        {
+            self.source_starts
+                .get(b + 1)
+                .copied()
+                .unwrap_or(self.rows.len())
+        } else {
+            self.source_starts
+                .get(self.cursor + 1)
+                .copied()
+                .unwrap_or(self.rows.len())
+        };
         if end <= start {
             end = (start + 1).min(self.rows.len());
         }
@@ -406,15 +488,7 @@ impl ViewState {
         let group_deleted = group_or(deleted);
         let end = (self.offset + viewport).min(self.rows.len());
         let mut start = self.cursor_row();
-        let mut c_end = self
-            .source_starts
-            .get(self.cursor + 1)
-            .copied()
-            .unwrap_or(self.rows.len());
-        // Blank lines share the previous row; still show at least one.
-        if c_end <= start {
-            c_end = (start + 1).min(self.rows.len());
-        }
+        let mut c_end = self.cursor_end_row() + 1;
         // The selection's row span (the fallback for unattributed rows).
         let sel_rows = selection.map(|(a, b)| {
             let f = self.source_starts.get(a).copied().unwrap_or(0);
@@ -536,6 +610,10 @@ impl ViewState {
                     ">",
                     Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
                 )
+            } else if self.old_side_rows.contains(&abs) {
+                // Old-side rows (3-2): a faint `~` — raw HEAD content,
+                // no comment/change marks.
+                ("~", Style::default().fg(Color::DarkGray))
             } else if in_sel_row {
                 // Selected rows carry a cyan bar (the composer's color, the
                 // same width as the yellow comment bar): the pending range
@@ -1463,5 +1541,117 @@ mod tests {
         assert_eq!(gutter[2].glyph, "▌", "the merged block is marked");
         assert_eq!(gutter[1].style.fg, Some(Color::Yellow), "marked rows are yellow");
     }
-}
 
+    #[test]
+    fn apply_old_side_splices_1to1_rows_and_remaps() {
+        // A hunk covering new lines 2-3 (0-based) in a 1:1 view: the
+        // block replaces those rows, the range's lines map to the block's
+        // first row, and lines below shift by the row-count delta.
+        let span = |t: &str| Span {
+            text: t.into(),
+            style: Style::default(),
+        };
+        let mut view = ViewState {
+            rows: (0..5).map(|i| vec![span(&format!("r{i}"))]).collect(),
+            offset: 0,
+            cursor: 3,
+            source_starts: (0..5).collect(),
+            row_segments: vec![Vec::new(); 5],
+            card_rows: vec![false; 5],
+            ..Default::default()
+        };
+        let block = vec![vec![span("old1")], vec![span("old2")]];
+        view.apply_old_side(&block, Some((2, 3)), 2);
+        assert_eq!(view.rows.len(), 5, "2 rows replaced by 2: 5 stay");
+        assert_eq!(view.source_starts, vec![0, 1, 2, 2, 4]);
+        assert_eq!(view.old_side_rows, 2..4);
+        assert_eq!(view.old_side_lines, Some((2, 3)));
+        // The cursor on a member line sits on the block and spans it.
+        assert_eq!(view.cursor_row(), 2);
+        assert_eq!(view.cursor_end_row(), 3);
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[2].glyph, ">", "cursor on the block");
+        assert_eq!(gutter[3].glyph, "~", "old-side rows carry ~");
+        assert_eq!(gutter[1].glyph, "│", "rows outside the block keep the border");
+        assert_eq!(gutter[4].glyph, "│", "shifted rows below keep the border");
+    }
+
+    #[test]
+    fn apply_old_side_expands_to_the_merged_group() {
+        // A changed line inside a merged paragraph (lines 0-2 share row
+        // 0): the block replaces the WHOLE group's row, never a fragment.
+        let span = |t: &str| Span {
+            text: t.into(),
+            style: Style::default(),
+        };
+        let mut view = ViewState {
+            rows: vec![vec![span("para")], vec![], vec![span("h")]],
+            offset: 0,
+            cursor: 1,
+            source_starts: vec![0, 0, 0, 1, 2],
+            row_segments: vec![Vec::new(); 5],
+            card_rows: vec![false; 5],
+            ..Default::default()
+        };
+        let block = vec![vec![span("old1")], vec![span("old2")]];
+        view.apply_old_side(&block, Some((1, 1)), 1);
+        assert_eq!(view.rows.len(), 4, "the group row replaced by the 2-row block");
+        assert_eq!(view.source_starts, vec![0, 0, 0, 2, 3]);
+        assert_eq!(view.old_side_rows, 0..2);
+        assert_eq!(
+            view.old_side_lines,
+            Some((0, 2)),
+            "the whole merged group belongs to the block"
+        );
+    }
+
+    #[test]
+    fn apply_old_side_inserts_before_the_owner_for_a_pure_deletion() {
+        // A pure-deletion hunk has no new lines: the block inserts before
+        // the following line (the owner), whose row group becomes
+        // block + own content.
+        let span = |t: &str| Span {
+            text: t.into(),
+            style: Style::default(),
+        };
+        let mut view = ViewState {
+            rows: vec![vec![span("a")], vec![span("e")]],
+            offset: 0,
+            cursor: 1,
+            source_starts: vec![0, 1],
+            row_segments: vec![Vec::new(); 2],
+            card_rows: vec![false; 2],
+            ..Default::default()
+        };
+        let block = vec![vec![span("b")], vec![span("c")], vec![span("d")]];
+        view.apply_old_side(&block, None, 1);
+        assert_eq!(view.rows.len(), 5, "3 rows inserted");
+        assert_eq!(view.source_starts, vec![0, 1]);
+        assert_eq!(view.old_side_rows, 1..4);
+        assert_eq!(view.old_side_lines, Some((1, 1)));
+        // The owner's cursor extent spans the block AND its own content.
+        assert_eq!(view.cursor_row(), 1);
+        assert_eq!(view.cursor_end_row(), 4);
+    }
+
+    #[test]
+    fn apply_old_side_on_an_empty_view_is_an_insert() {
+        let span = |t: &str| Span {
+            text: t.into(),
+            style: Style::default(),
+        };
+        let mut view = ViewState::default(); // empty file, no rows
+        let block = vec![vec![span("gone")]];
+        view.apply_old_side(&block, None, 0);
+        assert_eq!(view.rows.len(), 1, "the block lands in the empty view");
+        assert_eq!(view.old_side_rows, 0..1);
+    }
+}

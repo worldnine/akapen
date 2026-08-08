@@ -12,6 +12,7 @@
 mod comment;
 mod config;
 mod export;
+mod git;
 mod highlight;
 mod ime;
 mod render;
@@ -76,6 +77,11 @@ fn supports_view(path: &Path) -> bool {
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The diff base for the git integration (3-2): fixed at HEAD for now;
+/// the diff loader takes the ref as an argument, so a future generation
+/// shift only needs to pass a different ref here.
+const GIT_REF: &str = "HEAD";
+
 /// The 100ms event-poll/tick cadence.
 const TICK_MS: u64 = 100;
 /// Transient footer messages live this long.
@@ -89,6 +95,40 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 const HUGE_FILE: usize = 100_000;
 /// The default double-click window (see `App::double_click_ms`).
 const DOUBLE_CLICK_MS: Duration = Duration::from_millis(400);
+
+/// A hunk displayed old-side (3-2): the block replaces the hunk's new
+/// lines with the HEAD content. Cached per file so toggling and re-renders
+/// never re-parse the diff.
+#[derive(Debug)]
+struct OldSide {
+    /// Index into `git_diff.hunks`.
+    hunk: usize,
+    /// Old-side lines (context + deleted), in order.
+    old_lines: Vec<String>,
+    /// Per-line syntax-highlighted spans (tokenized as one unit, so
+    /// cross-line constructs keep their context).
+    old_spans: Vec<Vec<HiSpan>>,
+    /// Wrap-row counts per old line at the current content width.
+    row_counts: Vec<usize>,
+    /// 0-based new-file line range the hunk covers; `None` for a
+    /// pure-deletion hunk (its block inserts before `owner`).
+    range: Option<(usize, usize)>,
+    /// The new-file line the block is anchored to (cursor, marks).
+    owner: usize,
+    /// Old (HEAD) line numbers, 1-based, per old line.
+    old_numbers: Vec<u32>,
+}
+
+/// The line a comment/composer bar's rows attach to: normally the anchor
+/// line; inside a toggled old-side range (3-2) the range's first line —
+/// the bar renders after the block, and folding it there keeps
+/// [`App::line_rows`] in agreement with what [`build_rows`] paints.
+fn fold_bar_target(old_side: &Option<OldSide>, line: usize) -> usize {
+    old_side
+        .as_ref()
+        .and_then(|os| os.range)
+        .map_or(line, |(a, b)| if line >= a && line <= b { a } else { line })
+}
 
 /// Per-file state: everything that is unique to each file in the session.
 /// Swapped in/out of the active App fields on file switch.
@@ -112,6 +152,12 @@ struct FileState {
     last_change: Option<(usize, usize)>,
     last_added: HashSet<usize>,
     last_deleted_before: HashSet<usize>,
+    /// Git integration (3章): the startup snapshot vs `git_ref` and the
+    /// toggled old-side hunk, if any. `None`/empty outside a repository.
+    git_diff: Option<git::Diff>,
+    git_added: HashSet<usize>,
+    git_deleted_before: HashSet<usize>,
+    old_side: Option<OldSide>,
 }
 
 fn main() -> Result<()> {
@@ -147,12 +193,12 @@ fn main() -> Result<()> {
                  keys:\n\
                  \x20 view mode:    j/k/arrows scroll, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
                  \x20                v select, c comment, s send, y copy, d delete, e edit,\n\
-                 \x20                r reload, ]/[ next/prev file, l comments, Ctrl+p files,\n\
-                 \x20                Tab source mode\n\
+                 \x20                r reload, o old side (git), ]/[ next/prev file, l comments,\n\
+                 \x20                Ctrl+p files, Tab source mode\n\
                  \x20 source mode:  j/k move, v select, c comment, s send,\n\
                  \x20                y copy, d delete, e edit, r reload, n/N next comment,\n\
-                 \x20                ]/[ next/prev file, l comments, Ctrl+p files,\n\
-                 \x20                Tab view mode (Markdown files only)\n\
+                 \x20                o old side (git), ]/[ next/prev file, l comments,\n\
+                 \x20                Ctrl+p files, Tab view mode (Markdown files only)\n\
                  \x20 overlays:     j/k move, Enter jump/switch, d delete (comments),\n\
                  \x20                ? help, Esc/q close, click outside close\n\
                  \x20 input:        Enter confirm, Ctrl+j newline, Esc cancel"
@@ -282,6 +328,15 @@ struct App {
     /// Lines in the new file that immediately follow a deletion block
     /// (0-based indices). Marked with a red `-` gutter until next reload.
     last_deleted_before: HashSet<usize>,
+    /// The diff base ref (3-2): HEAD today; a future generation shift
+    /// changes this one field.
+    git_ref: String,
+    /// Git integration (3章): per-file snapshot vs `git_ref` (None outside
+    /// a repository) and the toggled old-side hunk, if any.
+    git_diff: Option<git::Diff>,
+    git_added: HashSet<usize>,
+    git_deleted_before: HashSet<usize>,
+    old_side: Option<OldSide>,
     running: bool,
     /// Resolved UI colors for the current `--light` / dark mode.
     ui_selected_bg: Color,
@@ -381,6 +436,11 @@ impl App {
             last_change: None,
             last_added: HashSet::new(),
             last_deleted_before: HashSet::new(),
+            git_ref: GIT_REF.to_string(),
+            git_diff: None,
+            git_added: HashSet::new(),
+            git_deleted_before: HashSet::new(),
+            old_side: None,
             running: true,
             ui_selected_bg: selected_bg(light),
             ui_changed_bg: changed_bg(light),
@@ -418,18 +478,63 @@ impl App {
     }
 
     /// Rebuild the per-source-line wrap cache when the content width changes.
-    /// Inline card/composer rows are folded in by [`App::refresh_line_rows`],
-    /// which runs every frame (composer height grows as you type).
+    /// Inline card/composer rows are folded in by [`App::refresh_line_rows`], which
+    /// runs every frame (composer height grows as you type).
     fn ensure_row_cache(&mut self, width: u16) {
         if width == self.content_width && !self.base_rows.is_empty() {
             return;
         }
+        self.content_width = width;
+        self.rebuild_base_rows();
+    }
+
+    /// Recompute `base_rows` from the tokenized spans, then fold the
+    /// toggled old-side block in (3-2): the block's rows replace the
+    /// hunk's new lines (attributed to the range's first line) or insert
+    /// before the owner line for a pure-deletion hunk — so every
+    /// navigation helper (`row_of`, `max_offset`, the mouse mapping) sees
+    /// the same layout the renderer paints. Runs on width changes and on
+    /// the `o` toggle.
+    fn rebuild_base_rows(&mut self) {
+        let width = self.content_width.max(1) as usize;
         self.base_rows = self
             .spans
             .iter()
-            .map(|spans| wrap_spans(spans, width as usize).len())
+            .map(|spans| wrap_spans(spans, width).len())
             .collect();
-        self.content_width = width;
+        if let Some(os) = &mut self.old_side {
+            os.row_counts = os
+                .old_spans
+                .iter()
+                .map(|spans| wrap_spans(spans, width).len())
+                .collect();
+            let block: usize = os.row_counts.iter().sum();
+            if let Some((a, b)) = os.range {
+                let hi = (b + 1).min(self.base_rows.len());
+                for i in a..hi {
+                    self.base_rows[i] = 0;
+                }
+                if a < self.base_rows.len() {
+                    self.base_rows[a] = block;
+                }
+            } else if os.owner < self.base_rows.len() {
+                self.base_rows[os.owner] += block;
+            }
+        }
+    }
+
+    /// The display rows the toggled old-side block occupies, when `line`
+    /// is inside it (3-2). The merged-block model attributes the block to
+    /// the range's first line, so [`App::rows_of`] reports 0 for the other
+    /// member lines; cursor/composer visibility must use the whole block
+    /// (plus the bars folded onto it) instead.
+    fn old_block_extent(&self, line: usize) -> Option<usize> {
+        let os = self.old_side.as_ref()?;
+        let (a, b) = os.range?;
+        if line < a || line > b {
+            return None;
+        }
+        Some(self.line_rows[a..=b.min(self.line_rows.len().saturating_sub(1))].iter().sum())
     }
 
     /// Fold inline card rows (saved comments) and the composer box (while
@@ -449,13 +554,18 @@ impl App {
                 continue;
             }
             let i = (c.end as usize).saturating_sub(1);
-            if i < extra.len() {
-                extra[i] += card_line_count(c, full_width);
+            // A bar anchored inside a toggled old-side range renders after
+            // the block, so its rows fold onto the range's first line.
+            let target = fold_bar_target(&self.old_side, i);
+            if target < extra.len() {
+                extra[target] += card_line_count(c, full_width);
             }
         }
-        if self.mode == Mode::Input && self.input_end < extra.len() {
-            extra[self.input_end] +=
-                composer_line_count(&self.input, self.input_cursor, full_width);
+        if self.mode == Mode::Input {
+            let target = fold_bar_target(&self.old_side, self.input_end);
+            if target < extra.len() {
+                extra[target] += composer_line_count(&self.input, self.input_cursor, full_width);
+            }
         }
         self.line_rows = self
             .base_rows
@@ -482,13 +592,26 @@ impl App {
     }
 
     /// Keep the cursor line visible; return nothing, mutate `offset`.
+    /// A cursor inside a toggled old-side range (3-2) anchors the whole
+    /// block: the merged-block model reports 0 rows for member lines, so
+    /// the block extent (plus its bars) stands in for the cursor's own.
     fn keep_cursor_visible(&mut self, height: u16) {
         if self.source.is_empty() || self.line_rows.is_empty() {
             self.offset = 0;
             return;
         }
-        let start = self.row_of(self.cursor);
-        let end = start + self.rows_of(self.cursor);
+        let in_block = self
+            .old_side
+            .as_ref()
+            .and_then(|os| os.range)
+            .is_some_and(|(a, b)| self.cursor >= a && self.cursor <= b);
+        let (start, rows) = if in_block {
+            let a = self.old_side.as_ref().and_then(|os| os.range).unwrap().0;
+            (self.row_of(a), self.old_block_extent(self.cursor).unwrap_or(0))
+        } else {
+            (self.row_of(self.cursor), self.rows_of(self.cursor))
+        };
+        let end = start + rows;
         let height = height.max(1) as usize;
         if start < self.offset {
             self.offset = start;
@@ -512,10 +635,28 @@ impl App {
         {
             return;
         }
-        let end = self.row_of(self.input_end) + self.rows_of(self.input_end);
+        let end = self.composer_end_row();
         let height = height.max(1);
         if end > self.offset + height {
             self.offset = end.saturating_sub(height);
+        }
+    }
+
+    /// The display row just past the composer bar's bottom rule — the
+    /// anchor [`App::keep_composer_visible`] scrolls to. Inside a toggled
+    /// old-side range (3-2) the bar renders after the block and the
+    /// range's cards (all folded onto the range's first line), so the
+    /// extent is the block start plus every row the range owns.
+    fn composer_end_row(&self) -> usize {
+        if let Some(os) = &self.old_side
+            && let Some((a, b)) = os.range
+            && self.input_end >= a
+            && self.input_end <= b
+        {
+            let hi = (b + 1).min(self.line_rows.len());
+            self.row_of(a) + self.line_rows[a..hi].iter().sum::<usize>()
+        } else {
+            self.row_of(self.input_end) + self.rows_of(self.input_end)
         }
     }
 
@@ -667,6 +808,15 @@ fn run(config: Config) -> Result<()> {
             mode: if supports_view(f) { Mode::View } else { Mode::Source },
             ..Default::default()
         };
+        // Git snapshot (3-1): marks for lines changed vs HEAD, and the
+        // diff behind the `o` toggle. Reply mode skips it — the doc is a
+        // temp copy of the agent's message, never part of a repo.
+        if !config.reply {
+            let (diff, added, deleted) = git_snapshot(GIT_REF, f, fs.source.len());
+            fs.git_diff = diff;
+            fs.git_added = added;
+            fs.git_deleted_before = deleted;
+        }
         // Record the on-disk stamp so the first poll doesn't treat the file
         // as freshly edited.
         if let Ok(meta) = std::fs::metadata(f) {
@@ -1342,10 +1492,12 @@ fn source_line_at(app: &App, width: usize, display_row: usize) -> Option<usize> 
             let line_rows = app.base_rows.get(idx).copied().unwrap_or(1);
             let card_rows: usize = cards
                 .iter()
-                .filter(|c| c.end as usize - 1 == idx)
+                .filter(|c| fold_bar_target(&app.old_side, c.end as usize - 1) == idx)
                 .map(|c| card_line_count(c, full_width))
                 .sum();
-            let composer_rows = if app.mode == Mode::Input && app.input_end == idx {
+            let composer_rows = if app.mode == Mode::Input
+                && fold_bar_target(&app.old_side, app.input_end) == idx
+            {
                 composer_line_count(&app.input, app.input_cursor, full_width)
             } else {
                 0
@@ -1551,6 +1703,27 @@ fn line_change_counts(old: &[String], new: &[String]) -> (usize, usize) {
     (new.len() - p - s, old.len() - p - s)
 }
 
+/// The git snapshot for one file (3-1): the diff vs `diff_ref` plus the
+/// per-line mark sets, ready to display. `None`/empty outside a git
+/// repository — the non-git behavior is preserved (no marks, `o`
+/// disabled). An untracked file counts as all-new (no HEAD side).
+fn git_snapshot(
+    diff_ref: &str,
+    path: &Path,
+    new_len: usize,
+) -> (Option<git::Diff>, HashSet<usize>, HashSet<usize>) {
+    let Some(diff) = git::Diff::load(diff_ref, path) else {
+        return (None, HashSet::new(), HashSet::new());
+    };
+    let added = if diff.untracked {
+        (0..new_len).collect()
+    } else {
+        diff.added(new_len)
+    };
+    let deleted = diff.deleted_before(new_len);
+    (Some(diff), added, deleted)
+}
+
 /// Re-read the file after an external (agent) edit. Returns `Ok(())` when
 /// the file was handled (read successfully — even if the content is
 /// unchanged); `Err(e)` when the read failed mid-write (e.g. non-UTF-8
@@ -1623,6 +1796,18 @@ fn reload_source(app: &mut App) -> anyhow::Result<()> {
     app.spans = app
         .highlight
         .highlight_with(&app.source.content, syntax_for(app.current_file_path()));
+    // Git snapshot refreshed (論点 5): the marks re-align to the new
+    // content vs the diff base, so the agent's fix leaves the marks
+    // describing the CURRENT working tree. The old-side toggle is reset
+    // — its hunk indices may have moved (snapshot semantics, P4).
+    if !reply {
+        let (diff, added, deleted) =
+            git_snapshot(&app.git_ref, app.current_file_path(), app.source.len());
+        app.git_diff = diff;
+        app.git_added = added;
+        app.git_deleted_before = deleted;
+    }
+    app.old_side = None;
     // View: re-render at the same width, keeping the cursor fraction.
     let fraction = app.view.cursor_fraction();
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -1744,19 +1929,128 @@ fn render_view_with_cards(
     view
 }
 
+/// Render the current file's view with the comment cards AND the toggled
+/// old-side block (3-2) folded in. Every view rebuild (comment edits,
+/// resize, mode handoffs) goes through here, so the toggle survives
+/// re-renders at the same width.
+fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
+    let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+    let width = view_render_width(w);
+    let mut view = render_view_with_cards(&app.source, width, &app.highlight, comments);
+    if let Some(os) = &app.old_side {
+        view.apply_old_side(&old_side_view_rows(os), os.range, os.owner);
+    }
+    view
+}
+
+/// The old-side block as raw view rows (3-2): the old lines wrapped at
+/// the view's text width in a dim style — raw source, visually distinct
+/// from the rendered markdown around it.
+fn old_side_view_rows(os: &OldSide) -> Vec<Vec<HiSpan>> {
+    let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+    let width = view_render_width(w) as usize;
+    let mut rows = Vec::new();
+    for line in &os.old_lines {
+        let spans = vec![HiSpan {
+            text: line.clone(),
+            style: Style::default().fg(Color::DarkGray),
+        }];
+        rows.extend(wrap_spans(&spans, width));
+    }
+    rows
+}
+
+/// Rebuild the source-mode layout and the rendered view after the `o`
+/// toggle (3-2): `base_rows` folds the block in (navigation math),
+/// `line_rows` re-attaches the bars onto the block, and the view splices
+/// the block's rows in place of the hunk. On and off converge on the same
+/// path, so toggling never leaves stale layout.
+fn apply_old_side_state(app: &mut App) {
+    app.rebuild_base_rows();
+    app.refresh_line_rows();
+    replace_view_preserving_cursor(app);
+    app.keep_cursor_visible(app.source_viewport_rows() as u16);
+    app.offset = app.offset.min(app.max_offset(app.source_viewport_rows() as u16));
+}
+
+/// `o`: toggle the hunk under the cursor between old (HEAD) and new
+/// display (3-2). The diff base is fixed at `git_ref` (HEAD today); the
+/// loader takes the ref as an argument, so a future generation shift
+/// only changes what is passed there.
+fn toggle_old_side(app: &mut App) {
+    let new_len = app.source.len();
+    let line = if app.mode == Mode::View {
+        app.view.cursor
+    } else {
+        app.cursor
+    };
+    let Some(diff) = app.git_diff.clone() else {
+        app.flash_err("not in a git repository — o disabled");
+        return;
+    };
+    if diff.untracked {
+        app.flash_err("untracked file — nothing to compare against HEAD");
+        return;
+    }
+    // A second `o` with the cursor still on the toggled hunk returns to
+    // the new side; with the cursor elsewhere it toggles that hunk.
+    if let Some(os) = &app.old_side
+        && diff.hunk_at(line, new_len) == Some(os.hunk)
+    {
+        app.old_side = None;
+        apply_old_side_state(app);
+        app.flash("new side");
+        return;
+    }
+    let Some(h) = diff.hunk_at(line, new_len) else {
+        app.flash_err("no git changes on this line");
+        return;
+    };
+    let hunk = &diff.hunks[h];
+    let old_lines = hunk.old_lines();
+    let range = hunk.new_range();
+    let owner = range.map_or_else(|| hunk.owner(new_len), |(a, _)| a);
+    let old_numbers: Vec<u32> = (hunk.old_start..).take(old_lines.len()).collect();
+    // Tokenize the old block as one unit so cross-line constructs (code
+    // fences, block comments) keep their context; pad when a trailing
+    // empty line collapses in the join.
+    let old_content = old_lines.join("\n");
+    let mut old_spans = app
+        .highlight
+        .highlight_with(&old_content, syntax_for(app.current_file_path()));
+    while old_spans.len() < old_lines.len() {
+        old_spans.push(vec![HiSpan {
+            text: String::new(),
+            style: Style::default(),
+        }]);
+    }
+    app.old_side = Some(OldSide {
+        hunk: h,
+        old_lines,
+        old_spans,
+        row_counts: Vec::new(),
+        range,
+        owner,
+        old_numbers,
+    });
+    apply_old_side_state(app);
+    let where_ = match range {
+        Some((a, b)) => format!("L{}-{}", a + 1, b + 1),
+        None => format!("before L{}", owner + 1),
+    };
+    app.flash(format!("old side vs HEAD · {where_}"));
+}
+
 /// Re-render the view after a comment was added/deleted (or a reload), and
 /// keep the cursor line at the same screen row it was on — inserting a card
 /// shifts the rows below, so without this the cursor jumps.
 fn replace_view_preserving_cursor(app: &mut App) {
     let line = app.view.cursor;
     let screen = app.view.cursor_row() as isize - app.view.offset as isize;
-    let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    let width = view_render_width(w);
     // Current file's cards, minus the one being re-edited (hidden under
     // the edit composer).
-    let file_comments: Vec<Comment> =
-        visible_cards(app).into_iter().cloned().collect();
-    let mut view = render_view_with_cards(&app.source, width, &app.highlight, &file_comments);
+    let file_comments: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
+    let mut view = render_current_view(app, &file_comments);
     view.goto_source_line(line);
     let target = view.cursor_row() as isize - screen;
     let viewport = app.view_viewport_rows();
@@ -1847,12 +2141,17 @@ fn view_marker_flags(comments: &[Comment], n_lines: usize, current_file: &Path) 
     marked
 }
 
-/// Per-line flags: which source lines were added or changed by the last
-/// reload. Mirrors [`view_marker_flags`] so the view gutter can show a
-/// green `▌` for changed lines.
-fn view_changed_flags(last_added: &HashSet<usize>, n_lines: usize) -> Vec<bool> {
+/// Per-line flags: which source lines were added or changed — by the last
+/// reload and/or by the git diff vs HEAD (3-1). Mirrors
+/// [`view_marker_flags`] so the view gutter can show a green `▌` for
+/// changed lines.
+fn view_changed_flags(
+    last_added: &HashSet<usize>,
+    git_added: &HashSet<usize>,
+    n_lines: usize,
+) -> Vec<bool> {
     let mut changed = vec![false; n_lines];
-    for &i in last_added {
+    for &i in last_added.iter().chain(git_added) {
         if i < n_lines {
             changed[i] = true;
         }
@@ -1861,10 +2160,15 @@ fn view_changed_flags(last_added: &HashSet<usize>, n_lines: usize) -> Vec<bool> 
 }
 
 /// Per-line flags: which source lines immediately follow a deletion block
-/// from the last reload. The view gutter shows a red `▌` for them.
-fn view_deleted_flags(last_deleted_before: &HashSet<usize>, n_lines: usize) -> Vec<bool> {
+/// — from the last reload and/or the git diff (3-1). The view gutter
+/// shows a red `▌` for them.
+fn view_deleted_flags(
+    last_deleted_before: &HashSet<usize>,
+    git_deleted_before: &HashSet<usize>,
+    n_lines: usize,
+) -> Vec<bool> {
     let mut deleted = vec![false; n_lines];
-    for &i in last_deleted_before {
+    for &i in last_deleted_before.iter().chain(git_deleted_before) {
         if i < n_lines {
             deleted[i] = true;
         }
@@ -2010,6 +2314,7 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
         KeyCode::Char('q') => request_quit(app),
         KeyCode::Char('r') => reload_now(app),
         KeyCode::Char('i') => ignore_change(app),
+        KeyCode::Char('o') => toggle_old_side(app),
         KeyCode::Char('e') => {
             if app.config.reply {
                 // Reply mode: the doc is the agent's message — editing the
@@ -2180,13 +2485,11 @@ fn view_render_width(terminal_width: u16) -> u16 {
 
 /// Re-render at the current terminal width, preserving the cursor fraction.
 fn rerender_view(app: &mut App) {
-    if let Ok((width, _)) = ratatui::crossterm::terminal::size() {
+    if ratatui::crossterm::terminal::size().is_ok() {
         let fraction = app.view.cursor_fraction();
-        let width = view_render_width(width);
-        let file_comments: Vec<Comment> =
-            visible_cards(app).into_iter().cloned().collect();
-        let mut view =
-            render_view_with_cards(&app.source, width, &app.highlight, &file_comments);
+        // render_current_view derives the render width from the terminal.
+        let file_comments: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
+        let mut view = render_current_view(app, &file_comments);
         view.goto_fraction(fraction);
         // Reveal the cursor in the fresh view (draw_view no longer
         // auto-scrolls to it every frame).
@@ -2323,6 +2626,7 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
         KeyCode::Char('q') => request_quit(app),
         KeyCode::Char('r') => reload_now(app),
         KeyCode::Char('i') => ignore_change(app),
+        KeyCode::Char('o') => toggle_old_side(app),
         KeyCode::Char('e') => {
             if app.config.reply {
                 // Reply mode: the doc is the agent's message — editing the
@@ -3181,8 +3485,12 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // `visible_text` resolves it to the exact spans via the phrase
     // segments.
     let sel = app.selection.map(|s| s.range());
-    let changed = view_changed_flags(&app.last_added, app.source.len());
-    let deleted = view_deleted_flags(&app.last_deleted_before, app.source.len());
+    let changed = view_changed_flags(&app.last_added, &app.git_added, app.source.len());
+    let deleted = view_deleted_flags(
+        &app.last_deleted_before,
+        &app.git_deleted_before,
+        app.source.len(),
+    );
     // The composer opened from view mode (`c` in view) is drawn inline
     // right under the cursor line, so the comment can be typed without
     // leaving the rendered view. While it is open it is part of the
@@ -3492,6 +3800,7 @@ fn help_rows(esc_quit: bool, reply: bool) -> Vec<(&'static str, &'static str)> {
     } else {
         rows.insert(1, ("file", "]/[ · ^p files"));
         rows.push(("reload", "r reload · i ignore · e edit"));
+        rows.push(("git", "o old side vs HEAD"));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
@@ -3962,6 +4271,13 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     let cards = visible_cards(app);
     let mut row = 0usize;
     for idx in 0..app.source.len() {
+        let old_side = app.old_side.as_ref();
+        let range = old_side.and_then(|os| os.range);
+        let in_old_range = range.is_some_and(|(a, b)| idx >= a && idx <= b);
+        let range_first = range.is_some_and(|(a, _)| a == idx);
+        // A pure-deletion hunk's block renders at its owner line, above
+        // the owner's own content.
+        let is_owner = old_side.is_some_and(|os| os.range.is_none() && os.owner == idx);
         let line_rows = app.rows_of(idx);
         if row + line_rows <= app.offset {
             row += line_rows;
@@ -3970,10 +4286,56 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         if row >= app.offset + height as usize {
             break;
         }
+        if in_old_range && !range_first {
+            // The block already rendered at the range's first line; this
+            // member line's rows (0 base — bars were folded onto the
+            // range's first line) paint nothing but still advance `row`.
+            row += line_rows;
+            continue;
+        }
+        if in_old_range || is_owner {
+            let os = old_side.unwrap();
+            // The old side replaces the hunk's new lines (3-2): each old
+            // line renders with its HEAD number and a faint `~` mark.
+            out.extend(old_block_rows(app, os, width, full_width));
+            // Bars anchored inside the toggled range render after the
+            // block, in anchor order (their own rows are gone).
+            for c in cards.iter().filter(|c| {
+                range.is_some_and(|(a, b)| {
+                    let i = c.end as usize - 1;
+                    i >= a && i <= b
+                })
+            }) {
+                out.extend(comment_bar_lines(c, full_width));
+            }
+            // The composer anchored inside the range sits below the block
+            // too (fold_bar_target folds its rows onto the first line).
+            if app.mode == Mode::Input
+                && range.is_some_and(|(a, b)| app.input_end >= a && app.input_end <= b)
+            {
+                let start_row = out.len();
+                out.extend(composer_lines(
+                    &app.input,
+                    app.input_cursor,
+                    app.input_start,
+                    app.input_end,
+                    full_width,
+                    app.editing_comment.is_some(),
+                ));
+                let (crow, ccol) = composer_cursor_pos(&app.input, app.input_cursor, full_width);
+                composer_cursor = Some((ccol as u16, (start_row + 1 + crow) as u16));
+            }
+            if in_old_range {
+                row += line_rows;
+                continue;
+            }
+            // Pure-deletion owner: fall through so its own content and
+            // bars render below the block.
+        }
         let selected = app.selection.is_some_and(|s| s.contains(idx));
         let commented = app.comments.iter().any(|c| c.covers(idx) && c.file_path == app.current_file_path());
-        let changed = app.last_added.contains(&idx);
-        let deleted_before = app.last_deleted_before.contains(&idx);
+        let changed = app.last_added.contains(&idx) || app.git_added.contains(&idx);
+        let deleted_before = app.last_deleted_before.contains(&idx) || app.git_deleted_before.contains(&idx);
         let is_cursor = idx == app.cursor;
         let cursor_mark = if is_cursor {
             ">"
@@ -4122,6 +4484,88 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         row += line_rows;
     }
     (Text::from(out), composer_cursor)
+}
+
+/// The old-side block (3-2) as source-mode rows: each old line renders
+/// like a normal gutter row — its HEAD line number, a faint `~` mark
+/// (the block's first row shows the `>` cursor marker instead when the
+/// cursor sits on the hunk), and the syntax-highlighted old text. The
+/// cursor/selection background spans the block like any cursor row.
+fn old_block_rows(app: &App, os: &OldSide, width: usize, full_width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let block_cursor = os
+        .range
+        .map_or(os.owner == app.cursor, |(a, b)| app.cursor >= a && app.cursor <= b);
+    let block_selected = app.selection.is_some_and(|s| {
+        let (sa, sb) = s.range();
+        os.range
+            .map_or(sa <= os.owner && os.owner <= sb, |(a, b)| sa <= b && sb >= a)
+    });
+    let cursor_bg = block_cursor || block_selected;
+    let gutter_style = if cursor_bg {
+        Style::default().bg(app.ui_selected_bg)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    for (i, old_spans) in os.old_spans.iter().enumerate() {
+        let is_cursor_row = block_cursor && i == 0;
+        let mark = if is_cursor_row { ">" } else { "~" };
+        let mark_style = if is_cursor_row {
+            let s = Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD);
+            if cursor_bg {
+                s.bg(app.ui_selected_bg)
+            } else {
+                s
+            }
+        } else {
+            gutter_style
+        };
+        let num = Span::styled(
+            format!("{:>width$} ", os.old_numbers[i], width = app.source.gutter_width),
+            gutter_style,
+        );
+        for (k, frags) in wrap_spans(old_spans, width).iter().enumerate() {
+            let mut spans: Vec<Span> = Vec::new();
+            if k == 0 {
+                spans.push(Span::styled(mark, mark_style));
+                spans.push(num.clone());
+            } else {
+                // Continuation rows indent by the gutter width, matching
+                // the normal wrapped lines.
+                let indent_style = if cursor_bg {
+                    Style::default().bg(app.ui_selected_bg)
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(
+                    " ".repeat(app.gutter_cols as usize),
+                    indent_style,
+                ));
+            }
+            for f in frags {
+                let style = if cursor_bg {
+                    f.style.bg(app.ui_selected_bg)
+                } else {
+                    f.style
+                };
+                spans.push(Span::styled(f.text.clone(), style));
+            }
+            if cursor_bg {
+                let used: usize = spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                if used < full_width {
+                    spans.push(Span::styled(
+                        " ".repeat(full_width - used),
+                        Style::default().bg(app.ui_selected_bg),
+                    ));
+                }
+            }
+            out.push(Line::from(spans));
+        }
+    }
+    out
 }
 
 /// Display rows a saved-comment bar occupies under its anchor line
@@ -4296,6 +4740,10 @@ impl App {
         old.last_change = self.last_change.take();
         old.last_added = std::mem::take(&mut self.last_added);
         old.last_deleted_before = std::mem::take(&mut self.last_deleted_before);
+        old.git_diff = self.git_diff.take();
+        old.git_added = std::mem::take(&mut self.git_added);
+        old.git_deleted_before = std::mem::take(&mut self.git_deleted_before);
+        old.old_side = self.old_side.take();
 
         // Close the composer if it was open.
         self.input.clear();
@@ -4324,6 +4772,10 @@ impl App {
         self.last_change = new.last_change.take();
         self.last_added = std::mem::take(&mut new.last_added);
         self.last_deleted_before = std::mem::take(&mut new.last_deleted_before);
+        self.git_diff = new.git_diff.take();
+        self.git_added = std::mem::take(&mut new.git_added);
+        self.git_deleted_before = std::mem::take(&mut new.git_deleted_before);
+        self.old_side = new.old_side.take();
 
         self.current_file_index = new_index;
         self.confirm_quit = false;
@@ -8302,5 +8754,363 @@ mod handoff_tests {
         assert_eq!(app.view.cursor, 45);
         on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
         assert_eq!(app.cursor, 45, "ラウンドトリップで行が動かない");
+    }
+}
+#[cfg(test)]
+mod git_tests {
+    use super::*;
+    use crate::config::{Config, EscQuit};
+    use crate::highlight::Highlighter;
+    use crate::ime::ImeMode;
+    use crate::view::ViewState;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// Init a git repo in `dir` and commit `doc.md` with `lines`.
+    /// Returns the file path.
+    fn init_repo(dir: &std::path::Path, lines: &[&str]) -> std::path::PathBuf {
+        let status = Command::new("git").arg("init").arg("-q").arg(dir).status().unwrap();
+        assert!(status.success(), "git init failed — is git installed?");
+        let path = dir.join("doc.md");
+        let content = lines.join("\n") + "\n";
+        std::fs::write(&path, content).unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &[
+            "-c", "user.name=test", "-c", "user.email=test@test", "commit", "-q", "-m", "init",
+        ]);
+        path
+    }
+
+    fn overwrite(path: &std::path::Path, lines: &[&str]) {
+        std::fs::write(path, lines.join("\n") + "\n").unwrap();
+    }
+
+    /// An app over `path` with the git snapshot loaded, exactly like
+    /// run() builds one.
+    fn git_app(path: std::path::PathBuf, mode: Mode) -> App {
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(path).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        app.mode = mode;
+        app.gutter_cols = 3;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        let (diff, added, deleted) = git_snapshot(&app.git_ref, &app.files[0], app.source.len());
+        app.git_diff = diff;
+        app.git_added = added;
+        app.git_deleted_before = deleted;
+        app
+    }
+
+    /// The rendered source rows as plain strings (gutter included).
+    fn source_rows(app: &App) -> Vec<String> {
+        let (text, _) = build_rows(app, 100, 75);
+        text.lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn git_marks_render_in_the_source_gutter() {
+        // 3-1: lines changed vs HEAD get the green `+` gutter (merged with
+        // the reload-diff marks); lines after a deletion block the red `-`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]);
+        overwrite(&path, &["one", "two", "three", "CHANGED", "five", "six", "seven", "eight", "nine", "ten"]);
+        let mut app = git_app(path, Mode::Source);
+        let rows = source_rows(&app);
+        assert!(rows[3].starts_with("+ 4 "), "changed line gets the + mark: {}", rows[3]);
+        assert!(rows[3].contains("CHANGED"));
+        assert!(rows[0].starts_with("> 1 "), "the cursor row keeps the > mark");
+        assert!(!rows[9].starts_with("+"), "unchanged lines stay clean");
+        // The reload-diff marks merge with the git marks: a line the
+        // session itself changed is marked too.
+        app.last_added.insert(8);
+        let rows = source_rows(&app);
+        assert!(rows[8].starts_with("+ 9 "), "reload mark joins the git mark");
+    }
+
+    #[test]
+    fn o_toggles_the_hunk_to_old_side_in_source_mode() {
+        // 3-2: `o` on a changed line replaces the hunk's new lines with
+        // the HEAD content — old line numbers and a faint `~` mark; a
+        // second `o` returns to the new side.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]);
+        overwrite(&path, &["one", "two", "three", "CHANGED", "five", "six", "seven", "eight", "nine", "ten"]);
+        let mut app = git_app(path, Mode::Source);
+        app.cursor = 3; // on the changed line
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let os = app.old_side.as_ref().expect("the hunk is toggled");
+        // Change at line 4 with 3 context lines: the hunk is old 1-7.
+        assert_eq!(os.old_lines, vec!["one", "two", "three", "four", "five", "six", "seven"]);
+        assert_eq!(os.old_numbers, vec![1, 2, 3, 4, 5, 6, 7], "HEAD line numbers");
+        assert_eq!(os.range, Some((0, 6)), "the hunk's new-line range");
+        let rows = source_rows(&app);
+        assert!(rows[0].starts_with("> 1 "), "the block opens with the cursor mark: {}", rows[0]);
+        assert!(rows[3].starts_with("~ 4 "), "old line 4 with a faint mark: {}", rows[3]);
+        assert!(rows[3].contains("four"), "the old content shows: {}", rows[3]);
+        assert!(!rows.iter().any(|r| r.contains("CHANGED")), "the new content is replaced");
+        assert!(rows[7].starts_with("  8 "), "the hunk's trailing context follows: {}", rows[7]);
+        // A second `o` with the cursor still on the hunk returns to new.
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none(), "toggled back");
+        let rows = source_rows(&app);
+        assert!(rows[3].starts_with("> 4 "), "the new side is back (cursor row): {}", rows[3]);
+        assert!(rows[3].contains("CHANGED"));
+    }
+
+    #[test]
+    fn o_moves_with_the_cursor_and_flashes_on_unchanged_lines() {
+        // A 20-line file so the hunk (change at line 10) has context
+        // outside its range: the ends are untouched by the diff.
+        let lines: Vec<String> = (1..=20).map(|i| format!("line{i:02}")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &lines.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let mut work = lines.clone();
+        work[9] = "CHANGED".into();
+        overwrite(&path, &work.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let mut app = git_app(path, Mode::Source);
+        // Unchanged line: nothing to toggle.
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none());
+        let (msg, _, is_error) = app.status.as_ref().expect("a flash explains");
+        assert!(*is_error, "it is an error toast: {msg}");
+        assert!(msg.contains("no git changes"), "message names the miss: {msg}");
+        // Toggle the hunk, move the cursor OUT of it, and `o` there
+        // flashes instead of untoggling — `o` always means the cursor's
+        // hunk.
+        app.cursor = 9;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        app.cursor = 0;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some(), "cursor outside the hunk: no untoggle");
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn o_toggles_a_pure_deletion_hunk() {
+        // A hunk whose new side is empty — the form git emits for a
+        // whole-file deletion. The block renders before the following
+        // line (the deletion position, marked red by 3-1). The diff is
+        // injected directly: with default context git only produces
+        // `+c,0` hunks for whole-file deletions, and an empty new file
+        // has no source rows to render the block into.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["a", "b", "c", "d", "e"]);
+        overwrite(&path, &["a", "e"]);
+        let mut app = git_app(path, Mode::Source);
+        app.git_diff = Some(crate::git::Diff {
+            hunks: vec![crate::git::Hunk {
+                old_start: 2,
+                old_len: 3,
+                new_start: 2,
+                new_len: 0,
+                body: vec![
+                    crate::git::HunkLine { tag: crate::git::Tag::Delete, text: "b".into() },
+                    crate::git::HunkLine { tag: crate::git::Tag::Delete, text: "c".into() },
+                    crate::git::HunkLine { tag: crate::git::Tag::Delete, text: "d".into() },
+                ],
+            }],
+            untracked: false,
+        });
+        app.git_deleted_before =
+            app.git_diff.as_ref().unwrap().deleted_before(app.source.len());
+        assert!(app.git_deleted_before.contains(&1), "the following line is marked");
+        let rows = source_rows(&app);
+        assert!(
+            rows[1].starts_with("-2 e"),
+            "deletion position mark on the following line: {}",
+            rows[1]
+        );
+        app.cursor = 1; // the following line — the deletion position
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let os = app.old_side.as_ref().expect("the deletion hunk toggles");
+        assert_eq!(os.range, None, "pure deletion has no new-line range");
+        assert_eq!(os.old_lines, vec!["b", "c", "d"]);
+        assert_eq!(os.old_numbers, vec![2, 3, 4], "the deleted lines' HEAD numbers");
+        let rows = source_rows(&app);
+        assert!(rows[1].starts_with(">2 b"), "the block opens with the cursor mark: {}", rows[1]);
+        assert!(rows[2].contains("c") && rows[3].contains("d"), "the deleted lines show");
+        // The owner row (cursor on it) shows the `>` marker; the red `-`
+        // deletion mark was asserted above, before the toggle.
+        assert!(rows[4].starts_with(">2 e"), "the following line keeps its place: {}", rows[4]);
+    }
+
+    #[test]
+    fn o_works_in_view_mode_and_restores() {
+        // 3-2 in the rendered view: the block is spliced in place of the
+        // hunk's rows as raw dim lines with a `~` marker; the cursor's
+        // extent spans the block; `o` restores the render exactly.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["# one", "# two", "# three", "# four", "# five", "# six", "# seven", "# eight", "# nine", "# ten"]);
+        overwrite(&path, &["# one", "# two", "# three", "# CHANGED", "# five", "# six", "# seven", "# eight", "# nine", "# ten"]);
+        let mut app = git_app(path, Mode::View);
+        let before_len = app.view.rows.len();
+        let before_starts = app.view.source_starts.clone();
+        app.view.goto_source_line(3); // the changed heading
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let rows = &app.view.rows;
+        let range = app.view.old_side_rows.clone();
+        assert!(!range.is_empty(), "the block occupies rows");
+        let block_text: String = rows[range.clone()]
+            .iter()
+            .flatten()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(block_text.contains("# four"), "old content spliced in: {block_text}");
+        assert!(!block_text.contains("CHANGED"), "new content replaced");
+        assert_eq!(
+            app.view.source_starts[3], range.start,
+            "the hunk's lines map to the block's first row"
+        );
+        assert_eq!(
+            app.view.old_side_lines,
+            Some((0, 6)),
+            "the hunk's new lines 1-7 (1-based)"
+        );
+        // The cursor (on a range line) sits on the block and spans it.
+        assert_eq!(app.view.cursor_row(), range.start);
+        assert_eq!(app.view.cursor_end_row(), range.end - 1);
+        // The marker column shows `~` on the block and `>` on the cursor.
+        let (_, gutter) = app.view.visible_text(
+            100,
+            &[],
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[range.start].glyph, ">", "cursor on the block");
+        assert_eq!(gutter[range.start + 1].glyph, "~", "old-side rows carry ~");
+        assert_eq!(gutter[range.end].glyph, "│", "rows after the block keep the border");
+        // Tab to source: the toggle is shared, the old lines show there.
+        on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Source);
+        let rows = source_rows(&app);
+        assert!(rows[3].contains("four") && !rows[3].contains("CHANGED"));
+        // Tab back and toggle off: the render is restored exactly.
+        on_source_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::View);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none());
+        assert_eq!(app.view.rows.len(), before_len, "rows restored");
+        assert_eq!(app.view.source_starts, before_starts, "mapping restored");
+    }
+
+    #[test]
+    fn drawing_with_the_old_side_toggled_does_not_panic() {
+        // Smoke: the full draw path (title, view/source panes, footer)
+        // runs with the block spliced in, and the old content actually
+        // reaches the terminal buffer in both modes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &["# one", "# two", "# three", "# four", "# five", "# six", "# seven", "# eight", "# nine", "# ten"],
+        );
+        overwrite(
+            &path,
+            &["# one", "# two", "# three", "# CHANGED", "# five", "# six", "# seven", "# eight", "# nine", "# ten"],
+        );
+        let mut app = git_app(path, Mode::View);
+        app.view.goto_source_line(3);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        let capture = |app: &mut App| -> String {
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
+                .unwrap();
+            t.draw(|f| draw(f, app)).unwrap();
+            t.backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .filter(|&c| c != ' ')
+                .collect()
+        };
+        let view = capture(&mut app);
+        assert!(view.contains("#four"), "old content in the view: {view}");
+        assert!(!view.contains("CHANGED"), "new content hidden: {view}");
+        assert!(view.contains('~'), "the old-side marker is drawn");
+        // Same pane in source mode: the block renders with old numbers.
+        on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Source);
+        let source = capture(&mut app);
+        assert!(source.contains("#four"), "old content in source mode: {source}");
+        assert!(!source.contains("CHANGED"));
+        assert!(source.contains('~'));
+    }
+
+    #[test]
+    fn o_without_git_is_a_no_op_with_a_flash() {
+        // P1: outside a repository the `o` key changes nothing about the
+        // existing behavior — it just explains why.
+        let dir = tempfile::tempdir().unwrap(); // no repo
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let mut app = git_app(path, Mode::Source);
+        assert!(app.git_diff.is_none(), "no git snapshot outside a repo");
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none());
+        assert!(app.status.is_some(), "a flash explains the disabled key");
+        assert_eq!(app.mode, Mode::Source, "nothing else changed");
+    }
+
+    #[test]
+    fn untracked_files_mark_every_line_and_disable_o() {
+        // An untracked file has no HEAD side: every line counts as added
+        // (3-1), and the old-side toggle has nothing to compare.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path(), &["tracked"]);
+        let untracked = dir.path().join("new.md");
+        std::fs::write(&untracked, "fresh\nnew\n").unwrap();
+        let mut app = git_app(untracked, Mode::Source);
+        assert_eq!(app.git_added.len(), 2, "every line is new");
+        let rows = source_rows(&app);
+        assert!(rows[1].starts_with("+2 "), "all lines carry the + mark: {}", rows[1]);
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none());
+        let (msg, _, _) = app.status.as_ref().expect("a flash explains");
+        assert!(msg.contains("untracked"), "message names the case: {msg}");
+    }
+
+    #[test]
+    fn reload_refetches_the_git_snapshot() {
+        // 論点 5: a manual reload takes the diff again, so the marks
+        // describe the CURRENT working tree, and the toggle resets.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three", "four", "five"]);
+        overwrite(&path, &["one", "two", "three", "four", "five", "six"]);
+        let mut app = git_app(path, Mode::Source);
+        assert!(app.git_added.contains(&5), "the appended line is marked");
+        // The agent rewrites the file; `r` refetches the diff.
+        overwrite(&app.files[0], &["one", "two", "CHANGED", "four"]);
+        assert!(reload_source(&mut app).is_ok());
+        assert!(app.git_added.contains(&2), "the new change is marked: {:?}", app.git_added);
+        assert!(!app.git_added.contains(&5), "stale marks are gone");
+        assert!(app.old_side.is_none());
     }
 }

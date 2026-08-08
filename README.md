@@ -74,6 +74,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `Ctrl+p` | file-list overlay |
 | `?` | key reference |
 | `r` / `i` | on external change: reload / ignore |
+| `o` | toggle the hunk under the cursor to its old side vs HEAD (git repositories only; `o` again returns) |
 | `e` | edit the file in `$EDITOR` (suspends the TUI, reloads with diff highlight on return) |
 | `y` | copy all comments to the clipboard (comments are kept) |
 | `s` | send via `--send-cmd` / `--send-agent` (comments are cleared only on success) |
@@ -93,6 +94,15 @@ akapen assumes a loop of *send comments → the agent edits the file → re-revi
 4. Comments on the reloaded file are cleared (their line anchors refer to the old content); comments on other session files are untouched.
 
 While the comment composer is open, change detection is suspended — a comment being written is never disturbed.
+
+## Git integration
+
+When a file is opened **inside a git repository**, akapen reads `git diff HEAD -- <file>` once at startup (and again on each `r` reload) and fuses it into the review UI. Outside a repository — or with no `HEAD` yet — nothing changes.
+
+- **Changed-line marks (3-1)**: added/modified lines get the same green `+` gutter and `▌` marker the reload diff uses (they merge, so session and git changes share one signal); lines immediately after a deleted block get the red `-` position mark — a thin marker only, the deleted content itself is shown with `o`.
+- **Old-side toggle (3-2)**: `o` replaces the hunk under the cursor with its HEAD content — old line numbers in source mode, raw dim lines in the rendered view, both with a faint `~` mark. The display stays inside the hunk even when the line counts differ; `o` again (cursor still on the hunk) returns to the new side. The diff base is fixed at `HEAD`, but the loader takes the ref as an argument, so generation movement (`HEAD^`, tags, …) is a one-line change.
+- **Untracked files** have no HEAD side: every line counts as added (the whole file is new) and `o` is disabled with an explanation.
+- Snapshot semantics: the diff is taken at startup/reload only — mid-session divergence between the file and HEAD is ignored, and there is no line tracking or persistence (P3/P4).
 
 ## Output format
 
