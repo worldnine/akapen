@@ -206,11 +206,11 @@ fn main() -> Result<()> {
                  keys:\n\
                  \x20 view mode:    j/k/arrows scroll, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
                  \x20                v select, c comment, s send, y copy, d delete, e edit,\n\
-                 \x20                r reload, o old side (git), F7/]c next change, ]/[ files,\n\
-                 \x20                l comments/changes, Ctrl+p files, Tab source mode\n\
+                 \x20                r reload, o old side (git), n/F7/]c next change, ]/[ files,\n\
+                 \x20                l comments/changes, Ctrl+o files, Tab source mode\n\
                  \x20 source mode:  j/k move, v select, c comment, s send,\n\
-                 \x20                y copy, d delete, e edit, r reload, n/N next comment,\n\
-                 \x20                o old side (git), F7/]c next change, ]/[ files,\n\
+                 \x20                y copy, d delete, e edit, r reload, ^n/^p next comment,\n\
+                 \x20                o old side (git), n/F7/]c next change, ]/[ files,\n\
                  \x20                l comments/changes, Ctrl+p files, Tab view mode (Markdown only)\n\
                  \x20 overlays:     j/k move, Enter jump/switch, d delete (comments),\n\
                  \x20                ? help, Esc/q close, click outside close\n\
@@ -1340,9 +1340,9 @@ fn on_files_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
         }
         KeyCode::Enter => activate_overlay_selection(app),
         // Esc or q closes the picker (q never quits the app while a
-        // picker is open); Ctrl+p toggles it closed again.
+        // picker is open); Ctrl+o toggles it closed again.
         KeyCode::Esc | KeyCode::Char('q') => app.overlay = None,
-        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => app.overlay = None,
+        KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => app.overlay = None,
         _ => {}
     }
 }
@@ -2663,6 +2663,12 @@ fn view_move_cursor(app: &mut App, dir: isize) {
 fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut ratatui::DefaultTerminal>) {
     let viewport = app.view_viewport_rows();
     match key {
+        // Alt+j / Alt+k: the next/previous change hunk — the same jump
+        // as F7/`]c`/n, for 40%-keyboard layouts where neither F7 nor
+        // `[`/`]` sit on the base layer (j/k are already the movement
+        // keys, so Alt+move is the bigger step, like Ctrl+d/Ctrl+u).
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_hunk(app, 1),
+        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_hunk(app, -1),
         KeyCode::Char('j') | KeyCode::Down => {
             if app.selection.is_some() {
                 extend_view_selection(app, 1);
@@ -2725,9 +2731,17 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
             // line, where the bar extends past the document's last row.
             open_composer(app, Mode::View);
         }
-        KeyCode::Char('n') | KeyCode::Char('N') => {
-            jump_comment(app, if key == KeyCode::Char('n') { 1 } else { -1 });
-        }
+        // n/N: the next/previous change hunk — the standard diff-tool
+        // keys (delta, less, magit), reachable on any layout: no F-keys,
+        // no `[`/`]`, no Alt. Comment jumping moved to Ctrl+n/Ctrl+p.
+        KeyCode::Char('n') if modifiers.is_empty() => jump_hunk(app, 1),
+        KeyCode::Char('N') if modifiers.is_empty() => jump_hunk(app, -1),
+        // Ctrl+n/Ctrl+N and Ctrl+p/Ctrl+P jump between comments: n and
+        // p move forward (next), the shifted variants backward (prev).
+        KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
+        KeyCode::Char('N') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
+        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
+        KeyCode::Char('P') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
         KeyCode::Tab => {
             // View is only reachable for Markdown-family files; a source
             // file (e.g. .rs) never leaves source mode. A mode flip
@@ -2748,6 +2762,15 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
         KeyCode::Char('q') => request_quit(app),
         KeyCode::Char('r') => reload_now(app),
         KeyCode::Char('i') => ignore_change(app),
+        KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.config.reply {
+                // The file picker shows temp-file names — meaningless in
+                // reply mode; ]/[ moves between messages instead.
+                app.flash_err("reply mode — move between messages with ]/[");
+            } else {
+                open_overlay(app, Overlay::Files, app.current_file_index);
+            }
+        }
         KeyCode::Char('o') => toggle_old_side(app),
         KeyCode::Char('e') => {
             if app.config.reply {
@@ -2773,15 +2796,6 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
         }
         KeyCode::Char('?') => {
             open_overlay(app, Overlay::Help, 0);
-        }
-        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.config.reply {
-                // The file picker shows temp-file names — meaningless in
-                // reply mode; ]/[ moves between messages instead.
-                app.flash_err("reply mode — move between messages with ]/[");
-            } else {
-                open_overlay(app, Overlay::Files, app.current_file_index);
-            }
         }
         KeyCode::Esc => {
             // View is the home mode: Esc cancels the quit confirmation
@@ -2982,6 +2996,11 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
                 app.confirm_quit = true;
             }
         }
+        // Alt+j / Alt+k: the next/previous change hunk — the same jump
+        // as F7/`]c`/n, for 40%-keyboard layouts where neither F7 nor
+        // `[`/`]` sit on the base layer.
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_hunk(app, 1),
+        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_hunk(app, -1),
         KeyCode::Char('j') | KeyCode::Down => {
             if app.selection.is_some() {
                 extend_selection(app, 1, viewport);
@@ -3060,6 +3079,15 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
         KeyCode::Char('q') => request_quit(app),
         KeyCode::Char('r') => reload_now(app),
         KeyCode::Char('i') => ignore_change(app),
+        KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.config.reply {
+                // The file picker shows temp-file names — meaningless in
+                // reply mode; ]/[ moves between messages instead.
+                app.flash_err("reply mode — move between messages with ]/[");
+            } else {
+                open_overlay(app, Overlay::Files, app.current_file_index);
+            }
+        }
         KeyCode::Char('o') => toggle_old_side(app),
         KeyCode::Char('e') => {
             if app.config.reply {
@@ -3070,9 +3098,17 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
                 open_editor(app, t);
             }
         }
-        KeyCode::Char('n') | KeyCode::Char('N') => {
-            jump_comment(app, if key == KeyCode::Char('n') { 1 } else { -1 });
-        }
+        // n/N: the next/previous change hunk — the standard diff-tool
+        // keys (delta, less, magit), reachable on any layout: no F-keys,
+        // no `[`/`]`, no Alt. Comment jumping moved to Ctrl+n/Ctrl+p.
+        KeyCode::Char('n') if modifiers.is_empty() => jump_hunk(app, 1),
+        KeyCode::Char('N') if modifiers.is_empty() => jump_hunk(app, -1),
+        // Ctrl+n/Ctrl+N and Ctrl+p/Ctrl+P jump between comments: n and
+        // p move forward (next), the shifted variants backward (prev).
+        KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
+        KeyCode::Char('N') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
+        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
+        KeyCode::Char('P') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
         // `]`/`[` arm the chord: alone they switch files (when the
         // [`CHORD_MS`] window expires, or on the next non-chord key); `c`
         // within the window jumps to the next/previous change instead
@@ -3088,15 +3124,6 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
         }
         KeyCode::Char('?') => {
             open_overlay(app, Overlay::Help, 0);
-        }
-        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.config.reply {
-                // The file picker shows temp-file names — meaningless in
-                // reply mode; ]/[ moves between messages instead.
-                app.flash_err("reply mode — move between messages with ]/[");
-            } else {
-                open_overlay(app, Overlay::Files, app.current_file_index);
-            }
         }
         _ => {}
     }
@@ -4277,7 +4304,7 @@ fn draw_overlay(f: &mut Frame, app: &App) {
 fn help_rows(esc_quit: bool, reply: bool) -> Vec<(&'static str, &'static str)> {
     let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
-        ("comment", "v select · Esc cancel · c add · d delete · n/N jump"),
+        ("comment", "v select · Esc cancel · c add · d delete · ^n/^p jump"),
         ("mode", "Tab view⇄source"),
         ("output", "y copy · s send"),
         ("list", "l comments/changes · Tab tab · ? help"),
@@ -4289,9 +4316,9 @@ fn help_rows(esc_quit: bool, reply: bool) -> Vec<(&'static str, &'static str)> {
         rows.push(("msg", "]/[ older/newer"));
         rows.push(("reload", "auto-reload on change · r manual"));
     } else {
-        rows.insert(1, ("file", "]/[ · ^p files"));
+        rows.insert(1, ("file", "]/[ · ^o files"));
         rows.push(("reload", "r reload · i ignore · e edit"));
-        rows.push(("git", "o old side vs HEAD · F7/]c next change · [c prev"));
+        rows.push(("git", "n/N next/prev change · F7/]c/Alt+j next · o old side vs HEAD"));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
@@ -6935,16 +6962,16 @@ mod state_tests {
             hunk: false,
             text: "c2".into(),
         });
-        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 2, "n jumps to the first comment below");
-        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 6, "n jumps to the next comment");
-        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 2, "N jumps back");
-        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 2, "N stays put when no comment above");
         assert!(app.status.is_some(), "and flashes a message");
-        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 6, "n resumes from where it stopped");
     }
 
@@ -7120,34 +7147,34 @@ mod state_tests {
             "overlapping comments stay separate targets"
         );
         app.comments = comments;
-        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 4, "cursor lands on the first comment's extent");
         assert_eq!(
             app.selection,
             Some(Selection { anchor: 1, cursor: 4 }),
             "only the first comment becomes the selection"
         );
-        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 5, "n steps into the overlapping comment");
         assert_eq!(app.selection, Some(Selection { anchor: 3, cursor: 5 }));
-        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 8, "n skips to the last comment");
         assert_eq!(app.selection, Some(Selection { anchor: 7, cursor: 8 }));
-        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 8, "n at the last comment flashes");
         assert!(app.status.is_some());
-        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 5, "N returns to the overlapping comment");
         assert_eq!(app.selection, Some(Selection { anchor: 3, cursor: 5 }));
-        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 4, "N returns to the first comment");
         assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 4 }));
-        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 4, "N at the first comment flashes");
         // Clearing the selection falls back to cursor-based navigation.
         on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(app.selection.is_none());
-        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.view.cursor, 8, "n from a cleared cursor still finds the next comment");
     }
 
@@ -7465,19 +7492,19 @@ mod state_tests {
             hunk: false,
             text: "c3".into(),
         });
-        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.cursor, 3, "cursor lands on the block extent");
         assert_eq!(
             app.selection,
             Some(Selection { anchor: 1, cursor: 3 }),
             "the block [1-3] is selected"
         );
-        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
         assert_eq!(app.cursor, 6, "stacked comments count as one block");
         assert_eq!(app.selection, Some(Selection { anchor: 6, cursor: 6 }));
         // N returns to the previous block, re-selecting it.
         app.selection = Some(Selection::new(6));
-        on_source_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('N'), KeyModifiers::CONTROL, None);
         assert_eq!(app.cursor, 3, "N returns to the previous block extent");
         assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 3 }));
     }
@@ -8082,10 +8109,10 @@ mod state_tests {
     }
 
     #[test]
-    fn ctrl_p_opens_the_file_picker_and_enter_switches() {
+    fn ctrl_o_opens_the_file_picker_and_enter_switches() {
         let (mut app, _dir) = make_session();
-        // Ctrl+p opens the Files overlay, cursor on the current file.
-        on_view_key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, None);
+        // Ctrl+o opens the Files overlay, cursor on the current file.
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL, None);
         assert_eq!(app.overlay, Some(Overlay::Files));
         assert_eq!(app.overlay_cursor, 0, "starts on the current file");
         // j moves to b.rs; Enter switches and closes.
@@ -8100,7 +8127,7 @@ mod state_tests {
     #[test]
     fn esc_and_q_close_the_overlay_without_quitting() {
         let (mut app, _dir) = make_session();
-        on_view_key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL, None);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL, None);
         assert!(app.overlay.is_some());
         on_overlay_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
         assert_eq!(app.overlay, None, "q closes the picker, not the app");
@@ -10210,6 +10237,23 @@ mod git_tests {
         // Shift+F7: back to the first.
         on_source_key(&mut app, KeyCode::F(7), KeyModifiers::SHIFT, None);
         assert_eq!(app.cursor, 4);
+        // n / N: the same jumps — the standard diff-tool keys, on the
+        // base layer of any keyboard layout.
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 14, "n: next hunk");
+        on_source_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 4, "N: previous hunk");
+        // Alt+j / Alt+k: the same jumps, for layouts where the terminal
+        // eats Alt and layouts without F7/`[`/`]` on the base layer.
+        on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::ALT, None);
+        assert_eq!(app.cursor, 14, "Alt+j: next hunk");
+        on_source_key(&mut app, KeyCode::Char('k'), KeyModifiers::ALT, None);
+        assert_eq!(app.cursor, 4, "Alt+k: previous hunk");
+        // Plain j/k still move (no modifier confusion) — after the hunk
+        // jump cleared its selection first.
+        app.selection = None;
+        on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 5, "plain j still moves");
         // Same keys work in view mode (from the first hunk onward).
         app.view.goto_source_line(4);
         app.mode = Mode::View;
@@ -10217,6 +10261,14 @@ mod git_tests {
         assert_eq!(app.view.cursor, 14);
         on_view_key(&mut app, KeyCode::F(7), KeyModifiers::SHIFT, None);
         assert_eq!(app.view.cursor, 4);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.view.cursor, 14, "view n: next hunk");
+        on_view_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        assert_eq!(app.view.cursor, 4, "view N: previous hunk");
+        on_view_key(&mut app, KeyCode::Char('j'), KeyModifiers::ALT, None);
+        assert_eq!(app.view.cursor, 14, "view Alt+j: next hunk");
+        on_view_key(&mut app, KeyCode::Char('k'), KeyModifiers::ALT, None);
+        assert_eq!(app.view.cursor, 4, "view Alt+k: previous hunk");
     }
 
     #[test]

@@ -75,7 +75,10 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `?` | key reference |
 | `r` / `i` | on external change: reload / ignore |
 | `o` | toggle the hunk under the cursor to its old side vs HEAD (git repositories only; `o` again returns) |
-| `F7` / `Shift+F7` | jump to the next / previous change hunk (the `]c` / `[c` chord is the fallback for terminals without F-keys) |
+| `n` / `N` | jump to the next / previous change hunk (the standard diff-tool keys — delta, less, magit; `F7` / `Shift+F7` work too) |
+| `F7` / `Shift+F7` | jump to the next / previous change hunk (the `]c` / `[c` chord is the fallback for terminals without F-keys; `Alt+j` / `Alt+k` too) |
+| `Ctrl+n` / `Ctrl+p` | jump to the next / previous comment (moved from `n` / `N`) |
+| `Ctrl+o` | file picker (moved from `Ctrl+p`) |
 | `l` | all-comments / changes overlay — `Tab` switches between the two tabs |
 | `e` | edit the file in `$EDITOR` (suspends the TUI, reloads with diff highlight on return) |
 | `y` | copy all comments to the clipboard (comments are kept) |
@@ -103,7 +106,7 @@ When a file is opened **inside a git repository**, akapen reads `git diff HEAD -
 
 - **Changed-line marks (3-1)**: added/modified lines get the same green `+` gutter and `▌` marker the reload diff uses (they merge, so session and git changes share one signal); lines immediately after a deleted block get the red `-` position mark — a thin marker only, the deleted content itself is shown with `o`.
 - **Old-side toggle (3-2)**: `o` replaces the hunk under the cursor with its HEAD content — old line numbers in source mode; in the rendered view the document re-renders with the hunk's old lines substituted, so tables and paragraphs keep the document's context. Both show a faint `~` mark. The display stays inside the hunk even when the line counts differ; `o` again (cursor still on the hunk) returns to the new side. The diff base is fixed at `HEAD`, but the loader takes the ref as an argument, so generation movement (`HEAD^`, tags, …) is a one-line change.
-- **Change navigation**: `F7` / `Shift+F7` jump to the next / previous hunk (the cursor lands on the first changed line, the hunk is selected). Terminals that do not deliver F-keys can use the `]c` / `[c` chord instead — `]`/`[` alone still switch files (after a short chord window), `]c`/`[c` jump to the changes. The `l` overlay has a `changes` tab (Tab toggles) listing every hunk across the session files with its location, `+N/-M`, and a preview; Enter jumps to it.
+- **Change navigation**: `n` / `N` (same as delta, less, magit) jump to the next / previous hunk; `F7` / `Shift+F7`, the `]c` / `[c` chord, and `Alt+j` / `Alt+k` do the same. The cursor lands on the first changed line, the hunk is selected. Terminals that do not deliver F-keys can use the `]c` / `[c` chord instead — `]`/`[` alone still switch files (after a short chord window), `]c`/`[c` jump to the changes. The `l` overlay has a `changes` tab (Tab toggles) listing every hunk across the session files with its location, `+N/-M`, and a preview; Enter jumps to it.
 - **Untracked files** have no HEAD side: every line counts as added (the whole file is new) and `o` is disabled with an explanation.
 - Snapshot semantics: the diff is taken at startup/reload only — mid-session divergence between the file and HEAD is ignored, and there is no line tracking or persistence (P3/P4).
 
