@@ -590,7 +590,7 @@ impl ViewState {
             // parse to a single empty-text span, so "no visible text" is
             // the test, not "no spans".
             let has_text = content.iter().any(|s| !s.content.is_empty());
-            if !has_text || frame {
+            if !has_text {
                 if let Some(text) = ghosts.get(&abs).and_then(|l| self.ghost_text(*l)) {
                     let mut style = Style::default()
                         .fg(Color::Gray)
@@ -598,15 +598,11 @@ impl ViewState {
                     if cursor_row || in_sel_row {
                         style = style.bg(selected_bg);
                     }
-                    // The ghost replaces the row: a blank row's filler, or
-                    // a table frame's glyphs (the delimiter's own
-                    // rendering — the frame is synthesized structure).
-                    content.clear();
                     content.push(ratatui::text::Span {
                         content: text.into(),
                         style,
                     });
-                } else if !has_text && (cursor_row || in_sel_row) {
+                } else if cursor_row || in_sel_row {
                     content.push(ratatui::text::Span {
                         content: " ".to_string().into(),
                         style: highlight_style,
@@ -622,13 +618,12 @@ impl ViewState {
 
     /// The ghost assignments for this frame (display row → invisible source
     /// line): a line that rendered no text and is touched by the cursor or
-    /// the selection paints its raw source onto a nearby row — its own
-    /// start row, a blank row, or a synthesized table frame (a table's
-    /// delimiter line maps onto the header separator, exactly where its
-    /// raw source belongs). Best-effort by design: one ghost per row, the
-    /// cursor's line first, and a line with no free row nearby is skipped
-    /// silently. Paint-time only — the mapping and the layout are never
-    /// touched.
+    /// the selection paints its raw source onto a nearby blank row — its
+    /// own start row, or the row just below (a closing fence shares the
+    /// last code row, so it borrows the spacer beneath). Best-effort by
+    /// design: one ghost per row, the cursor's line first, and a line with
+    /// no free blank row nearby is skipped silently. Paint-time only —
+    /// the mapping and the layout are never touched.
     fn ghost_rows(&self, selection: Option<(usize, usize)>, end: usize) -> HashMap<usize, usize> {
         let mut ghosts: HashMap<usize, usize> = HashMap::new();
         let place = |line: usize, ghosts: &mut HashMap<usize, usize>| {
@@ -641,8 +636,7 @@ impl ViewState {
                     continue;
                 }
                 let blank = self.rows[row].iter().all(|s| s.text.is_empty());
-                let frame = is_table_frame(&self.rows[row]);
-                if (blank || frame) && !ghosts.contains_key(&row) {
+                if blank && !ghosts.contains_key(&row) {
                     ghosts.insert(row, line);
                     return;
                 }
@@ -708,9 +702,40 @@ fn is_table_frame(row: &[Span]) -> bool {
     any
 }
 
+/// True when `line` is a markdown table delimiter row (`|---|---|`, with
+/// optional alignment colons): a line that renders nothing of its own and
+/// carries no information — the table body already shows the columns,
+/// widths and alignment — so the view skips it exactly like a blank line.
+/// The ghost set is the gate: only lines that rendered no text at all are
+/// candidates (ref-defs, fences and HTML rows are structurally ruled out
+/// — they either render or are handled elsewhere), and a candidate must
+/// still match the `|`-`-`-`:` pattern. The leading `>` (blockquote) and
+/// whitespace are peeled off first, so a delimiter inside a blockquote
+/// (`> |---|---|`) counts too.
+pub(crate) fn is_table_delimiter_line(ghost: &[Option<String>], line: usize) -> bool {
+    let Some(Some(text)) = ghost.get(line) else {
+        return false;
+    };
+    let body = text.trim_start_matches(|c: char| c == '>' || c.is_whitespace());
+    let mut pipes = false;
+    let mut dashes = false;
+    for c in body.chars() {
+        match c {
+            '|' => pipes = true,
+            '-' => dashes = true,
+            ':' | ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    pipes && dashes
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{scroll_offset_at, scroll_offset_drag, scroll_thumb, selected_bg, Span, ViewState};
+    use super::{
+        is_table_delimiter_line, scroll_offset_at, scroll_offset_drag, scroll_thumb, selected_bg, Span,
+        ViewState,
+    };
     use crate::highlight::Highlighter;
     use ratatui::style::Color;
     use crate::source::Source;
@@ -1160,45 +1185,57 @@ mod tests {
     }
 
     #[test]
-    fn table_delimiter_row_ghosts_onto_the_header_separator() {
-        // The delimiter row (`|---|---|`) renders nothing of its own and
-        // maps onto the header separator frame. Putting the cursor (or a
-        // selection) on the delimiter paints its raw source there — the
-        // separator row shows the exact source line instead of the
-        // synthesized frame.
+    fn table_delimiter_line_detection() {
+        // A delimiter row (`|---|---|`) is a skip line: ghost entry plus
+        // the |/-/: pattern. Alignment colons and a missing leading pipe
+        // are still delimiters; ref-defs, fences and HTML rows are not.
+        let ghost: Vec<Option<String>> = [
+            Some("|---|---|".into()),
+            Some("|:---|---:|".into()),
+            Some("---|---".into()),
+            Some("[ref1]: https://example.com".into()),
+            Some("```rust".into()),
+            Some("<!-- comment -->".into()),
+            Some("> |---|---|".into()),
+            Some("> > |---|---|".into()),
+            Some("> foo |---|---|".into()),
+            Some("".into()),
+            None,
+        ]
+        .into();
+        assert!(is_table_delimiter_line(&ghost, 0));
+        assert!(is_table_delimiter_line(&ghost, 1), "alignment colons count");
+        assert!(is_table_delimiter_line(&ghost, 2), "no leading pipe is still a delimiter");
+        assert!(!is_table_delimiter_line(&ghost, 3), "ref-def is not a delimiter");
+        assert!(!is_table_delimiter_line(&ghost, 4), "fence is not a delimiter");
+        assert!(!is_table_delimiter_line(&ghost, 5), "HTML is not a delimiter");
+        assert!(is_table_delimiter_line(&ghost, 6), "blockquote delimiter counts");
+        assert!(
+            is_table_delimiter_line(&ghost, 7),
+            "nested blockquote delimiter counts"
+        );
+        assert!(
+            !is_table_delimiter_line(&ghost, 8),
+            "blockquote prose with pipes is not a delimiter"
+        );
+        assert!(!is_table_delimiter_line(&ghost, 9), "blank lines have no ghost text");
+        assert!(!is_table_delimiter_line(&ghost, 10), "rendered lines have no ghost");
+        assert!(!is_table_delimiter_line(&ghost, 11), "out of bounds is not a delimiter");
+    }
+
+    #[test]
+    fn rendered_table_like_lines_are_not_delimiters() {
+        // The ghost gate is structural: a `|---|` line inside a code block
+        // renders (no ghost entry), so it is never a delimiter even though
+        // it matches the character pattern.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
-        std::fs::write(&path, "| A | B |\n|---|---|\n| a | b |\n").unwrap();
+        std::fs::write(&path, "```\n|---|\n```\n").unwrap();
         let source = Source::load(path).unwrap();
-        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false));
-        let frame_row = (0..view.rows.len())
-            .find(|&r| {
-                view.rows[r]
-                    .iter()
-                    .map(|s| s.text.as_str())
-                    .collect::<String>()
-                    .starts_with('├')
-            })
-            .expect("the header separator frame row");
-        let frame: String = view.rows[frame_row].iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(frame, "├───┼───┤");
-        // Cursor elsewhere: the separator renders normally.
-        view.cursor = 0;
-        assert_eq!(row_text(&view, None, frame_row), format!(" {frame} "));
-        // Cursor on the delimiter (source line 1): the raw source replaces
-        // the frame.
-        view.cursor = 1;
-        assert_eq!(
-            row_text(&view, None, frame_row),
-            " |---|---| ",
-            "the delimiter's raw source appears on the separator row"
-        );
-        // A selection covering the delimiter triggers the ghost too.
-        view.cursor = 0;
-        assert_eq!(
-            row_text(&view, Some((1, 2)), frame_row),
-            " |---|---| ",
-            "the selection paints the ghost as well"
+        let view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        assert!(
+            !is_table_delimiter_line(&view.ghost, 1),
+            "code-rendered |---| has no ghost and is not a delimiter"
         );
     }
 

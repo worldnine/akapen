@@ -47,8 +47,8 @@ use crate::config::{Action, Config, EscQuit};
 use crate::highlight::{Highlighter, Span as HiSpan, syntax_for, wrap_spans};
 use crate::source::Source;
 use crate::view::{
-    border_color, changed_bg, scroll_offset_at, scroll_offset_drag, scroll_thumb,
-    scrollbar_thumb, selected_bg, GutterCell, ViewState,
+    border_color, changed_bg, is_table_delimiter_line, scroll_offset_at, scroll_offset_drag,
+    scroll_thumb, scrollbar_thumb, selected_bg, GutterCell, ViewState,
 };
 
 /// The kind of overlay currently open (Ctrl+p = files, `l` = comments,
@@ -1887,10 +1887,13 @@ fn comment_regions(comments: &[Comment], n_lines: usize, current_file: &Path) ->
     regions
 }
 
-/// Move the view cursor by one CONTENT line: blank source lines are
-/// skipped (they render as gap rows — stopping on them is a wasted
-/// keypress; the mouse, a selection's j/k extension, and source mode
-/// still reach them). Stays put when only blanks remain in that direction.
+/// Move the view cursor by one CONTENT line: blank source lines and table
+/// delimiter rows (`|---|---|`) are skipped (they render as gap rows —
+/// stopping on them is a wasted keypress; the mouse, a selection's j/k
+/// extension, and source mode still reach them). A delimiter row carries
+/// no information — the table body already shows the columns — so it
+/// counts as a gap like a blank. Stays put when only blanks remain in
+/// that direction.
 fn view_move_cursor(app: &mut App, dir: isize) {
     let n = app.source.len() as isize;
     let mut i = app.view.cursor as isize;
@@ -1899,7 +1902,9 @@ fn view_move_cursor(app: &mut App, dir: isize) {
         if i < 0 || i >= n {
             return;
         }
-        if !app.source.lines[i as usize].trim().is_empty() {
+        if !app.source.lines[i as usize].trim().is_empty()
+            && !is_table_delimiter_line(&app.view.ghost, i as usize)
+        {
             app.view.goto_source_line(i as usize);
             return;
         }
@@ -5512,6 +5517,84 @@ mod state_tests {
             row >= offset && row < offset + viewport,
             "cursor revealed (row {row}, offset {offset}, viewport {viewport})"
         );
+    }
+
+    #[test]
+    fn view_j_skips_table_delimiter_rows_like_blanks() {
+        // A table's delimiter row renders nothing and carries no
+        // information (the body shows the columns) — j/k skip it exactly
+        // like a blank line: from the header row the cursor lands on the
+        // body, never on the delimiter.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "| A | B |\n|---|---|\n| a | b |\n").unwrap();
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: None,
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(path).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.mode = Mode::View;
+        assert_eq!(
+            app.view.ghost[1].as_deref(),
+            Some("|---|---|"),
+            "the delimiter renders nothing (ghost entry)"
+        );
+        // Down from the header row: the delimiter is skipped, the body is
+        // the first stop.
+        app.view.cursor = 0;
+        view_move_cursor(&mut app, 1);
+        assert_eq!(
+            app.view.cursor, 2,
+            "j lands on the body row, past the delimiter"
+        );
+        // Up from the body: the delimiter is skipped again.
+        view_move_cursor(&mut app, -1);
+        assert_eq!(app.view.cursor, 0, "k lands back on the header row");
+    }
+
+    #[test]
+    fn view_j_still_stops_on_informational_invisible_lines() {
+        // The skip is for the delimiter row only: ref-defs and fences
+        // carry information, so j/k keep stopping on them (the ghost
+        // paints the raw source there).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(
+            &path,
+            "段落\n\n[ref1]: https://example.com\n\n```rust\nfn main() {}\n```\n",
+        )
+        .unwrap();
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: None,
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(path).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.mode = Mode::View;
+        app.view.cursor = 0;
+        view_move_cursor(&mut app, 1);
+        assert_eq!(app.view.cursor, 2, "j stops on the ref-def (informational)");
+        view_move_cursor(&mut app, 1);
+        assert_eq!(app.view.cursor, 4, "j stops on the opening fence");
     }
 
     #[test]
