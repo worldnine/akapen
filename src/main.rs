@@ -2151,9 +2151,15 @@ fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     view
 }
 
-/// The old-side block as raw view rows (3-2): the old lines wrapped at
-/// the view's text width in a dim style — raw source, visually distinct
-/// from the rendered markdown around it.
+/// The old-side block as rendered view rows (3-2): the old lines are
+/// rendered as a markdown fragment, so the old side reads like the view
+/// itself — headings, bold, lists render instead of showing raw
+/// `#`/`**` source — while the display stays closed within the hunk (a
+/// fragment never reflows across the boundary). The lines are joined
+/// with BLANK lines: markdown would otherwise merge consecutive lines
+/// into one paragraph, hiding the hunk's line structure (the old side is
+/// a diff-like view — each line must stay its own row). The `~` gutter
+/// marker keeps the block distinct from the new side.
 fn old_side_view_rows(app: &App, os: &OldSide) -> Vec<Vec<HiSpan>> {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let width = view_render_width(w);
