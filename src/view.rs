@@ -479,8 +479,17 @@ impl ViewState {
             let segments = self.row_segments.get(abs).map(|s| s.as_slice()).unwrap_or(&[]);
             // The cursor line's phrase inside this row; rows with no
             // segments (blanks, unattributed wraps) fall back to the whole
-            // row, so the line cursor stays visible everywhere.
-            let cursor_seg = segments.iter().find(|s| s.line == self.cursor);
+            // row, so the line cursor stays visible everywhere. Every
+            // segment of the cursor's line counts: a table row's cells are
+            // separate segments of one line, so `find` would leave every
+            // cell but the first dark.
+            let cursor_segs: Vec<&Segment> =
+                segments.iter().filter(|s| s.line == self.cursor).collect();
+            // Synthesized table frames (borders, header/row separators)
+            // are box-drawing-only rows: structure, not content. They stay
+            // clean under the cursor and the selection — selecting a table
+            // highlights the cells, never the frame.
+            let frame = is_table_frame(&self.rows[abs]);
             let span_hl = |range: (usize, usize)| {
                 let sel_hl = match selection {
                     None => false,
@@ -492,7 +501,7 @@ impl ViewState {
                         {
                             true
                         } else {
-                            segments.is_empty() && in_sel_row
+                            segments.is_empty() && in_sel_row && !frame
                         }
                     }
                 };
@@ -502,9 +511,11 @@ impl ViewState {
                 if !cursor_row {
                     return false;
                 }
-                match cursor_seg {
-                    Some(s) => s.start < range.1 && s.end > range.0,
-                    None => segments.is_empty(),
+                match cursor_segs.as_slice() {
+                    [] => segments.is_empty() && !frame,
+                    segs => segs
+                        .iter()
+                        .any(|s| s.start < range.1 && s.end > range.0),
                 }
             };
             let highlight_style = Style::default().bg(selected_bg);
@@ -670,6 +681,27 @@ impl ViewState {
     }
 }
 
+/// A synthesized table frame row (top/bottom border, header separator,
+/// or row separator): box-drawing glyphs only. It is structure, not
+/// content — the cursor and the selection highlight the cells, never the
+/// frame. A blank row (no glyphs at all) is not a frame and keeps the
+/// whole-row selection band.
+fn is_table_frame(row: &[Span]) -> bool {
+    let mut any = false;
+    for s in row {
+        for c in s.text.chars() {
+            any = true;
+            if !matches!(
+                c,
+                '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
+            ) {
+                return false;
+            }
+        }
+    }
+    any
+}
+
 #[cfg(test)]
 mod tests {
     use super::{scroll_offset_at, scroll_offset_drag, scroll_thumb, selected_bg, Span, ViewState};
@@ -724,6 +756,19 @@ mod tests {
             .get(i)
             .map(|c| c.glyph)
             .unwrap_or("")
+    }
+
+    /// The highlighted (selection-background) span contents of `visible_text`'s
+    /// row `i`.
+    fn bg_spans(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> Vec<String> {
+        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+            .0
+            .lines[i]
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(selected_bg(false)))
+            .map(|s| s.content.to_string())
+            .collect()
     }
 
     #[test]
@@ -1027,6 +1072,85 @@ mod tests {
             Style::default(),
         );
         assert_eq!(gutter[3].glyph, ">", "standalone cursor keeps its marker");
+    }
+
+    #[test]
+    fn cursor_row_highlights_every_table_cell_not_the_frame() {
+        // The cursor on a table row: every cell of the row highlights (the
+        // cells are separate segments of one source line — the old
+        // first-segment-only lookup left the inner cells dark), and the
+        // borders stay clean.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "| A | B |\n|---|---|\n| a | b |\n").unwrap();
+        let source = Source::load(path).unwrap();
+        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        view.cursor = 2; // the "a | b" body row
+        let row = view.source_starts[2];
+        let hl = bg_spans(&view, None, row);
+        let cells: Vec<&String> = hl.iter().filter(|s| !s.trim().is_empty()).collect();
+        assert_eq!(
+            cells,
+            vec![&"a".to_string(), &"b".to_string()],
+            "every cell of the cursor row highlights: {hl:?}"
+        );
+        assert!(
+            !hl.iter().any(|s| s.contains('│')),
+            "borders never highlight on the cursor row: {hl:?}"
+        );
+    }
+
+    #[test]
+    fn selection_highlights_cells_but_not_table_frame_rows() {
+        // A selection covering the whole (width-constrained) table: content
+        // rows highlight their cells, while the synthesized frame rows
+        // (box-drawing only: top border, header separator, row separators,
+        // bottom border) stay clean.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(
+            &path,
+            "| 左 | 中央 | 右 |\n|:--|:--:|--:|\n| a | b | https://example.com/long/path |\n| d | e | f |\n",
+        )
+        .unwrap();
+        let source = Source::load(path).unwrap();
+        // Width 40 constrains the table: columns shrink, cells wrap, and
+        // row separators appear between the body rows.
+        let view = ViewState::render(&source, 40, &Highlighter::new(None, false));
+        let sel = Some((0, 3)); // the whole table
+        let mut frames = 0;
+        for abs in 0..view.rows.len() {
+            let raw: String = view.rows[abs].iter().map(|s| s.text.as_str()).collect();
+            let is_frame = raw.trim_start().starts_with('┌')
+                || raw.trim_start().starts_with('├')
+                || raw.trim_start().starts_with('└');
+            if is_frame {
+                frames += 1;
+                let hl = bg_spans(&view, sel, abs);
+                assert!(
+                    hl.iter().all(|s| s.trim().is_empty()),
+                    "frame row {abs} ({raw:?}) stays clean: {hl:?}"
+                );
+            }
+        }
+        assert!(
+            frames >= 4,
+            "expected top + header separator + row separators + bottom, saw {frames}"
+        );
+        // Content rows: both cells highlighted, borders clean.
+        for line in 2..=3 {
+            let row = view.source_starts[line];
+            let hl = bg_spans(&view, sel, row);
+            let cells: Vec<&String> = hl.iter().filter(|s| !s.trim().is_empty()).collect();
+            assert!(
+                !cells.is_empty(),
+                "row {line} highlights its cells: {hl:?}"
+            );
+            assert!(
+                !hl.iter().any(|s| s.contains('│')),
+                "row {line}: borders stay clean: {hl:?}"
+            );
+        }
     }
 
     #[test]
