@@ -2093,6 +2093,16 @@ fn render_view_with_cards(
     comments: &[Comment],
 ) -> ViewState {
     let mut view = ViewState::render(source, columns, highlighter);
+    insert_cards(&mut view, comments, columns as usize);
+    view
+}
+
+/// Fold comment cards into a rendered view: each comment's card is
+/// inserted right after its end line's rendered block, and the
+/// source-line mapping for everything below shifts by the card's height
+/// (so scroll, cursor follow, and the view↔comment handoff all stay
+/// consistent with what is painted).
+fn insert_cards(view: &mut ViewState, comments: &[Comment], columns: usize) {
     let mut card_rows = vec![false; view.rows.len()];
     let mut order: Vec<&Comment> = comments.iter().collect();
     order.sort_by_key(|c| c.end);
@@ -2105,7 +2115,7 @@ fn render_view_with_cards(
         // above it.
         let last_row = block_last_row(&view.source_starts, view.rows.len(), end);
         let insert_at = last_row + 1;
-        let lines = comment_bar_lines(c, columns as usize);
+        let lines = comment_bar_lines(c, columns);
         // Shift the source-line mapping only for lines whose text starts
         // at or below the card's insert row. Lines merged with the
         // comment's END line keep their start row: their text renders
@@ -2134,93 +2144,127 @@ fn render_view_with_cards(
         }
     }
     view.card_rows = card_rows;
-    view
 }
 
 /// Render the current file's view with the comment cards AND the toggled
 /// old-side block (3-2) folded in. Every view rebuild (comment edits,
 /// resize, mode handoffs) goes through here, so the toggle survives
 /// re-renders at the same width.
+///
+/// The old side is rendered by SUBSTITUTING the hunk's new lines with
+/// the old lines and re-rendering the whole document — unlike an
+/// isolated fragment render, the old side then keeps the document's
+/// context: a table keeps its header, delimiter, and column widths, and
+/// renders as one table instead of a disconnected fragment.
 fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let width = view_render_width(w);
-    let mut view = render_view_with_cards(&app.source, width, &app.highlight, comments);
-    if let Some(os) = &app.old_side {
-        view.apply_old_side(&old_side_view_rows(app, os), os.range, os.owner);
+    let Some(os) = &app.old_side else {
+        return render_view_with_cards(&app.source, width, &app.highlight, comments);
+    };
+    let (sub_source, a, span, block_len) = substitute_old_side(app, os);
+    let mut view = ViewState::render(&sub_source, width, &app.highlight);
+    // The block's rows (the old content + its separators): the `~`
+    // gutter range, computed from the substituted render's attribution
+    // before the remap below.
+    let sub_starts = view.source_starts.clone();
+    view.old_side_rows = sub_starts.get(a).copied().unwrap_or(0)
+        ..sub_starts.get(a + block_len).copied().unwrap_or(view.rows.len());
+    view.old_side_lines = os.range.or(Some((os.owner, os.owner)));
+    // Remap the substituted attribution back to NEW-file line numbers:
+    // the block's lines (old content + separators) all belong to the
+    // hunk's first new line (merged-block), lines after shift by
+    // `block_len - span`.
+    for segs in &mut view.row_segments {
+        for seg in segs {
+            seg.line = remapped_line(seg.line, a, span, block_len);
+        }
     }
+    let sub_ghost = std::mem::take(&mut view.ghost);
+    view.source_starts = (0..app.source.len())
+        .map(|j| {
+            sub_starts
+                .get(sub_index(j, a, span, block_len))
+                .copied()
+                .unwrap_or(0)
+        })
+        .collect();
+    view.ghost = (0..app.source.len())
+        .map(|j| {
+            sub_ghost
+                .get(sub_index(j, a, span, block_len))
+                .cloned()
+                .flatten()
+        })
+        .collect();
+    insert_cards(&mut view, comments, width as usize);
     view
 }
 
-/// The old-side block as rendered view rows (3-2): the old lines are
-/// rendered as a markdown fragment, so the old side reads like the view
-/// itself — headings, bold, lists render instead of showing raw
-/// `#`/`**` source — while the display stays closed within the hunk (a
-/// fragment never reflows across the boundary). The lines are joined
-/// with BLANK lines: markdown would otherwise merge consecutive lines
-/// into one paragraph, hiding the hunk's line structure (the old side is
-/// a diff-like view — each line must stay its own row). The `~` gutter
-/// marker keeps the block distinct from the new side.
-fn old_side_view_rows(app: &App, os: &OldSide) -> Vec<Vec<HiSpan>> {
-    let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    let width = view_render_width(w);
-    // A body-only table fragment (the hunk cut the table's header or
-    // delimiter off) can never render as a markdown table — synthesize
-    // the missing structure so the old side shows table frames instead
-    // of raw pipe text: a leading delimiter (useless without its header)
-    // is dropped, then a missing delimiter is inserted after the first
-    // row, which becomes the header.
-    let mut frag_lines: Vec<String> = os.old_lines.clone();
-    let all_pipe = frag_lines.iter().all(|l| l.starts_with('|'));
-    if all_pipe {
-        if frag_lines.first().is_some_and(|l| is_table_delimiter_row(l)) {
-            frag_lines.remove(0);
-        }
-        if !frag_lines.iter().any(|l| is_table_delimiter_row(l)) && !frag_lines.is_empty() {
-            let cols = frag_lines[0].matches('|').count().saturating_sub(1).max(1);
-            // `|---`.repeat + one closing `|`: repeating the full
-            // `|---|` cell would double the middle pipe.
-            frag_lines.insert(1, format!("{}|", "|---".repeat(cols)));
-        }
-    }
-    // Join with blank lines so consecutive lines never merge into one
-    // run-on paragraph — EXCEPT between consecutive table rows
-    // (`|`-leading lines): a table needs its rows adjacent, and a blank
-    // line would break it into raw pipe text.
-    let mut content = String::new();
-    for (i, line) in frag_lines.iter().enumerate() {
+/// Build the substituted document for the old-side view: the hunk's new
+/// lines are replaced by the old lines, each old line blank-separated so
+/// it keeps its own row (markdown would otherwise merge consecutive
+/// lines into one paragraph — the old side is a diff-like view) — except
+/// consecutive table rows (`|`-leading), which stay adjacent or the
+/// table breaks. Returns the substituted [`Source`] and the block's
+/// geometry: `a` = the substituted index of the block's first line,
+/// `span` = the replaced new-line count (0 for a pure deletion, which
+/// inserts before `owner`), `block_len` = the block's line count.
+fn substitute_old_side(app: &App, os: &OldSide) -> (Source, usize, usize, usize) {
+    let (a, b) = match os.range {
+        Some((a, b)) => (a, b),
+        None => (os.owner, os.owner),
+    };
+    let span = os.range.map_or(0, |(a, b)| b - a + 1);
+    let mut block: Vec<String> = Vec::with_capacity(os.old_lines.len() * 2);
+    for (i, line) in os.old_lines.iter().enumerate() {
         if i > 0 {
-            let prev = &frag_lines[i - 1];
-            if prev.starts_with('|') && line.starts_with('|') {
-                content.push('\n');
-            } else {
-                content.push_str("\n\n");
+            let prev = &os.old_lines[i - 1];
+            if !(prev.starts_with('|') && line.starts_with('|')) {
+                block.push(String::new());
             }
         }
-        content.push_str(line);
+        block.push(line.clone());
     }
-    content.push('\n');
-    // The renderer attributes rows to source lines by index, so `lines`
-    // must match the content exactly (the blank separators count).
-    let fragment_lines: Vec<String> = content.lines().map(str::to_owned).collect();
-    let fragment = Source {
-        path: PathBuf::new(),
+    let block_len = block.len();
+    let mut lines: Vec<String> = Vec::with_capacity(app.source.len() + block_len);
+    lines.extend(app.source.lines[..a].iter().cloned());
+    lines.extend(block);
+    lines.extend(app.source.lines[b + 1..].iter().cloned());
+    let content = lines.join("\n") + "\n";
+    let source = Source {
+        path: app.current_file_path().to_path_buf(),
         content,
-        lines: fragment_lines,
-        gutter_width: 1,
+        gutter_width: lines.len().to_string().len().max(1),
+        lines,
     };
-    render::render(&fragment, width as usize, &app.highlight).rows
+    (source, a, span, block_len)
 }
-fn is_table_delimiter_row(line: &str) -> bool {
-    line.trim()
-        .trim_start_matches('|')
-        .trim_end_matches('|')
-        .split('|')
-        .all(|cell| {
-            let cell = cell.trim();
-            !cell.is_empty()
-                && cell.contains('-')
-                && cell.chars().all(|c| c == '-' || c == ':')
-        })
+
+/// Map a substituted-source line index back to the NEW-file line index
+/// (the substitution replaced new lines `[a, a+span)` with a block of
+/// `block_len` lines that all belong to new-file line `a`).
+fn remapped_line(i: usize, a: usize, span: usize, block_len: usize) -> usize {
+    if i < a {
+        i
+    } else if i < a + block_len {
+        a
+    } else {
+        i + span - block_len
+    }
+}
+
+/// The substituted-source index for NEW-file line `j` (the inverse of
+/// [`remapped_line`] on the non-block lines; the hunk's lines all point
+/// at the block's first line).
+fn sub_index(j: usize, a: usize, span: usize, block_len: usize) -> usize {
+    if j < a {
+        j
+    } else if j < a + span {
+        a
+    } else {
+        j + block_len - span
+    }
 }
 
 /// Rebuild the source-mode layout and the rendered view after the `o`
@@ -2266,7 +2310,7 @@ fn toggle_old_side(app: &mut App) {
         return;
     }
     let Some(h) = diff.hunk_at(line, new_len) else {
-        app.flash_err("no git changes on this line");
+        app.flash_err("no git changes on this line — F7: next change");
         return;
     };
     let hunk = &diff.hunks[h];
