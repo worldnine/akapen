@@ -76,6 +76,25 @@ impl Hunk {
             })
     }
 
+    /// Whether new-file `line` is one of the hunk's added/changed lines
+    /// (the `+` lines — context lines are not the change itself).
+    pub fn is_changed_line(&self, line: usize) -> bool {
+        let mut new_idx = self.new_start.saturating_sub(1) as usize;
+        for l in &self.body {
+            match l.tag {
+                Tag::Add => {
+                    if new_idx == line {
+                        return true;
+                    }
+                    new_idx += 1;
+                }
+                Tag::Delete => {}
+                Tag::Context => new_idx += 1,
+            }
+        }
+        false
+    }
+
     /// The old-side lines of the hunk: context + deleted lines in order —
     /// exactly the ref's lines this hunk covers.
     pub fn old_lines(&self) -> Vec<String> {
@@ -84,6 +103,47 @@ impl Hunk {
             .filter(|l| l.tag != Tag::Add)
             .map(|l| l.text.clone())
             .collect()
+    }
+
+    /// The new-file line a hunk jump lands on: the first added/changed
+    /// line of the hunk (the first `+` — context lines are skipped), or
+    /// the following line for a pure deletion.
+    pub fn anchor(&self, new_len: usize) -> usize {
+        let mut new_idx = self.new_start.saturating_sub(1) as usize;
+        for l in &self.body {
+            match l.tag {
+                Tag::Add => return new_idx,
+                Tag::Delete => {}
+                Tag::Context => new_idx += 1,
+            }
+        }
+        self.owner(new_len)
+    }
+
+    /// `(added, deleted)` line counts inside the hunk — the `+N/-M` the
+    /// changes list shows per hunk.
+    pub fn counts(&self) -> (usize, usize) {
+        let mut added = 0usize;
+        let mut deleted = 0usize;
+        for l in &self.body {
+            match l.tag {
+                Tag::Add => added += 1,
+                Tag::Delete => deleted += 1,
+                Tag::Context => {}
+            }
+        }
+        (added, deleted)
+    }
+
+    /// The preview line for a changes-list row: the first ADDED line of
+    /// the hunk (what the file now contains), else the first deleted
+    /// line for a pure deletion.
+    pub fn preview_line(&self) -> Option<&str> {
+        self.body
+            .iter()
+            .find(|l| l.tag == Tag::Add)
+            .or_else(|| self.body.iter().find(|l| l.tag != Tag::Context))
+            .map(|l| l.text.as_str())
     }
 }
 
@@ -172,6 +232,17 @@ impl Diff {
             }
         }
         out
+    }
+
+    /// The hunk whose CHANGED region contains new-file `line`: an added
+    /// line, or the owner line of a pure deletion. Context-only positions
+    /// return `None` — the jump keys treat them as "not on a change" and
+    /// land on the nearest hunk instead of stepping.
+    pub fn changed_at(&self, line: usize, new_len: usize) -> Option<usize> {
+        self.hunks.iter().position(|h| match h.new_range() {
+            Some(_) => h.is_changed_line(line),
+            None => h.owner(new_len) == line,
+        })
     }
 
     /// The index of the hunk under new-file `line` (0-based): the hunk
@@ -313,6 +384,31 @@ mod tests {
     fn old_lines_are_context_and_deletes_in_order() {
         let d = parse_diff("@@ -1,5 +1,4 @@\n c1\n-old1\n-old2\n+new1\n c2\n c3\n");
         assert_eq!(d.hunks[0].old_lines(), vec!["c1", "old1", "old2", "c2", "c3"]);
+    }
+
+    #[test]
+    fn anchor_lands_on_the_first_changed_line() {
+        // Context lines are skipped; the first `+` is the landing line.
+        let d = parse_diff("@@ -1,5 +1,5 @@\n c1\n-old1\n+new1\n c2\n c3\n");
+        let h = &d.hunks[0];
+        assert_eq!(h.anchor(10), 1, "the changed line (0-based)");
+        // A pure addition anchors at the first added line.
+        let d = parse_diff("@@ -1,2 +1,4 @@\n c1\n c2\n+new3\n+new4\n");
+        assert_eq!(d.hunks[0].anchor(10), 2);
+        // A pure deletion anchors at the following line.
+        let d = parse_diff("@@ -2,3 +2,0 @@\n-b\n-c\n-d\n");
+        assert_eq!(d.hunks[0].anchor(5), 1);
+    }
+
+    #[test]
+    fn counts_and_preview_line_describe_the_hunk() {
+        let d = parse_diff("@@ -1,5 +1,6 @@\n c1\n-old1\n+new1\n+new2\n c2\n c3\n");
+        let h = &d.hunks[0];
+        assert_eq!(h.counts(), (2, 1), "+2/-1");
+        assert_eq!(h.preview_line(), Some("new1"), "the first changed line");
+        let d = parse_diff("@@ -2,3 +2,0 @@\n-b\n-c\n-d\n");
+        assert_eq!(d.hunks[0].counts(), (0, 3));
+        assert_eq!(d.hunks[0].preview_line(), Some("b"));
     }
 
     #[test]

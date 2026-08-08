@@ -64,6 +64,15 @@ enum Overlay {
     Help,
 }
 
+/// Which tab the all-comments overlay (`l`) shows: the comments list or
+/// the git changes list (hunks across every file). Tab toggles.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum OverlayTab {
+    #[default]
+    Comments,
+    Changes,
+}
+
 /// Whether `path` can be opened in view mode. The native renderer is
 /// tui-markdown (pulldown-cmark), so only Markdown-family files render;
 /// everything else (`.rs`, `.toml`, …) is source-only.
@@ -95,6 +104,10 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 const HUGE_FILE: usize = 100_000;
 /// The default double-click window (see `App::double_click_ms`).
 const DOUBLE_CLICK_MS: Duration = Duration::from_millis(400);
+/// The window in which a second key completes a `]`/`[` chord: `]` alone
+/// falls back to the file switch after this, `]c` jumps to the next
+/// change (the F7 fallback for terminals that do not deliver F-keys).
+const CHORD_MS: Duration = Duration::from_millis(400);
 
 /// A hunk displayed old-side (3-2): the block replaces the hunk's new
 /// lines with the HEAD content. Cached per file so toggling and re-renders
@@ -193,12 +206,12 @@ fn main() -> Result<()> {
                  keys:\n\
                  \x20 view mode:    j/k/arrows scroll, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
                  \x20                v select, c comment, s send, y copy, d delete, e edit,\n\
-                 \x20                r reload, o old side (git), ]/[ next/prev file, l comments,\n\
-                 \x20                Ctrl+p files, Tab source mode\n\
+                 \x20                r reload, o old side (git), F7/]c next change, ]/[ files,\n\
+                 \x20                l comments/changes, Ctrl+p files, Tab source mode\n\
                  \x20 source mode:  j/k move, v select, c comment, s send,\n\
                  \x20                y copy, d delete, e edit, r reload, n/N next comment,\n\
-                 \x20                o old side (git), ]/[ next/prev file, l comments,\n\
-                 \x20                Ctrl+p files, Tab view mode (Markdown files only)\n\
+                 \x20                o old side (git), F7/]c next change, ]/[ files,\n\
+                 \x20                l comments/changes, Ctrl+p files, Tab view mode (Markdown only)\n\
                  \x20 overlays:     j/k move, Enter jump/switch, d delete (comments),\n\
                  \x20                ? help, Esc/q close, click outside close\n\
                  \x20 input:        Enter confirm, Ctrl+j newline, Esc cancel"
@@ -225,6 +238,12 @@ struct App {
     /// The overlay currently open (Ctrl+p files / `l` comments / `?`
     /// help), if any.
     overlay: Option<Overlay>,
+    /// Which tab the comments overlay shows (comments vs git changes).
+    overlay_tab: OverlayTab,
+    /// A pending `]`/`[` chord: the bracket pressed and when. Resolves to
+    /// the file switch when the [`CHORD_MS`] window expires, or to a hunk
+    /// jump when `c` follows (`]c`/`[c` — the F7 fallback).
+    pending_chord: Option<(Instant, char)>,
     /// Cursor row in the overlay (0-based).
     overlay_cursor: usize,
     /// Scroll offset of the overlay's list (rows): moves only when the
@@ -393,6 +412,8 @@ impl App {
             current_file_index: 0,
             file_states: Vec::new(),
             overlay: None,
+            overlay_tab: OverlayTab::default(),
+            pending_chord: None,
             overlay_cursor: 0,
             overlay_offset: 0,
             last_overlay_click: None,
@@ -910,6 +931,8 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
                 }
             }
         }
+        // Expire a pending `]`/`[` chord into its default file switch.
+        expire_pending_chord(app);
         terminal.draw(|f| draw(f, app))?;
         // Resize debounce: re-render the view once the pane settles.
         if app.view_dirty {
@@ -963,6 +986,35 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
     if app.overlay.is_some() {
         return on_overlay_key(app, key, modifiers);
     }
+    // A pending `]`/`[` chord resolves on the next key: `c` within the
+    // window completes it into a hunk jump (the F7 fallback), `]`/`[`
+    // again falls back to the file switch and arms the new bracket, Esc
+    // cancels entirely (no file switch), and any other key falls back to
+    // the file switch and is then processed normally.
+    if let Some((_, bracket)) = app.pending_chord {
+        match key {
+            KeyCode::Char('c') if modifiers.is_empty() => {
+                app.pending_chord = None;
+                jump_hunk(app, if bracket == ']' { 1 } else { -1 });
+                return;
+            }
+            KeyCode::Char(']') | KeyCode::Char('[') if modifiers.is_empty() => {
+                let next = if key == KeyCode::Char(']') { ']' } else { '[' };
+                switch_file(app, bracket);
+                app.pending_chord = Some((Instant::now(), next));
+                return;
+            }
+            KeyCode::Esc => {
+                // Cancel: the bracket is dropped, Esc proceeds normally.
+                app.pending_chord = None;
+            }
+            _ => {
+                app.pending_chord = None;
+                switch_file(app, bracket);
+                // Fall through: the new key is processed normally.
+            }
+        }
+    }
     match app.mode {
         Mode::Input => on_input_key(app, key, modifiers),
         Mode::View => on_view_key(app, key, modifiers, terminal),
@@ -972,12 +1024,15 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
 
 /// Open an overlay, resetting the double-click tracker: a click in a
 /// fresh session must never be mistaken for the tail of an old
-/// double-click (and a delete may have shifted the entry indices).
+/// double-click (and a delete may have shifted the entry indices). The
+/// pending `]`/`[` chord is dropped too — overlay keys must never
+/// complete it.
 fn open_overlay(app: &mut App, kind: Overlay, cursor: usize) {
     app.overlay = Some(kind);
     app.overlay_cursor = cursor;
     app.overlay_offset = 0;
     app.last_overlay_click = None;
+    app.pending_chord = None;
 }
 
 /// Raw indices of `app.comments` in the overlay's order (file, then
@@ -993,6 +1048,76 @@ fn sorted_comment_indices(app: &App) -> Vec<usize> {
     idx
 }
 
+/// The git diff for `file` (the current file's diff lives in the live
+/// App fields; the others in their FileState slots).
+fn diff_for(app: &App, file: usize) -> Option<&git::Diff> {
+    if file == app.current_file_index {
+        app.git_diff.as_ref()
+    } else {
+        app.file_states.get(file).and_then(|fs| fs.git_diff.as_ref())
+    }
+}
+
+/// The loaded line count of `file` (current file: the live source).
+fn file_len(app: &App, file: usize) -> usize {
+    if file == app.current_file_index {
+        app.source.len()
+    } else {
+        app.file_states.get(file).map_or(0, |fs| fs.source.len())
+    }
+}
+
+/// One selectable entry of the changes tab: a hunk of a file, or an
+/// untracked file (every line is a change, no hunks exist).
+#[derive(Clone, Copy, Debug)]
+enum ChangesEntry {
+    Hunk { file: usize, hunk: usize },
+    Untracked { file: usize },
+}
+
+impl ChangesEntry {
+    fn file(&self) -> usize {
+        match self {
+            ChangesEntry::Hunk { file, .. } | ChangesEntry::Untracked { file } => *file,
+        }
+    }
+}
+
+/// The changes tab's entries: one per hunk across every session file,
+/// plus one per untracked file, in file order.
+fn changes_entries(app: &App) -> Vec<ChangesEntry> {
+    let mut out = Vec::new();
+    for fi in 0..app.files.len() {
+        let Some(diff) = diff_for(app, fi) else { continue };
+        if diff.untracked {
+            if file_len(app, fi) > 0 {
+                out.push(ChangesEntry::Untracked { file: fi });
+            }
+        } else {
+            for h in 0..diff.hunks.len() {
+                out.push(ChangesEntry::Hunk { file: fi, hunk: h });
+            }
+        }
+    }
+    out
+}
+
+/// The changes tab's display rows: per file a group header, then one row
+/// per entry — the same shape as the comments tab's rows.
+fn changes_rows(app: &App) -> Vec<Option<usize>> {
+    let entries = changes_entries(app);
+    let mut rows = Vec::new();
+    let mut last: Option<usize> = None;
+    for (pos, e) in entries.iter().enumerate() {
+        if last != Some(e.file()) {
+            last = Some(e.file());
+            rows.push(None); // group header
+        }
+        rows.push(Some(pos));
+    }
+    rows
+}
+
 /// The display rows of the open overlay, top to bottom: `None` = a group
 /// header (not selectable), `Some(i)` = the entry index in overlay order
 /// (files: the file index; comments: the [`sorted_comment_indices`]
@@ -1001,6 +1126,9 @@ fn overlay_rows(app: &App) -> Vec<Option<usize>> {
     match app.overlay {
         Some(Overlay::Files) => (0..app.files.len()).map(Some).collect(),
         Some(Overlay::Comments) => {
+            if app.overlay_tab == OverlayTab::Changes {
+                return changes_rows(app);
+            }
             let idx = sorted_comment_indices(app);
             let mut rows = Vec::new();
             let mut last_file: Option<&PathBuf> = None;
@@ -1015,6 +1143,22 @@ fn overlay_rows(app: &App) -> Vec<Option<usize>> {
             rows
         }
         Some(Overlay::Help) | None => Vec::new(),
+    }
+}
+
+/// The number of selectable entries in the open overlay — the j/k and
+/// wheel clamps. The comments overlay counts its current tab.
+fn overlay_entry_count(app: &App) -> usize {
+    match app.overlay {
+        Some(Overlay::Files) => app.files.len(),
+        Some(Overlay::Comments) => {
+            if app.overlay_tab == OverlayTab::Changes {
+                changes_entries(app).len()
+            } else {
+                app.comments.len()
+            }
+        }
+        Some(Overlay::Help) | None => 0,
     }
 }
 
@@ -1110,9 +1254,42 @@ fn activate_overlay_selection(app: &mut App) {
             }
         }
         Some(Overlay::Comments) => {
-            // Jump to the selected comment's file; its whole range becomes
-            // the selection (all lines light up), cursor on the extent.
-            // The cursor indexes the SORTED list; map through the indices.
+            if app.overlay_tab == OverlayTab::Changes {
+                // Changes tab: jump to the selected hunk (switch to its
+                // file first), or to an untracked file's top.
+                let entries = changes_entries(app);
+                let Some(e) = entries.get(app.overlay_cursor).copied() else {
+                    return;
+                };
+                app.overlay = None;
+                match e {
+                    ChangesEntry::Hunk { file, hunk } => {
+                        if file != app.current_file_index {
+                            app.switch_to_file(file);
+                        }
+                        land_on_hunk(app, hunk);
+                    }
+                    ChangesEntry::Untracked { file } => {
+                        if file != app.current_file_index {
+                            app.switch_to_file(file);
+                        }
+                        app.selection = None;
+                        if app.mode == Mode::View {
+                            app.view.goto_source_line(0);
+                            app.view.keep_cursor_visible(app.view_viewport_rows());
+                        } else {
+                            app.cursor = 0;
+                            app.keep_cursor_visible(app.source_viewport_rows() as u16);
+                        }
+                        app.flash("untracked — all lines are new");
+                    }
+                }
+                return;
+            }
+            // Comments tab: jump to the selected comment's file; its
+            // whole range becomes the selection (all lines light up),
+            // cursor on the extent. The cursor indexes the SORTED list;
+            // map through the indices.
             let idx = sorted_comment_indices(app);
             if let Some(&raw) = idx.get(app.overlay_cursor) {
                 let c = &app.comments[raw];
@@ -1168,8 +1345,17 @@ fn on_files_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
 /// The all-comments list (`l`): j/k move, Enter jumps to the comment's
 /// file+line, `d` deletes it, and Esc / q / `l` close it.
 fn on_comments_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
-    let total = app.comments.len();
+    let total = overlay_entry_count(app);
     match key {
+        // Tab toggles the comments | changes tab.
+        KeyCode::Tab => {
+            app.overlay_tab = match app.overlay_tab {
+                OverlayTab::Comments => OverlayTab::Changes,
+                OverlayTab::Changes => OverlayTab::Comments,
+            };
+            app.overlay_cursor = 0;
+            app.overlay_offset = 0;
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             if total > 0 {
                 app.overlay_cursor = (app.overlay_cursor + 1).min(total - 1);
@@ -1182,8 +1368,12 @@ fn on_comments_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers
         }
         KeyCode::Enter => activate_overlay_selection(app),
         KeyCode::Char('d') => {
-            // Delete the selected comment. The cursor indexes the SORTED
-            // list; map through the indices to the raw vec for removal.
+            // Delete the selected comment (comments tab only — the
+            // changes tab has nothing to delete). The cursor indexes the
+            // SORTED list; map through the indices to the raw vec.
+            if app.overlay_tab != OverlayTab::Comments {
+                return;
+            }
             let idx = sorted_comment_indices(app);
             if let Some(&raw) = idx.get(app.overlay_cursor) {
                 app.comments.remove(raw);
@@ -1205,6 +1395,9 @@ fn on_comments_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers
 /// left-drag selects a line range (source mode only). Clicking without
 /// dragging never starts a selection, so the mouse stays optional.
 fn on_mouse(app: &mut App, mouse: MouseEvent) {
+    // A mouse action cancels a pending `]`/`[` chord: the user moved on,
+    // the bracket's default file switch must not fire later.
+    app.pending_chord = None;
     // With an overlay open the mouse drives the overlay only: a click
     // outside the panel closes it (modal dismiss), a click on an entry
     // selects it, and the wheel moves the selection (j/k semantics).
@@ -1261,9 +1454,10 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
                     }
                 }
                 _ => {
-                    if !app.comments.is_empty() {
-                        app.overlay_cursor =
-                            (app.overlay_cursor + 1).min(app.comments.len() - 1);
+                    // Comments overlay: the current tab's entries.
+                    let total = overlay_entry_count(app);
+                    if total > 0 {
+                        app.overlay_cursor = (app.overlay_cursor + 1).min(total - 1);
                         keep_overlay_cursor_visible(app);
                     }
                 }
@@ -2055,6 +2249,120 @@ fn toggle_old_side(app: &mut App) {
     app.flash(format!("old side vs HEAD · {where_}"));
 }
 
+/// 1-based location label for a hunk: `L5-9`, or `before L5` for a pure
+/// deletion (mirrors the `o` toggle's message).
+fn hunk_label(hunk: &git::Hunk, new_len: usize) -> String {
+    match hunk.new_range() {
+        Some((a, b)) => format!("L{}-{}", a + 1, b + 1),
+        None => format!("before L{}", hunk.owner(new_len) + 1),
+    }
+}
+
+/// `]`/`[` file switching — the chord's default action, shared by the
+/// immediate resolution paths and the chord timeout.
+fn switch_file(app: &mut App, bracket: char) {
+    let n = app.files.len();
+    if n == 0 {
+        return;
+    }
+    let next = if bracket == ']' {
+        (app.current_file_index + 1).min(n - 1)
+    } else {
+        app.current_file_index.saturating_sub(1)
+    };
+    app.switch_to_file(next);
+}
+
+/// Land the cursor on hunk `h` of the current file's diff, with a
+/// selection covering the hunk. Shared by F7 / `]c` jumping and the
+/// changes tab's Enter. The cursor sits on the hunk's first CHANGED line
+/// (`anchor` — the review position), while the selection covers the
+/// whole hunk range (the owner line for a pure deletion).
+fn land_on_hunk(app: &mut App, h: usize) {
+    let Some(diff) = &app.git_diff else { return };
+    let Some(hunk) = diff.hunks.get(h) else { return };
+    let new_len = app.source.len();
+    let (start, end) = match hunk.new_range() {
+        Some((a, b)) => (a, b),
+        None => {
+            let o = hunk.owner(new_len);
+            (o, o)
+        }
+    };
+    let line = hunk.anchor(new_len);
+    app.selection = Some(Selection {
+        anchor: start,
+        cursor: end,
+    });
+    if app.mode == Mode::View {
+        app.view.goto_source_line(line);
+        app.view.keep_cursor_visible(app.view_viewport_rows());
+    } else {
+        app.cursor = line;
+        app.keep_cursor_visible(app.source_viewport_rows() as u16);
+    }
+}
+
+/// Jump to the next (`dir > 0`) or previous change hunk: `F7` /
+/// `Shift+F7`, or the `]c` / `[c` chord. From a line outside any hunk
+/// the jump lands on the nearest hunk in `dir`; at the ends it flashes
+/// instead of wrapping (like `n`/`N`).
+fn jump_hunk(app: &mut App, dir: isize) {
+    let Some(diff) = &app.git_diff else {
+        app.flash_err("not in a git repository");
+        return;
+    };
+    if diff.untracked {
+        app.flash_err("untracked file — nothing to compare");
+        return;
+    }
+    let n = diff.hunks.len();
+    if n == 0 {
+        app.flash_err("no git changes");
+        return;
+    }
+    let new_len = app.source.len();
+    let line = if app.mode == Mode::View {
+        app.view.cursor
+    } else {
+        app.cursor
+    };
+    // Stepping requires the cursor to be ON a changed line (context
+    // positions count as "not on a change": the jump lands on the
+    // nearest hunk in `dir` instead).
+    let target = match diff.changed_at(line, new_len) {
+        Some(i) => {
+            let next = i as isize + dir;
+            if next < 0 || next >= n as isize {
+                app.flash_err(if dir > 0 { "no changes below" } else { "no changes above" });
+                return;
+            }
+            next as usize
+        }
+        None => {
+            if dir > 0 {
+                0
+            } else {
+                n - 1
+            }
+        }
+    };
+    let label = hunk_label(&diff.hunks[target], new_len);
+    app.flash(format!("変更 {}/{} · {label}", target + 1, n));
+    land_on_hunk(app, target);
+}
+
+/// Expire a pending `]`/`[` chord into its default file switch. Called
+/// every frame by the event loop; exposed so tests drive the same path.
+fn expire_pending_chord(app: &mut App) {
+    if let Some((at, bracket)) = app.pending_chord
+        && at.elapsed() >= CHORD_MS
+    {
+        app.pending_chord = None;
+        switch_file(app, bracket);
+    }
+}
+
 /// Re-render the view after a comment was added/deleted (or a reload), and
 /// keep the cursor line at the same screen row it was on — inserting a card
 /// shifts the rows below, so without this the cursor jumps.
@@ -2343,14 +2651,14 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
                 open_editor(app, t);
             }
         }
-        KeyCode::Char(']') => {
-            let next = (app.current_file_index + 1).min(app.files.len().saturating_sub(1));
-            app.switch_to_file(next);
-        }
-        KeyCode::Char('[') => {
-            let prev = app.current_file_index.saturating_sub(1);
-            app.switch_to_file(prev);
-        }
+        // `]`/`[` arm the chord: alone they switch files (when the
+        // [`CHORD_MS`] window expires, or on the next non-chord key); `c`
+        // within the window jumps to the next/previous change instead
+        // (the F7 fallback). F7/Shift+F7 jump directly.
+        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_hunk(app, -1),
+        KeyCode::F(7) => jump_hunk(app, 1),
+        KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
+        KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
         // `l` opens the all-comments list; Ctrl+p opens the file picker;
         // `?` opens the full key reference.
         KeyCode::Char('l') => {
@@ -2658,14 +2966,14 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
         KeyCode::Char('n') | KeyCode::Char('N') => {
             jump_comment(app, if key == KeyCode::Char('n') { 1 } else { -1 });
         }
-        KeyCode::Char(']') => {
-            let next = (app.current_file_index + 1).min(app.files.len().saturating_sub(1));
-            app.switch_to_file(next);
-        }
-        KeyCode::Char('[') => {
-            let prev = app.current_file_index.saturating_sub(1);
-            app.switch_to_file(prev);
-        }
+        // `]`/`[` arm the chord: alone they switch files (when the
+        // [`CHORD_MS`] window expires, or on the next non-chord key); `c`
+        // within the window jumps to the next/previous change instead
+        // (the F7 fallback). F7/Shift+F7 jump directly.
+        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_hunk(app, -1),
+        KeyCode::F(7) => jump_hunk(app, 1),
+        KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
+        KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
         // `l` opens the all-comments list; Ctrl+p opens the file picker;
         // `?` opens the full key reference.
         KeyCode::Char('l') => {
@@ -3808,7 +4116,7 @@ fn help_rows(esc_quit: bool, reply: bool) -> Vec<(&'static str, &'static str)> {
         ("comment", "v select · Esc cancel · c add · d delete · n/N jump"),
         ("mode", "Tab view⇄source"),
         ("output", "y copy · s send"),
-        ("list", "l comments · ? help"),
+        ("list", "l comments/changes · Tab tab · ? help"),
     ];
     if reply {
         // Reply mode: a single message document — no file navigation, no
@@ -3819,7 +4127,7 @@ fn help_rows(esc_quit: bool, reply: bool) -> Vec<(&'static str, &'static str)> {
     } else {
         rows.insert(1, ("file", "]/[ · ^p files"));
         rows.push(("reload", "r reload · i ignore · e edit"));
-        rows.push(("git", "o old side vs HEAD"));
+        rows.push(("git", "o old side vs HEAD · F7/]c next change · [c prev"));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
@@ -4078,7 +4386,44 @@ fn draw_files_overlay(f: &mut Frame, app: &App) {
 
 /// The all-comments list (`l`): every file's comments sorted by path then
 /// start line, with jump (Enter) and delete (d).
+/// The overlay title's leading spans: the comments | changes tab
+/// indicator with the active tab highlighted, plus the shared directory
+/// suffix. Both tab drawers lead with this, so the tabs read as one
+/// element wherever the list is.
+fn overlay_title_spans(
+    app: &App,
+    comments: usize,
+    changes: usize,
+    dir: Option<String>,
+) -> Vec<Span<'static>> {
+    let dark_gray = Style::default().fg(Color::DarkGray);
+    let cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let tab = |label: &str, n: usize, active: bool| {
+        Span::styled(
+            format!(" {label} ({n}) "),
+            if active { cyan } else { dark_gray },
+        )
+    };
+    let mut spans = vec![
+        tab("comments", comments, app.overlay_tab == OverlayTab::Comments),
+        Span::styled("|", dark_gray),
+        tab("changes", changes, app.overlay_tab == OverlayTab::Changes),
+    ];
+    if let Some(dir) = dir {
+        spans.push(Span::styled(format!("· {dir} "), yellow));
+    }
+    spans
+}
+
+/// The all-comments list (`l`): every file's comments sorted by path then
+/// start line, with jump (Enter) and delete (d). Tab switches to the
+/// changes tab (git hunks across every file).
 fn draw_comments_overlay(f: &mut Frame, app: &App) {
+    if app.overlay_tab == OverlayTab::Changes {
+        draw_changes_overlay(f, app);
+        return;
+    }
     use ratatui::widgets::Clear;
     let area = f.area();
     let panel = overlay_panel(area);
@@ -4100,24 +4445,24 @@ fn draw_comments_overlay(f: &mut Frame, app: &App) {
             comment_files.push(file.clone());
         }
     }
-    let title_text = if count > 0 {
-        match common_parent(&comment_files) {
-            Some(dir) => format!(" comments ({count}) · {dir} "),
-            None => format!(" comments ({count}) "),
-        }
-    } else {
-        " no comments ".to_string()
-    };
-    let title_fill = "─".repeat(panel.width.saturating_sub(title_text.width() as u16 + 2) as usize);
-    lines.push(Line::from(vec![
-        Span::styled(title_text, yellow),
-        Span::styled(title_fill, dark_gray),
-    ]));
+    let dir = (count > 0).then(|| common_parent(&comment_files).unwrap_or_default());
+    let mut title = overlay_title_spans(app, count, changes_entries(app).len(), dir);
+    let used: usize = title
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    title.push(Span::styled(
+        "─".repeat(panel.width.saturating_sub(used as u16 + 2) as usize),
+        dark_gray,
+    ));
+    lines.push(Line::from(title));
 
     if count == 0 {
         lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(" no comments yet", dark_gray)));
+        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            " Esc/q:close",
+            " Tab:tab  Esc/q:close",
             dark_gray,
         )));
         let block = Block::default()
@@ -4187,7 +4532,144 @@ fn draw_comments_overlay(f: &mut Frame, app: &App) {
     // Footer hints.
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " j/k:move  Enter:jump  d:delete  Esc/q:close",
+        " Tab:tab  j/k:move  Enter:jump  d:delete  Esc/q:close",
+        dark_gray,
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(dark_gray);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
+}
+
+/// The changes tab of the `l` overlay: every session file's git hunks
+/// (one row per hunk with its location, +N/-M, and a preview line), plus
+/// untracked files. Enter jumps to the hunk (or the file's top for
+/// untracked).
+fn draw_changes_overlay(f: &mut Frame, app: &App) {
+    use ratatui::widgets::Clear;
+    let area = f.area();
+    let panel = overlay_panel(area);
+    f.render_widget(Clear, panel);
+    let dark_gray = Style::default().fg(Color::DarkGray);
+    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let cyan = Style::default().fg(Color::Cyan);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let entries = changes_entries(app);
+    let count = entries.len();
+    // Distinct files with changes, for the shared-dir title and the
+    // shortest-unique-suffix group headers.
+    let mut change_files: Vec<PathBuf> = Vec::new();
+    for e in &entries {
+        let file = &app.files[e.file()];
+        if !change_files.contains(file) {
+            change_files.push(file.clone());
+        }
+    }
+    let dir = (count > 0).then(|| common_parent(&change_files).unwrap_or_default());
+    let mut title = overlay_title_spans(app, app.comments.len(), count, dir);
+    let used: usize = title
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    title.push(Span::styled(
+        "─".repeat(panel.width.saturating_sub(used as u16 + 2) as usize),
+        dark_gray,
+    ));
+    lines.push(Line::from(title));
+
+    if count == 0 {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " no changes yet (git diff vs HEAD)",
+            dark_gray,
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Tab:tab  Esc/q:close",
+            dark_gray,
+        )));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(dark_gray);
+        f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
+        return;
+    }
+
+    let inner = panel.width.saturating_sub(2) as usize;
+    // Scroll only when the list overflows; a list that fits never moves.
+    let rows = changes_rows(app);
+    let visible = overlay_visible_rows();
+    let offset = app.overlay_offset.min(rows.len().saturating_sub(visible));
+    for (p, row) in rows.iter().enumerate().skip(offset).take(visible) {
+        match row {
+            // A group header: the (shortest unique) path and its change
+            // count, once per file.
+            None => {
+                let Some(first_entry) = rows[p..].iter().find_map(|r| *r) else {
+                    continue;
+                };
+                let file = &app.files[entries[first_entry].file()];
+                let suffix = unique_suffix(file, &change_files);
+                let group_count = entries
+                    .iter()
+                    .filter(|e| e.file() == entries[first_entry].file())
+                    .count();
+                lines.push(Line::from(vec![Span::styled(
+                    format!(" {suffix} ({group_count})"),
+                    Style::default()
+                        .fg(Color::LightBlue)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+            }
+            Some(entry_pos) => {
+                let selected = *entry_pos == app.overlay_cursor;
+                let cursor_mark = if selected { "▸ " } else { "  " };
+                let loc_style = if selected {
+                    cyan.add_modifier(Modifier::BOLD)
+                } else {
+                    yellow
+                };
+                match &entries[*entry_pos] {
+                    ChangesEntry::Hunk { file, hunk } => {
+                        let diff = diff_for(app, *file).expect("entry implies a diff");
+                        let h = &diff.hunks[*hunk];
+                        let (a, d) = h.counts();
+                        let label = hunk_label(h, file_len(app, *file));
+                        let counts = format!("+{a}/-{d}");
+                        let preview = h.preview_line().unwrap_or("");
+                        let used =
+                            2 + UnicodeWidthStr::width(label.as_str()) + 2 + counts.len() + 1;
+                        let budget = inner.saturating_sub(used);
+                        let preview = clip_if_needed(preview, budget);
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("{cursor_mark}{label}"), loc_style),
+                            Span::styled(format!(" {counts}  {preview}"), dark_gray),
+                        ]));
+                    }
+                    ChangesEntry::Untracked { file } => {
+                        let n = file_len(app, *file);
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("{cursor_mark}untracked"),
+                                loc_style,
+                            ),
+                            Span::styled(
+                                format!("  {n} lines — all new"),
+                                dark_gray,
+                            ),
+                        ]));
+                    }
+                }
+            }
+        }
+    }
+
+    // Footer hints.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Tab:tab  j/k:move  Enter:jump  Esc/q:close",
         dark_gray,
     )));
 
@@ -4739,6 +5221,8 @@ impl App {
         if new_index == self.current_file_index || new_index >= self.files.len() {
             return;
         }
+        // A file switch resolves (or drops) any pending `]`/`[` chord.
+        self.pending_chord = None;
         // Save current state into the old slot.
         let old = &mut self.file_states[self.current_file_index];
         old.source = std::mem::take(&mut self.source);
@@ -5419,6 +5903,17 @@ mod state_tests {
         app.ensure_row_cache(75);
         app.refresh_line_rows();
         (app, dir)
+    }
+
+    /// Simulate the [`CHORD_MS`] window elapsing, then run the event
+    /// loop's expiry — the tests press `]`/`[` and expire synchronously,
+    /// so the timestamp must be backdated past the window first.
+    pub(crate) fn expire_chord(app: &mut App) {
+        if let Some((_, bracket)) = app.pending_chord {
+            app.pending_chord =
+                Some((Instant::now() - CHORD_MS - Duration::from_millis(1), bracket));
+        }
+        expire_pending_chord(app);
     }
 
     fn add_comment(app: &mut App, start: usize, end: usize, text: &str) {
@@ -6653,11 +7148,13 @@ mod state_tests {
         on_view_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
         assert!(app.confirm_reload);
         on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        expire_chord(&mut app); // the chord's default: file switch
         assert!(!app.confirm_reload, "file switch cancels the confirmation");
         assert_eq!(app.current_file_index, 1);
         // Back on a.md (view mode), arm again: Tab's mode flip cancels
         // too — the prompt's context is the pane the user looked at.
         on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
         assert_eq!(app.current_file_index, 0);
         assert_eq!(app.mode, Mode::View, "a.md restores to view mode");
         on_view_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
@@ -7383,8 +7880,10 @@ mod state_tests {
         let (mut app, _dir) = make_session();
         assert_eq!(app.current_file_index, 0);
         assert_eq!(app.mode, Mode::View);
-        // ] → next file (b.rs, source-only).
+        // ] → next file (b.rs, source-only). The bracket alone falls back
+        // to the file switch when the chord window expires.
         on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
         assert_eq!(app.current_file_index, 1);
         assert_eq!(app.mode, Mode::Source, "b.rs opens in source mode");
         // Tab is a no-op on the source-only file.
@@ -7393,6 +7892,7 @@ mod state_tests {
         assert!(app.status.is_some(), "a toast explains the restriction");
         // [ → back to a.md, view mode restored.
         on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
         assert_eq!(app.current_file_index, 0);
         assert_eq!(app.mode, Mode::View, "per-file mode restored");
     }
@@ -7470,6 +7970,7 @@ mod state_tests {
         });
         // Start on b.rs (index 1); jump via the list back to a.md line 3.
         on_source_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
         assert_eq!(app.current_file_index, 1);
         on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
         on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -7513,7 +8014,9 @@ mod state_tests {
         let (mut app, _dir) = make_session();
         app.view.width = 10; // simulate a stale render width
         on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
         on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
         assert_ne!(
             app.view.width, 10,
             "the restored view re-renders at the current width"
@@ -8219,6 +8722,7 @@ mod state_tests {
         });
         // Start on b.rs (index 1), open the comment list.
         on_source_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
         assert_eq!(app.current_file_index, 1);
         on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
         let panel = overlay_panel(Rect {
@@ -9192,6 +9696,358 @@ mod git_tests {
         assert!(app.old_side.is_none());
         let (msg, _, _) = app.status.as_ref().expect("a flash explains");
         assert!(msg.contains("untracked"), "message names the case: {msg}");
+    }
+
+    #[test]
+    fn f7_jumps_between_hunks_and_selects_them() {
+        // A 20-line file with two changes: F7 from an unchanged line
+        // lands on the first hunk's first CHANGED line, F7 steps to the
+        // second, Shift+F7 back. The selection covers each hunk.
+        let lines: Vec<String> = (1..=20).map(|i| format!("line{i:02}")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &lines.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
+        let mut work = lines.clone();
+        work[4] = "CHANGED-A".into();
+        work[14] = "CHANGED-B".into();
+        overwrite(&path, &work.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let mut app = git_app(path, Mode::Source);
+        assert_eq!(app.git_diff.as_ref().unwrap().hunks.len(), 2);
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 4, "lands on the first changed line");
+        // The selection covers the whole hunk (context included), like
+        // the `o` toggle's replacement range.
+        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 7 }));
+        let (msg, _, _) = app.status.as_ref().unwrap();
+        assert!(msg.contains("変更 1/2"), "toast reports the position: {msg}");
+        // F7 again: the second hunk.
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 14);
+        assert_eq!(app.selection, Some(Selection { anchor: 11, cursor: 17 }));
+        assert!(app.status.as_ref().unwrap().0.contains("変更 2/2"));
+        // Shift+F7: back to the first.
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::SHIFT, None);
+        assert_eq!(app.cursor, 4);
+        // Same keys work in view mode (from the first hunk onward).
+        app.view.goto_source_line(4);
+        app.mode = Mode::View;
+        on_view_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert_eq!(app.view.cursor, 14);
+        on_view_key(&mut app, KeyCode::F(7), KeyModifiers::SHIFT, None);
+        assert_eq!(app.view.cursor, 4);
+    }
+
+    #[test]
+    fn f7_at_the_ends_flashes_without_wrapping() {
+        let lines: Vec<String> = (1..=20).map(|i| format!("line{i:02}")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &lines.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
+        let mut work = lines.clone();
+        work[4] = "CHANGED-A".into();
+        work[14] = "CHANGED-B".into();
+        overwrite(&path, &work.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let mut app = git_app(path, Mode::Source);
+        // Cursor on the LAST hunk already: F7 flashes, does not wrap.
+        app.cursor = 14;
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        let (msg, _, is_error) = app.status.as_ref().unwrap();
+        assert!(*is_error && msg.contains("no changes below"), "{msg}");
+        assert_eq!(app.cursor, 14, "stays put");
+        // Shift+F7 from the first hunk flashes the other way.
+        app.cursor = 4;
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::SHIFT, None);
+        let (msg, _, is_error) = app.status.as_ref().unwrap();
+        assert!(*is_error && msg.contains("no changes above"), "{msg}");
+        assert_eq!(app.cursor, 4);
+        // No hunks at all: a clear error.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three"]);
+        let mut app = git_app(path, Mode::Source);
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert!(app.status.as_ref().unwrap().0.contains("no git changes"));
+    }
+
+    #[test]
+    fn bracket_c_chord_jumps_instead_of_switching_files() {
+        // `]c` within the chord window is a change jump (the F7
+        // fallback) — the file does NOT switch. A 2-file session: a.md
+        // has a change, b.rs does not.
+        let dir = tempfile::tempdir().unwrap();
+        let a = init_repo(dir.path(), &["one", "two", "three"]);
+        overwrite(&a, &["one", "CHANGED", "three"]);
+        let b = dir.path().join("b.rs");
+        std::fs::write(&b, "fn main() {}\n// second line\n").unwrap();
+        let config = Config {
+            files: vec![a, b],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(config.files[0].clone()).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        app.mode = Mode::Source;
+        // file_states[1] needs a real source: the chord's default action
+        // switches into it.
+        let b_source = Source::load(app.files[1].clone()).unwrap();
+        let b_spans = app
+            .highlight
+            .highlight_with(&b_source.content, syntax_for(&app.files[1]));
+        let b_view = ViewState::render(&b_source, 75, &app.highlight);
+        app.file_states = vec![
+            FileState::default(),
+            FileState {
+                source: b_source,
+                spans: b_spans,
+                view: b_view,
+                mode: Mode::Source,
+                ..Default::default()
+            },
+        ];
+        app.gutter_cols = 3;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        let (diff, added, deleted) = git_snapshot(&app.git_ref, &app.files[0], app.source.len());
+        app.git_diff = diff;
+        app.git_added = added;
+        app.git_deleted_before = deleted;
+        // `]` then `c`: the chord completes into a jump. The tests go
+        // through on_key — the chord resolution lives in the dispatcher,
+        // not in the per-mode handlers.
+        on_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        on_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.current_file_index, 0, "no file switch");
+        assert!(app.pending_chord.is_none(), "the chord was consumed");
+        assert_eq!(app.cursor, 1, "landed on the changed line");
+        assert_eq!(app.selection, Some(Selection { anchor: 0, cursor: 2 }));
+        assert_eq!(app.mode, Mode::Source, "c was the chord, not the composer");
+        // `[c` jumps back to the previous hunk (none above: flashes).
+        on_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
+        on_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert!(app.status.as_ref().unwrap().0.contains("no changes above"));
+        // A plain `]` alone still switches files once the window expires.
+        on_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        state_tests::expire_chord(&mut app);
+        assert_eq!(app.current_file_index, 1, "the default action fires");
+    }
+
+    #[test]
+    fn other_keys_resolve_the_bracket_to_a_file_switch() {
+        // `]` followed by any non-chord key falls back to the file
+        // switch and the key is processed normally; Esc cancels instead.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.md");
+        let b = dir.path().join("b.rs");
+        std::fs::write(&a, "# a\n\nline2\n").unwrap();
+        std::fs::write(&b, "fn main() {}\n// second line\n").unwrap();
+        let config = Config {
+            files: vec![a, b],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: None,
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(config.files[0].clone()).unwrap();
+        let highlight = Highlighter::new(None, false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        // file_states[1] needs a real source: switching into an empty
+        // slot would make `j` a no-op.
+        let b_source = Source::load(app.files[1].clone()).unwrap();
+        let b_spans = app
+            .highlight
+            .highlight_with(&b_source.content, syntax_for(&app.files[1]));
+        let b_view = ViewState::render(&b_source, 75, &app.highlight);
+        app.file_states = vec![
+            FileState {
+                mode: Mode::View,
+                ..Default::default()
+            },
+            FileState {
+                source: b_source,
+                spans: b_spans,
+                view: b_view,
+                mode: Mode::Source,
+                ..Default::default()
+            },
+        ];
+        app.gutter_cols = 3;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        // `]` then `j`: file switch + move (through on_key, the real
+        // dispatcher).
+        let cur = app.cursor;
+        on_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        on_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
+        assert_eq!(app.current_file_index, 1, "] fell back to the switch");
+        assert_eq!(app.cursor, cur + 1, "j processed normally afterwards");
+        // `[` then Esc: cancelled — no switch, Esc proceeds (clears a
+        // selection).
+        on_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
+        app.selection = Some(Selection::new(1));
+        on_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert_eq!(app.current_file_index, 1, "Esc cancels the bracket");
+        assert!(app.selection.is_none(), "Esc itself is still processed");
+        assert!(app.pending_chord.is_none());
+        // Mashing `]` `]`: the second press resolves the first into a
+        // file switch and arms itself.
+        on_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        on_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        assert_eq!(app.current_file_index, 1, "the first ] resolved");
+        assert!(app.pending_chord.is_some(), "the second ] is pending");
+    }
+
+    #[test]
+    fn l_changes_tab_lists_hunks_and_enter_jumps() {
+        // `l` → Tab: the changes tab lists every hunk across the session
+        // files with location, +N/-M, and a preview; Enter jumps to it.
+        let dir = tempfile::tempdir().unwrap();
+        let a = init_repo(dir.path(), &["one", "two", "three", "four", "five"]);
+        overwrite(&a, &["one", "CHANGED", "three", "four", "five"]);
+        let b = dir.path().join("b.rs");
+        std::fs::write(&b, "fn main() {}\n// second line\n").unwrap();
+        let config = Config {
+            files: vec![a, b],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(config.files[0].clone()).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        app.mode = Mode::Source;
+        app.gutter_cols = 3;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        let (diff, added, deleted) = git_snapshot(&app.git_ref, &app.files[0], app.source.len());
+        app.git_diff = diff;
+        app.git_added = added;
+        app.git_deleted_before = deleted;
+        on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        assert_eq!(app.overlay, Some(Overlay::Comments));
+        on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.overlay_tab, OverlayTab::Changes);
+        // Draw: the changes tab shows the hunk's location and preview.
+        let capture = |app: &mut App| -> String {
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
+                .unwrap();
+            t.draw(|f| draw(f, app)).unwrap();
+            t.backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        let frame = capture(&mut app);
+        assert!(frame.contains("changes (1)"), "tab count: {frame}");
+        assert!(frame.contains("+1/-1"), "hunk counts: {frame}");
+        assert!(frame.contains("CHANGED"), "preview line: {frame}");
+        assert!(!frame.contains("d:delete"), "no delete hint on the changes tab");
+        // Enter jumps to the hunk and closes the overlay.
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.cursor, 1, "landed on the changed line");
+        assert_eq!(app.selection, Some(Selection { anchor: 0, cursor: 4 }));
+        // Tab back to comments.
+        on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.overlay_tab, OverlayTab::Comments);
+    }
+
+    #[test]
+    fn changes_tab_shows_untracked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path(), &["tracked"]);
+        let untracked = dir.path().join("new.md");
+        std::fs::write(&untracked, "fresh\nnew\n").unwrap();
+        let config = Config {
+            files: vec![untracked],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(config.files[0].clone()).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        app.mode = Mode::Source;
+        app.gutter_cols = 3;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        let (diff, added, deleted) = git_snapshot(&app.git_ref, &app.files[0], app.source.len());
+        app.git_diff = diff;
+        app.git_added = added;
+        app.git_deleted_before = deleted;
+        on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let frame: String = t
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(frame.contains("untracked"), "untracked row: {frame}");
+        assert!(frame.contains("all new"), "the explanation: {frame}");
+        // Enter lands at the top.
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn f7_without_git_flashes() {
+        // P1: outside a repository the jump keys explain themselves and
+        // change nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let mut app = git_app(path, Mode::Source);
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        let (msg, _, _) = app.status.as_ref().expect("a flash explains");
+        assert!(msg.contains("not in a git repository"), "{msg}");
+        assert!(app.selection.is_none());
     }
 
     #[test]
