@@ -1713,8 +1713,18 @@ fn render_view_with_cards(
         let last_row = block_last_row(&view.source_starts, view.rows.len(), end);
         let insert_at = last_row + 1;
         let lines = comment_bar_lines(c, columns as usize);
+        // Shift the source-line mapping only for lines whose text starts
+        // at or below the card's insert row. Lines merged with the
+        // comment's END line keep their start row: their text renders
+        // above the card (the paragraph shares the end line's row), so
+        // shifting them would point the cursor/selection at the card
+        // rows — the cursor marker and the selection highlight would
+        // vanish (rendered as a plain card) and mouse hits would resolve
+        // to the wrong line.
         for s in view.source_starts.iter_mut().skip(end + 1) {
-            *s += lines.len();
+            if *s >= insert_at {
+                *s += lines.len();
+            }
         }
         for (i, line) in lines.into_iter().enumerate() {
             let spans: Vec<HiSpan> = line
@@ -6456,6 +6466,76 @@ mod state_tests {
             !app.view.card_rows.iter().any(|&b| b),
             "the card is removed with the comment"
         );
+    }
+
+    #[test]
+    fn merged_followers_keep_their_row_after_a_card() {
+        // A comment whose end line is merged with the following lines
+        // (one paragraph row): the card is inserted after the paragraph's
+        // row, so the merged followers' text stays ABOVE the card — their
+        // source-line mapping must not shift into the card (the regression:
+        // the cursor landed on a card row, losing the `>` marker and the
+        // selection highlight, and mouse clicks resolved to wrong lines).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // One 4-line paragraph (no blank lines): all four lines merge
+        // into a single rendered row, then a blank + a heading.
+        writeln!(f, "para one").unwrap();
+        writeln!(f, "para two").unwrap();
+        writeln!(f, "para three").unwrap();
+        writeln!(f, "para four").unwrap();
+        writeln!(f).unwrap();
+        writeln!(f, "# after").unwrap();
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: None,
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let source = Source::load(path).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        // Comment on line 1 (0-based), the paragraph's second line.
+        let comments = vec![Comment {
+            file_path: "d.md".into(),
+            start: 2,
+            end: 2,
+            lines: String::new(),
+            text: "card".into(),
+        }];
+        let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+        let width = view_render_width(w);
+        let mut view = render_view_with_cards(&source, width, &highlight, &comments);
+        let card_h = view.card_rows.iter().filter(|&&b| b).count();
+        assert!(card_h >= 3);
+        // The paragraph (lines 0-3) shares row 0; the card follows it;
+        // the blank (line 4) and the heading (line 5) shift down by the
+        // card height.
+        assert_eq!(view.source_starts[0], 0);
+        assert_eq!(view.source_starts[1], 0, "merged follower keeps the paragraph row");
+        assert_eq!(view.source_starts[2], 0, "merged follower keeps the paragraph row");
+        assert_eq!(view.source_starts[3], 0, "merged follower keeps the paragraph row");
+        assert_eq!(view.source_starts[4], 1 + card_h, "the blank shifts below the card");
+        assert_eq!(view.source_starts[5], 2 + card_h, "lines below the card shift");
+        // The cursor on a merged follower stays on the paragraph row: the
+        // `>` marker and the selection band are visible again (the
+        // regression: the cursor row resolved into the card).
+        view.cursor = 1;
+        let (_, gutter) = view.visible_text(
+            10,
+            &[false; 6],
+            &[],
+            &[],
+            Some((1, 1)),
+            Color::Rgb(88, 91, 112),
+            ratatui::style::Style::default(),
+        );
+        assert_eq!(gutter[0].glyph, ">", "cursor on the merged follower marks row 0");
     }
 
     #[test]
