@@ -2457,7 +2457,7 @@ fn jump_hunk(app: &mut App, dir: isize) {
         }
     };
     let label = hunk_label(&diff.hunks[target], new_len);
-    app.flash(format!("変更 {}/{} · {label}", target + 1, n));
+    app.flash(format!("change {}/{} · {label}", target + 1, n));
     land_on_hunk(app, target);
 }
 
@@ -10228,12 +10228,12 @@ mod git_tests {
         // the `o` toggle's replacement range.
         assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 7 }));
         let (msg, _, _) = app.status.as_ref().unwrap();
-        assert!(msg.contains("変更 1/2"), "toast reports the position: {msg}");
+        assert!(msg.contains("change 1/2"), "toast reports the position: {msg}");
         // F7 again: the second hunk.
         on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
         assert_eq!(app.cursor, 14);
         assert_eq!(app.selection, Some(Selection { anchor: 11, cursor: 17 }));
-        assert!(app.status.as_ref().unwrap().0.contains("変更 2/2"));
+        assert!(app.status.as_ref().unwrap().0.contains("change 2/2"));
         // Shift+F7: back to the first.
         on_source_key(&mut app, KeyCode::F(7), KeyModifiers::SHIFT, None);
         assert_eq!(app.cursor, 4);
