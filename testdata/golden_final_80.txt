@@ -359,7 +359,9 @@
 "├───────────────────────────────────────────────────────────┼─────────┼────────┤"|Style::new().dark_gray()
 "│"|Style::new().dark_gray();;" "|Style::new();;"日本語の長いテキストが入るセル。折り返しはどうなるか確認"|Style::new();;"  "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"中央"|Style::new();;"    "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"x"|Style::new();;"      "|Style::new();;"│"|Style::new().dark_gray()
 "│"|Style::new().dark_gray();;" "|Style::new();;"するため。"|Style::new();;"                                                "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"        "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"       "|Style::new();;"│"|Style::new().dark_gray()
+"├───────────────────────────────────────────────────────────┼─────────┼────────┤"|Style::new().dark_gray()
 "│"|Style::new().dark_gray();;" "|Style::new();;"複数行にしたい場合は"|Style::new();;"<br>"|Style::new().dim();;"br タグを使う"|Style::new();;"                     "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"2"|Style::new();;"       "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"y"|Style::new();;"      "|Style::new();;"│"|Style::new().dark_gray()
+"├───────────────────────────────────────────────────────────┼─────────┼────────┤"|Style::new().dark_gray()
 "│"|Style::new().dark_gray();;" "|Style::new();;"セル内に "|Style::new();;"[img] "|Style::new().dim().italic();;"img"|Style::new().dim().italic();;" を入れる"|Style::new();;"                               "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"3"|Style::new();;"       "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"z"|Style::new();;"      "|Style::new();;"│"|Style::new().dark_gray()
 "└───────────────────────────────────────────────────────────┴─────────┴────────┘"|Style::new().dark_gray()
 
@@ -446,6 +448,7 @@
 "├─────────────────────────────────────┼───────────┼────────────────────────────┤"|Style::new().dark_gray()
 "│"|Style::new().dark_gray();;" "|Style::new();;"abcdefghijklmnopqrstuvwxyzabcdefghi"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"中央"|Style::new();;"      "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"右"|Style::new();;"                         "|Style::new();;"│"|Style::new().dark_gray()
 "│"|Style::new().dark_gray();;" "|Style::new();;"jklmnopqrstuvwxyz"|Style::new();;"                   "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"          "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"                           "|Style::new();;"│"|Style::new().dark_gray()
+"├─────────────────────────────────────┼───────────┼────────────────────────────┤"|Style::new().dark_gray()
 "│"|Style::new().dark_gray();;" "|Style::new();;"短い"|Style::new();;"                                "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"中央"|Style::new();;"      "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"12345678901234567890123456"|Style::new();;" "|Style::new();;"│"|Style::new().dark_gray()
 "│"|Style::new().dark_gray();;" "|Style::new();;"                                    "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"          "|Style::new();;"│"|Style::new().dark_gray();;" "|Style::new();;"78901234567890"|Style::new();;"             "|Style::new();;"│"|Style::new().dark_gray()
 "└─────────────────────────────────────┴───────────┴────────────────────────────┘"|Style::new().dark_gray()

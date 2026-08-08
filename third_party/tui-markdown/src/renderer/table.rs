@@ -188,7 +188,7 @@ impl<'a> TableBuilder<'a> {
             return Vec::new();
         }
 
-        let column_widths = self.column_widths(column_count, available_width);
+        let (column_widths, constrained) = self.column_widths(column_count, available_width);
         let border_style = styles.table_border();
 
         let top_border = TOP_BORDER.render(&column_widths, border_style);
@@ -204,7 +204,14 @@ impl<'a> TableBuilder<'a> {
         let mut lines = vec![top_border];
         lines.extend(header);
         lines.push(header_separator);
-        for row in body {
+        for (index, row) in body.into_iter().enumerate() {
+            // A width-constrained table wraps every row onto several lines;
+            // a separator between body rows keeps the row boundaries
+            // readable. A natural-width table keeps the light look (header
+            // separator only), byte-identical to the unbounded render.
+            if constrained && index > 0 {
+                lines.push(HEADER_SEPARATOR.render(&column_widths, border_style));
+            }
             lines.extend(row);
         }
         lines.push(bottom_border);
@@ -221,7 +228,8 @@ impl<'a> TableBuilder<'a> {
         )
     }
 
-    /// Column widths for a table laid out within `available` columns.
+    /// Column widths for a table laid out within `available` columns, and
+    /// whether the table had to shrink to fit (`true` = width-constrained).
     ///
     /// The natural width (widest cell per column, display-width measured) is
     /// used unchanged when the whole table fits. Otherwise the fixed
@@ -233,7 +241,7 @@ impl<'a> TableBuilder<'a> {
     /// CJK/emoji character counts as a token of its own). When the floors
     /// themselves do not fit, they drop to one display column each and the
     /// budget is distributed again (see the fallback branch below).
-    fn column_widths(&self, column_count: usize, available: usize) -> Vec<usize> {
+    fn column_widths(&self, column_count: usize, available: usize) -> (Vec<usize>, bool) {
         let mut natural = vec![0usize; column_count];
         let mut floors = vec![1usize; column_count];
         for (col_idx, cell) in self.header.cells.iter().enumerate() {
@@ -252,11 +260,11 @@ impl<'a> TableBuilder<'a> {
         let overhead = 3 * column_count + 1; // borders (n + 1) + per-cell padding (2n)
         let total: usize = natural.iter().sum();
         if total + overhead <= available {
-            return natural;
+            return (natural, false);
         }
         let budget = available.saturating_sub(overhead);
         if floors.iter().sum::<usize>() <= budget {
-            return proportional_with_floor(&natural, &floors, budget);
+            return (proportional_with_floor(&natural, &floors, budget), true);
         }
         // The token floors do not fit: drop them to one display column each
         // and distribute again, so a single oversized token (a long URL, an
@@ -268,9 +276,9 @@ impl<'a> TableBuilder<'a> {
         // never drops content.
         if column_count <= budget {
             let ones = vec![1usize; column_count];
-            return proportional_with_floor(&natural, &ones, budget);
+            return (proportional_with_floor(&natural, &ones, budget), true);
         }
-        vec![1; column_count]
+        (vec![1; column_count], true)
     }
 }
 
@@ -823,7 +831,7 @@ mod tests {
     fn column_widths_have_a_minimum_of_one() {
         let mut builder = TableBuilder::new(vec![]);
         builder.header.cells.push(TableCell::default());
-        assert_eq!(builder.column_widths(1, usize::MAX), vec![1]);
+        assert_eq!(builder.column_widths(1, usize::MAX), (vec![1], false));
     }
 
     #[test]
@@ -1466,6 +1474,43 @@ mod tests {
     }
 
     #[test]
+    fn width_constrained_tables_separate_body_rows() {
+        // The 3-row table from testdata/full.md at width 40: every cell
+        // wraps onto several lines, so a separator runs between each pair
+        // of body rows and the header separator stays where it was. At a
+        // width where the table fits, no body separators appear at all.
+        let markdown = indoc! {"
+            | 左揃え | 中央揃え | 右揃え |
+            |:-------|:--------:|-------:|
+            | a | b | c |
+            | 長いセル | 中央 | 1000 |
+            | `コード` | **太字** | [リンク](https://example.com) |
+        "};
+
+        let narrow = render_at_width(markdown, 40);
+        let separator_rows: Vec<usize> = narrow
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with('├'))
+            .map(|(i, _)| i)
+            .collect();
+        // Header separator (after the 4-line wrapped header) + one between each
+        // body row pair (3 body rows → 2).
+        assert_eq!(separator_rows, vec![5, 7, 10]);
+        assert!(separator_rows
+            .iter()
+            .all(|&i| narrow[i] == "├──────┼─────┼─────────────────────────┤"));
+        assert!(narrow.iter().all(|l| l.chars().count() <= 40));
+
+        let wide = render_at_width(markdown, 200);
+        assert_eq!(
+            wide.iter().filter(|l| l.starts_with('├')).count(),
+            1,
+            "fits naturally: header separator only, light look"
+        );
+    }
+
+    #[test]
     fn table_keeps_natural_width_when_it_fits() {
         let rendered = render_at_width(
             indoc! {"
@@ -1516,7 +1561,7 @@ mod tests {
         builder.header.cells.push(TableCell {
             spans: vec![(Span::raw("日本語"), None)],
         });
-        assert_eq!(builder.column_widths(2, 8), vec![1, 1]);
+        assert_eq!(builder.column_widths(2, 8), (vec![1, 1], true));
     }
 
     #[test]
@@ -1702,4 +1747,6 @@ mod tests {
         let text: String = rendered[0].0.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains('日'));
     }
+
+
 }
