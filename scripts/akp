@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""akp — instant reply to the latest agent messages.
+
+Resolves the sole herdr agent in the current tab (else workspace — the
+same rule as akapen's --send-agent), extracts the most recent text-bearing
+assistant messages (default 10, AKP_HISTORY to change) from its session
+transcript, and opens akapen on them in reply mode: `]/[` moves between
+messages, comments accumulate, `s` sends them straight back to the agent
+via `herdr agent prompt` as blockquotes (`> ` lines, blank line before
+each comment — no location or line-number noise, and the blank line
+keeps the comment from being swallowed by the markdown quote).
+
+The documents live at tab-stable paths ($TMPDIR/akp-<tab>-NN.md, 01 =
+newest) so a re-invocation can overwrite them: the running akapen
+auto-reloads the current message. `--refresh` does the overwrite without
+launching akapen (used by the herdr-akp-pane toggle).
+
+When akapen exits, the pane closes itself via --callback
+(`herdr pane close <own-pane>`) — the pane lives exactly as long as the
+review session.
+
+Requires herdr on PATH and HERDR_* env (i.e. running inside a
+herdr-managed pane). Transcripts: pi/claude/codex JSONL (searched by
+session id), hermes SQLite (~/.hermes/state.db).
+"""
+
+from collections import deque
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+AKAPEN = os.environ.get("AKAPEN", "akapen")
+
+
+def herdr_json(args):
+    out = subprocess.run(["herdr", *args], capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit(f"akp: herdr {' '.join(args)} failed: {out.stderr.strip()}")
+    return json.loads(out.stdout)
+
+
+def agents():
+    data = herdr_json(["agent", "list"])
+    return data.get("result", {}).get("agents") or data.get("agents") or []
+
+
+def herdr_env():
+    """(tab, ws, me) for the current context.
+
+    Normal panes get HERDR_TAB_ID / HERDR_WORKSPACE_ID / HERDR_PANE_ID
+    injected. Plugin panes (float) do NOT — instead herdr provides
+    HERDR_PLUGIN_CONTEXT_JSON with the same fields. In a plugin pane we
+    must NOT exclude the focused pane (it is the user's pane, possibly an
+    agent we want to reply to), so me stays None there.
+    """
+    tab = os.environ.get("HERDR_TAB_ID")
+    ws = os.environ.get("HERDR_WORKSPACE_ID")
+    me = None if os.environ.get("HERDR_PLUGIN_ID") else os.environ.get("HERDR_PANE_ID")
+    ctx = os.environ.get("HERDR_PLUGIN_CONTEXT_JSON")
+    if ctx:
+        try:
+            c = json.loads(ctx)
+        except json.JSONDecodeError:
+            c = {}
+        tab = tab or c.get("tab_id")
+        ws = ws or c.get("workspace_id")
+    return tab, ws, me
+
+
+def own_pane_id():
+    """This process's pane id, for the close-on-exit callback. Plugin
+    panes have no HERDR_PANE_ID — resolve via `herdr pane current`."""
+    me = os.environ.get("HERDR_PANE_ID")
+    if me:
+        return me
+    if os.environ.get("HERDR_PLUGIN_ID"):
+        out = subprocess.run(
+            ["herdr", "pane", "current", "--current"],
+            capture_output=True,
+            text=True,
+        )
+        if out.returncode == 0:
+            try:
+                return json.loads(out.stdout).get("result", {}).get("pane", {}).get("pane_id")
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
+def pick_agent(listing, me=None):
+    """The sole agent in this tab, else the sole workspace agent.
+
+    me: the pane id to exclude as "self", or None to exclude nothing —
+    --refresh uses None because it runs from the keybinding wrapper where
+    HERDR_PANE_ID (if set at all) points at the focused pane, which is
+    legitimately the agent itself.
+    """
+    tab, ws, _ = herdr_env()
+
+    def real(a):
+        return a.get("agent") and (me is None or a.get("pane_id") != me)
+
+    in_tab = [a for a in listing if real(a) and a.get("tab_id") == tab]
+    if len(in_tab) == 1:
+        return in_tab[0]
+    # The only agent in this tab is our own pane (e.g. akp typed at a
+    # codex-style prompt): do NOT fall back to a workspace sibling — the
+    # reply would go to the wrong agent. Demand a sibling pane instead.
+    # (real() excludes self, so scan without it here.)
+    if not in_tab and any(a.get("agent") and a.get("tab_id") == tab for a in listing):
+        sys.exit(
+            "akp: the only agent in this tab is this pane itself — "
+            "run akp from a sibling pane in the agent's tab"
+        )
+    in_ws = [a for a in listing if real(a) and a.get("workspace_id") == ws]
+    if len(in_ws) == 1:
+        return in_ws[0]
+    if not in_tab and not in_ws:
+        sys.exit("akp: no agent in this tab/workspace")
+    sys.exit(
+        "akp: several agents here — comments will go to the clipboard only "
+        "(run inside the agent's tab for a direct send)"
+    )
+
+
+def session_path(agent):
+    """The session transcript source for an agent entry, or exit.
+
+    Resolution strategy: no per-agent path construction. herdr reports
+    either a direct path (pi) or a session id; ids are unique, so we
+    search the candidate JSONL roots for `<id>.jsonl`, then fall back to
+    the SQLite backends (hermes, opencode) that key their transcript
+    tables by the same id.
+
+    Returns ("jsonl", path) or ("sqlite", db_path, session_id).
+    """
+    s = agent.get("agent_session") or {}
+    if s.get("kind") == "path" and s.get("value"):
+        return ("jsonl", s["value"])
+    if s.get("kind") == "id" and s.get("value"):
+        sid = s["value"]
+        for root in JSONL_ROOTS:
+            matches = list(root.glob(f"**/{sid}.jsonl"))
+            if len(matches) == 1:
+                return ("jsonl", str(matches[0]))
+            if len(matches) > 1:
+                sys.exit(f"akp: ambiguous session {sid}: {matches}")
+        kind = agent.get("agent")
+        db = SQLITE_ROOTS.get(kind)
+        if db and Path(db).exists():
+            return ("sqlite", db, sid)
+        sys.exit(
+            f"akp: session {sid} not found in {len(JSONL_ROOTS)} jsonl roots "
+            f"nor sqlite roots ({kind})"
+        )
+    sys.exit(f"akp: unsupported agent_session: {s}")
+
+
+# Candidate JSONL session roots for the `<id>.jsonl` search above. herdr's
+# agent_session carries kind=id for agents whose CLI exposes a session id
+# but no path (claude, codex, ...).
+JSONL_ROOTS = [
+    Path.home() / ".claude" / "projects",
+    Path.home() / ".codex" / "sessions",
+    Path.home() / ".pi" / "agent" / "sessions",
+]
+
+# SQLite transcript backends, keyed by the agent kind herdr reports. The
+# session id herdr carries is the primary key in the transcript tables.
+SQLITE_ROOTS = {
+    "hermes": str(Path.home() / ".hermes" / "state.db"),
+    # opencode: ~/.local/share/opencode/opencode.db (session→message→part,
+    # text lives in part.data JSON) — add the reader when needed.
+}
+
+
+def message_text(message):
+    """Join the text blocks of a message; '' when none."""
+    content = message.get("content")
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+        )
+    return ""
+
+
+def latest_text_messages(source, n):
+    """The most recent `n` assistant messages that contain text
+    (chronological order), or []. Tool_use-only messages are skipped —
+    nothing to comment on.
+
+    source: ("jsonl", path) or ("sqlite", db, session_id).
+    """
+    kind, *rest = source
+    if kind == "jsonl":
+        return _latest_texts_jsonl(rest[0], n)
+    if kind == "sqlite":
+        return _latest_texts_sqlite(rest[0], rest[1], n)
+    sys.exit(f"akp: unknown session source {kind}")
+
+
+def _latest_texts_jsonl(path, n):
+    texts = deque(maxlen=n)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = rec.get("message")
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") != "assistant":
+                continue
+            text = message_text(message)
+            if text.strip():
+                texts.append(text)
+    return list(texts)
+
+
+def _latest_texts_sqlite(db, sid, n):
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error as e:
+        sys.exit(f"akp: cannot open {db}: {e}")
+    try:
+        # hermes: messages(role, content) with plain-text content. Newest
+        # first with LIMIT, then reversed to chronological order.
+        rows = con.execute(
+            "SELECT content FROM messages WHERE session_id=? "
+            "AND role='assistant' AND content IS NOT NULL AND content != '' "
+            "ORDER BY timestamp DESC LIMIT ?",
+            (sid, n),
+        ).fetchall()
+    except sqlite3.Error as e:
+        sys.exit(f"akp: cannot read {db}: {e}")
+    finally:
+        con.close()
+    return [r[0] for r in reversed(rows)]
+
+
+def doc_path(tab_id, idx):
+    """Tab-stable document path for the idx-th newest message (1 = newest):
+    re-invocations overwrite the same files so the running akapen shows ⚡
+    and reloads with diff highlights. Zero-padded so the send order (sorted
+    by file path) matches recency."""
+    name = f"akp-{tab_id.replace(':', '-')}-{idx:02d}.md"
+    return os.path.join(tempfile.gettempdir(), name)
+
+
+def main():
+    args = sys.argv[1:]
+    refresh = "--refresh" in args
+    is_float = "--float" in args
+    tab, _, _ = herdr_env()
+    if not tab:
+        sys.exit("akp: HERDR_TAB_ID not set — run inside a herdr pane")
+    if refresh:
+        # Wrapper context: never exclude self — HERDR_PANE_ID here is the
+        # focused pane (possibly the agent itself), not our own pane.
+        agent = pick_agent(agents(), me=None)
+    else:
+        agent = pick_agent(agents(), me=os.environ.get("HERDR_PANE_ID"))
+    source = session_path(agent)
+    n = min(int(os.environ.get("AKP_HISTORY", "10")), 99)
+    texts = latest_text_messages(source, n)
+    if not texts:
+        sys.exit("akp: no assistant text message in the session")
+    docs = []
+    for i, text in enumerate(reversed(texts), start=1):
+        doc = doc_path(tab, i)
+        with open(doc, "w", encoding="utf-8") as f:
+            f.write(text)
+        docs.append(doc)
+    if refresh:
+        print(
+            f"refreshed {len(docs)} message(s) -> "
+            f"{os.path.basename(docs[0])}..{os.path.basename(docs[-1])}",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+    target = agent.get("pane_id")
+    print(
+        f"akp: {agent.get('agent')} @ {target} — "
+        f"latest {len(docs)} message(s); ]/[ navigate · s send · q quit (closes pane)",
+        file=sys.stderr,
+    )
+    cmd = [AKAPEN, *docs, "--send-agent", "--reply"]
+    if is_float:
+        # Popup: no pane ID, closes automatically when the command exits.
+        # A close callback would target the underlying tiled pane — never
+        # add one here. Esc quits akapen → command exits → popup closes.
+        cmd += ["--esc-quit", "always"]
+    else:
+        me = own_pane_id()
+        if me:
+            # The pane closes itself when akapen exits (plugin panes have
+            # no HERDR_PANE_ID — own_pane_id resolves it via pane current).
+            # The callback enables the esc-quit auto affordance too.
+            cmd += ["--callback", f"herdr pane close {me}"]
+    env = dict(os.environ)
+    if is_float:
+        # Popup processes get no HERDR_* vars (herdr spec: a popup is not
+        # a pane). akapen's --send-agent resolution is env-driven, so
+        # inject the tab/workspace from the plugin context here.
+        # HERDR_PANE_ID stays unset: the popup is not a pane, so there is
+        # nothing to exclude as self.
+        tab, ws, _ = herdr_env()
+        env["HERDR_TAB_ID"] = tab
+        if ws:
+            env["HERDR_WORKSPACE_ID"] = ws
+    try:
+        proc = subprocess.run(cmd, env=env)
+    except FileNotFoundError:
+        sys.exit(f"akp: {AKAPEN} not found on PATH")
+    sys.exit(proc.returncode)
+
+
+if __name__ == "__main__":
+    main()

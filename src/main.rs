@@ -120,13 +120,17 @@ fn main() -> Result<()> {
             println!(
                 "akapen — read markdown rendered, comment on source lines\n\
                  \n\
-                 usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--theme <name>]\n\
+                 usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply]
+                 \x20                         [--theme <name>]\n\
                  \x20                         [--ime <off|ascii|jp>] [--light|--dark]\n\
                  \x20                         [--callback <cmd>]\n\
                  \n\
                  \x20 --send-cmd <cmd>  pipe `s` export to a shell command via stdin\n\
                  \x20 --send-agent      send `s` export to the sole herdr agent in this tab\n\
                  \x20                   (else the sole workspace agent; needs herdr on PATH)\n\
+                 \x20 --reply           quote the snippet without file/line\n\
+                 \x20                   references; external changes auto-reload\n\
+                 \x20                   (instant reply to an agent message; see scripts/akp)\n\
                  \x20 --theme <name>    syntect theme name or path to a .tmTheme file\n\
                  \x20 --ime <off|ascii|jp> input-source control around the composer\n\
                  \x20                   (default ascii; needs swiftc on macOS)\n\
@@ -758,15 +762,23 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
             app.ime_forced = app.ime_session.force_ascii();
         }
         // File-change polling: an external edit (the agent rewriting the
-        // doc) is debounced into a toast + ⚡ badge; the reload itself is
-        // manual (`r`), so content is never swapped under the user mid-work.
+        // doc) is debounced; the reload is manual (`r`) so content is
+        // never swapped under the user mid-work — except in reply mode,
+        // where the doc only changes via the akp refresh (i.e. the agent's
+        // new message is here) and reloads automatically.
         poll_file_change(app);
         if let Some(since) = app.reload_pending
             && since.elapsed() >= RELOAD_DEBOUNCE
             && app.mode != Mode::Input
         {
             app.reload_pending = None;
-            notify_file_changed(app);
+            if app.config.reply {
+                // Auto-reload: comments on the old message are dropped
+                // with it (they were either sent or are stale).
+                reload_now_auto(app);
+            } else {
+                notify_file_changed(app);
+            }
         }
         // Expire transient footer messages.
         if app
@@ -905,7 +917,7 @@ fn on_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
 /// only when it overflows the panel (content that fits never scrolls).
 /// Esc / q / `?` close it.
 fn on_help_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
-    let max = help_rows(app.esc_quit_enabled())
+    let max = help_rows(app.esc_quit_enabled(), app.config.reply)
         .len()
         .saturating_sub(overlay_visible_rows());
     match key {
@@ -1073,7 +1085,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             }
             MouseEventKind::ScrollDown => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled())
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply)
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = (app.overlay_cursor + 1).min(max);
@@ -1094,7 +1106,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             },
             MouseEventKind::ScrollUp => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled())
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply)
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = app.overlay_cursor.saturating_sub(1).min(max);
@@ -1408,7 +1420,21 @@ fn reload_now(app: &mut App) {
         return;
     }
     app.confirm_reload = false;
+    finish_reload(app);
+}
 
+/// Reply-mode auto-reload (`--reply`): no confirmation — comments on this
+/// file are dropped with the old content. Fires from the change poll when
+/// scripts/akp refreshes the doc. On failure the ⚡ prompt stays up and
+/// `r` retries manually.
+fn reload_now_auto(app: &mut App) {
+    app.confirm_reload = false;
+    if finish_reload(app) {
+        app.flash("auto-reloaded");
+    }
+}
+
+fn finish_reload(app: &mut App) -> bool {
     match reload_source(app) {
         Ok(()) => {
             // Refresh the on-disk stamp so the next poll_file_change won't
@@ -1419,11 +1445,17 @@ fn reload_now(app: &mut App) {
                 app.last_loaded_stamp = Some(stamp);
             }
             app.file_changed = false;
+            true
         }
         // The read failed (non-UTF-8 content, e.g. a binary write or a
         // mid-write agent edit): toast the reason and keep the in-memory
-        // content — the ⚡ prompt stays up and the next `r` retries.
-        Err(e) => app.flash_err(format!("reload failed: {e:#}")),
+        // content. Mark the change seen so the auto path does not retry
+        // every poll — the ⚡ prompt stays up and `r` retries manually.
+        Err(e) => {
+            app.flash_err(format!("reload failed: {e:#}"));
+            app.file_changed = true;
+            false
+        }
     }
 }
 
@@ -1536,37 +1568,48 @@ fn reload_source(app: &mut App) -> anyhow::Result<()> {
     }
     let old_content = app.source.content.clone();
     let old_lines = std::mem::take(&mut app.source.lines);
-    let (added, removed) = line_change_counts(&old_lines, &new_source.lines);
 
-    // Diff for line-level highlighting: added/changed lines get a green
-    // `+` gutter; lines immediately after a deletion get a red `-`.
-    let diff = TextDiff::from_lines(&old_content, &new_source.content);
-    let mut changed: HashSet<usize> = HashSet::new();
-    let mut deleted_before: HashSet<usize> = HashSet::new();
-    let mut new_idx = 0usize;
-    let new_len = new_source.lines.len();
-    for change in diff.iter_all_changes() {
-        let n = change.value().lines().count();
-        match change.tag() {
-            ChangeTag::Equal => new_idx += n,
-            ChangeTag::Insert => {
-                for i in 0..n {
-                    changed.insert(new_idx + i);
+    // Reply mode: each refresh replaces the whole message, so a diff would
+    // just mark everything as changed — noise. Skip the diff and the
+    // +N/-M badge; the whole message is "new" by definition.
+    let reply = app.config.reply;
+    let (added, removed) = if reply {
+        app.last_added.clear();
+        app.last_deleted_before.clear();
+        (0, 0)
+    } else {
+        let (added, removed) = line_change_counts(&old_lines, &new_source.lines);
+        // Diff for line-level highlighting: added/changed lines get a green
+        // `+` gutter; lines immediately after a deletion get a red `-`.
+        let diff = TextDiff::from_lines(&old_content, &new_source.content);
+        let mut changed: HashSet<usize> = HashSet::new();
+        let mut deleted_before: HashSet<usize> = HashSet::new();
+        let mut new_idx = 0usize;
+        let new_len = new_source.lines.len();
+        for change in diff.iter_all_changes() {
+            let n = change.value().lines().count();
+            match change.tag() {
+                ChangeTag::Equal => new_idx += n,
+                ChangeTag::Insert => {
+                    for i in 0..n {
+                        changed.insert(new_idx + i);
+                    }
+                    new_idx += n;
                 }
-                new_idx += n;
-            }
-            ChangeTag::Delete => {
-                // The line at `new_idx` (or the last line for an
-                // end-of-file deletion) follows this deletion block.
-                let mark = new_idx.min(new_len.saturating_sub(1));
-                if new_len > 0 {
-                    deleted_before.insert(mark);
+                ChangeTag::Delete => {
+                    // The line at `new_idx` (or the last line for an
+                    // end-of-file deletion) follows this deletion block.
+                    let mark = new_idx.min(new_len.saturating_sub(1));
+                    if new_len > 0 {
+                        deleted_before.insert(mark);
+                    }
                 }
             }
         }
-    }
-    app.last_added = changed;
-    app.last_deleted_before = deleted_before;
+        app.last_added = changed;
+        app.last_deleted_before = deleted_before;
+        (added, removed)
+    };
 
     // Comments are anchored to the old content; clear them — but only
     // THIS file's (other files' anchors are untouched by this reload).
@@ -1602,13 +1645,20 @@ fn reload_source(app: &mut App) -> anyhow::Result<()> {
     app.selection = None;
     app.offset = app.offset.min(app.max_offset(app.source_viewport_rows() as u16));
     app.file_changed = false;
-    app.last_change = Some((added, removed));
-    let cleared = if comment_count > 0 {
-        format!(" — {comment_count} comment(s) cleared")
+    if reply {
+        // The whole message is new — the +N/-M badge and the diff gutters
+        // would mark everything, so they stay off in reply mode.
+        app.last_change = None;
+        app.flash("reloaded");
     } else {
-        String::new()
-    };
-    app.flash(format!("reloaded (+{added}/-{removed}){cleared}"));
+        app.last_change = Some((added, removed));
+        let cleared = if comment_count > 0 {
+            format!(" — {comment_count} comment(s) cleared")
+        } else {
+            String::new()
+        };
+        app.flash(format!("reloaded (+{added}/-{removed}){cleared}"));
+    }
     Ok(())
 }
 
@@ -1951,7 +2001,11 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
         KeyCode::Char('r') => reload_now(app),
         KeyCode::Char('i') => ignore_change(app),
         KeyCode::Char('e') => {
-            if let Some(t) = terminal {
+            if app.config.reply {
+                // Reply mode: the doc is the agent's message — editing the
+                // temp copy would only diverge from the conversation.
+                app.flash_err("reply mode — editing disabled");
+            } else if let Some(t) = terminal {
                 open_editor(app, t);
             }
         }
@@ -1972,7 +2026,13 @@ fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: O
             open_overlay(app, Overlay::Help, 0);
         }
         KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
-            open_overlay(app, Overlay::Files, app.current_file_index);
+            if app.config.reply {
+                // The file picker shows temp-file names — meaningless in
+                // reply mode; ]/[ moves between messages instead.
+                app.flash_err("reply mode — move between messages with ]/[");
+            } else {
+                open_overlay(app, Overlay::Files, app.current_file_index);
+            }
         }
         KeyCode::Esc => {
             // View is the home mode: Esc cancels the quit confirmation
@@ -2254,7 +2314,11 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
         KeyCode::Char('r') => reload_now(app),
         KeyCode::Char('i') => ignore_change(app),
         KeyCode::Char('e') => {
-            if let Some(t) = terminal {
+            if app.config.reply {
+                // Reply mode: the doc is the agent's message — editing the
+                // temp copy would only diverge from the conversation.
+                app.flash_err("reply mode — editing disabled");
+            } else if let Some(t) = terminal {
                 open_editor(app, t);
             }
         }
@@ -2278,7 +2342,13 @@ fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal:
             open_overlay(app, Overlay::Help, 0);
         }
         KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
-            open_overlay(app, Overlay::Files, app.current_file_index);
+            if app.config.reply {
+                // The file picker shows temp-file names — meaningless in
+                // reply mode; ]/[ moves between messages instead.
+                app.flash_err("reply mode — move between messages with ]/[");
+            } else {
+                open_overlay(app, Overlay::Files, app.current_file_index);
+            }
         }
         _ => {}
     }
@@ -2596,7 +2666,11 @@ fn export_all(app: &mut App, send: bool) {
         app.flash_err("no comments yet");
         return;
     }
-    let text = export::format_all(&app.comments);
+    let text = if app.config.reply {
+        export::format_all_reply(&app.comments)
+    } else {
+        export::format_all(&app.comments)
+    };
     let mut parts: Vec<String> = Vec::new();
     let mut had_error = false;
     match export::copy_to_clipboard(&text) {
@@ -2902,16 +2976,23 @@ fn title_metrics(app: &App, width: u16) -> TitleMetrics {
     // file. Click → file picker.
     let file_count = if app.files.len() > 1 {
         format!(
-            " {}/{} files",
+            " {}/{} {}",
             app.current_file_index + 1,
-            app.files.len()
+            app.files.len(),
+            if app.config.reply { "msgs" } else { "files" }
         )
     } else {
         String::new()
     };
     let file_count_w = UnicodeWidthStr::width(file_count.as_str()) as u16;
     let path_max = path_area_end.saturating_sub(change_w + file_count_w + 1);
-    let path = truncate_path(app.current_file_path(), path_max as usize);
+    let path = if app.config.reply {
+        // Reply mode: the doc is a temp copy of the agent's message — the
+        // path is noise; the label says what this pane is for.
+        "reply".to_string()
+    } else {
+        truncate_path(app.current_file_path(), path_max as usize)
+    };
     let path_w = UnicodeWidthStr::width(path.as_str()) as u16;
     TitleMetrics {
         change,
@@ -3384,17 +3465,26 @@ fn draw_overlay(f: &mut Frame, app: &App) {
 /// scroll clamp, so the list never scrolls past its own end; scrollable
 /// with j/k or the wheel (small screens), closed by Esc / q / `?` or a
 /// click outside the panel. The quit row reflects the active Esc binding.
-fn help_rows(esc_quit: bool) -> Vec<(&'static str, &'static str)> {
-    vec![
+fn help_rows(esc_quit: bool, reply: bool) -> Vec<(&'static str, &'static str)> {
+    let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
-        ("file", "]/[ · ^p files"),
         ("comment", "v select · Esc cancel · c add · d delete · n/N jump"),
         ("mode", "Tab view⇄source"),
         ("output", "y copy · s send"),
         ("list", "l comments · ? help"),
-        ("reload", "r reload · i ignore · e edit"),
-        ("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }),
-    ]
+    ];
+    if reply {
+        // Reply mode: a single message document — no file navigation, no
+        // edit, and reloads are automatic (r stays as a manual retry).
+        // ]/[ moves between the recent messages akp materialized.
+        rows.push(("msg", "]/[ older/newer"));
+        rows.push(("reload", "auto-reload on change · r manual"));
+    } else {
+        rows.insert(1, ("file", "]/[ · ^p files"));
+        rows.push(("reload", "r reload · i ignore · e edit"));
+    }
+    rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
+    rows
 }
 
 /// The full key reference (`?`): label + keys per category, scrollable
@@ -3411,7 +3501,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
         .fg(Color::LightBlue)
         .add_modifier(Modifier::BOLD);
 
-    let rows = help_rows(app.esc_quit_enabled());
+    let rows = help_rows(app.esc_quit_enabled(), app.config.reply);
     let visible = overlay_visible_rows();
     // Scroll only when the reference overflows the panel; a reference
     // that fits stays put (j/k are no-ops there).
@@ -4477,6 +4567,7 @@ mod mouse_tests {
             files: vec![path.clone()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: Some("base16-ocean.dark".into()),
             ime: ImeMode::Off,
             light: None,
@@ -4520,6 +4611,7 @@ mod mouse_tests {
             files: vec![path.clone()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: Some("base16-ocean.dark".into()),
             ime: ImeMode::Off,
             light: None,
@@ -4605,6 +4697,7 @@ mod mouse_tests {
             files: vec![path.clone()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: Some("base16-ocean.dark".into()),
             ime: ImeMode::Off,
             light: None,
@@ -4641,6 +4734,7 @@ mod mouse_tests {
             files: vec![path],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: Some("base16-ocean.dark".into()),
             ime: ImeMode::Off,
             light: None,
@@ -4786,6 +4880,7 @@ mod state_tests {
             files: vec![path.clone()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: Some("base16-ocean.dark".into()),
             ime: ImeMode::Off,
             light: None,
@@ -4822,6 +4917,7 @@ mod state_tests {
             files: vec![path.clone()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: Some("base16-ocean.dark".into()),
             ime: ImeMode::Off,
             light: None,
@@ -5050,16 +5146,55 @@ mod state_tests {
 
     #[test]
     fn help_rows_reflect_the_esc_binding() {
-        let rows = help_rows(false);
+        let rows = help_rows(false, false);
         assert!(
             rows.iter().any(|(l, k)| *l == "quit" && *k == "q quit · Esc cancel"),
             "default help advertises Esc as cancel"
         );
-        let rows = help_rows(true);
+        let rows = help_rows(true, false);
         assert!(
             rows.iter().any(|(l, k)| *l == "quit" && *k == "Esc/q quit"),
             "esc-quit help advertises Esc/q as quit"
         );
+    }
+
+    #[test]
+    fn reply_mode_help_hides_file_navigation_and_edit() {
+        // Reply mode: messages replace files — no file switching, no
+        // edit, and reloads are automatic.
+        let rows = help_rows(false, true);
+        assert!(
+            !rows.iter().any(|(l, _)| *l == "file"),
+            "no file navigation row in reply mode"
+        );
+        assert!(
+            !rows.iter().any(|(_, k)| k.contains("e edit")),
+            "no edit in reply mode"
+        );
+        assert!(
+            rows.iter()
+                .any(|(l, k)| *l == "msg" && k.contains("]/[")),
+            "reply help advertises message navigation"
+        );
+        assert!(
+            rows.iter()
+                .any(|(l, k)| *l == "reload" && k.contains("auto-reload")),
+            "reply help advertises auto-reload"
+        );
+        // Non-reply mode keeps them.
+        let rows = help_rows(false, false);
+        assert!(rows.iter().any(|(l, _)| *l == "file"));
+        assert!(rows.iter().any(|(_, k)| k.contains("e edit")));
+    }
+
+    #[test]
+    fn reply_mode_title_shows_label_not_temp_path() {
+        // The doc is a temp copy of the agent's message; the path is
+        // noise in reply mode — the title says what the pane is for.
+        let (mut app, _dir) = make_app_keep(5, Mode::View);
+        assert_ne!(title_metrics(&app, 80).path, "reply");
+        app.config.reply = true;
+        assert_eq!(title_metrics(&app, 80).path, "reply");
     }
 
     #[test]
@@ -5393,6 +5528,7 @@ mod state_tests {
             files: vec![path.clone()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: None,
             ime: ImeMode::Off,
             light: None,
@@ -5803,6 +5939,23 @@ mod state_tests {
         new = old.clone();
         new[4] = "changed".into();
         assert_eq!(line_change_counts(&old, &new), (1, 1));
+    }
+
+    #[test]
+    fn reply_mode_reload_skips_diff_and_badge() {
+        // --reply: the doc is a single agent message; each refresh replaces
+        // the whole thing, so a diff would mark everything as changed.
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        app.config.reply = true;
+        let mut f = std::fs::File::create(app.current_file_path()).unwrap();
+        writeln!(f, "new message line 1").unwrap();
+        writeln!(f, "new message line 2").unwrap();
+        assert!(reload_source(&mut app).is_ok());
+        assert_eq!(app.source.len(), 2, "new content is loaded");
+        assert!(app.last_added.is_empty(), "no diff gutters in reply mode");
+        assert!(app.last_deleted_before.is_empty(), "no deletion markers");
+        assert_eq!(app.last_change, None, "no +N/-M badge in reply mode");
+        assert!(!app.file_changed, "reload clears the pending prompt");
     }
 
     #[test]
@@ -6220,6 +6373,7 @@ mod state_tests {
             files: vec![path.clone()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: None,
             ime: ImeMode::Off,
             light: None,
@@ -6552,6 +6706,7 @@ mod state_tests {
             files: vec![md_path, rs_path],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: None,
             ime: ImeMode::Off,
             light: None,
@@ -7020,6 +7175,21 @@ mod state_tests {
         app.files = vec![app.files[0].clone()];
         app.current_file_index = 0;
         assert_eq!(title_metrics(&app, 80).file_count, "");
+    }
+
+    #[test]
+    fn title_reply_mode_counts_messages_not_files() {
+        // Reply mode: the files are recent agent messages — the counter
+        // says msgs so ]/[ navigation reads as message navigation.
+        let (mut app, _dir) = make_session();
+        app.config.reply = true;
+        assert_eq!(
+            title_metrics(&app, 80).file_count,
+            " 1/2 msgs",
+            "reply mode labels the counter with messages"
+        );
+        app.current_file_index = 1;
+        assert_eq!(title_metrics(&app, 80).file_count, " 2/2 msgs");
     }
 
     #[test]
@@ -7902,6 +8072,7 @@ mod mouse_view_tests {
             files: vec![path.into()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: Some("base16-ocean.dark".into()),
             ime: ImeMode::Off,
             light: None,
@@ -8013,6 +8184,7 @@ mod handoff_tests {
             files: vec![path.into()],
             send_cmd: None,
             send_agent: false,
+            reply: false,
             theme: Some("base16-ocean.dark".into()),
             ime: ImeMode::Off,
             light: None,

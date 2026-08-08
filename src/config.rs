@@ -62,6 +62,14 @@ pub struct Config {
     /// `--send-agent`: resolve the sole herdr agent in the current tab
     /// (else workspace) and submit the export directly (no shell).
     pub send_agent: bool,
+    /// `--reply`: omit the `file:lines` location line and the `n: `
+    /// line-number prefixes from the export, quoting the snippet
+    /// GitHub-style. External changes auto-reload (no ⚡/`r` dance) and
+    /// the reload skips the diff — each refresh replaces the whole
+    /// message, so a diff would mark everything as changed. For instant
+    /// replies to an agent message (see scripts/akp), where the commented
+    /// document is the agent's own output.
+    pub reply: bool,
     /// `--theme <name>`: syntect theme name for source-mode highlighting,
     /// or a path to a `.tmTheme` file (e.g. tokyo-night.tmTheme).
     pub theme: Option<String>,
@@ -89,6 +97,7 @@ impl Config {
         let mut files: Vec<PathBuf> = Vec::new();
         let mut send_cmd: Option<String> = None;
         let mut send_agent = false;
+        let mut reply = false;
         let mut theme: Option<String> = None;
         let mut ime = ImeMode::Ascii;
         let mut light: Option<bool> = None;
@@ -109,6 +118,7 @@ impl Config {
                 }
                 "--send-cmd" => send_cmd = it.next(),
                 "--send-agent" => send_agent = true,
+                "--reply" => reply = true,
                 "--theme" => theme = it.next(),
                 "--ime" => {
                     if let Some(v) = it.next() {
@@ -123,7 +133,7 @@ impl Config {
         }
         if files.is_empty() {
             bail!(
-                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark]"
+                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark]"
             );
         }
         if send_cmd.is_some() && send_agent {
@@ -133,6 +143,7 @@ impl Config {
             files,
             send_cmd,
             send_agent,
+            reply,
             theme,
             ime,
             light,
@@ -178,6 +189,15 @@ mod tests {
         let c = cfg(&action);
         assert!(c.send_agent);
         assert!(c.send_cmd.is_none());
+        assert!(!c.reply, "--reply defaults to off");
+    }
+
+    #[test]
+    fn reply_flag_parses() {
+        let action = parse(&["--reply", "a.md"]);
+        let c = cfg(&action);
+        assert!(c.reply);
+        assert!(!c.send_agent, "--reply is independent of --send-agent");
     }
 
     #[test]

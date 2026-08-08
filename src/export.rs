@@ -3,7 +3,9 @@
 //! A comment becomes a block of `location`, the anchored snippet, then the
 //! comment text — the same structure as herdr-reviewr's `export.rs`
 //! (MIT, Dmitry Persiyanov), minus the diff side markers: akapen
-//! anchors to plain source lines.
+//! anchors to plain source lines. Reply mode (`--reply`, scripts/akp)
+//! drops the location and the line-number prefixes, quoting the snippet
+//! GitHub-style (`> `) instead — see `format_comment_reply`.
 //!
 //! Export is non-destructive: comments stay in the list after a copy so the
 //! user can re-output or send them again (delete is explicit, `d`).
@@ -20,12 +22,82 @@ use crate::comment::Comment;
 
 /// One comment as its export block: location, numbered snippet, then text.
 pub fn format_comment(comment: &Comment) -> String {
-    format!(
-        "{}\n{}\n{}",
-        comment.location(),
-        numbered_snippet(comment),
-        normalize_text(&comment.text)
-    )
+    format_comment_with(comment, true, None)
+}
+
+/// Reply-mode export: the blockquoted snippet then the comment, with a
+/// blank line between them. Used by `--reply` (scripts/akp): the commented
+/// document is the agent's own message, so a temp-file path and line
+/// numbers (which reference nothing without a file) would only add noise.
+///
+/// The blank line is load-bearing: CommonMark lazy continuation pulls a
+/// non-blank line after a `> ` line into the blockquote, so without it
+/// the comment renders as part of the quote (pi and GitHub both do this).
+///
+/// `number` prefixes the QUOTE (`N. > ...`) when a batch of comments is
+/// sent — the numbering tells the agent the message is a list of distinct
+/// points to address in order, and the comment is indented so the whole
+/// pair stays inside the numbered item. The number sits before the `> `
+/// marker so quoted content (which can itself contain `1. ` list markers)
+/// can never collide with it.
+pub fn format_comment_reply(comment: &Comment, number: Option<usize>) -> String {
+    format_comment_with(comment, false, number)
+}
+
+fn format_comment_with(
+    comment: &Comment,
+    include_location: bool,
+    number: Option<usize>,
+) -> String {
+    if include_location {
+        format!(
+            "{}\n{}\n{}",
+            comment.location(),
+            numbered_snippet(comment),
+            normalize_text(&comment.text)
+        )
+    } else {
+        let quote = quoted_snippet(comment);
+        let quote = match number {
+            Some(n) => {
+                // `N. > first` then 3-space-indented continuation quote
+                // lines, so the whole quote stays one numbered item (the
+                // list marker is at column 1-3, content at column 4).
+                let mut lines = quote.lines();
+                let mut out = format!("{n}. {}", lines.next().unwrap_or(""));
+                for line in lines {
+                    out.push_str("\n   ");
+                    out.push_str(line);
+                }
+                out
+            }
+            None => quote,
+        };
+        let text = normalize_text(&comment.text);
+        // In a batch, indent the comment 4 spaces so it lives inside the
+        // numbered item next to its quote (unambiguous pairing, and the
+        // comment's own text cannot collide with the item number).
+        let text = match number {
+            Some(_) => text
+                .lines()
+                .map(|l| format!("    {l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None => text,
+        };
+        format!("{quote}\n\n{text}")
+    }
+}
+
+/// The snippet's lines, pinned to the location's `start-end` range (short
+/// `lines` are padded, extra parts dropped) — the range is the single
+/// source of truth for how many lines a snippet shows.
+fn snippet_parts(comment: &Comment) -> Vec<&str> {
+    let parts: Vec<&str> = comment.lines.split('\n').collect();
+    let count = (comment.end - comment.start + 1) as usize;
+    (0..count)
+        .map(|i| parts.get(i).copied().unwrap_or(""))
+        .collect()
 }
 
 /// The anchored snippet with a `n: ` line-number prefix per line (design
@@ -36,14 +108,22 @@ pub fn format_comment(comment: &Comment) -> String {
 /// dropped) — adapters like scripts/akapen2hunk rely on that to split
 /// the snippet from the comment text.
 fn numbered_snippet(comment: &Comment) -> String {
-    let parts: Vec<&str> = comment.lines.split('\n').collect();
-    let count = (comment.end - comment.start + 1) as usize;
-    (0..count)
-        .map(|i| {
-            let n = comment.start + i as u32;
-            let text = parts.get(i).copied().unwrap_or("");
-            format!("{n}: {text}")
-        })
+    snippet_parts(comment)
+        .iter()
+        .enumerate()
+        .map(|(i, text)| format!("{}: {text}", comment.start + i as u32))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Reply-mode snippet: GitHub-style blockquote, no line numbers — the
+/// message is right there in the conversation, so `n: ` prefixes (which
+/// reference nothing without a file) would be noise. Blank lines in the
+/// selection render as `> ` so they still read as quoted.
+fn quoted_snippet(comment: &Comment) -> String {
+    snippet_parts(comment)
+        .iter()
+        .map(|text| format!("> {text}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -63,11 +143,31 @@ fn normalize_text(text: &str) -> String {
 /// Many comments, sorted by file then start line, one blank line between
 /// blocks (reviewr's `format_all`).
 pub fn format_all(comments: &[Comment]) -> String {
+    format_all_with(comments, true)
+}
+
+/// Reply-mode export: `format_all` without the location lines.
+pub fn format_all_reply(comments: &[Comment]) -> String {
+    format_all_with(comments, false)
+}
+
+fn format_all_with(comments: &[Comment], include_location: bool) -> String {
     let mut sorted: Vec<&Comment> = comments.iter().collect();
     sorted.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.start.cmp(&b.start)));
+    // Reply-mode batches are numbered (`1. `, `2. `...) so the receiving
+    // agent reads the message as a list of distinct points; a single
+    // comment stays unnumbered (plain chat).
+    let numbered = !include_location && sorted.len() > 1;
     sorted
         .iter()
-        .map(|c| format_comment(c))
+        .enumerate()
+        .map(|(i, c)| {
+            if include_location {
+                format_comment(c)
+            } else {
+                format_comment_reply(c, numbered.then_some(i + 1))
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -313,7 +413,7 @@ fn select_tool(
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIPBOARD_TOOLS, format_all, format_comment, select_tool};
+    use super::{CLIPBOARD_TOOLS, format_all, format_all_reply, format_comment, select_tool};
     use crate::comment::Comment;
     use std::time::{Duration, Instant};
 
@@ -516,6 +616,89 @@ mod tests {
         let list = vec![agent("p1", "t1", "w1", true)];
         let err = pick_agent(&list, None, None, None).unwrap_err();
         assert!(err.to_string().contains("no agent"));
+    }
+
+    #[test]
+    fn reply_format_blockquotes_without_location_or_numbers() {
+        use super::format_comment_reply;
+        let c = comment("doc.md", 12, 14, "a\nb\nc", "note");
+        assert_eq!(
+            format_comment_reply(&c, None),
+            "> a\n> b\n> c\n\nnote",
+            "blank line keeps the comment out of the lazy-continuation quote"
+        );
+        let all = format_all_reply(&[c]);
+        assert!(!all.contains("doc.md"), "no file path leaks into a reply");
+        assert!(!all.contains("12:"), "no line-number prefix leaks into a reply");
+        assert_eq!(all, "> a\n> b\n> c\n\nnote");
+    }
+
+    #[test]
+    fn reply_format_blank_selection_lines_stay_quoted() {
+        use super::format_comment_reply;
+        let c = comment("doc.md", 7, 9, "x\n\ny", "note");
+        assert_eq!(
+            format_comment_reply(&c, None),
+            "> x\n> \n> y\n\nnote",
+            "blank lines render as `> ` and cannot become block separators"
+        );
+    }
+
+    #[test]
+    fn reply_format_batch_numbers_each_quote() {
+        // A batch of comments is a list of distinct points: the quote of
+        // each pair gets the number (`N. > ...`) and the comment is
+        // indented so the whole pair lives inside the numbered item.
+        // The number sits before the `> ` marker — quoted content that
+        // itself contains `1. ` list markers cannot collide.
+        let c1 = comment("a.md", 3, 3, "x", "one");
+        let c2 = comment("b.md", 1, 2, "p\nq", "two");
+        assert_eq!(
+            format_all_reply(&[c1.clone(), c2.clone()]),
+            "1. > x\n\n    one\n\n2. > p\n   > q\n\n    two",
+            "each pair's quote is numbered and its comment indented"
+        );
+        // Single comments stay plain (no number, no indent).
+        assert_eq!(format_all_reply(&[c1]), "> x\n\none");
+        assert_eq!(format_all_reply(&[c2]), "> p\n> q\n\ntwo");
+    }
+
+    #[test]
+    fn reply_format_batch_indents_multiline_comment() {
+        use super::format_comment_reply;
+        // A multi-line comment stays inside its numbered item: every
+        // comment line gets the 4-space indent.
+        let c = comment("a.md", 1, 1, "x", "first\nsecond");
+        assert_eq!(
+            format_comment_reply(&c, Some(1)),
+            "1. > x\n\n    first\n    second"
+        );
+    }
+
+    #[test]
+    fn reply_format_numbered_quote_indents_continuation() {
+        use super::format_comment_reply;
+        // Multi-line quote: `3. > first` then 3-space-indented `> rest`
+        // lines, so the whole quote stays inside the numbered item.
+        let c = comment("doc.md", 1, 2, "first\nsecond", "note");
+        assert_eq!(
+            format_comment_reply(&c, Some(3)),
+            "3. > first\n   > second\n\n    note"
+        );
+    }
+
+    #[test]
+    fn reply_format_quoted_list_markers_do_not_collide() {
+        use super::format_comment_reply;
+        // Quoted content that is itself a numbered list: the inner `1. `
+        // stays inside the blockquote and cannot be mistaken for the
+        // batch number of this pair.
+        let c = comment("doc.md", 1, 2, "1. first\n2. second", "note");
+        assert_eq!(
+            format_comment_reply(&c, Some(2)),
+            "2. > 1. first\n   > 2. second\n\n    note",
+            "item number (2.) precedes the quote marker, inner list stays inside"
+        );
     }
 
     #[test]

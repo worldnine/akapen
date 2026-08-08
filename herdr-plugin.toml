@@ -1,0 +1,52 @@
+# herdr-plugin.toml — akp: reply to the agent's latest messages.
+#
+# A thin wrapper that drives akapen --reply + scripts/akp from herdr.
+# Placement variants: open (bottom split, default) / open-side (side
+# split) / open-float (floating overlay). Every action shows up in the
+# jt.command-palette; keybindings live in config.toml
+# ([[keys.command]] type = "plugin_action").
+#
+# Design notes: bottom/side splits are created by the action script
+# (`herdr pane split`) because manifest panes cannot pick a split
+# direction. The floating variant is a manifest pane with placement
+# "popup": a session-modal partial-size popup (80% x 70%) that closes
+# when its command exits. A popup is not a Herdr pane (no pane ID, not
+# in pane list) — the akp script gets its context from
+# HERDR_PLUGIN_CONTEXT_JSON and skips the close-on-exit callback there.
+# "popup already open" is the singleton guard; the action treats it as
+# the toggle (refresh the running popup).
+id = "akp"
+name = "akp"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Comment on the agent's latest messages and reply straight back (akapen --reply)"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "open"
+title = "akp: reply (bottom pane)"
+description = "Open the agent's recent messages in a bottom split for commenting"
+contexts = ["workspace", "tab", "pane"]
+command = ["bash", "scripts/akp-plugin.sh", "open"]
+
+[[actions]]
+id = "open-side"
+title = "akp: reply (side pane)"
+description = "Open the agent's recent messages in a side split for commenting"
+contexts = ["workspace", "tab", "pane"]
+command = ["bash", "scripts/akp-plugin.sh", "side"]
+
+[[actions]]
+id = "open-float"
+title = "akp: reply (floating)"
+description = "Open the agent's recent messages in a floating overlay for commenting"
+contexts = ["workspace", "tab", "pane"]
+command = ["bash", "scripts/akp-plugin.sh", "float"]
+
+[[panes]]
+id = "float"
+title = "akp-float"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/scripts/akp\" --float"]
