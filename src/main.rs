@@ -756,6 +756,25 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Move the first file's per-file state into the live App fields —
+/// run()'s startup activation. Every field switch_to_file saves/restores
+/// must ride along (the git snapshot included: without it the first file
+/// opens with no marks and `o` claims "not in a git repository" until a
+/// file switch). Kept as a function so the wiring is exercised by tests
+/// instead of only by the TUI path.
+fn activate_first_file(app: &mut App) {
+    let fs = &mut app.file_states[0];
+    app.source = std::mem::take(&mut fs.source);
+    app.spans = std::mem::take(&mut fs.spans);
+    app.view = std::mem::take(&mut fs.view);
+    app.file_stamp = fs.file_stamp;
+    app.last_loaded_stamp = fs.last_loaded_stamp;
+    app.git_diff = fs.git_diff.take();
+    app.git_added = std::mem::take(&mut fs.git_added);
+    app.git_deleted_before = std::mem::take(&mut fs.git_deleted_before);
+    app.old_side = fs.old_side.take();
+}
+
 fn run(config: Config) -> Result<()> {
     // A piped/redirected stdin must not kill the TUI (see above).
     ensure_terminal_stdin();
@@ -827,18 +846,13 @@ fn run(config: Config) -> Result<()> {
         file_states.push(fs);
     }
 
-    // Move the first file's loaded state into the live App fields. The
+    // Move the first file's loaded state into the live App fields (the
     // emptied slot is never read: switch_to_file always saves the live
-    // state back into it before leaving the file.
-    let source = std::mem::take(&mut file_states[0].source);
-    let spans = std::mem::take(&mut file_states[0].spans);
-    let view = std::mem::take(&mut file_states[0].view);
-
-    let mut app = App::new(config, source, highlight, view, light);
-    app.spans = spans;
+    // state back into it before leaving the file). Extracted so tests
+    // exercise the same wiring (git_tests::startup_activation_...).
+    let mut app = App::new(config, Source::default(), highlight, ViewState::default(), light);
     app.file_states = file_states;
-    app.file_stamp = app.file_states[0].file_stamp;
-    app.last_loaded_stamp = app.file_states[0].last_loaded_stamp;
+    activate_first_file(&mut app);
     // Command mode always runs in ASCII so j/k etc. are never swallowed by
     // the IME. The first attempt may no-op while the helper compiles on
     // first run; the event loop retries until it sticks.
@@ -9178,6 +9192,67 @@ mod git_tests {
         assert!(app.old_side.is_none());
         let (msg, _, _) = app.status.as_ref().expect("a flash explains");
         assert!(msg.contains("untracked"), "message names the case: {msg}");
+    }
+
+    #[test]
+    fn startup_activation_carries_the_git_snapshot_into_the_live_fields() {
+        // Regression: run() moves the first file's per-file state into the
+        // live App fields via activate_first_file — the git snapshot must
+        // ride along. Before the fix the first file opened with empty
+        // marks and `o` claimed "not in a git repository" until a file
+        // switch (the tests built App directly and never exercised run()'s
+        // wiring).
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three"]);
+        overwrite(&path, &["one", "CHANGED", "three"]);
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+        };
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        // Build FileState exactly like run() does.
+        let source = Source::load(path.clone()).unwrap();
+        let spans = highlight.highlight_with(&source.content, syntax_for(&path));
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut fs = FileState {
+            source,
+            spans,
+            view,
+            mode: Mode::Source,
+            ..Default::default()
+        };
+        let (diff, added, deleted) = git_snapshot("HEAD", &config.files[0], fs.source.len());
+        fs.git_diff = diff;
+        fs.git_added = added;
+        fs.git_deleted_before = deleted;
+        // Activate like run() does.
+        let mut app =
+            App::new(config, Source::default(), highlight, ViewState::default(), false);
+        app.file_states = vec![fs];
+        activate_first_file(&mut app);
+        assert_eq!(
+            app.source.lines,
+            ["one", "CHANGED", "three"],
+            "the first file's source is live"
+        );
+        assert!(app.git_diff.is_some(), "the snapshot rides along");
+        assert_eq!(app.git_added, HashSet::from([1]), "the marks ride along");
+        // `o` works on the first file right away (it used to flash
+        // "not in a git repository").
+        app.mode = Mode::Source;
+        app.gutter_cols = 3;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some(), "the toggle sees the snapshot");
     }
 
     #[test]
