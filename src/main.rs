@@ -2157,12 +2157,15 @@ fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
 fn old_side_view_rows(app: &App, os: &OldSide) -> Vec<Vec<HiSpan>> {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let width = view_render_width(w);
-    let mut content = os.old_lines.join("\n");
+    let mut content = os.old_lines.join("\n\n");
     content.push('\n');
+    // The renderer attributes rows to source lines by index, so `lines`
+    // must match the content exactly (the blank separators count).
+    let fragment_lines: Vec<String> = content.lines().map(str::to_owned).collect();
     let fragment = Source {
         path: PathBuf::new(),
         content,
-        lines: os.old_lines.clone(),
+        lines: fragment_lines,
         gutter_width: 1,
     };
     render::render(&fragment, width as usize, &app.highlight).rows
@@ -9626,6 +9629,33 @@ mod git_tests {
         assert!(app.old_side.is_none());
         assert_eq!(app.view.rows.len(), before_len, "rows restored");
         assert_eq!(app.view.source_starts, before_starts, "mapping restored");
+    }
+
+    #[test]
+    fn old_side_in_view_keeps_each_line_separate() {
+        // The fragment render joins the old lines with blanks: consecutive
+        // lines must NOT merge into one run-on paragraph (the regression:
+        // three context lines rendered as a single merged row, hiding the
+        // hunk's line structure).
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["line one", "line two", "line three"]);
+        overwrite(&path, &["line one CHANGED", "line two", "line three"]);
+        let mut app = git_app(path, Mode::View);
+        app.view.goto_source_line(0);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let range = app.view.old_side_rows.clone();
+        assert!(!range.is_empty());
+        let rows: Vec<String> = app.view.rows[range]
+            .iter()
+            .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect();
+        assert!(rows.iter().any(|r| r.contains("line one")));
+        assert!(rows.iter().any(|r| r.contains("line three")));
+        assert!(
+            !rows.iter().any(|r| r.contains("line one") && r.contains("line three")),
+            "each old line stays its own row: {rows:?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("CHANGED")));
     }
 
     #[test]
