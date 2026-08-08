@@ -8,13 +8,17 @@ repository = "https://github.com/worldnine/akapen"
 
 # Vendored from crates.io tui-markdown 0.3.9 (MIT OR Apache-2.0).
 # Deviations from upstream:
-# - dev-dependencies (indoc, insta, rstest, pretty_assertions) and the
-#   document-features optional dep are dropped; the crate's internal
-#   #[cfg(test)] modules are not compiled by mdcomment's builds.
+# - the document-features optional dep is dropped; the crate's internal
+#   #[cfg(test)] modules are not compiled by akapen's builds.
 # - the renderer threads pulldown-cmark's event byte-ranges through the
 #   span sinks, exposing per-span source-line attribution via
 #   `from_str_with_options_tagged` (see renderer/mod.rs).
-# The rendering logic (what gets drawn) is byte-identical to upstream.
+# - tables are width-adaptive: `Options::max_width` gives the renderer a
+#   layout budget; tables whose natural width does not fit shrink their
+#   columns and wrap cell content instead of overflowing (see
+#   renderer/table.rs).
+# The rest of the rendering logic (what gets drawn) is byte-identical to
+# upstream.
 
 [features]
 default = ["highlight-code"]
@@ -27,6 +31,15 @@ pulldown-cmark = "0.13"
 ratatui-core = { version = "0.1", default-features = false }
 syntect = { version = "5", optional = true }
 tracing = "0.1.37"
+unicode-width = "0.2"
+
+[dev-dependencies]
+indoc = "2"
+insta = "1"
+pretty_assertions = "1"
+ratatui = "0.30"
+rstest = "0.26"
+tracing-subscriber = "0.3"
 
 [lib]
 name = "tui_markdown"

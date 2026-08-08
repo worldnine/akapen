@@ -89,7 +89,14 @@ where
                     return;
                 }
             }
-            line.spans.insert(1, marker_span);
+            // The marker becomes the second span (ordered lists, whose
+            // marker is "1. ", take this path). It is synthesized: it
+            // carries no source line, and the parallel attribution must
+            // stay in lockstep with the spans.
+            let at = line.spans.len().min(1);
+            line.spans.insert(at, marker_span);
+            let attrs = self.out_lines.last_mut().expect("out_lines parallels text");
+            attrs.insert(at, None);
         } else {
             self.push_span(marker_span);
         }

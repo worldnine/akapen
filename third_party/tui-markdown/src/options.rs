@@ -77,6 +77,12 @@ pub struct Options<S: StyleSheet = DefaultStyleSheet> {
     pub(crate) styles: S,
     /// The content to render in place of images.
     pub(crate) image_fallback: ImageFallback,
+    /// Maximum display width the renderer may use, in terminal columns.
+    ///
+    /// Tables lay out within this budget: when the table's natural width does not fit, its
+    /// columns shrink and cell content wraps instead of overflowing the pane. `None` (the
+    /// default) leaves the width unlimited and tables render at their natural width.
+    pub(crate) max_width: Option<usize>,
     /// Explicit syntax-highlighting theme for fenced code blocks.
     ///
     /// When absent, the renderer uses the shared built-in default.
@@ -92,9 +98,21 @@ impl<S: StyleSheet> Options<S> {
         Self {
             styles,
             image_fallback: ImageFallback::default(),
+            max_width: None,
             #[cfg(feature = "highlight-code")]
             code_theme: None,
         }
+    }
+
+    /// Limits the layout width to `max_width` terminal columns.
+    ///
+    /// Only tables are width-constrained today: their columns shrink and cell content wraps to
+    /// fit the budget (the table renderer shrinks columns and wraps cells; see the
+    /// `renderer::table` module). Other constructs keep their natural width.
+    #[must_use]
+    pub fn max_width(mut self, max_width: usize) -> Self {
+        self.max_width = Some(max_width);
+        self
     }
 
     /// Selects the text used to represent Markdown images.
@@ -179,6 +197,7 @@ mod tests {
         let options = Options {
             styles: CustomStyleSheet,
             image_fallback: ImageFallback::default(),
+            max_width: None,
             #[cfg(feature = "highlight-code")]
             code_theme: None,
         };

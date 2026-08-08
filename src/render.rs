@@ -230,7 +230,12 @@ fn code_theme(highlighter: &Highlighter) -> CodeTheme {
 /// to its first display row. All colors come from `highlighter`'s theme.
 pub fn render(source: &Source, width: usize, highlighter: &Highlighter) -> Rendered {
     let options = Options::new(MdcommentStyleSheet::from_theme(highlighter))
-        .code_theme(code_theme(highlighter));
+        .code_theme(code_theme(highlighter))
+        // Tables lay out within the pane width (shrinking columns and
+        // wrapping cells instead of overflowing); everything else renders
+        // at its natural width. The width must agree with the wrap width
+        // below, or a laid-out table would be re-cut.
+        .max_width(width);
     let (text, line_attrs) =
         tui_markdown::from_str_with_options_tagged(&source.content, &options);
     let mut rows: Vec<Vec<Span>> = Vec::new();

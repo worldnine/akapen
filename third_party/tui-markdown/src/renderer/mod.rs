@@ -112,6 +112,7 @@ where
         parser.into_offset_iter(),
         options.styles.clone(),
         options.image_fallback,
+        options.max_width,
         line_starts(input),
     );
     #[cfg(feature = "highlight-code")]
@@ -194,6 +195,9 @@ struct TextWriter<'a, 'theme, I, S: StyleSheet> {
     images: Vec<image::PendingImage<'a>>,
     /// Content to render in place of images.
     image_fallback: ImageFallback,
+    /// Maximum layout width, in columns; tables shrink and wrap within it.
+    /// `None` (the default) renders tables at their natural width.
+    max_width: Option<usize>,
 
     // List rendering state.
     /// Current list index as a stack of indices.
@@ -217,7 +221,13 @@ where
     I: Iterator<Item = (Event<'a>, std::ops::Range<usize>)>,
     S: StyleSheet,
 {
-    fn new(iter: I, styles: S, image_fallback: ImageFallback, line_starts: Vec<usize>) -> Self {
+    fn new(
+        iter: I,
+        styles: S,
+        image_fallback: ImageFallback,
+        max_width: Option<usize>,
+        line_starts: Vec<usize>,
+    ) -> Self {
         Self {
             iter,
             text: Text::default(),
@@ -241,6 +251,7 @@ where
             link: None,
             images: vec![],
             image_fallback,
+            max_width,
             list_indices: vec![],
             list_items: vec![],
             in_footnote_definition: false,

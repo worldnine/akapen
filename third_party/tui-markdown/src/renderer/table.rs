@@ -4,6 +4,12 @@
 //! display width. [`TableBuilder`] collects the header and body rows, then renders their content,
 //! alignment, padding, and Unicode box-drawing borders once pulldown-cmark closes the table.
 //!
+//! Tables are width-adaptive: given a layout budget ([`Options::max_width`], minus the display
+//! width an enclosing list marker or blockquote prefix takes), a table whose natural width does
+//! not fit shrinks its columns (proportional to the natural widths, floored at each column's
+//! widest unsplittable token) and wraps cell content across multiple rows instead of overflowing.
+//! Wrapped cell lines keep the source-line attribution of the spans they carry.
+//!
 //! The central renderer dispatches events and owns shared inline state. This module owns the table
 //! event handlers, buffered table state, list-aware output placement, and final table layout.
 
@@ -59,7 +65,24 @@ where
 
     pub fn end_table(&mut self) {
         if let Some(builder) = self.table_builder.take() {
-            let lines = builder.render(&self.styles);
+            // Every table line loses the same horizontal budget: the first
+            // line of a table inside a list item shares the marker line
+            // (and the rest carry the continuation prefix), and blockquote
+            // lines all carry their prefixes plus the spacer before them.
+            // The table is still on the construct stack when it closes, so
+            // the active indent is exactly what `push_table_lines` will
+            // apply. Without this, the laid-out table would be re-cut by
+            // the view's own wrap.
+            let list_indent = self
+                .list_items
+                .last()
+                .map_or(0, |item| item.continuation_width);
+            let prefix_indent = self.line_prefixes.iter().map(|s| s.width()).sum::<usize>()
+                + usize::from(!self.line_prefixes.is_empty());
+            let available = self.max_width.map_or(usize::MAX, |w| {
+                w.saturating_sub(list_indent + prefix_indent)
+            });
+            let lines = builder.render(&self.styles, available);
             self.push_table_lines(lines);
             self.needs_newline = true;
         }
@@ -152,26 +175,38 @@ impl<'a> TableBuilder<'a> {
         self.rows.push(std::mem::take(&mut self.current_row));
     }
 
-    pub fn render<S: StyleSheet>(self, styles: &S) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
+    /// Renders the buffered table within `available_width` display columns
+    /// (`usize::MAX` = natural width). Returns one output line per drawn row;
+    /// a cell that wraps to several lines makes its whole row several lines.
+    pub fn render<S: StyleSheet>(
+        self,
+        styles: &S,
+        available_width: usize,
+    ) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
         let column_count = self.column_count();
         if column_count == 0 {
             return Vec::new();
         }
 
-        let column_widths = self.column_widths(column_count);
+        let column_widths = self.column_widths(column_count, available_width);
         let border_style = styles.table_border();
 
         let top_border = TOP_BORDER.render(&column_widths, border_style);
         let header = self.header.render(&column_widths, &self.alignments, styles);
         let header_separator = HEADER_SEPARATOR.render(&column_widths, border_style);
-        let body = self
+        let body: Vec<_> = self
             .rows
             .iter()
-            .map(|row| row.render(&column_widths, &self.alignments, styles));
+            .map(|row| row.render(&column_widths, &self.alignments, styles))
+            .collect();
         let bottom_border = BOTTOM_BORDER.render(&column_widths, border_style);
 
-        let mut lines = vec![top_border, header, header_separator];
-        lines.extend(body);
+        let mut lines = vec![top_border];
+        lines.extend(header);
+        lines.push(header_separator);
+        for row in body {
+            lines.extend(row);
+        }
         lines.push(bottom_border);
         lines
     }
@@ -186,21 +221,94 @@ impl<'a> TableBuilder<'a> {
         )
     }
 
-    fn column_widths(&self, column_count: usize) -> Vec<usize> {
-        let mut widths = vec![0; column_count];
+    /// Column widths for a table laid out within `available` columns.
+    ///
+    /// The natural width (widest cell per column, display-width measured) is
+    /// used unchanged when the whole table fits. Otherwise the fixed
+    /// overhead — the `n + 1` border glyphs plus the two padding columns
+    /// each of the `n` cells reserves (`3n + 1` in total) — is subtracted
+    /// from the budget and the remainder is shared proportionally to the
+    /// natural widths, never dropping a column below its floor: the widest
+    /// token wrapping cannot split (a whitespace-separated word; every wide
+    /// CJK/emoji character counts as a token of its own). When the floors
+    /// themselves do not fit, they drop to one display column each and the
+    /// budget is distributed again (see the fallback branch below).
+    fn column_widths(&self, column_count: usize, available: usize) -> Vec<usize> {
+        let mut natural = vec![0usize; column_count];
+        let mut floors = vec![1usize; column_count];
         for (col_idx, cell) in self.header.cells.iter().enumerate() {
-            widths[col_idx] = widths[col_idx].max(cell.width());
+            natural[col_idx] = natural[col_idx].max(cell.width());
+            floors[col_idx] = floors[col_idx].max(cell.longest_token());
         }
         for row in &self.rows {
             for (col_idx, cell) in row.cells.iter().enumerate() {
-                widths[col_idx] = widths[col_idx].max(cell.width());
+                natural[col_idx] = natural[col_idx].max(cell.width());
+                floors[col_idx] = floors[col_idx].max(cell.longest_token());
             }
         }
-        for width in &mut widths {
+        for width in &mut natural {
             *width = (*width).max(1);
         }
-        widths
+        let overhead = 3 * column_count + 1; // borders (n + 1) + per-cell padding (2n)
+        let total: usize = natural.iter().sum();
+        if total + overhead <= available {
+            return natural;
+        }
+        let budget = available.saturating_sub(overhead);
+        if floors.iter().sum::<usize>() <= budget {
+            return proportional_with_floor(&natural, &floors, budget);
+        }
+        // The token floors do not fit: drop them to one display column each
+        // and distribute again, so a single oversized token (a long URL, an
+        // unbroken word) costs its column only what fairness allows instead
+        // of collapsing the whole table. Wrapping then splits such tokens
+        // character by character. Only when even one column per column does
+        // not fit (`available < 4n + 1`) do the columns stay at one and the
+        // table overflows the pane — the physical minimum; the table itself
+        // never drops content.
+        if column_count <= budget {
+            let ones = vec![1usize; column_count];
+            return proportional_with_floor(&natural, &ones, budget);
+        }
+        vec![1; column_count]
     }
+}
+
+/// Distribute `budget` display columns across the columns: each column keeps
+/// its floor, the remainder is shared proportionally to the natural widths
+/// (rounded down, with the leftover given to the widest columns), and no
+/// column exceeds its natural width. The returned widths sum to exactly
+/// `min(budget, Σnatural)`.
+fn proportional_with_floor(natural: &[usize], floors: &[usize], budget: usize) -> Vec<usize> {
+    let sum_natural: usize = natural.iter().sum();
+    if budget >= sum_natural {
+        return natural.to_vec();
+    }
+    let sum_floor: usize = floors.iter().sum();
+    let mut widths = floors.to_vec();
+    let span = sum_natural.saturating_sub(sum_floor);
+    if span == 0 || budget <= sum_floor {
+        return widths;
+    }
+    let extra = budget - sum_floor;
+    // Widest share first, so integer rounding favors the widest columns.
+    let mut order: Vec<usize> = (0..natural.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(natural[i] - floors[i]));
+    let mut remainder = extra;
+    for &i in &order {
+        let share = (natural[i] - floors[i]) * extra / span;
+        widths[i] += share;
+        remainder -= share;
+    }
+    for &i in &order {
+        if remainder == 0 || widths[i] >= natural[i] {
+            continue;
+        }
+        widths[i] += 1;
+        remainder -= 1;
+    }
+    debug_assert_eq!(remainder, 0, "all budget columns allocated");
+    widths
 }
 
 #[derive(Default)]
@@ -214,7 +322,7 @@ impl<'a> TableHeader<'a> {
         column_widths: &[usize],
         alignments: &[Alignment],
         styles: &S,
-    ) -> (Line<'a>, Vec<Option<usize>>) {
+    ) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
         render_line(
             &self.cells,
             column_widths,
@@ -236,7 +344,7 @@ impl<'a> TableRow<'a> {
         column_widths: &[usize],
         alignments: &[Alignment],
         styles: &S,
-    ) -> (Line<'a>, Vec<Option<usize>>) {
+    ) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
         render_line(
             &self.cells,
             column_widths,
@@ -263,27 +371,275 @@ impl<'a> TableCell<'a> {
         self.spans.iter().map(|(span, _)| Span::width(span)).sum()
     }
 
-    fn render_spans(
+    /// The widest token in the cell — the piece wrapping can never split:
+    /// a run of narrow non-whitespace characters (a word, a URL) counts as
+    /// one token, while every wide CJK/emoji character is breakable on its
+    /// own and counts as a token of its display width. Zero-width characters
+    /// (combining marks, variation selectors) ride their neighbours and add
+    /// nothing.
+    fn longest_token(&self) -> usize {
+        let mut longest = 0usize;
+        let mut run = 0usize;
+        for (span, _) in &self.spans {
+            for ch in span.content.chars() {
+                let width = char_display_width(ch);
+                if ch.is_whitespace() {
+                    run = 0;
+                } else if width >= 2 {
+                    longest = longest.max(run).max(width);
+                    run = 0;
+                } else if width == 1 {
+                    run += 1;
+                }
+            }
+        }
+        longest.max(run)
+    }
+
+    /// Wrap the cell content to `column_width` display columns and render
+    /// every line: the padding for `alignment` (applied per line, so
+    /// alignment survives wrapping), the cell's `style` on content and
+    /// padding alike, and one source-line attribution per output span — a
+    /// wrapped fragment inherits its source line.
+    fn render_lines(
         &self,
         column_width: usize,
         alignment: Alignment,
         style: Style,
-    ) -> (Vec<Span<'a>>, Vec<Option<usize>>) {
-        let (pad_left, pad_right) = padding(column_width, self.width(), alignment);
-        // Padding is synthesized filler: it carries no source line.
-        let mut spans = vec![Span::styled(" ".repeat(pad_left + 1), style)];
-        let mut attrs = vec![None];
-
-        for (span, line) in &self.spans {
-            let mut span = span.clone();
-            span.style = span.style.patch(style);
-            spans.push(span);
-            attrs.push(*line);
-        }
-        spans.push(Span::styled(" ".repeat(pad_right + 1), style));
-        attrs.push(None);
-        (spans, attrs)
+    ) -> CellLines<'a> {
+        wrap_cell(&self.spans, column_width)
+            .into_iter()
+            .map(|line| {
+                let content_width: usize = line.iter().map(|(span, _)| Span::width(span)).sum();
+                let (pad_left, pad_right) = padding(column_width, content_width, alignment);
+                // Padding is synthesized filler: it carries no source line.
+                let mut spans = vec![Span::styled(" ".repeat(pad_left + 1), style)];
+                let mut attrs = vec![None];
+                for (span, line) in line {
+                    let mut span = span;
+                    span.style = span.style.patch(style);
+                    spans.push(span);
+                    attrs.push(line);
+                }
+                spans.push(Span::styled(" ".repeat(pad_right + 1), style));
+                attrs.push(None);
+                (spans, attrs)
+            })
+            .collect()
     }
+}
+
+/// One rendered line of a cell: its spans plus the per-span source-line
+/// attribution (padding spans carry `None`).
+type CellLine<'a> = (Vec<Span<'a>>, Vec<Option<usize>>);
+
+/// The rendered lines of a whole cell (one per wrap row).
+type CellLines<'a> = Vec<CellLine<'a>>;
+
+/// One character of a cell with the source span it came from, flattened so
+/// wrapping can cut at any boundary without losing the span's style, source
+/// line, or identity (a wrapped line re-merges its characters by span index,
+/// so a cell that does not wrap keeps its input spans exactly).
+#[derive(Clone, Copy)]
+struct CellChar {
+    ch: char,
+    /// Index into the cell's span list; also the span's style and line.
+    span: usize,
+    line: Option<usize>,
+}
+
+/// Greedy word-wrap state for one cell.
+struct CellWrap {
+    /// The column's content width.
+    width: usize,
+    /// Completed lines.
+    lines: Vec<Vec<CellChar>>,
+    /// The line being filled.
+    current: Vec<CellChar>,
+    current_width: usize,
+    /// The pending word: a run of narrow non-whitespace characters (plus
+    /// any zero-width characters glued to them).
+    word: Vec<CellChar>,
+    word_width: usize,
+    /// The whitespace run consumed since the last committed word; its first
+    /// character is re-inserted as the single separator space when the next
+    /// word lands on a non-empty line. `None` when the original text had no
+    /// whitespace (CJK text must not gain spaces) or the separator was
+    /// already dropped at a line break.
+    pending_space: Option<CellChar>,
+}
+
+impl CellWrap {
+    fn new(width: usize) -> Self {
+        Self {
+            width: width.max(1),
+            lines: Vec::new(),
+            current: Vec::new(),
+            current_width: 0,
+            word: Vec::new(),
+            word_width: 0,
+            pending_space: None,
+        }
+    }
+
+    /// Close the current line and start a fresh one.
+    fn close_line(&mut self) {
+        if !self.current.is_empty() {
+            self.lines.push(std::mem::take(&mut self.current));
+            self.current_width = 0;
+        }
+    }
+
+    /// Append `ch` to the current line, closing it first when the character
+    /// does not fit in the remainder. A wide character that cannot fit even
+    /// on an empty line is placed anyway (it overflows the column — the
+    /// physical minimum; wide characters are never split). Zero-width
+    /// characters always ride the current line.
+    fn put(&mut self, ch: CellChar) {
+        let w = char_display_width(ch.ch);
+        if w > 0 && self.current_width + w > self.width {
+            self.close_line();
+        }
+        self.current_width += w;
+        self.current.push(ch);
+    }
+
+    /// Commit the pending word: place it on the current line when it fits
+    /// (preceded by the recorded separator space), otherwise start a new
+    /// line with it; a single word wider than the column is split character
+    /// by character without splitting wide characters.
+    fn commit_word(&mut self) {
+        if self.word.is_empty() {
+            return;
+        }
+        let word = std::mem::take(&mut self.word);
+        let word_width = std::mem::take(&mut self.word_width);
+        let space = self.pending_space.take();
+        if self.current.is_empty() {
+            if word_width <= self.width {
+                self.current = word;
+                self.current_width = word_width;
+            } else {
+                for ch in word {
+                    self.put(ch);
+                }
+            }
+            return;
+        }
+        let space_width = usize::from(space.is_some());
+        if self.current_width + space_width + word_width <= self.width {
+            if let Some(space) = space {
+                self.current.push(space);
+                self.current_width += 1;
+            }
+            self.current.extend(word);
+            self.current_width += word_width;
+        } else if word_width <= self.width {
+            self.close_line();
+            self.current = word;
+            self.current_width = word_width;
+        } else {
+            self.close_line();
+            for ch in word {
+                self.put(ch);
+            }
+        }
+    }
+}
+
+/// Word-wrap cell content to `width` display columns, returning one list of
+/// (span, source line) pairs per line. Break opportunities are whitespace
+/// and every wide (CJK, emoji) character, so Japanese text wraps between any
+/// two characters while `https://example.com` stays whole when it fits. A
+/// single token wider than the column is split character by character so no
+/// text is ever dropped; a wide character is never split, and one that does
+/// not fit even on an empty line overflows the column (the physical
+/// minimum). Whitespace runs collapse to one separator space, which is
+/// dropped at a line break and never invented between words the source did
+/// not separate.
+fn wrap_cell<'a>(
+    spans: &[(Span<'a>, Option<usize>)],
+    width: usize,
+) -> Vec<Vec<(Span<'a>, Option<usize>)>> {
+    let mut chars: Vec<CellChar> = Vec::new();
+    for (span_idx, (span, line)) in spans.iter().enumerate() {
+        for ch in span.content.chars() {
+            chars.push(CellChar {
+                ch,
+                span: span_idx,
+                line: *line,
+            });
+        }
+    }
+
+    let mut wrap = CellWrap::new(width);
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        let w = char_display_width(ch.ch);
+        if ch.ch.is_whitespace() {
+            // Whitespace ends the word; the run collapses to one separator
+            // space carrying the run's first character's style and line.
+            wrap.commit_word();
+            wrap.pending_space = Some(ch);
+            while i < chars.len() && chars[i].ch.is_whitespace() {
+                i += 1;
+            }
+            continue;
+        }
+        if w >= 2 {
+            // A wide character breaks the line on its own.
+            wrap.commit_word();
+            wrap.word.push(ch);
+            wrap.word_width = w;
+            wrap.commit_word();
+            i += 1;
+            continue;
+        }
+        wrap.word.push(ch);
+        wrap.word_width += w;
+        i += 1;
+    }
+    wrap.commit_word();
+    wrap.close_line();
+    if wrap.lines.is_empty() {
+        wrap.lines.push(Vec::new());
+    }
+
+    wrap.lines
+        .into_iter()
+        .map(|line| {
+            // Re-merge consecutive characters of the same source span, so a
+            // span that was never cut keeps its exact input text (and a
+            // wrapped span becomes one fragment per line).
+            let mut out: Vec<(Span<'a>, Option<usize>)> = Vec::new();
+            let mut cur: Option<(usize, Option<usize>, String)> = None;
+            for ch in line {
+                match &mut cur {
+                    Some((span, line, text)) if *span == ch.span && *line == ch.line => {
+                        text.push(ch.ch);
+                    }
+                    _ => {
+                        if let Some((span, line, text)) = cur.take() {
+                            out.push((Span::styled(text, spans[span].0.style), line));
+                        }
+                        cur = Some((ch.span, ch.line, ch.ch.to_string()));
+                    }
+                }
+            }
+            if let Some((span, line, text)) = cur {
+                out.push((Span::styled(text, spans[span].0.style), line));
+            }
+            out
+        })
+        .collect()
+}
+
+/// The terminal display width of `ch` (unicode-width; 0 for combining marks
+/// and other zero-width characters).
+fn char_display_width(ch: char) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    ch.width().unwrap_or(0)
 }
 
 #[derive(Clone, Copy)]
@@ -319,31 +675,67 @@ impl BorderGlyphs {
     }
 }
 
+/// Renders one header/body row as one output line per wrap row: every cell
+/// wraps to its column width, the row's height is the tallest cell, shorter
+/// cells continue as blank padded lines, and every line — wrapped or not —
+/// is framed by its `│` borders.
 fn render_line<'a>(
     cells: &[TableCell<'a>],
     column_widths: &[usize],
     alignments: &[Alignment],
     content_style: Style,
     border_style: Style,
-) -> (Line<'a>, Vec<Option<usize>>) {
-    let mut spans = vec![Span::styled(VERTICAL_BORDER, border_style)];
-    let mut attrs = vec![None];
+) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
     let empty_cell = TableCell::default();
-    for (column_index, &column_width) in column_widths.iter().enumerate() {
-        let cell = cells.get(column_index).unwrap_or(&empty_cell);
-        let alignment = alignments
-            .get(column_index)
-            .copied()
-            .unwrap_or(Alignment::None);
-        let (cell_spans, cell_attrs) = cell.render_spans(column_width, alignment, content_style);
-        spans.extend(cell_spans);
-        attrs.extend(cell_attrs);
-        // The cell separator belongs to the same rendered row as the cell
-        // content, but it is a synthesized glyph: no source line.
-        spans.push(Span::styled(VERTICAL_BORDER, border_style));
-        attrs.push(None);
-    }
-    (Line::from(spans), attrs)
+    // Wrap every cell once; the per-column blank line fills a shorter
+    // cell's continuation rows.
+    let wrapped: Vec<CellLines<'a>> = column_widths
+        .iter()
+        .enumerate()
+        .map(|(column_index, &column_width)| {
+            let cell = cells.get(column_index).unwrap_or(&empty_cell);
+            let alignment = alignments
+                .get(column_index)
+                .copied()
+                .unwrap_or(Alignment::None);
+            cell.render_lines(column_width, alignment, content_style)
+        })
+        .collect();
+    let blank_lines: Vec<CellLine<'a>> = column_widths
+        .iter()
+        .enumerate()
+        .map(|(column_index, &column_width)| {
+            let alignment = alignments
+                .get(column_index)
+                .copied()
+                .unwrap_or(Alignment::None);
+            empty_cell
+                .render_lines(column_width, alignment, content_style)
+                .pop()
+                .expect("an empty cell renders exactly one line")
+        })
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+
+    (0..height)
+        .map(|line_index| {
+            let mut spans = vec![Span::styled(VERTICAL_BORDER, border_style)];
+            let mut attrs = vec![None];
+            for (column_index, column_lines) in wrapped.iter().enumerate() {
+                let (cell_spans, cell_attrs) = column_lines
+                    .get(line_index)
+                    .cloned()
+                    .unwrap_or_else(|| blank_lines[column_index].clone());
+                spans.extend(cell_spans);
+                attrs.extend(cell_attrs);
+                // The cell separator belongs to the same rendered row as the
+                // cell content, but it is a synthesized glyph: no source line.
+                spans.push(Span::styled(VERTICAL_BORDER, border_style));
+                attrs.push(None);
+            }
+            (Line::from(spans), attrs)
+        })
+        .collect()
 }
 
 fn padding(column_width: usize, content_width: usize, alignment: Alignment) -> (usize, usize) {
@@ -370,22 +762,25 @@ mod tests {
     use ratatui_core::text::{Line, Span, Text};
 
     use super::*;
-    use crate::{from_str, from_str_with_options, DefaultStyleSheet, Options, StyleSheet};
+    use crate::{
+        from_str, from_str_with_options, from_str_with_options_tagged, DefaultStyleSheet, Options,
+        StyleSheet,
+    };
 
     #[test]
     fn empty_table() {
         let builder = TableBuilder::new(vec![]);
-        assert!(builder.render(&DefaultStyleSheet).is_empty());
+        assert!(builder.render(&DefaultStyleSheet, usize::MAX).is_empty());
     }
 
     #[test]
     fn single_cell() {
         let mut builder = TableBuilder::new(vec![Alignment::None]);
         builder.start_cell();
-        builder.push_span(Span::raw("hi"));
+        builder.push_span(Span::raw("hi"), Some(0));
         builder.finish_cell();
         builder.finish_header();
-        assert_eq!(builder.render(&DefaultStyleSheet).len(), 4);
+        assert_eq!(builder.render(&DefaultStyleSheet, usize::MAX).len(), 4);
     }
 
     #[test]
@@ -400,21 +795,27 @@ mod tests {
     fn cell_style_covers_padding_and_empty_cells() {
         let style = Style::new().on_green();
         let cell = TableCell {
-            spans: vec![Span::raw("x")],
+            spans: vec![(Span::raw("x"), Some(3))],
         };
         assert_eq!(
-            cell.render_spans(4, Alignment::Center, style),
-            [
-                Span::styled("  ", style),
-                Span::styled("x", style),
-                Span::styled("   ", style),
-            ]
+            cell.render_lines(4, Alignment::Center, style),
+            [(
+                vec![
+                    Span::styled("  ", style),
+                    Span::styled("x", style),
+                    Span::styled("   ", style),
+                ],
+                vec![None, Some(3), None]
+            )]
         );
 
         let empty_cell = TableCell::default();
         assert_eq!(
-            empty_cell.render_spans(4, Alignment::Right, style),
-            [Span::styled("     ", style), Span::styled(" ", style)]
+            empty_cell.render_lines(4, Alignment::Right, style),
+            [(
+                vec![Span::styled("     ", style), Span::styled(" ", style)],
+                vec![None, None]
+            )]
         );
     }
 
@@ -422,13 +823,16 @@ mod tests {
     fn column_widths_have_a_minimum_of_one() {
         let mut builder = TableBuilder::new(vec![]);
         builder.header.cells.push(TableCell::default());
-        assert_eq!(builder.column_widths(1), vec![1]);
+        assert_eq!(builder.column_widths(1, usize::MAX), vec![1]);
     }
 
     #[test]
     fn styled_cell_width() {
         let cell = TableCell {
-            spans: vec![Span::from("hello").bold(), Span::raw(" world")],
+            spans: vec![
+                (Span::from("hello").bold(), None),
+                (Span::raw(" world"), None),
+            ],
         };
         assert_eq!(cell.width(), 11);
     }
@@ -436,7 +840,7 @@ mod tests {
     #[test]
     fn emoji_cell_width() {
         let cell = TableCell {
-            spans: vec![Span::raw("✅"), Span::raw(" ok")],
+            spans: vec![(Span::raw("✅"), None), (Span::raw(" ok"), None)],
         };
         assert_eq!(cell.width(), 5);
     }
@@ -444,7 +848,7 @@ mod tests {
     #[test]
     fn cjk_cell_width() {
         let cell = TableCell {
-            spans: vec![Span::raw("日本"), Span::raw(" ok")],
+            spans: vec![(Span::raw("日本"), None), (Span::raw(" ok"), None)],
         };
         assert_eq!(cell.width(), 7);
     }
@@ -1023,5 +1427,279 @@ mod tests {
                 | baz  | qux   |
             "});
         insta::assert_snapshot!(text);
+    }
+
+    // ---- width-adaptive layout (Options::max_width) ----
+
+    fn render_at_width(markdown: &str, width: usize) -> Vec<String> {
+        let options = Options::new(DefaultStyleSheet).max_width(width);
+        from_str_with_options(markdown, &options)
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect_vec()
+    }
+
+    #[test]
+    fn table_shrinks_to_the_available_width() {
+        // Natural widths [8, 8, 28] + 10 overhead = 54; at 40 the columns
+        // shrink to [4, 3, 23] (budget 30, floors [2, 2, 21] — the URL is
+        // one 21-column token) and the table uses exactly the budget.
+        let rendered = render_at_width(
+            indoc! {"
+                | 左揃え | 中央揃え | 右揃え |
+                |:-------|:--------:|-------:|
+                | a | b | c |
+                | 長いセル | 中央 | 1000 |
+                | `コード` | **太字** | [リンク](https://example.com) |
+            "},
+            40,
+        );
+        assert_eq!(rendered[0], "┌──────┬─────┬─────────────────────────┐");
+        assert_eq!(rendered[0].chars().count(), 40);
+        assert!(rendered.iter().all(|l| l.chars().count() <= 40));
+        // The wrapped link cell: the URL stays whole on its own line.
+        assert_eq!(
+            rendered[rendered.len() - 2],
+            "│ ド   │ 字  │   (https://example.com) │"
+        );
+    }
+
+    #[test]
+    fn table_keeps_natural_width_when_it_fits() {
+        let rendered = render_at_width(
+            indoc! {"
+                | A | B |
+                |---|---|
+                | a | b |
+            "},
+            40,
+        );
+        assert_eq!(
+            rendered,
+            [
+                "┌───┬───┐",
+                "│ A │ B │",
+                "├───┼───┤",
+                "│ a │ b │",
+                "└───┴───┘",
+            ]
+        );
+    }
+
+    #[test]
+    fn column_widths_are_proportional_with_floor_and_exact_budget() {
+        let natural = vec![8, 8, 28];
+        let floors = vec![2, 2, 21];
+        assert_eq!(
+            proportional_with_floor(&natural, &floors, 30),
+            vec![4, 3, 23]
+        );
+        // The budget is used up exactly.
+        let widths = proportional_with_floor(&natural, &floors, 25);
+        assert_eq!(widths.iter().sum::<usize>(), 25);
+        assert!(widths.iter().zip(&floors).all(|(w, f)| w >= f));
+        assert!(widths.iter().zip(&natural).all(|(w, n)| w <= n));
+        // A budget at or above the natural total keeps natural widths.
+        assert_eq!(proportional_with_floor(&natural, &floors, 44), natural);
+    }
+
+    #[test]
+    fn columns_shrink_to_one_when_the_floors_cannot_fit() {
+        // 2 columns with floors 19 and 2 need 21 + 7 = 28 columns; at a
+        // budget below the floor sum every column becomes one display
+        // column (wrapping then splits even the URL, char by char).
+        let mut builder = TableBuilder::new(vec![]);
+        builder.header.cells.push(TableCell {
+            spans: vec![(Span::raw("https://example.com"), None)],
+        });
+        builder.header.cells.push(TableCell {
+            spans: vec![(Span::raw("日本語"), None)],
+        });
+        assert_eq!(builder.column_widths(2, 8), vec![1, 1]);
+    }
+
+    #[test]
+    fn longest_token_measures_display_width() {
+        let cell = TableCell {
+            spans: vec![(Span::raw("foo 日本語 https://example.com"), None)],
+        };
+        // "foo" 3, each CJK char 2, the URL 19 — the URL is the widest
+        // unsplittable piece.
+        assert_eq!(cell.longest_token(), 19);
+        let cjk = TableCell {
+            spans: vec![(Span::raw("日本語"), None)],
+        };
+        assert_eq!(cjk.longest_token(), 2);
+        let empty = TableCell::default();
+        assert_eq!(empty.longest_token(), 0);
+    }
+
+    #[test]
+    fn cell_content_wraps_into_multiple_rows() {
+        // Natural [30, 1] + 7 = 38 > 36 → columns [28, 1]; the 30-column
+        // Japanese cell wraps at CJK boundaries into 28 + 2.
+        let rendered = render_at_width(
+            indoc! {"
+                | Column 1 | x |
+                |----------|---|
+                | 日本語の長いテキストが入るセル | 1 |
+            "},
+            36,
+        );
+        assert_eq!(rendered[0], "┌──────────────────────────────┬───┐");
+        assert_eq!(rendered[3], "│ 日本語の長いテキストが入るセ │ 1 │");
+        assert_eq!(rendered[4], "│ ル                           │   │");
+        assert_eq!(rendered[5], "└──────────────────────────────┴───┘");
+        assert!(rendered.iter().all(|l| l.chars().count() <= 36));
+    }
+
+    #[test]
+    fn word_wrap_keeps_long_tokens_whole_and_splits_them_last() {
+        // Natural 25 + 4 = 29 > 28 → column 24. "foo https://example.com"
+        // (23) fits the first line with the URL whole; "bar" wraps.
+        let rendered = render_at_width(
+            indoc! {"
+                | Link |
+                |------|
+                | foo https://example.com bar |
+            "},
+            28,
+        );
+        assert_eq!(rendered[3], "│ foo https://example.com  │");
+        assert_eq!(rendered[4], "│ bar                      │");
+        assert!(rendered.iter().all(|l| l.chars().count() <= 28));
+    }
+
+    #[test]
+    fn wrapped_lines_keep_alignment() {
+        // Natural 10 + 4 = 14 > 12 → column 8, right-aligned: every
+        // wrapped line is padded on the left.
+        let rendered = render_at_width(
+            indoc! {"
+                | Right |
+                |------:|
+                | aa bbbbb c |
+            "},
+            12,
+        );
+        assert_eq!(rendered[3], "│ aa bbbbb │");
+        assert_eq!(rendered[4], "│        c │");
+    }
+
+    #[test]
+    fn wrapped_cell_lines_carry_the_source_line_attribution() {
+        // Column 7: "aa bb cc" (8) wraps to "aa bb" / "cc"; both lines'
+        // content spans carry the cell row's source line (2, 0-based).
+        let options = Options::new(DefaultStyleSheet).max_width(11);
+        let (text, attrs) = from_str_with_options_tagged(
+            indoc! {"
+                | Long |
+                |------|
+                | aa bb cc |
+            "},
+            &options,
+        );
+        let rendered: Vec<String> = text.lines.iter().map(ToString::to_string).collect_vec();
+        assert_eq!(rendered[3], "│ aa bb   │");
+        assert_eq!(rendered[4], "│ cc      │");
+        for line_attrs in &attrs[3..=4] {
+            assert_eq!(
+                line_attrs,
+                &vec![None, None, Some(2), None, None],
+                "wrapped lines inherit the cell row's source line"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_rows_pad_shorter_cells_to_the_row_height() {
+        // Natural [11, 1] + 7 = 19 > 16 → columns [8, 1]; "aaaa bbbb" wraps
+        // to two lines and the second column continues on a blank padded
+        // line; every line keeps its │ borders.
+        let rendered = render_at_width(
+            indoc! {"
+                | A | B |
+                |---|---|
+                | aaaa bbbb | x |
+            "},
+            16,
+        );
+        assert_eq!(rendered[0], "┌──────────┬───┐");
+        assert_eq!(rendered[3], "│ aaaa     │ x │");
+        assert_eq!(rendered[4], "│ bbbb     │   │");
+        assert_eq!(rendered[5], "└──────────┴───┘");
+    }
+
+    #[test]
+    fn cjk_cell_wrapping_never_inserts_spaces() {
+        // Natural [9, 2] + 7 = 18 > 16 → columns [7, 2]. 日本語 (6) then
+        // abc (3): no space is invented between CJK and Latin text the
+        // source did not separate, and the wide い overflows its 2-column
+        // cell only because that is its exact natural width.
+        let rendered = render_at_width(
+            indoc! {"
+                | あ | い |
+                |---|---|
+                | 日本語abc | z |
+            "},
+            16,
+        );
+        assert_eq!(rendered[0], "┌─────────┬────┐");
+        assert_eq!(rendered[3], "│ 日本語  │ z  │");
+        assert_eq!(rendered[4], "│ abc     │    │");
+        assert!(rendered.iter().all(|l| l.chars().count() <= 16));
+    }
+
+    #[test]
+    fn table_in_list_item_uses_the_reduced_width() {
+        // The list marker takes 2 columns, so the table lays out within
+        // 40 − 2 = 38: columns [3, 2, 23] (naturals [8, 8, 28], budget 28)
+        // instead of [4, 3, 23] at the full 40. Without the deduction the
+        // view's own wrap would re-cut the laid-out table.
+        let rendered = render_at_width(
+            indoc! {"
+                - | 左揃え | 中央揃え | 右揃え |
+                  |:-------|:--------:|-------:|
+                  | a | b | c |
+                  | 長いセル | 中央 | 1000 |
+                  | `コード` | **太字** | [リンク](https://example.com) |
+            "},
+            40,
+        );
+        assert_eq!(rendered[0], "- ┌─────┬────┬─────────────────────────┐");
+        assert_eq!(rendered[0].chars().count(), 40);
+        assert!(rendered.iter().all(|l| l.chars().count() <= 40));
+    }
+
+    #[test]
+    fn table_in_blockquote_uses_the_reduced_width() {
+        // The "  " prefix (spacer + ">") leaves 18 columns; a 14-column
+        // cell wraps to 13 + 2 inside that budget.
+        let rendered = render_at_width(
+            indoc! {"
+                > | A |
+                > |---|
+                > | aa bb cc dd ee |
+            "},
+            17,
+        );
+        assert_eq!(rendered[0], "> ┌─────────────┐");
+        assert_eq!(rendered[3], "> │ aa bb cc dd │");
+        assert_eq!(rendered[4], "> │ ee          │");
+        assert!(rendered.iter().all(|l| l.chars().count() <= 17));
+    }
+
+    #[test]
+    fn wide_character_is_never_split_across_wrapped_lines() {
+        // A 2-column CJK character in a 1-column cell overflows the column
+        // rather than being split in half.
+        let cell = TableCell {
+            spans: vec![(Span::raw("日"), None)],
+        };
+        let rendered = cell.render_lines(1, Alignment::None, Style::default());
+        assert_eq!(rendered.len(), 1, "the wide char stays on one line");
+        let text: String = rendered[0].0.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('日'));
     }
 }

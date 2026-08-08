@@ -10,7 +10,7 @@ Based on the line-comment experience of [herdr-reviewr](https://github.com/persi
 
 ## Highlights
 
-- **view mode** (default for `.md`): native markdown rendering (tui-markdown / pulldown-cmark) — tables, headings, code blocks, links, footnotes, math, task lists, front matter, in full color. No external renderer process.
+- **view mode** (default for `.md`): native markdown rendering (tui-markdown / pulldown-cmark) — tables, headings, code blocks, links, footnotes, math, task lists, front matter, in full color. No external renderer process. Tables are **width-adaptive**: when they exceed the pane width, columns shrink (down to their longest unbreakable token) and cells wrap — never truncated, no information loss.
 - **source mode**: raw source with line numbers and syntect highlighting (100+ languages). Long lines wrap with gutter-aligned indentation; tabs expand to 8-column stops.
 - **Comment anywhere**: line cursor and range selection work identically in both modes — `v` to select, `c` to comment, without leaving the rendered view. Comments appear as inline cards right under the lines they refer to.
 - **Your files are never modified.** akapen is strictly read-only; comments are exported through a separate channel (clipboard, stdout, or a send command).
