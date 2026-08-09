@@ -213,6 +213,8 @@ fn activate_first_file(app: &mut App) {
     app.file_stamp = fs.file_stamp;
     app.last_loaded_stamp = fs.last_loaded_stamp;
     app.last_diff = fs.last_diff.take();
+    app.scope = fs.scope;
+    app.scope_manual = fs.scope_manual;
     app.git_diff = fs.git_diff.take();
     app.git_added = std::mem::take(&mut fs.git_added);
     app.git_deleted_before = std::mem::take(&mut fs.git_deleted_before);
@@ -280,6 +282,12 @@ fn run(config: Config) -> Result<()> {
             fs.git_added = added;
             fs.git_deleted_before = deleted;
         }
+        // The initial scope (diff-scope step ①): Git inside a repository
+        // (the marks describe the working tree vs HEAD); Last outside one
+        // — the non-git session keeps its exact pre-scope look (P1).
+        // Reply mode never loads a git snapshot, so it stays on Last,
+        // which the scope machinery keeps invisible.
+        fs.scope = if fs.git_diff.is_some() { DiffScope::Git } else { DiffScope::Last };
         // Record the on-disk stamp so the first poll doesn't treat the file
         // as freshly edited.
         if let Ok(meta) = std::fs::metadata(f) {
@@ -513,7 +521,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             }
             MouseEventKind::ScrollDown => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled(), app.config.reply)
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, app.git_diff.is_some())
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = (app.overlay_cursor + 1).min(max);
@@ -535,7 +543,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             },
             MouseEventKind::ScrollUp => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled(), app.config.reply)
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, app.git_diff.is_some())
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = app.overlay_cursor.saturating_sub(1).min(max);
@@ -1243,6 +1251,10 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // guard would drop.
         KeyCode::Char('n') => jump_hunk(app, 1),
         KeyCode::Char('N') => jump_hunk(app, -1),
+        // m: cycle the diff scope (diff-scope step ①) — which diff
+        // drives the marks and title counts (last/git/both/off). The
+        // change-navigation keys keep the union until step ②.
+        KeyCode::Char('m') => app.cycle_scope(),
         KeyCode::Tab => {
             // View is only reachable for Markdown-family files; a source
             // file (e.g. .rs) never leaves source mode. A mode flip
@@ -1580,6 +1592,9 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         KeyCode::Char('q') => request_quit(app),
         KeyCode::Char('r') => reload_now(app),
         KeyCode::Char('i') => ignore_change(app),
+        // m: cycle the diff scope (diff-scope step ①) — same as view
+        // mode: marks and title counts switch, navigation stays until ②.
+        KeyCode::Char('m') => app.cycle_scope(),
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             if app.config.reply {
                 // The file picker shows temp-file names — meaningless in
@@ -2168,12 +2183,11 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // `visible_text` resolves it to the exact spans via the phrase
     // segments.
     let sel = app.selection.map(|s| s.range());
-    let changed = view_changed_flags(&app.last_added, &app.git_added, app.source.len());
-    let deleted = view_deleted_flags(
-        &app.last_deleted_before,
-        &app.git_deleted_before,
-        app.source.len(),
-    );
+    // The scoped mark sets: one selection point for view and source
+    // gutters (diff-scope step ①).
+    let (scoped_added, scoped_deleted) = scoped_mark_sets(app);
+    let changed = view_changed_flags(&scoped_added, app.source.len());
+    let deleted = view_deleted_flags(&scoped_deleted, app.source.len());
     // The composer opened from view mode (`c` in view) is drawn inline
     // right under the cursor line, so the comment can be typed without
     // leaving the rendered view. While it is open it is part of the
@@ -2401,6 +2415,9 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     let mut out: Vec<Line> = Vec::new();
     let mut composer_cursor: Option<(u16, u16)> = None;
     let width = content_width as usize;
+    // The scoped mark sets (diff-scope step ①): one selection point,
+    // computed once so every line reads the same scope.
+    let (scoped_added, scoped_deleted) = scoped_mark_sets(app);
     // Comment bars span the whole pane (gutter included), pi.dev-style.
     let full_width = (content_width + app.gutter_cols) as usize;
     // The current file's cards (the edited one is hidden while composing).
@@ -2470,8 +2487,10 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         }
         let selected = app.selection.is_some_and(|s| s.contains(idx));
         let commented = app.comments.iter().any(|c| c.covers(idx) && c.file_path == app.current_file_path());
-        let changed = app.last_added.contains(&idx) || app.git_added.contains(&idx);
-        let deleted_before = app.last_deleted_before.contains(&idx) || app.git_deleted_before.contains(&idx);
+        // The scoped mark sets (diff-scope step ①): computed once at the
+        // top of build_rows, so every line reads the same selection.
+        let changed = scoped_added.contains(&idx);
+        let deleted_before = scoped_deleted.contains(&idx);
         let is_cursor = idx == app.cursor;
         let cursor_mark = if is_cursor {
             ">"

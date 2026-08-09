@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use ratatui::style::Style;
 
-use crate::app::{App, Mode, OldSide};
+use crate::app::{App, DiffScope, Mode, OldSide};
 use crate::comment::Selection;
 use crate::git;
 use crate::highlight::{Span as HiSpan, syntax_for};
@@ -320,17 +320,38 @@ pub(crate) fn jump_hunk(app: &mut App, dir: isize) {
     land_on_hunk(app, target);
 }
 
-/// Per-line flags: which source lines were added or changed — by the last
-/// reload and/or by the git diff vs HEAD (3-1). Mirrors
-/// [`view_marker_flags`] so the view gutter can show a green `▌` for
-/// changed lines.
-pub(crate) fn view_changed_flags(
-    last_added: &HashSet<usize>,
-    git_added: &HashSet<usize>,
-    n_lines: usize,
-) -> Vec<bool> {
+/// The mark sets the active scope selects (diff-scope step ①) — the
+/// single place that turns the scope into concrete per-line mark sets,
+/// read by both the view gutter and the source gutter so they can never
+/// disagree. Returns `(added, deleted_before)` as 0-based new-file
+/// indices.
+/// An untracked file contributes NO marks under the Git scope (git's
+/// all-lines-added mark is noise); under Both only the reload marks show.
+pub(crate) fn scoped_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
+    let untracked = app.git_diff.as_ref().is_some_and(|d| d.untracked);
+    match app.scope {
+        DiffScope::Last => (app.last_added.clone(), app.last_deleted_before.clone()),
+        DiffScope::Git if untracked => (HashSet::new(), HashSet::new()),
+        DiffScope::Git => (app.git_added.clone(), app.git_deleted_before.clone()),
+        DiffScope::Both => {
+            let mut added = app.last_added.clone();
+            let mut deleted = app.last_deleted_before.clone();
+            if !untracked {
+                added.extend(app.git_added.iter().copied());
+                deleted.extend(app.git_deleted_before.iter().copied());
+            }
+            (added, deleted)
+        }
+        DiffScope::Off => (HashSet::new(), HashSet::new()),
+    }
+}
+
+/// Per-line flags: which source lines are in `marks` (the scoped mark
+/// set — see [`scoped_mark_sets`]). The view gutter shows a green `▌`
+/// for changed lines.
+pub(crate) fn view_changed_flags(marks: &HashSet<usize>, n_lines: usize) -> Vec<bool> {
     let mut changed = vec![false; n_lines];
-    for &i in last_added.iter().chain(git_added) {
+    for &i in marks {
         if i < n_lines {
             changed[i] = true;
         }
@@ -338,16 +359,12 @@ pub(crate) fn view_changed_flags(
     changed
 }
 
-/// Per-line flags: which source lines immediately follow a deletion block
-/// — from the last reload and/or the git diff (3-1). The view gutter
-/// shows a red `▌` for them.
-pub(crate) fn view_deleted_flags(
-    last_deleted_before: &HashSet<usize>,
-    git_deleted_before: &HashSet<usize>,
-    n_lines: usize,
-) -> Vec<bool> {
+/// Per-line flags: which source lines are in `marks` (the scoped mark
+/// set — see [`scoped_mark_sets`]). The view gutter shows a red `▌` for
+/// the lines following a deletion block.
+pub(crate) fn view_deleted_flags(marks: &HashSet<usize>, n_lines: usize) -> Vec<bool> {
     let mut deleted = vec![false; n_lines];
-    for &i in last_deleted_before.iter().chain(git_deleted_before) {
+    for &i in marks {
         if i < n_lines {
             deleted[i] = true;
         }
@@ -357,7 +374,7 @@ pub(crate) fn view_deleted_flags(
 
 #[cfg(test)]
 mod git_tests {
-    use crate::app::{App, FileState, Mode};
+    use crate::app::{App, DiffScope, FileState, Mode};
     use crate::comment::Selection;
     use crate::config::{Config, EscQuit};
     use crate::export;
@@ -430,6 +447,9 @@ mod git_tests {
         app.git_diff = diff;
         app.git_added = added;
         app.git_deleted_before = deleted;
+        // run() と同じ初期スコープ (diff-scope step ①): リポジトリ内は
+        // Git、外は Last。
+        app.scope = if app.git_diff.is_some() { DiffScope::Git } else { DiffScope::Last };
         app
     }
 
@@ -446,17 +466,21 @@ mod git_tests {
     fn git_marks_render_in_the_source_gutter() {
         // 3-1: lines changed vs HEAD get the green `+` gutter (merged with
         // the reload-diff marks); lines after a deletion block the red `-`.
+        // The Git scope (run()'s in-repo default, diff-scope step ①)
+        // selects the git marks.
         let dir = tempfile::tempdir().unwrap();
         let path = init_repo(dir.path(), &["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]);
         overwrite(&path, &["one", "two", "three", "CHANGED", "five", "six", "seven", "eight", "nine", "ten"]);
         let mut app = git_app(path, Mode::Source);
+        assert_eq!(app.scope, DiffScope::Git, "in-repo default");
         let rows = source_rows(&app);
         assert!(rows[3].starts_with("+ 4 "), "changed line gets the + mark: {}", rows[3]);
         assert!(rows[3].contains("CHANGED"));
         assert!(rows[0].starts_with("> 1 "), "the cursor row keeps the > mark");
         assert!(!rows[9].starts_with("+"), "unchanged lines stay clean");
-        // The reload-diff marks merge with the git marks: a line the
-        // session itself changed is marked too.
+        // Both merges the reload-diff marks with the git marks: a line
+        // the session itself changed is marked too.
+        app.scope = DiffScope::Both;
         app.last_added.insert(8);
         let rows = source_rows(&app);
         assert!(rows[8].starts_with("+ 9 "), "reload mark joins the git mark");
@@ -958,17 +982,28 @@ mod git_tests {
     }
 
     #[test]
-    fn untracked_files_mark_every_line_and_disable_o() {
-        // An untracked file has no HEAD side: every line counts as added
-        // (3-1), and the old-side toggle has nothing to compare.
+    fn untracked_files_disable_o_and_hide_git_marks() {
+        // An untracked file has no HEAD side: the old-side toggle has
+        // nothing to compare, and (diff-scope step ①) the Git scope shows
+        // NO marks — git's all-lines-added mark is noise. Both shows only
+        // the reload marks.
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path(), &["tracked"]);
         let untracked = dir.path().join("new.md");
         std::fs::write(&untracked, "fresh\nnew\n").unwrap();
         let mut app = git_app(untracked, Mode::Source);
-        assert_eq!(app.git_added.len(), 2, "every line is new");
+        assert_eq!(app.git_added.len(), 2, "every line is new in the snapshot");
+        assert_eq!(app.scope, DiffScope::Git, "untracked is still inside a repo");
         let rows = source_rows(&app);
-        assert!(rows[1].starts_with("+2 "), "all lines carry the + mark: {}", rows[1]);
+        assert!(
+            !rows[1].starts_with("+2 "),
+            "Git scope hides the all-lines mark: {}",
+            rows[1]
+        );
+        app.last_added.insert(1);
+        app.scope = DiffScope::Both;
+        let rows = source_rows(&app);
+        assert!(rows[1].starts_with("+2 "), "Both shows the reload marks: {}", rows[1]);
         app.cursor = 1;
         on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         assert!(app.old_side.is_none());
@@ -1545,6 +1580,8 @@ mod git_tests {
         fs.git_diff = diff;
         fs.git_added = added;
         fs.git_deleted_before = deleted;
+        // run() の初期スコープ設定 (diff-scope step ①): リポジトリ内は Git。
+        fs.scope = if fs.git_diff.is_some() { DiffScope::Git } else { DiffScope::Last };
         // Activate like run() does.
         let mut app =
             App::new(config, Source::default(), highlight, ViewState::default(), false);
@@ -1557,6 +1594,8 @@ mod git_tests {
         );
         assert!(app.git_diff.is_some(), "the snapshot rides along");
         assert_eq!(app.git_added, HashSet::from([1]), "the marks ride along");
+        assert_eq!(app.scope, DiffScope::Git, "the initial scope rides along");
+        assert!(!app.scope_manual, "the startup default is not user-pinned");
         // `o` works on the first file right away (it used to flash
         // "not in a git repository").
         app.mode = Mode::Source;
@@ -1579,9 +1618,12 @@ mod git_tests {
         assert!(app.git_added.contains(&5), "the appended line is marked");
         // The agent rewrites the file; `r` refetches the diff.
         overwrite(&app.files[0], &["one", "two", "CHANGED", "four"]);
-        assert!(reload_source(&mut app).is_ok());
+        assert!(reload_source(&mut app, false).is_ok());
         assert!(app.git_added.contains(&2), "the new change is marked: {:?}", app.git_added);
         assert!(!app.git_added.contains(&5), "stale marks are gone");
         assert!(app.old_side.is_none());
+        // A content-changing reload under the unpinned Git scope
+        // auto-transitions to Last (diff-scope step ①).
+        assert_eq!(app.scope, DiffScope::Last, "the new edit is reviewed via the reload diff");
     }
 }

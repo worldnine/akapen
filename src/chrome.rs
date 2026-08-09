@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Mode};
+use crate::app::{App, DiffScope, Mode};
 use crate::clip_if_needed;
 
 /// Smart-truncate a path for the title bar: keep the basename whole, add
@@ -197,14 +197,14 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
     } else {
         width.saturating_sub(indicator_w + esc_close_w)
     };
-    // While an external edit is pending the title shows ⚡; after a reload
-    // it shows the +N/-M from that reload until the next change.
+    // While an external edit is pending the title shows ⚡ (it outranks
+    // every scope's count); otherwise the active scope picks the badge
+    // (diff-scope step ①): Last/Both → the reload's +N/-M, Git → the
+    // git snapshot's g+K/-L, Off → nothing.
     let change = if app.file_changed {
         " ⚡ ".to_string()
-    } else if let Some((a, r)) = app.last_change {
-        format!(" +{a}/-{r} ")
     } else {
-        String::new()
+        scoped_change_badge(app)
     };
     let change_w = UnicodeWidthStr::width(change.as_str()) as u16;
     // `1/3 files`: the current position in the session, matching the ]/[
@@ -360,6 +360,50 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// The title's change badge for the active scope (diff-scope step ①).
+/// Last and Both show the last reload's `+N/-M`; Git shows the git
+/// snapshot's `g+K/-L` — the sum of every hunk's [`Hunk::counts`] — and
+/// nothing for an untracked file (no ref side) or an empty diff; Off
+/// shows nothing. The pending ⚡ badge takes precedence (caller).
+fn scoped_change_badge(app: &App) -> String {
+    match app.scope {
+        DiffScope::Last | DiffScope::Both => match app.last_change {
+            Some((a, r)) => format!(" +{a}/-{r} "),
+            None => String::new(),
+        },
+        DiffScope::Git => {
+            let Some(diff) = &app.git_diff else { return String::new() };
+            if diff.untracked || diff.hunks.is_empty() {
+                return String::new();
+            }
+            let (k, l) = diff.hunks.iter().fold((0, 0), |(k, l), h| {
+                let (a, d) = h.counts();
+                (k + a, l + d)
+            });
+            format!(" g+{k}/-{l} ")
+        }
+        DiffScope::Off => String::new(),
+    }
+}
+
+/// The footer's scope badge (diff-scope step ①): `m:last` / `m:git` /
+/// `m:both` / `m:off`, appended to the hints so the scope is always
+/// visible (spec 3-4). Hidden outside a git repository while Last — the
+/// default there, and the non-git session must look exactly as before
+/// (P1) — and in reply mode, where the scope machinery is off.
+fn scope_footer_hint(app: &App) -> Option<&'static str> {
+    if app.config.reply {
+        return None;
+    }
+    match (app.scope, app.git_diff.is_some()) {
+        (DiffScope::Last, false) => None,
+        (DiffScope::Last, true) => Some("m:last"),
+        (DiffScope::Git, _) => Some("m:git"),
+        (DiffScope::Both, _) => Some("m:both"),
+        (DiffScope::Off, _) => Some("m:off"),
+    }
+}
+
 /// The footer's mode hint: the cursor's position as `L{line}/{total}`
 /// (1-based source line — the cursor IS the review anchor, so the line
 /// number is more actionable than a %), a few labeled actions for the
@@ -374,7 +418,7 @@ pub(crate) fn footer_hints(app: &App) -> String {
             format!("L{}/{}", line + 1, total)
         }
     };
-    match app.mode {
+    let hints = match app.mode {
         Mode::Input => "Enter confirm · ^j newline · ←→↑↓ move · Esc cancel".to_string(),
         Mode::View => {
             let p = pos(app.view.cursor, app.source.len());
@@ -401,6 +445,11 @@ pub(crate) fn footer_hints(app: &App) -> String {
                 None => format!("{p} · j/k move · v select · c comment · ? help"),
             }
         }
+    };
+    // The scope badge rides the hints' tail (diff-scope step ①).
+    match scope_footer_hint(app) {
+        Some(scope) => format!("{hints} · {scope}"),
+        None => hints,
     }
 }
 

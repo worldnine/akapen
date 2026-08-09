@@ -281,8 +281,18 @@ impl Diff {
 ///   put the deletion mark on the line BEFORE the deleted block (off
 ///   by one from the reload convention). The +1 form is what the
 ///   formulas expect when there are no context lines.
+///
+/// The returned hunks are sorted by new position (old position breaks
+/// ties) — same file order as real git diffs — so position-ordered
+/// navigation (step ②) can walk them directly.
 pub fn synthesize_diff(old: &str, new: &str) -> Diff {
-    let mut hunks: Vec<Hunk> = Vec::new();
+    // (old position, new position, hunk) — the positions are the sort
+    // key: similar's Myers can emit the insert of a same-position
+    // insert/delete pair before its delete, while real git diffs are
+    // always in file order. Navigation (step ②) depends on hunk order,
+    // so the synthesized hunks are sorted by new position (old position
+    // breaks ties) before returning.
+    let mut hunks: Vec<(usize, usize, Hunk)> = Vec::new();
     // The open hunk as (old position, new position, delete lines, add
     // lines): positions are 0-based, captured when the hunk opens. Equal
     // lines close it — a hunk is a maximal run of changes.
@@ -297,7 +307,7 @@ pub fn synthesize_diff(old: &str, new: &str) -> Diff {
                 old_idx += n;
                 new_idx += n;
                 if let Some(h) = open.take() {
-                    hunks.push(finish_hunk(h));
+                    hunks.push((h.0, h.1, finish_hunk(h)));
                 }
             }
             ChangeTag::Delete => {
@@ -317,9 +327,13 @@ pub fn synthesize_diff(old: &str, new: &str) -> Diff {
         }
     }
     if let Some(h) = open.take() {
-        hunks.push(finish_hunk(h));
+        hunks.push((h.0, h.1, finish_hunk(h)));
     }
-    Diff { hunks, untracked: false }
+    hunks.sort_by_key(|&(old_pos, new_pos, _)| (new_pos, old_pos));
+    Diff {
+        hunks: hunks.into_iter().map(|(_, _, h)| h).collect(),
+        untracked: false,
+    }
 }
 
 /// Close an open hunk: the body in unified-diff order (deletes before
@@ -773,6 +787,32 @@ mod tests {
                 want_deleted,
                 "deleted_before() diverges from the legacy scan — old:\n{old}new:\n{new}"
             );
+        }
+    }
+
+    #[test]
+    fn synthesize_diff_hunks_are_sorted_by_position() {
+        // similar's Myers splits a same-position insert/delete pair
+        // across an equal line and can emit the insert first — the old
+        // [line1, line2, line3] → [line1, line3, X] case yields the
+        // insertion at new 1 before the deletion at new 2. Real git
+        // diffs are always in file order, and navigation (step ②) walks
+        // hunks in order, so the synthesized hunks must be position-
+        // sorted: new position, old position as tie-break.
+        let d = synthesize_diff("line1\nline2\nline3\n", "line1\nline3\nX\n");
+        assert_eq!(d.hunks.len(), 2);
+        assert_eq!(d.hunks[0].counts(), (0, 1), "the insertion at new 1");
+        assert_eq!(d.hunks[1].counts(), (1, 0), "the deletion at new 2");
+        assert!(d.hunks[0].new_start <= d.hunks[1].new_start);
+        // Every diff-shape case keeps the (new, old) position order.
+        for (old, new, _) in DIFF_CASES {
+            let d = synthesize_diff(old, new);
+            let mut prev = (0u32, 0u32);
+            for h in &d.hunks {
+                let key = (h.new_start, h.old_start);
+                assert!(key >= prev, "hunks out of order — old:\n{old}new:\n{new}");
+                prev = key;
+            }
         }
     }
 

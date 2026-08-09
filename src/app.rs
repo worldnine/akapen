@@ -21,6 +21,37 @@ use crate::{
     view_content_width, view_render_width,
 };
 
+/// The diff scope (diff-scope step ①): which diff drives the marks and
+/// the title counts — the 3-4 scope switch of the git-integration spec.
+/// `Last` = the last reload's diff (the ONLY scope outside a git
+/// repository — P1: the non-git session must look exactly as before);
+/// `Git` = the git snapshot vs `git_ref`; `Both` = the union; `Off` =
+/// none. Navigation and the old-side toggle join in step ②.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum DiffScope {
+    /// The last reload's diff.
+    #[default]
+    Last,
+    /// The git snapshot vs the diff base (`git_ref`).
+    Git,
+    /// The union of Last and Git.
+    Both,
+    /// No marks or counts at all.
+    Off,
+}
+
+impl DiffScope {
+    /// The lowercase label for the footer badge and the `m` flash.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            DiffScope::Last => "last",
+            DiffScope::Git => "git",
+            DiffScope::Both => "both",
+            DiffScope::Off => "off",
+        }
+    }
+}
+
 /// Whether `path` can be opened in view mode. The native renderer is
 /// tui-markdown (pulldown-cmark), so only Markdown-family files render;
 /// everything else (`.rs`, `.toml`, …) is source-only.
@@ -118,6 +149,12 @@ pub(crate) struct FileState {
     /// snapshot uses, so marks, +N/-M, old-side and navigation can share
     /// one consumer). `None` in reply mode and before the first reload.
     pub(crate) last_diff: Option<git::Diff>,
+    /// The active diff scope and whether the user pinned it with `m`
+    /// (diff-scope step ①): a pinned scope survives the automatic
+    /// Git → Last transition on a content-changing reload; a new
+    /// external-change episode (notify_file_changed) resets the pin.
+    pub(crate) scope: DiffScope,
+    pub(crate) scope_manual: bool,
     /// Git integration (3章): the startup snapshot vs `git_ref` and the
     /// toggled old-side hunk, if any. `None`/empty outside a repository.
     pub(crate) git_diff: Option<git::Diff>,
@@ -256,6 +293,18 @@ pub(crate) struct App {
     /// +N/-M derive from it and the scoped navigation can too. `None` in
     /// reply mode.
     pub(crate) last_diff: Option<git::Diff>,
+    /// The active diff scope (diff-scope step ①): which diff drives the
+    /// marks and the title counts. The startup default is Git inside a
+    /// repository and Last outside one (P1); `m` cycles it and pins it
+    /// as user-chosen (`scope_manual`), which disables the automatic
+    /// Git → Last transition on a content-changing reload.
+    pub(crate) scope: DiffScope,
+    /// Whether the user chose the scope with `m`: while true, a reload
+    /// does NOT auto-transition Git → Last (the pin says "I am looking
+    /// at this diff, keep it"). A new external-change episode resets it
+    /// to false (notify_file_changed), so a fresh change is always
+    /// reviewed with the automatic behavior re-armed.
+    pub(crate) scope_manual: bool,
     /// The diff base ref (3-2): HEAD today; a future generation shift
     /// changes this one field.
     pub(crate) git_ref: String,
@@ -368,6 +417,8 @@ impl App {
             last_added: HashSet::new(),
             last_deleted_before: HashSet::new(),
             last_diff: None,
+            scope: DiffScope::Last,
+            scope_manual: false,
             git_ref: GIT_REF.to_string(),
             git_diff: None,
             git_added: HashSet::new(),
@@ -600,6 +651,30 @@ impl App {
     /// it entirely). Called every frame while the view-origin composer is
     /// open, from [`draw_view`] — before the visible window is built, so
     /// the splice below lands on the adjusted offset.
+    /// Cycle the diff scope with `m` (diff-scope step ①): Last → Git →
+    /// Both → Off → Last inside a git repository, Last ↔ Off outside one
+    /// (P1: the non-git session only ever has the reload diff). The
+    /// first press pins the scope as user-chosen, which disables the
+    /// automatic Git → Last transition on reload. Reply mode: the scope
+    /// machinery is off entirely — the key is a no-op.
+    pub(crate) fn cycle_scope(&mut self) {
+        if self.config.reply {
+            return;
+        }
+        self.scope_manual = true;
+        self.scope = match (self.scope, self.git_diff.is_some()) {
+            (DiffScope::Last, true) => DiffScope::Git,
+            (DiffScope::Git, true) => DiffScope::Both,
+            (DiffScope::Both, true) => DiffScope::Off,
+            (DiffScope::Off, true) => DiffScope::Last,
+            (DiffScope::Last, false) => DiffScope::Off,
+            // Outside a repo Git/Both are unreachable; anything else
+            // falls back to Last.
+            (_, false) => DiffScope::Last,
+        };
+        self.flash(format!("marks: {}", self.scope.label()));
+    }
+
     pub(crate) fn keep_composer_visible_view(&mut self, height: usize) {
         let height = height.max(1);
         let full_width = view_content_width(self);
@@ -640,6 +715,8 @@ impl App {
         old.last_added = std::mem::take(&mut self.last_added);
         old.last_deleted_before = std::mem::take(&mut self.last_deleted_before);
         old.last_diff = self.last_diff.take();
+        old.scope = self.scope;
+        old.scope_manual = self.scope_manual;
         old.git_diff = self.git_diff.take();
         old.git_added = std::mem::take(&mut self.git_added);
         old.git_deleted_before = std::mem::take(&mut self.git_deleted_before);
@@ -674,6 +751,8 @@ impl App {
         self.last_added = std::mem::take(&mut new.last_added);
         self.last_deleted_before = std::mem::take(&mut new.last_deleted_before);
         self.last_diff = new.last_diff.take();
+        self.scope = new.scope;
+        self.scope_manual = new.scope_manual;
         self.git_diff = new.git_diff.take();
         self.git_added = std::mem::take(&mut new.git_added);
         self.git_deleted_before = std::mem::take(&mut new.git_deleted_before);

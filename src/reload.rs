@@ -9,7 +9,7 @@ use std::time::{Instant, SystemTime};
 
 use ratatui::crossterm::cursor::Hide;
 
-use crate::app::App;
+use crate::app::{App, DiffScope};
 use crate::git;
 use crate::highlight::syntax_for;
 use crate::source::Source;
@@ -36,11 +36,15 @@ pub(crate) fn poll_file_change(app: &mut App) {
 /// The debounced notification for an external edit: the persistent ⚡ badge
 /// in the title and the footer prompt (`r reload · i ignore`) are the
 /// notification — no transient toast (the prompt supersedes it anyway).
+/// A new external-change episode also re-arms the scope's automatic
+/// transition (diff-scope step ①): whatever the user pinned with `m`
+/// spoke for the OLD change, not this one.
 pub(crate) fn notify_file_changed(app: &mut App) {
     if app.file_changed {
         return;
     }
     app.file_changed = true;
+    app.scope_manual = false;
 }
 
 /// Manual reload (`r`), Vim's `:e` model: the user decides when the
@@ -57,7 +61,7 @@ pub(crate) fn reload_now(app: &mut App) {
         return;
     }
     app.confirm_reload = false;
-    finish_reload(app);
+    finish_reload(app, false);
 }
 
 /// Reply-mode auto-reload (`--reply`): no confirmation — comments on this
@@ -66,13 +70,19 @@ pub(crate) fn reload_now(app: &mut App) {
 /// `r` retries manually.
 pub(crate) fn reload_now_auto(app: &mut App) {
     app.confirm_reload = false;
-    if finish_reload(app) {
+    if finish_reload(app, false) {
         app.flash("auto-reloaded");
     }
 }
 
-pub(crate) fn finish_reload(app: &mut App) -> bool {
-    match reload_source(app) {
+/// `from_editor`: the reload came from `e` (an edit of one's own), so
+/// the scope's automatic Git → Last transition is skipped (diff-scope
+/// step ①) — one's own edit is not up for review.
+pub(crate) fn finish_reload(app: &mut App, from_editor: bool) -> bool {
+    // A reload that actually runs resolves any pending confirmation —
+    // including the open_editor path, which calls this directly.
+    app.confirm_reload = false;
+    match reload_source(app, from_editor) {
         Ok(()) => {
             // Refresh the on-disk stamp so the next poll_file_change won't
             // re-detect the same edit as a pending change.
@@ -147,8 +157,12 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
 
     match status {
         Ok(s) if s.success() => {
-            // Reload with diff highlighting — the user just edited the file.
-            reload_now(app);
+            // Reload with diff highlighting — the user just edited the
+            // file. Skipping the confirmation path (comments were already
+            // cleared) and the scope transition: an edit of one's own is
+            // not up for review, so the automatic Git → Last transition
+            // is disabled (diff-scope step ①).
+            finish_reload(app, true);
         }
         Ok(_) => app.flash_err(format!("{editor} exited with error")),
         Err(e) => app.flash_err(format!("{editor}: {e}")),
@@ -201,7 +215,7 @@ pub(crate) fn git_snapshot(
 /// highlighting, all comments are cleared (anchors are stale), and the
 /// view re-renders at the same width preserving the cursor fraction.
 /// Triggered by `r` only — never while Input is open.
-pub(crate) fn reload_source(app: &mut App) -> anyhow::Result<()> {
+pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<()> {
     let new_source = Source::load(app.current_file_path().to_path_buf())?;
     if new_source.content == app.source.content {
         return Ok(()); // touched but unchanged
@@ -235,6 +249,16 @@ pub(crate) fn reload_source(app: &mut App) -> anyhow::Result<()> {
         app.last_deleted_before = deleted_set;
         (added, removed)
     };
+
+    // The content actually changed: under the Git scope an external edit
+    // auto-transitions to Last (diff-scope step ①) — the reload diff is
+    // what the session reviews now. Skipped when the user pinned the
+    // scope with `m` (scope_manual), when the reload came from `e` (an
+    // edit of one's own is not up for review), and in reply mode (the
+    // scope machinery is off). Last/Both/Off stay put.
+    if !reply && !from_editor && app.scope == DiffScope::Git && !app.scope_manual {
+        app.scope = DiffScope::Last;
+    }
 
     // Comments are anchored to the old content; clear them — but only
     // THIS file's (other files' anchors are untouched by this reload).

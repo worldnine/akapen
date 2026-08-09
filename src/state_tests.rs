@@ -8,6 +8,7 @@
 /// would — only the rendering is bypassed.
 use crate::*;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::comment::Selection;
@@ -308,12 +309,12 @@ use crate::comment::Selection;
 
     #[test]
     fn help_rows_reflect_the_esc_binding() {
-        let rows = help_rows(false, false);
+        let rows = help_rows(false, false, false);
         assert!(
             rows.iter().any(|(l, k)| *l == "quit" && *k == "q quit · Esc cancel"),
             "default help advertises Esc as cancel"
         );
-        let rows = help_rows(true, false);
+        let rows = help_rows(true, false, false);
         assert!(
             rows.iter().any(|(l, k)| *l == "quit" && *k == "Esc/q quit"),
             "esc-quit help advertises Esc/q as quit"
@@ -321,10 +322,29 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn help_advertises_the_scope_cycle() {
+        // Diff-scope step ①: the full cycle inside a repository, the
+        // Last ↔ Off cycle outside one (P1), nothing in reply mode.
+        let rows = help_rows(false, false, true);
+        assert!(rows
+            .iter()
+            .any(|(l, k)| *l == "marks" && k.contains("last/git/both/off")));
+        let rows = help_rows(false, false, false);
+        assert!(rows
+            .iter()
+            .any(|(l, k)| *l == "marks" && k.contains("last/off")));
+        assert!(!rows
+            .iter()
+            .any(|(l, k)| *l == "marks" && k.contains("git/both")));
+        let rows = help_rows(false, true, true);
+        assert!(!rows.iter().any(|(l, _)| *l == "marks"));
+    }
+
+    #[test]
     fn reply_mode_help_hides_file_navigation_and_edit() {
         // Reply mode: messages replace files — no file switching, no
         // edit, and reloads are automatic.
-        let rows = help_rows(false, true);
+        let rows = help_rows(false, true, false);
         assert!(
             !rows.iter().any(|(l, _)| *l == "file"),
             "no file navigation row in reply mode"
@@ -344,7 +364,7 @@ use crate::comment::Selection;
             "reply help advertises auto-reload"
         );
         // Non-reply mode keeps them.
-        let rows = help_rows(false, false);
+        let rows = help_rows(false, false, false);
         assert!(rows.iter().any(|(l, _)| *l == "file"));
         assert!(rows.iter().any(|(_, k)| k.contains("e edit")));
     }
@@ -1176,7 +1196,7 @@ use crate::comment::Selection;
         // no common suffix), the exact diff is +1/-1.
         let (mut app, _dir) = make_app_keep(3, Mode::Source);
         std::fs::write(app.current_file_path(), "line1\nline3\nX\n").unwrap();
-        assert!(reload_source(&mut app).is_ok());
+        assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.last_change, Some((1, 1)), "exact diff, not the old 2/-2 approximation");
         let diff = app.last_diff.as_ref().expect("the reload diff is stored");
         // Two hunks (the equal `line3` splits the deletion from the
@@ -1191,6 +1211,230 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn m_cycles_the_scope_and_flashes_the_name() {
+        // Diff-scope step ①: `m` cycles Last → Git → Both → Off inside a
+        // repository, pins the scope as user-chosen, and flashes the name.
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        app.git_diff = Some(crate::git::Diff::default());
+        app.scope = crate::app::DiffScope::Git; // run() の初期値
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Both);
+        assert!(app.scope_manual, "m pins the scope");
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|(m, _, _)| m.contains("marks: both")));
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Off);
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Last);
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Git, "one full cycle");
+        // View モードでも同じキーが効く。
+        let (mut app2, _dir2) = make_app_keep(5, Mode::View);
+        app2.git_diff = Some(crate::git::Diff::default());
+        app2.scope = crate::app::DiffScope::Last;
+        on_view_key(&mut app2, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app2.scope, crate::app::DiffScope::Git);
+    }
+
+    #[test]
+    fn m_outside_a_repo_cycles_last_and_off_only() {
+        // P1: git 外ではサイクルは Last ↔ Off のみ — Git/Both には
+        // 到達しない（表示すべき git マークが存在しない）。
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        assert!(app.git_diff.is_none());
+        app.scope = crate::app::DiffScope::Last;
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Off);
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Last);
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Off);
+    }
+
+    #[test]
+    fn reload_auto_transitions_git_to_last_unless_pinned_or_self_edited() {
+        // 内容が変わる reload で、ピンされていない Git スコープは
+        // Last に遷移する — 新しい外部編集は last で採点する。
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        app.git_diff = Some(crate::git::Diff::default());
+        app.scope = crate::app::DiffScope::Git;
+        std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
+        assert!(reload_source(&mut app, false).is_ok());
+        assert_eq!(app.scope, crate::app::DiffScope::Last, "the new edit is reviewed via last");
+        // ピン済み (m で選択): 遷移しない。
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        app.git_diff = Some(crate::git::Diff::default());
+        app.scope = crate::app::DiffScope::Git;
+        app.scope_manual = true;
+        std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
+        assert!(reload_source(&mut app, false).is_ok());
+        assert_eq!(app.scope, crate::app::DiffScope::Git, "a pinned scope survives the reload");
+        // e 経由 (from_editor): 自分の編集は採点対象ではない — 遷移しない。
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        app.git_diff = Some(crate::git::Diff::default());
+        app.scope = crate::app::DiffScope::Git;
+        std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
+        assert!(finish_reload(&mut app, true));
+        assert_eq!(app.scope, crate::app::DiffScope::Git, "an edit of one's own is not up for review");
+    }
+
+    #[test]
+    fn reload_keeps_last_both_and_off_scopes() {
+        // 自動遷移は Git → Last のみ: 他のスコープは無条件で維持。
+        for scope in [
+            crate::app::DiffScope::Last,
+            crate::app::DiffScope::Both,
+            crate::app::DiffScope::Off,
+        ] {
+            let (mut app, _dir) = make_app_keep(5, Mode::Source);
+            app.git_diff = Some(crate::git::Diff::default());
+            app.scope = scope;
+            std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
+            assert!(reload_source(&mut app, false).is_ok());
+            assert_eq!(app.scope, scope, "{scope:?} stays put");
+        }
+    }
+
+    #[test]
+    fn notify_file_changed_resets_the_scope_pin() {
+        // 新しい ⚡ エピソードは自動遷移を再武装する: ピンは旧変更に
+        // 対するもの。
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        app.scope_manual = true;
+        notify_file_changed(&mut app);
+        assert!(!app.scope_manual, "a new change episode re-arms the auto transition");
+        assert!(app.file_changed);
+    }
+
+    #[test]
+    fn m_is_a_no_op_in_reply_mode() {
+        // Reply モードではスコープ機構ごと無効: m は何も変えない。
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        app.config.reply = true;
+        app.scope = crate::app::DiffScope::Git;
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Git, "reply mode keeps the machinery off");
+        assert!(!app.scope_manual);
+    }
+
+    #[test]
+    fn outside_a_repo_the_session_keeps_its_look() {
+        // P1 回帰: git 外ではデフォルト Last のまま、リロード後に last
+        // マークが出る（従来挙動）、m は Last ↔ Off のみ、フッターに
+        // バッジは出ない。
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        assert!(app.git_diff.is_none());
+        assert_eq!(app.scope, crate::app::DiffScope::Last, "non-git default is Last");
+        std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
+        assert!(reload_source(&mut app, false).is_ok());
+        assert_eq!(app.last_change, Some((1, 0)));
+        let (added, _) = scoped_mark_sets(&app);
+        assert!(added.contains(&5), "the Last scope shows the reload marks");
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Off);
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Last);
+        assert!(!footer_hints(&app).contains("m:"), "non-git look is unchanged (P1)");
+    }
+
+    #[test]
+    fn scoped_marks_select_the_scope() {
+        // マーク選択は 1 箇所 (scoped_mark_sets) に集約され、view と
+        // source の両ガターが同じ集合を読む。
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        app.last_added = HashSet::from([1, 2]);
+        app.last_deleted_before = HashSet::from([3]);
+        app.git_added = HashSet::from([2, 4]);
+        app.git_deleted_before = HashSet::from([0]);
+        app.git_diff = Some(crate::git::Diff::default());
+        app.scope = crate::app::DiffScope::Last;
+        assert_eq!(scoped_mark_sets(&app), (HashSet::from([1, 2]), HashSet::from([3])));
+        app.scope = crate::app::DiffScope::Git;
+        assert_eq!(scoped_mark_sets(&app), (HashSet::from([2, 4]), HashSet::from([0])));
+        app.scope = crate::app::DiffScope::Both;
+        assert_eq!(scoped_mark_sets(&app), (HashSet::from([1, 2, 4]), HashSet::from([0, 3])));
+        app.scope = crate::app::DiffScope::Off;
+        assert_eq!(scoped_mark_sets(&app), (HashSet::new(), HashSet::new()));
+        // untracked: Git は空（全行マークはノイズ）、Both は last 分のみ。
+        app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
+        app.scope = crate::app::DiffScope::Git;
+        assert_eq!(scoped_mark_sets(&app), (HashSet::new(), HashSet::new()));
+        app.scope = crate::app::DiffScope::Both;
+        assert_eq!(scoped_mark_sets(&app), (HashSet::from([1, 2]), HashSet::from([3])));
+    }
+
+    #[test]
+    fn title_badge_follows_the_scope() {
+        let (mut app, _dir) = make_app_keep(5, Mode::Source);
+        // Git スコープ: g+K/-L が hunk counts の合計と一致。
+        let diff = crate::git::synthesize_diff(
+            "one\ntwo\nthree\nfour\nfive\n",
+            "one\nX\nY\nthree\nfour\nfive\n",
+        );
+        app.git_diff = Some(diff);
+        app.scope = crate::app::DiffScope::Git;
+        assert_eq!(title_metrics(&app, 100).change, " g+2/-1 ");
+        // Last / Both: リロードの +N/-M。
+        app.last_change = Some((3, 2));
+        app.scope = crate::app::DiffScope::Both;
+        assert_eq!(title_metrics(&app, 100).change, " +3/-2 ");
+        app.scope = crate::app::DiffScope::Last;
+        assert_eq!(title_metrics(&app, 100).change, " +3/-2 ");
+        // Off: なし。
+        app.scope = crate::app::DiffScope::Off;
+        assert_eq!(title_metrics(&app, 100).change, "");
+        // untracked / 空 diff × Git: なし。
+        app.scope = crate::app::DiffScope::Git;
+        app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
+        assert_eq!(title_metrics(&app, 100).change, "");
+        app.git_diff = Some(crate::git::Diff::default());
+        assert_eq!(title_metrics(&app, 100).change, "", "no hunks, no badge");
+        // ⚡ pending は全スコープより優先。
+        app.file_changed = true;
+        assert_eq!(title_metrics(&app, 100).change, " ⚡ ");
+    }
+
+    #[test]
+    fn footer_shows_the_scope_badge() {
+        let (mut app, _dir) = make_app_keep(5, Mode::View);
+        // git 外のデフォルト (Last): バッジなし (P1)。
+        assert!(!footer_hints(&app).contains("m:"));
+        // git 内: 常に出る。
+        app.git_diff = Some(crate::git::Diff::default());
+        app.scope = crate::app::DiffScope::Git;
+        assert!(footer_hints(&app).contains("m:git"));
+        app.scope = crate::app::DiffScope::Last;
+        assert!(footer_hints(&app).contains("m:last"));
+        app.scope = crate::app::DiffScope::Both;
+        assert!(footer_hints(&app).contains("m:both"));
+        app.scope = crate::app::DiffScope::Off;
+        assert!(footer_hints(&app).contains("m:off"));
+        // Reply モード: 出さない。
+        app.config.reply = true;
+        assert!(!footer_hints(&app).contains("m:"));
+    }
+
+    #[test]
+    fn scope_state_rides_along_file_switches() {
+        // scope / scope_manual はファイルごとの状態: 切替で保存・復元
+        // され、他ファイルに漏れない。
+        let (mut app, _dir) = make_session();
+        app.scope = crate::app::DiffScope::Both;
+        app.scope_manual = true;
+        on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
+        assert_eq!(app.current_file_index, 1);
+        assert_eq!(app.scope, crate::app::DiffScope::Last, "the other file has its own scope");
+        assert!(!app.scope_manual);
+        on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
+        assert_eq!(app.scope, crate::app::DiffScope::Both, "the scope comes back");
+        assert!(app.scope_manual);
+    }
+
+    #[test]
     fn reply_mode_reload_skips_diff_and_badge() {
         // --reply: the doc is a single agent message; each refresh replaces
         // the whole thing, so a diff would mark everything as changed.
@@ -1199,7 +1443,7 @@ use crate::comment::Selection;
         let mut f = std::fs::File::create(app.current_file_path()).unwrap();
         writeln!(f, "new message line 1").unwrap();
         writeln!(f, "new message line 2").unwrap();
-        assert!(reload_source(&mut app).is_ok());
+        assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.source.len(), 2, "new content is loaded");
         assert!(app.last_added.is_empty(), "no diff gutters in reply mode");
         assert!(app.last_deleted_before.is_empty(), "no deletion markers");
@@ -1225,7 +1469,7 @@ use crate::comment::Selection;
         for i in 1..=7 {
             writeln!(f, "line{i}").unwrap();
         }
-        assert!(reload_source(&mut app).is_ok());
+        assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.source.len(), 7);
         assert_eq!(app.cursor, 6, "cursor clamps to the new last line");
         assert!(
@@ -1398,7 +1642,7 @@ use crate::comment::Selection;
         // touch the file: same content, new mtime
         let file = app.current_file_path().to_path_buf();
         std::fs::write(&file, std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert!(reload_source(&mut app).is_ok(), "a touch is handled");
+        assert!(reload_source(&mut app, false).is_ok(), "a touch is handled");
         assert_eq!(app.last_change, None, "no diff to report");
     }
 
@@ -2234,7 +2478,7 @@ use crate::comment::Selection;
             text: "on b".into(),
         });
         std::fs::write(&a, "# a\n\nchanged\n").unwrap();
-        assert!(reload_source(&mut app).is_ok());
+        assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.comments.len(), 1, "only a.md's comment is cleared");
         assert_eq!(app.comments[0].text, "on b");
     }
