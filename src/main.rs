@@ -2587,15 +2587,25 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             num_style,
         );
         let wrapped = wrap_spans(&app.spans[idx], width);
-        // The cursor glyph is bold LightCyan — it must be findable at a
-        // glance (yellow is the comment marker's color), same as view mode.
-        // Additions: green `+`. Rewrites: yellow `~` — the number stays
-        // green (yellow is the commented-line color); the glyph alone
-        // tells "this line replaced an old one, `o` shows it". Deleted-
-        // before lines: red `▀`. The cursor's hunk's marks emphasize
-        // (bold + bright, diff-scope step ④).
+        // The cursor glyph is bold — it must be findable at a glance
+        // (yellow is the comment marker's color), same as view mode. Its
+        // COLOR inherits the mark under it (user request): `+` rows
+        // LightGreen, `~` rows LightYellow, `▀` rows LightRed — the
+        // mark stays readable on the cursor row (the Light+BOLD family
+        // matches the emphasis). Mark-less rows keep the classic
+        // LightCyan. The cursor's hunk's marks emphasize (bold + bright,
+        // diff-scope step ④).
         let mark_style = if is_cursor {
-            let s = Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD);
+            let fg = if added {
+                Color::LightGreen
+            } else if modified {
+                Color::LightYellow
+            } else if deleted_before {
+                Color::LightRed
+            } else {
+                Color::LightCyan
+            };
+            let s = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
         } else if modified && !cursor_bg {
             let s = Style::default().fg(Color::Yellow).bg(app.ui_changed_bg);

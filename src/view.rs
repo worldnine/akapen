@@ -562,10 +562,19 @@ impl ViewState {
             // findable at a glance (yellow is the comment marker's
             // color).
             let (glyph, mut marker_style) = if abs == start {
-                (
-                    ">",
-                    Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
-                )
+                // The cursor glyph keeps its `>` shape but INHERITS the
+                // mark's color (user request): on a changed/deleted row
+                // it reads as the emphasis (Light + BOLD), so a one-line
+                // hunk's mark is not hidden by the cursor. Mark-less
+                // rows keep the classic LightCyan.
+                let fg = if changed_row {
+                    Color::LightGreen
+                } else if deleted_row {
+                    Color::LightRed
+                } else {
+                    Color::LightCyan
+                };
+                (">", Style::default().fg(fg).add_modifier(Modifier::BOLD))
             } else if self.old_side_rows.contains(&abs) {
                 // Old-side rows (3-2): a faint `~` — raw HEAD content,
                 // no comment/change marks.
@@ -1567,6 +1576,79 @@ mod tests {
         assert_eq!(gutter[4].glyph, "│", "the merged block's later rows stay clean");
         assert_eq!(gutter[1].style.fg, Some(Color::Red), "deletion marks are red");
         assert_eq!(gutter[3].style.fg, Some(Color::Red), "deletion marks are red");
+    }
+
+    #[test]
+    fn cursor_marker_inherits_the_marks_color() {
+        // User request: the cursor's `>` keeps its shape but inherits
+        // the mark's color — changed rows LightGreen, deleted-mark rows
+        // LightRed, mark-less rows the classic LightCyan. A one-line
+        // hunk's mark therefore stays readable under the cursor.
+        let changed = vec![false, true, false, false];
+        let deleted = vec![false, false, true, false];
+        // Cursor on a changed row.
+        let view = ViewState {
+            rows: vec![vec![]; 4],
+            offset: 0,
+            cursor: 1,
+            source_starts: vec![0, 1, 2, 3],
+            ..Default::default()
+        };
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &changed,
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[1].glyph, ">", "the cursor glyph stays");
+        assert_eq!(gutter[1].style.fg, Some(Color::LightGreen));
+        assert!(gutter[1].style.add_modifier.contains(Modifier::BOLD));
+        // Cursor on a deleted-mark row.
+        let view = ViewState {
+            rows: vec![vec![]; 4],
+            offset: 0,
+            cursor: 2,
+            source_starts: vec![0, 1, 2, 3],
+            ..Default::default()
+        };
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &[],
+            &deleted,
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[2].glyph, ">");
+        assert_eq!(gutter[2].style.fg, Some(Color::LightRed));
+        assert!(gutter[2].style.add_modifier.contains(Modifier::BOLD));
+        // Cursor on a mark-less row: the classic LightCyan.
+        let view = ViewState {
+            rows: vec![vec![]; 4],
+            offset: 0,
+            cursor: 3,
+            source_starts: vec![0, 1, 2, 3],
+            ..Default::default()
+        };
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &changed,
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[3].glyph, ">");
+        assert_eq!(gutter[3].style.fg, Some(Color::LightCyan));
+        assert!(gutter[3].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

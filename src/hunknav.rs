@@ -649,6 +649,7 @@ pub(crate) fn deletion_hunk_at(diff: &git::Diff, line: usize, new_len: usize) ->
 mod git_tests {
     use super::{
         DiffSource, deleted_above_count, deletion_hunk_at, emphasized_mark_lines, scoped_hunk_refs,
+        scoped_mark_sets,
     };
     use crate::app::{App, DiffScope, FileState, Mode};
     use crate::chrome::footer_hints;
@@ -2332,6 +2333,54 @@ mod git_tests {
         // untouched), so the emphasis is readable from emphasized_mark_lines
         // — the ▀ row is the whole hunk, and the `o` flip range is that
         // single row.
+    }
+
+    #[test]
+    fn source_cursor_marker_inherits_the_marks_color() {
+        // User request: the cursor's `>` keeps its shape but inherits
+        // the mark's color — `+` rows LightGreen, `~` rows LightYellow,
+        // `▀` rows LightRed, mark-less rows LightCyan (all BOLD).
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &["one", "two", "three", "four", "five", "six", "seven", "eight"],
+        );
+        // two → CHANGED (rewrite), five → X,Y,Z (rewrite + additions),
+        // eight deleted (pure deletion at EOF).
+        overwrite(&path, &["one", "CHANGED", "three", "four", "X", "Y", "Z", "six", "seven"]);
+        let mut app = git_app(path, Mode::Source);
+        let (added, modified, deleted) = scoped_mark_sets(&app);
+        assert_eq!(modified, HashSet::from([1, 4]), "rewrites");
+        assert_eq!(added, HashSet::from([5, 6]), "pure additions");
+        // Deletion marks: the rewrite rows (1, 4) carry one too — the
+        // modified glyph wins there — plus the EOF deletion at 8.
+        assert_eq!(deleted, HashSet::from([1, 4, 8]), "deletion marks");
+        let mark_at = |app: &mut App, cursor: usize, i: usize| {
+            app.cursor = cursor;
+            let (text, _) = build_rows(app, 100, 75);
+            let s = &text.lines[i].spans[0].style;
+            (s.fg, s.add_modifier.contains(Modifier::BOLD))
+        };
+        assert_eq!(
+            mark_at(&mut app, 1, 1),
+            (Some(Color::LightYellow), true),
+            "cursor on a rewrite row"
+        );
+        assert_eq!(
+            mark_at(&mut app, 5, 5),
+            (Some(Color::LightGreen), true),
+            "cursor on a pure addition row"
+        );
+        assert_eq!(
+            mark_at(&mut app, 8, 8),
+            (Some(Color::LightRed), true),
+            "cursor on a deletion mark row (the EOF deletion)"
+        );
+        assert_eq!(
+            mark_at(&mut app, 2, 2),
+            (Some(Color::LightCyan), true),
+            "cursor on a mark-less row keeps the classic color"
+        );
     }
 
     #[test]
