@@ -277,14 +277,42 @@ pub(crate) fn title_hit_at(app: &App, width: u16, x: u16) -> Option<TitleHit> {
 /// (low priority, vanishes when the path needs the room). The path, the
 /// file counter, and the comment counter are clickable buttons (see
 /// on_mouse).
+/// The title badge's colored spans: under the Git scope the `+K` counts
+/// render green and the `-L` red (the `g` prefix and `/` separator stay
+/// yellow); every other scope renders the whole badge yellow as before.
+/// The text is identical to the plain badge, so the width math and the
+/// click areas in [`title_metrics`] are unaffected.
+fn change_badge_spans(change: &str, scope: DiffScope) -> Vec<Span<'static>> {
+    let base = Style::default().fg(Color::Yellow);
+    if scope != DiffScope::Git {
+        return vec![Span::styled(change.to_string(), base)];
+    }
+    let mut spans = Vec::new();
+    let mut rest = change;
+    while let Some(i) = rest.find(['+', '-']) {
+        if i > 0 {
+            spans.push(Span::styled(rest[..i].to_string(), base));
+        }
+        // The sign and its digits: `+K` / `-L`.
+        let num_end = i + 1
+            + rest[i + 1..]
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len() - i - 1);
+        let fg = if rest[i..].starts_with('+') { Color::Green } else { Color::Red };
+        spans.push(Span::styled(rest[i..num_end].to_string(), Style::default().fg(fg)));
+        rest = &rest[num_end..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_string(), base));
+    }
+    spans
+}
+
 pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     let m = title_metrics(app, area.width);
     if m.change_w > 0 {
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                m.change,
-                Style::default().fg(Color::Yellow),
-            ))),
+            Paragraph::new(Line::from(change_badge_spans(&m.change, app.scope))),
             Rect {
                 x: area.x,
                 y: area.y,
@@ -669,9 +697,48 @@ mod width_tests {
 
 #[cfg(test)]
 mod title_tests {
+    use super::change_badge_spans;
+    use crate::app::DiffScope;
     use crate::truncate_path;
+    use ratatui::style::Color;
     use std::path::Path;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn git_count_badge_colors_the_counts() {
+        // Git スコープ: +K 緑、-L 赤 — `g` と `/` と空白は Yellow の
+        // まま。文字列は不変なので幅計算・クリック領域は影響なし。
+        let spans = change_badge_spans(" g+2/-1 ", DiffScope::Git);
+        let parts: Vec<(String, Option<Color>)> = spans
+            .iter()
+            .map(|s| (s.content.to_string(), s.style.fg))
+            .collect();
+        assert_eq!(
+            parts,
+            vec![
+                (" g".into(), Some(Color::Yellow)),
+                ("+2".into(), Some(Color::Green)),
+                ("/".into(), Some(Color::Yellow)),
+                ("-1".into(), Some(Color::Red)),
+                (" ".into(), Some(Color::Yellow)),
+            ]
+        );
+        // 片側のみ（0 側省略）: ` g+3 `.
+        let spans = change_badge_spans(" g+3 ", DiffScope::Git);
+        assert!(spans
+            .iter()
+            .any(|s| s.content.as_ref() == "+3" && s.style.fg == Some(Color::Green)));
+        // 純削除のみ: ` g-2 `.
+        let spans = change_badge_spans(" g-2 ", DiffScope::Git);
+        assert!(spans
+            .iter()
+            .any(|s| s.content.as_ref() == "-2" && s.style.fg == Some(Color::Red)));
+        // Last スコープは不変: 全体 Yellow の 1 span。
+        let spans = change_badge_spans(" +3/-2 ", DiffScope::Last);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[0].content.as_ref(), " +3/-2 ");
+    }
 
     #[test]
     fn short_paths_pass_through() {
