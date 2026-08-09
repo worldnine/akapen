@@ -2736,11 +2736,14 @@ use crate::comment::Selection;
 
     #[test]
     fn footer_hints_lead_with_deleted_above_on_a_deletion_mark_row() {
-        // 3-1: a cursor on a deletion mark row (reload or git) leads the
-        // footer with `-N deleted above · o: old side` (N derived from
-        // the git hunks) — or the bare `deleted above · o: old side`
-        // when only reload marks exist and the count is unknowable. Off
-        // the mark row the footer stays exactly as before.
+        // 3-1: a cursor on a deletion mark row leads the footer. Inside a
+        // git hunk the hunk display wins (`hunk L… +A/-D` — the counts')
+        // `-N` covers the deletion); outside every hunk (reload-only
+        // marks, or a git mark the EOF clamp dropped outside every hunk
+        // range) the deletion hint appears: `-N deleted above · o: old
+        // side` when the count is derivable from the git hunks, the bare
+        // `deleted above · o: old side` when only reload marks exist.
+        // Off the mark row the footer stays exactly as before.
         let mut app = make_app(5, Mode::View);
         app.view.goto_source_line(2);
         app.last_deleted_before.insert(2); // reload-only mark on line 3
@@ -2750,8 +2753,9 @@ use crate::comment::Selection;
             "reload marks get the count-less hint, leading the footer: {hints}"
         );
 
-        // A git mark derives the count from its hunk: 2 lines deleted
-        // above line 4 (0-based 3).
+        // A git mark whose hunk has no new range (pure deletion) is the
+        // hunk's owner line: the hunk display wins, the counts' `-2`
+        // carrying the deletion scale.
         app.view.goto_source_line(3);
         app.git_deleted_before.insert(3);
         app.git_diff = Some(crate::git::Diff {
@@ -2775,12 +2779,51 @@ use crate::comment::Selection;
         });
         let hints = footer_hints(&app);
         assert!(
-            hints.starts_with("-2 deleted above · o: old side · L4/5"),
-            "git marks derive the count from the hunks: {hints}"
+            hints.starts_with("hunk L4 -2 · o old side · L4/5"),
+            "the owner row of a pure-deletion hunk shows the hunk: {hints}"
+        );
+
+        // A git mark the EOF clamp dropped OUTSIDE every hunk's range:
+        // the hunk display has nothing to say, so the deletion hint shows
+        // the count derived from the hunks.
+        let mut app = make_app(5, Mode::Source);
+        app.cursor = 4;
+        app.git_deleted_before.insert(4);
+        app.git_diff = Some(crate::git::Diff {
+            untracked: false,
+            hunks: vec![crate::git::Hunk {
+                old_start: 3,
+                old_len: 3,
+                new_start: 3,
+                new_len: 2,
+                body: vec![
+                    crate::git::HunkLine {
+                        tag: crate::git::Tag::Context,
+                        text: "c1".into(),
+                    },
+                    crate::git::HunkLine {
+                        tag: crate::git::Tag::Context,
+                        text: "c2".into(),
+                    },
+                    crate::git::HunkLine {
+                        tag: crate::git::Tag::Delete,
+                        text: "d1".into(),
+                    },
+                    crate::git::HunkLine {
+                        tag: crate::git::Tag::Delete,
+                        text: "d2".into(),
+                    },
+                ],
+            }],
+        });
+        let hints = footer_hints(&app);
+        assert!(
+            hints.starts_with("-2 deleted above · o: old side · L5/5"),
+            "an EOF-clamped mark outside every hunk keeps the counted hint: {hints}"
         );
 
         // Off the mark row: no deletion hint at all.
-        app.view.goto_source_line(0);
+        app.cursor = 0;
         let hints = footer_hints(&app);
         assert!(!hints.contains("deleted above"), "{hints}");
 
@@ -2793,6 +2836,119 @@ use crate::comment::Selection;
         assert!(hints.starts_with("deleted above · o: old side · L2/5"), "{hints}");
         app.cursor = 0;
         assert!(!footer_hints(&app).contains("deleted above"));
+    }
+
+    #[test]
+    fn footer_hints_show_the_hunk_range_and_scale_inside_a_hunk() {
+        // Cursor inside a git hunk (added, deleted and context lines
+        // alike): the footer leads with `hunk L{a}-{b} +A/-D · o old
+        // side` — the 1-based new range and the hunk's counts, zero
+        // sides omitted. Deletion marks inside the hunk are absorbed by
+        // the counts, so no separate `deleted above` mention appears.
+        let diff = |hunks: Vec<crate::git::Hunk>| crate::git::Diff {
+            untracked: false,
+            hunks,
+        };
+        // A change hunk: 2 adds + 2 deletes over new lines 1-2, with a
+        // trailing context line outside the range.
+        let change = diff(vec![crate::git::Hunk {
+            old_start: 1,
+            old_len: 3,
+            new_start: 1,
+            new_len: 2,
+            body: vec![
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Delete,
+                    text: "a".into(),
+                },
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Add,
+                    text: "a2".into(),
+                },
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Delete,
+                    text: "b".into(),
+                },
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Add,
+                    text: "b2".into(),
+                },
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Context,
+                    text: "c".into(),
+                },
+            ],
+        }]);
+        let mut app = make_app(5, Mode::Source);
+        app.git_diff = Some(change);
+        app.cursor = 0;
+        let hints = footer_hints(&app);
+        assert!(
+            hints.starts_with("hunk L1-2 +2/-2 · o old side · L1/5"),
+            "both count sides show: {hints}"
+        );
+        app.cursor = 1;
+        assert!(footer_hints(&app).contains("hunk L1-2 +2/-2 · o old side"));
+        // A deletion mark row INSIDE the hunk stays on the hunk display:
+        // the counts already say `-2`.
+        app.git_deleted_before.insert(1);
+        let hints = footer_hints(&app);
+        assert!(
+            hints.starts_with("hunk L1-2 +2/-2 · o old side") && !hints.contains("deleted above"),
+            "the hunk display absorbs the deletion: {hints}"
+        );
+        // Outside the hunk (the trailing context line's position): no
+        // hint — the row is neither in a hunk nor on a mark.
+        app.cursor = 2;
+        assert_eq!(footer_hints(&app), "L3/5 · j/k move · v select · c comment · ? help");
+
+        // A pure-addition hunk omits the `-0` side.
+        let mut app = make_app(5, Mode::Source);
+        app.git_diff = Some(diff(vec![crate::git::Hunk {
+            old_start: 1,
+            old_len: 1,
+            new_start: 1,
+            new_len: 2,
+            body: vec![
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Context,
+                    text: "a".into(),
+                },
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Add,
+                    text: "b".into(),
+                },
+            ],
+        }]));
+        app.cursor = 0;
+        assert!(
+            footer_hints(&app).starts_with("hunk L1-2 +1 · o old side"),
+            "the zero deletion side is omitted"
+        );
+
+        // A pure-deletion hunk shows its owner line and only `-N`.
+        let mut app = make_app(5, Mode::Source);
+        app.git_diff = Some(diff(vec![crate::git::Hunk {
+            old_start: 1,
+            old_len: 2,
+            new_start: 1,
+            new_len: 0,
+            body: vec![
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Delete,
+                    text: "a".into(),
+                },
+                crate::git::HunkLine {
+                    tag: crate::git::Tag::Delete,
+                    text: "b".into(),
+                },
+            ],
+        }]));
+        app.cursor = 0;
+        assert!(
+            footer_hints(&app).starts_with("hunk L1 -2 · o old side"),
+            "pure deletion: the owner line and the count"
+        );
     }
 
     #[test]

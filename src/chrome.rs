@@ -13,6 +13,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
 use crate::clip_if_needed;
+use crate::git;
+use crate::hunknav::deleted_above_count;
 
 /// Smart-truncate a path for the title bar: keep the basename whole, add
 /// directory components from the right while they fit, and collapse the
@@ -360,25 +362,37 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// The deletion-position hint (3-1): when the cursor sits on a line
-/// marked "deleted block above" (reload and/or git), a snippet leading
-/// the footer — `-N deleted above · o: old side` with N derived from the
-/// git hunks when the mark is a git one, the bare `deleted above · o:
-/// old side` when only reload marks exist and the count is unknowable.
-/// On-demand only (cursor-anchored): no always-on information (P2).
-fn deletion_hint(app: &App) -> Option<String> {
+/// The hunk hint leading the footer when the cursor sits on a change:
+/// inside a git hunk (context lines included) the hunk's range, scale
+/// and action — `hunk L29-33 +1/-2 · o old side` (zero count sides
+/// omitted; a pure-deletion hunk shows its owner line) — or, outside
+/// every hunk on a deletion mark row (reload-only marks, or a git mark
+/// the EOF clamp dropped outside every hunk range), the count-bearing
+/// `-N deleted above · o: old side` / count-less `deleted above · o: old
+/// side`. Deletion marks inside a hunk are covered by the counts' `-N`,
+/// so no separate mention is added. On-demand only (cursor-anchored):
+/// no always-on information (P2).
+fn hunk_hint(app: &App) -> Option<String> {
     let line = match app.mode {
         Mode::View => app.view.cursor,
         Mode::Source => app.cursor,
         Mode::Input => return None,
     };
+    let new_len = app.source.len();
+    // Cursor inside a git hunk: the hunk display wins over the deletion
+    // hint (the deletion count is visible in the counts).
+    if let Some(d) = &app.git_diff
+        && let Some(h) = d.hunk_at(line, new_len)
+    {
+        return Some(hunk_range_hint(&d.hunks[h], new_len));
+    }
     if !app.last_deleted_before.contains(&line) && !app.git_deleted_before.contains(&line) {
         return None;
     }
     let count = if app.git_deleted_before.contains(&line) {
         app.git_diff
             .as_ref()
-            .map(|d| crate::hunknav::deleted_above_count(d, line, app.source.len()))
+            .map(|d| deleted_above_count(d, line, new_len))
             .unwrap_or(0)
     } else {
         0
@@ -390,13 +404,39 @@ fn deletion_hint(app: &App) -> Option<String> {
     })
 }
 
+/// `hunk L{a}-{b} +A/-D · o old side`: the hunk's 1-based new range
+/// (the owner line alone for a pure-deletion hunk) and its added/deleted
+/// counts ([`git::Hunk::counts`], zero sides omitted).
+fn hunk_range_hint(hunk: &git::Hunk, new_len: usize) -> String {
+    let range = match hunk.new_range() {
+        Some((a, b)) => format!("L{}-{}", a + 1, b + 1),
+        None => format!("L{}", hunk.owner(new_len) + 1),
+    };
+    let (added, deleted) = hunk.counts();
+    let mut counts = String::new();
+    if added > 0 {
+        counts.push_str(&format!("+{added}"));
+    }
+    if deleted > 0 {
+        if !counts.is_empty() {
+            counts.push('/');
+        }
+        counts.push_str(&format!("-{deleted}"));
+    }
+    if counts.is_empty() {
+        format!("hunk {range} · o old side")
+    } else {
+        format!("hunk {range} {counts} · o old side")
+    }
+}
+
 /// The footer's mode hint: the cursor's position as `L{line}/{total}`
 /// (1-based source line — the cursor IS the review anchor, so the line
 /// number is more actionable than a %), a few labeled actions for the
 /// current context, then `? help` for the full key reference. Keys keep
 /// their relative order across modes so a mode switch never rearranges
-/// the hints. A deletion mark row under the cursor leads the hints with
-/// the `deleted above` snippet (see [`deletion_hint`]) — it is prepended,
+/// the hints. A change row under the cursor leads the hints with the
+/// hunk / `deleted above` snippet (see [`hunk_hint`]) — it is prepended,
 /// so the footer's existing right-edge truncation drops the generic hints
 /// first when the terminal is narrow.
 pub(crate) fn footer_hints(app: &App) -> String {
@@ -407,7 +447,7 @@ pub(crate) fn footer_hints(app: &App) -> String {
             format!("L{}/{}", line + 1, total)
         }
     };
-    let lead = deletion_hint(app)
+    let lead = hunk_hint(app)
         .map(|d| format!("{d} · "))
         .unwrap_or_default();
     match app.mode {
