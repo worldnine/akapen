@@ -154,6 +154,46 @@ fn hunk_refs(source: DiffSource, diff: &git::Diff, new_len: usize) -> Vec<HunkRe
         .collect()
 }
 
+/// The new-file lines a hunk's marks cover: its new range, or the owner
+/// line for a pure deletion. The cursor-emphasis highlight paints
+/// exactly these (diff-scope step ④) — the `o` toggle's replacement
+/// range, visible in the marker column before pressing `o`.
+pub(crate) fn hunk_mark_lines(hunk: &git::Hunk, new_len: usize) -> HashSet<usize> {
+    match hunk.new_range() {
+        Some((a, b)) => (a..=b).collect(),
+        None => HashSet::from([hunk.owner(new_len)]),
+    }
+}
+
+/// The mark lines to EMPHASIZE (bold + bright) because the cursor sits
+/// in that hunk under the active scope (diff-scope step ④): the hunk's
+/// own marks light up, so the `o` toggle's "flip range" is readable
+/// from the marker column before pressing it. Last → the reload diff's
+/// hunks (works outside a git repo too), Git → the snapshot's, Off →
+/// none.
+pub(crate) fn emphasized_mark_lines(app: &App) -> HashSet<usize> {
+    if app.scope == DiffScope::Off {
+        return HashSet::new();
+    }
+    let new_len = app.source.len();
+    let line = if app.mode == Mode::View {
+        app.view.cursor
+    } else {
+        app.cursor
+    };
+    for r in scoped_hunk_refs(app) {
+        let Some(h) = hunk_ref(app, r) else { continue };
+        let covers = match h.new_range() {
+            Some((a, b)) => line >= a && line <= b,
+            None => line == h.owner(new_len),
+        };
+        if covers {
+            return hunk_mark_lines(h, new_len);
+        }
+    }
+    HashSet::new()
+}
+
 /// Resolve a [`HunkRef`] to the hunk itself.
 pub(crate) fn hunk_ref(app: &App, r: HunkRef) -> Option<&git::Hunk> {
     match r.source {
@@ -596,7 +636,9 @@ pub(crate) fn deletion_hunk_at(diff: &git::Diff, line: usize, new_len: usize) ->
 
 #[cfg(test)]
 mod git_tests {
-    use super::{DiffSource, deleted_above_count, deletion_hunk_at, scoped_hunk_refs};
+    use super::{
+        DiffSource, deleted_above_count, deletion_hunk_at, emphasized_mark_lines, scoped_hunk_refs,
+    };
     use crate::app::{App, DiffScope, FileState, Mode};
     use crate::chrome::footer_hints;
     use crate::comment::Selection;
@@ -615,7 +657,7 @@ mod git_tests {
         on_source_key, on_view_key,
     };
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-    use ratatui::style::{Color, Style};
+    use ratatui::style::{Color, Modifier, Style};
     use std::collections::HashSet;
     use std::process::Command;
 
@@ -929,6 +971,7 @@ mod git_tests {
         // The marker column shows `~` on the block and `>` on the cursor.
         let (_, gutter) = app.view.visible_text(
             100,
+            &[],
             &[],
             &[],
             &[],
@@ -2088,6 +2131,115 @@ mod git_tests {
         assert!(scoped_hunk_refs(&app).iter().all(|r| r.source == DiffSource::Git));
         app.scope = DiffScope::Off;
         assert!(scoped_hunk_refs(&app).is_empty());
+    }
+
+    #[test]
+    fn cursor_hunk_emphasis_selects_the_hunks_marks() {
+        // Diff-scope step ④: the cursor's hunk's mark lines emphasize —
+        // the `o` flip range, readable from the marker column. A cursor
+        // between hunks emphasizes nothing; Off never emphasizes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &["one", "two", "three", "four", "five", "six", "seven", "eight"],
+        );
+        overwrite(
+            &path,
+            &["one", "CHANGED", "three", "four", "five", "six", "SEVEN", "eight"],
+        );
+        let mut app = git_app(path, Mode::Source);
+        assert_eq!(app.git_diff.as_ref().unwrap().hunks.len(), 2, "-U0 keeps them apart");
+        app.cursor = 1; // inside hunk 0
+        assert_eq!(emphasized_mark_lines(&app), HashSet::from([1]));
+        app.cursor = 6; // inside hunk 1
+        assert_eq!(emphasized_mark_lines(&app), HashSet::from([6]));
+        app.cursor = 3; // between the hunks
+        assert!(emphasized_mark_lines(&app).is_empty(), "no hunk, no emphasis");
+        // Off: never.
+        app.scope = DiffScope::Off;
+        app.cursor = 1;
+        assert!(emphasized_mark_lines(&app).is_empty());
+        // Last scope (the reload diff) works too — outside a repo as well.
+        app.scope = DiffScope::Last;
+        app.last_diff = Some(crate::git::Diff {
+            hunks: vec![crate::git::Hunk {
+                old_start: 2,
+                old_len: 1,
+                new_start: 2,
+                new_len: 1,
+                body: vec![
+                    crate::git::HunkLine {
+                        tag: crate::git::Tag::Delete,
+                        text: "two".into(),
+                    },
+                    crate::git::HunkLine {
+                        tag: crate::git::Tag::Add,
+                        text: "CHANGED".into(),
+                    },
+                ],
+            }],
+            untracked: false,
+        });
+        app.cursor = 1;
+        assert_eq!(emphasized_mark_lines(&app), HashSet::from([1]), "last scope");
+    }
+
+    #[test]
+    fn cursor_hunk_emphasis_covers_a_pure_deletion_owner() {
+        // A pure-deletion hunk has no new range: its owner line (the ▀
+        // row) is the whole hunk, and the emphasis makes that visible.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &["one", "two", "three", "four", "five", "six", "seven", "eight"],
+        );
+        std::fs::write(&path, "one\ntwo\nthree\nfive\nsix\nseven\neight\n").unwrap();
+        let mut app = git_app(path, Mode::Source);
+        let diff = app.git_diff.as_ref().unwrap();
+        assert_eq!(diff.hunks.len(), 1);
+        assert_eq!(diff.hunks[0].new_len, 0, "pure deletion");
+        app.cursor = 3; // the owner row (the ▀ mark)
+        assert_eq!(emphasized_mark_lines(&app), HashSet::from([3]));
+        // The cursor row itself renders `>` (the priority order is
+        // untouched), so the emphasis is readable from emphasized_mark_lines
+        // — the ▀ row is the whole hunk, and the `o` flip range is that
+        // single row.
+    }
+
+    #[test]
+    fn source_gutter_emphasizes_only_the_cursor_hunks_marks() {
+        // Two -U0 hunks (a two-line rewrite + a separate rewrite): the
+        // cursor's hunk renders bold + bright, the neighbour keeps its
+        // normal weight. (The cursor's own row shows `>`, so the
+        // emphasis is read on the hunk's OTHER mark rows.)
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &["one", "two", "three", "four", "five", "six", "seven", "eight"],
+        );
+        overwrite(
+            &path,
+            &["one", "CHANGED-A", "CHANGED-B", "four", "five", "six", "SEVEN", "eight"],
+        );
+        let mut app = git_app(path, Mode::Source);
+        app.cursor = 1; // hunk 0's first row
+        let (text, _) = build_rows(&app, 100, 75);
+        let mark = |i: usize| text.lines[i].spans[0].clone();
+        assert_eq!(mark(1).content.as_ref(), ">", "the cursor row");
+        assert_eq!(mark(2).content.as_ref(), "~", "a rewrite");
+        assert!(mark(2).style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(mark(2).style.fg, Some(Color::LightYellow));
+        assert!(
+            !mark(6).style.add_modifier.contains(Modifier::BOLD),
+            "the neighbouring hunk keeps its weight"
+        );
+        assert_eq!(mark(6).style.fg, Some(Color::Yellow));
+        // Cursor moves to the other hunk: the emphasis flips.
+        app.cursor = 6;
+        let (text, _) = build_rows(&app, 100, 75);
+        let mark = |i: usize| text.lines[i].spans[0].clone();
+        assert!(mark(6).style.add_modifier.contains(Modifier::BOLD));
+        assert!(!mark(2).style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

@@ -2216,13 +2216,15 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     let sel = app.selection.map(|s| s.range());
     // The scoped mark sets: one selection point for view and source
     // gutters (diff-scope step ③). The view keeps its two-class
-    // vocabulary: added ∪ modified = a green ▌.
+    // vocabulary: added ∪ modified = a green ▌. The cursor's hunk's
+    // marks emphasize (step ④) so the `o` flip range is readable.
     let (added, modified, deleted_set) = scoped_mark_sets(app);
     let n = app.source.len();
     let mut changed_set = added;
     changed_set.extend(modified);
     let changed = view_changed_flags(&changed_set, n);
     let deleted = view_deleted_flags(&deleted_set, n);
+    let emphasized = view_changed_flags(&emphasized_mark_lines(app), n);
     // The composer opened from view mode (`c` in view) is drawn inline
     // right under the cursor line, so the comment can be typed without
     // leaving the rendered view. While it is open it is part of the
@@ -2242,6 +2244,7 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         &marked,
         &changed,
         &deleted,
+        &emphasized,
         sel,
         app.ui_selected_bg,
         border_style,
@@ -2451,8 +2454,10 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     let mut composer_cursor: Option<(u16, u16)> = None;
     let width = content_width as usize;
     // The scoped mark sets (diff-scope step ③): one selection point,
-    // computed once so every line reads the same scope.
+    // computed once so every line reads the same scope. The cursor's
+    // hunk's marks emphasize (step ④).
     let (scoped_added, scoped_modified, scoped_deleted) = scoped_mark_sets(app);
+    let emphasized_marks = emphasized_mark_lines(app);
     // Comment bars span the whole pane (gutter included), pi.dev-style.
     let full_width = (content_width + app.gutter_cols) as usize;
     // The current file's cards (the edited one is hidden while composing).
@@ -2527,6 +2532,8 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         let added = scoped_added.contains(&idx);
         let modified = scoped_modified.contains(&idx);
         let deleted_before = scoped_deleted.contains(&idx);
+        // The cursor's hunk's mark rows emphasize (bold + bright).
+        let emphasized = emphasized_marks.contains(&idx);
         let is_cursor = idx == app.cursor;
         // The three-class source vocabulary (user-agreed spec): `+` a
         // pure addition, `~` a rewritten line (paired delete+add — `o`
@@ -2585,16 +2592,20 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // Additions: green `+`. Rewrites: yellow `~` — the number stays
         // green (yellow is the commented-line color); the glyph alone
         // tells "this line replaced an old one, `o` shows it". Deleted-
-        // before lines: red `▀`.
+        // before lines: red `▀`. The cursor's hunk's marks emphasize
+        // (bold + bright, diff-scope step ④).
         let mark_style = if is_cursor {
             let s = Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
         } else if modified && !cursor_bg {
-            Style::default().fg(Color::Yellow).bg(app.ui_changed_bg)
+            let s = Style::default().fg(Color::Yellow).bg(app.ui_changed_bg);
+            if emphasized { s.add_modifier(Modifier::BOLD).fg(Color::LightYellow) } else { s }
         } else if changed_bg {
-            Style::default().fg(Color::Green).bg(app.ui_changed_bg)
+            let s = Style::default().fg(Color::Green).bg(app.ui_changed_bg);
+            if emphasized { s.add_modifier(Modifier::BOLD).fg(Color::LightGreen) } else { s }
         } else if deleted_fg {
-            Style::default().fg(Color::Red)
+            let s = Style::default().fg(Color::Red);
+            if emphasized { s.add_modifier(Modifier::BOLD).fg(Color::LightRed) } else { s }
         } else {
             gutter_style
         };

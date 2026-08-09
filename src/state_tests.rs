@@ -1078,6 +1078,7 @@ use crate::comment::Selection;
             &marked,
             &[],
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
@@ -2038,6 +2039,7 @@ use crate::comment::Selection;
             &[],
             &[],
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
@@ -2142,6 +2144,7 @@ use crate::comment::Selection;
         let (_, gutter) = view.visible_text(
             10,
             &[false; 6],
+            &[],
             &[],
             &[],
             Some((1, 1)),

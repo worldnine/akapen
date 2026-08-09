@@ -389,6 +389,7 @@ impl ViewState {
         marked: &[bool],
         changed: &[bool],
         deleted: &[bool],
+        emphasized: &[bool],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
         border_style: Style,
@@ -428,6 +429,12 @@ impl ViewState {
         let group_marked = group_or(marked);
         let group_changed = group_or(changed);
         let group_deleted = group_or(deleted);
+        // The cursor's hunk's marks render bold + bright (diff-scope
+        // step ④): the `o` toggle's flip range is readable from the
+        // marker column before pressing it. The emphasis only styles a
+        // mark that is already selected — the priority order above it
+        // (cursor / old side / selection / comment) is untouched.
+        let group_emphasized = group_or(emphasized);
         let end = (self.offset + viewport).min(self.rows.len());
         let mut start = self.cursor_row();
         let mut c_end = self.cursor_end_row() + 1;
@@ -572,7 +579,16 @@ impl ViewState {
             } else if marked_row {
                 ("▌", Style::default().fg(Color::Yellow))
             } else if changed_row {
-                ("▌", Style::default().fg(Color::Green))
+                if group_emphasized[src] {
+                    (
+                        "▌",
+                        Style::default()
+                            .fg(Color::LightGreen)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("▌", Style::default().fg(Color::Green))
+                }
             } else if deleted_row {
                 // Deleted blocks are shown by POSITION only (3-1): the
                 // `▀` (upper half of this row) reads as "something above
@@ -580,7 +596,16 @@ impl ViewState {
                 // deleted/changed LINE at a glance, and the upper-half
                 // block keeps the same weight as the green `▌` (both
                 // half-blocks). `o` shows the content.
-                ("▀", Style::default().fg(Color::Red))
+                if group_emphasized[src] {
+                    (
+                        "▀",
+                        Style::default()
+                            .fg(Color::LightRed)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("▀", Style::default().fg(Color::Red))
+                }
             } else {
                 ("│", border_style)
             };
@@ -770,7 +795,7 @@ mod tests {
         ViewState,
     };
     use crate::highlight::Highlighter;
-    use ratatui::style::{Color, Style};
+    use ratatui::style::{Color, Modifier, Style};
     use crate::source::Source;
     use unicode_width::UnicodeWidthStr;
 
@@ -802,7 +827,7 @@ mod tests {
     /// The concatenated text of `visible_text`'s row `i` (content only —
     /// the marker column is separate; see [`gutter_at`]).
     fn row_text(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> String {
-        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .0
             .lines[i]
             .spans
@@ -814,7 +839,7 @@ mod tests {
     /// The marker glyph of `visible_text`'s row `i` (the cell drawn over
     /// the frame's left border).
     fn gutter_at(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> &'static str {
-        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .1
             .get(i)
             .map(|c| c.glyph)
@@ -824,7 +849,7 @@ mod tests {
     /// The highlighted (selection-background) span contents of `visible_text`'s
     /// row `i`.
     fn bg_spans(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> Vec<String> {
-        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .0
             .lines[i]
             .spans
@@ -866,7 +891,7 @@ mod tests {
         );
         // The layout is untouched: same number of rows either way.
         assert_eq!(
-            view.visible_text(100, &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
+            view.visible_text(100, &[], &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
                 .0
                 .lines
                 .len(),
@@ -1056,7 +1081,7 @@ mod tests {
         // Can't easily inspect styles through Text, so just ensure the rows
         // render without panicking and the cursor row stays in bounds.
         assert_eq!(
-            view.visible_text(10, &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
+            view.visible_text(10, &[], &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
                 .0
                 .lines
                 .len(),
@@ -1081,6 +1106,7 @@ mod tests {
         let (_, gutter) = view.visible_text(
             10,
             &marked,
+            &[],
             &[],
             &[],
             None,
@@ -1110,6 +1136,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             Some((1, 3)),
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -1127,6 +1154,7 @@ mod tests {
         // Without a selection the cursor row still shows `>`.
         let (_, gutter) = view.visible_text(
             10,
+            &[],
             &[],
             &[],
             &[],
@@ -1488,6 +1516,7 @@ mod tests {
             &marked,
             &changed,
             &deleted,
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -1526,6 +1555,7 @@ mod tests {
             &[],
             &[],
             &deleted,
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -1537,6 +1567,65 @@ mod tests {
         assert_eq!(gutter[4].glyph, "│", "the merged block's later rows stay clean");
         assert_eq!(gutter[1].style.fg, Some(Color::Red), "deletion marks are red");
         assert_eq!(gutter[3].style.fg, Some(Color::Red), "deletion marks are red");
+    }
+
+    #[test]
+    fn emphasized_marks_render_bold_and_bright() {
+        // Diff-scope step ④: the cursor's hunk's marks render bold +
+        // bright (LightGreen/LightRed) — the `o` flip range readable in
+        // the marker column. Rows outside the hunk keep their normal
+        // weight; rows above the mark priority (cursor etc.) are
+        // untouched because the emphasis only styles a selected mark.
+        let view = ViewState {
+            rows: vec![vec![]; 4],
+            offset: 0,
+            cursor: 3, // an unmarked row keeps the > marker
+            source_starts: vec![0, 1, 2, 3],
+            ..Default::default()
+        };
+        let changed = vec![true, false, true, false];
+        let deleted = vec![false, true, false, false];
+        let emphasized = vec![true, false, false, false];
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &changed,
+            &deleted,
+            &emphasized,
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[0].glyph, "▌");
+        assert!(
+            gutter[0].style.add_modifier.contains(Modifier::BOLD),
+            "the cursor hunk's mark is bold"
+        );
+        assert_eq!(gutter[0].style.fg, Some(Color::LightGreen));
+        assert_eq!(gutter[1].glyph, "▀", "deleted mark outside the hunk");
+        assert!(
+            !gutter[1].style.add_modifier.contains(Modifier::BOLD),
+            "not the cursor's hunk: normal weight"
+        );
+        assert_eq!(gutter[1].style.fg, Some(Color::Red));
+        assert_eq!(gutter[2].glyph, "▌");
+        assert!(!gutter[2].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(gutter[2].style.fg, Some(Color::Green));
+        // The emphasized deleted mark renders LightRed + bold.
+        let emphasized = vec![false, true, false, false];
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &changed,
+            &deleted,
+            &emphasized,
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[1].glyph, "▀");
+        assert!(gutter[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(gutter[1].style.fg, Some(Color::LightRed));
     }
 
     #[test]
@@ -1558,6 +1647,7 @@ mod tests {
         let (_, gutter) = view.visible_text(
             10,
             &marked,
+            &[],
             &[],
             &[],
             None,
