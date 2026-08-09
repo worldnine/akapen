@@ -109,8 +109,9 @@ pub fn scroll_offset_drag(
 
 /// A 1-column marker cell drawn over the frame's left border (see
 /// [`ViewState::visible_text`]): `>` marks the cursor row, `▌` a
-/// comment-covered row; rows with no marker reproduce the border's `│`,
-/// so the column reads as the frame itself.
+/// comment-covered row, a red top-edge `▔` a deleted block's position
+/// mark (3-1); rows with no marker reproduce the border's `│`, so the
+/// column reads as the frame itself.
 #[derive(Debug, Clone)]
 pub struct GutterCell {
     pub glyph: &'static str,
@@ -359,8 +360,9 @@ impl ViewState {
     /// per visible row). The marker column is drawn over the frame's left
     /// border by the caller (see `draw_view`): `>` marks the cursor row, a
     /// yellow `▌` a comment-covered row (`marked` is indexed by source
-    /// line); rows without a marker carry the border's `│`. Rows inside
-    /// `selection` (an inclusive
+    /// line), a red top-edge `▔` a deleted block's position mark
+    /// (`deleted`, 3-1); rows without a marker carry the border's `│`.
+    /// Rows inside `selection` (an inclusive
     /// DISPLAY-ROW range — the view's selection is tracked by rows, immune
     /// to source-line mapping imprecision) and the cursor row get the calm
     /// DarkGray background ([`SELECTED_BG`]) — including blank lines inside
@@ -482,7 +484,13 @@ impl ViewState {
             // a backward scan (see the fold above).
             let marked_row = group_marked[src];
             let changed_row = group_changed[src];
-            let deleted_row = group_deleted[src];
+            // The deletion mark is a TOP-EDGE bar (`▔`): it means "a
+            // block was deleted above this row's top edge", so it sits on
+            // the marked line's FIRST display row only — a wrap
+            // continuation row's top edge is mid-line, where no deletion
+            // can sit (the group fold above keeps marking every member
+            // line; this restricts the RENDER to the first row).
+            let deleted_row = group_deleted[src] && abs == self.source_starts[src];
             // The selection is a LINE range; the row span is the rows
             // those lines render on (merged rows can share one). The exact
             // gray highlights a span exactly when its byte range
@@ -539,11 +547,12 @@ impl ViewState {
             // `draw_view` over the border cells): `>` marks the cursor
             // line's FIRST display row (parallel to source mode, where the
             // marker sits on the first wrapped row only), `▌` a
-            // comment-covered row; rows without a marker reproduce the
-            // border's `│`. The selection background extends over the
-            // marker, so cursor/selection rows read as one band running to
-            // the page edge. The cursor glyph is bold LightCyan — it must
-            // be findable at a glance (yellow is the comment marker's
+            // comment-covered row, a red top-edge `▔` a deleted block's
+            // position mark; rows without a marker reproduce the border's
+            // `│`. The selection background extends over the marker, so
+            // cursor/selection rows read as one band running to the page
+            // edge. The cursor glyph is bold LightCyan — it must be
+            // findable at a glance (yellow is the comment marker's
             // color).
             let (glyph, mut marker_style) = if abs == start {
                 (
@@ -565,7 +574,11 @@ impl ViewState {
             } else if changed_row {
                 ("▌", Style::default().fg(Color::Green))
             } else if deleted_row {
-                ("▌", Style::default().fg(Color::Red))
+                // Deleted blocks are shown by POSITION only (3-1): the
+                // `▔` (top edge of this row) reads as "something above
+                // was deleted" — a full-height `▌` would read as a
+                // deleted/changed LINE at a glance. `o` shows the content.
+                ("▔", Style::default().fg(Color::Red))
             } else {
                 ("│", border_style)
             };
@@ -1455,6 +1468,10 @@ mod tests {
         // line, changed on the group's last line, deleted on a wrap — and
         // every row of the group must carry its marker, exactly like
         // `marker_covers_the_whole_line_block` but across several groups.
+        // The deletion mark is the one exception: it is a top-edge `▔`
+        // ("deleted above"), so only the wrapped line's FIRST display row
+        // carries it — a wrap continuation's top edge is mid-line, where
+        // no deletion can sit.
         let view = ViewState {
             rows: vec![vec![]; 8],
             offset: 0,
@@ -1479,13 +1496,46 @@ mod tests {
         assert_eq!(gutter[2].glyph, "▌", "marked paragraph row keeps the marker");
         assert_eq!(gutter[3].glyph, "▌", "changed group rows are marked");
         assert_eq!(gutter[4].glyph, "▌", "changed group rows are marked");
-        assert_eq!(gutter[5].glyph, "▌", "deleted wrap rows are marked");
-        assert_eq!(gutter[6].glyph, "▌", "deleted wrap rows are marked");
+        assert_eq!(gutter[5].glyph, "▔", "deleted row shows the top-edge bar");
+        assert_eq!(gutter[6].glyph, "│", "deleted wrap continuation rows keep the border");
         assert_eq!(gutter[7].glyph, "│", "unflagged line keeps the border");
         assert_eq!(gutter[1].style.fg, Some(Color::Yellow), "marked rows are yellow");
         assert_eq!(gutter[3].style.fg, Some(Color::Green), "changed rows are green");
         assert_eq!(gutter[5].style.fg, Some(Color::Red), "deleted rows are red");
         assert_eq!(gutter[7].style.fg, None, "border rows carry the border style");
+    }
+
+    #[test]
+    fn deleted_mark_sits_on_the_first_display_row_of_the_marked_line() {
+        // Line 1 wraps over rows 1-2, and lines 3-4 merge into row 3
+        // (flagged on the SECOND member). The `▔` means "deleted above
+        // this row's top edge": it renders on the first display row of
+        // the marked line only — never on a wrap continuation or on the
+        // rows a merged block's later members occupy.
+        let view = ViewState {
+            rows: vec![vec![]; 5],
+            offset: 0,
+            cursor: 0,
+            source_starts: vec![0, 1, 3, 3],
+            ..Default::default()
+        };
+        let deleted = vec![false, true, false, true];
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &[],
+            &deleted,
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[0].glyph, ">", "cursor row shows the > marker");
+        assert_eq!(gutter[1].glyph, "▔", "first display row of the marked line");
+        assert_eq!(gutter[2].glyph, "│", "wrap continuation rows carry no deletion mark");
+        assert_eq!(gutter[3].glyph, "▔", "the merged block's top edge carries the mark");
+        assert_eq!(gutter[4].glyph, "│", "the merged block's later rows stay clean");
+        assert_eq!(gutter[1].style.fg, Some(Color::Red), "deletion marks are red");
+        assert_eq!(gutter[3].style.fg, Some(Color::Red), "deletion marks are red");
     }
 
     #[test]
