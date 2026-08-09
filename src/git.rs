@@ -196,18 +196,42 @@ impl Diff {
     /// 0-based new-file indices of the added/changed lines (every `+`
     /// line — a modified line is a delete+add pair, so the add side is the
     /// changed line in the new file). An untracked file marks every line.
+    /// The union of [`Diff::added_modified`] — kept for callers that only
+    /// need "changed or added" without the origin split.
     pub fn added(&self, new_len: usize) -> HashSet<usize> {
+        let (added, modified) = self.added_modified(new_len);
+        added.union(&modified).copied().collect()
+    }
+
+    /// 0-based new-file indices of the added/changed lines, split by
+    /// origin (diff-scope step ③): `added` = pure additions (lines with
+    /// no old counterpart), `modified` = the add lines that pair with a
+    /// deletion in the same hunk — a rewritten line, whose old content
+    /// the `o` toggle can show. Per hunk the first `min(deleted, added)`
+    /// add lines count as rewrites (gitgutter's rule), the rest as pure
+    /// additions. `added ∪ modified` equals what [`Diff::added`]
+    /// returns. An untracked file: every line is a pure addition.
+    pub fn added_modified(&self, new_len: usize) -> (HashSet<usize>, HashSet<usize>) {
         if self.untracked {
-            return (0..new_len).collect();
+            return ((0..new_len).collect(), HashSet::new());
         }
-        let mut out = HashSet::new();
+        let mut added = HashSet::new();
+        let mut modified = HashSet::new();
         for h in &self.hunks {
             // `+0,0` (a whole-file deletion) has new_start == 0.
             let mut new_idx = h.new_start.saturating_sub(1) as usize;
+            let (deleted, inserted) = h.counts();
+            let paired = deleted.min(inserted);
+            let mut adds_seen = 0usize;
             for l in &h.body {
                 match l.tag {
                     Tag::Add => {
-                        out.insert(new_idx);
+                        if adds_seen < paired {
+                            modified.insert(new_idx);
+                        } else {
+                            added.insert(new_idx);
+                        }
+                        adds_seen += 1;
                         new_idx += 1;
                     }
                     Tag::Delete => {}
@@ -215,7 +239,7 @@ impl Diff {
                 }
             }
         }
-        out
+        (added, modified)
     }
 
     /// 0-based new-file indices of the lines immediately following a
@@ -788,6 +812,55 @@ mod tests {
                 "deleted_before() diverges from the legacy scan — old:\n{old}new:\n{new}"
             );
         }
+    }
+
+    #[test]
+    fn added_modified_splits_pure_additions_from_rewrites() {
+        // 純追加のみ: two appended lines.
+        let d = synthesize_diff("a\nb\n", "a\nb\nX\nY\n");
+        let (added, modified) = d.added_modified(4);
+        assert_eq!(added, HashSet::from([2, 3]));
+        assert!(modified.is_empty(), "no deletes, no rewrites");
+        // 書き換えのみ: delete 1 + add 1.
+        let d = synthesize_diff("a\nb\nc\n", "a\nX\nc\n");
+        let (added, modified) = d.added_modified(3);
+        assert!(added.is_empty());
+        assert_eq!(modified, HashSet::from([1]));
+        // 混在 hunk: delete 1 + add 3 — the first min(1,3) add is the
+        // rewrite, the rest are pure additions.
+        let d = synthesize_diff("a\nb\nc\n", "a\nX\nY\nZ\nc\n");
+        let (added, modified) = d.added_modified(5);
+        assert_eq!(modified, HashSet::from([1]));
+        assert_eq!(added, HashSet::from([2, 3]));
+        // 複数の離れた書き換え: 2 hunks, one rewrite each.
+        let d = synthesize_diff("a\nb\nc\nd\ne\nf\n", "a\nX\nc\nd\nY\nf\n");
+        let (added, modified) = d.added_modified(6);
+        assert!(added.is_empty());
+        assert_eq!(modified, HashSet::from([1, 4]));
+        // `added()` stays the union (caller compatibility).
+        let d = synthesize_diff("a\nb\nc\n", "a\nX\nY\nZ\nc\n");
+        let (added, modified) = d.added_modified(5);
+        let union: HashSet<usize> = added.union(&modified).copied().collect();
+        assert_eq!(d.added(5), union);
+        // An untracked diff: every line is a pure addition.
+        let d = Diff { untracked: true, ..Default::default() };
+        let (added, modified) = d.added_modified(3);
+        assert_eq!(added, HashSet::from([0, 1, 2]));
+        assert!(modified.is_empty());
+    }
+
+    #[test]
+    fn added_modified_works_on_real_git_diffs() {
+        // The same split must hold for a parsed real git diff: a
+        // rewritten line plus appended lines in one hunk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three"]);
+        std::fs::write(&path, "one\nCHANGED\nthree\nfour\nfive\n").unwrap();
+        let diff = Diff::load("HEAD", &path).expect("inside a git repo");
+        assert_eq!(diff.hunks.len(), 1, "one hunk with 3 context lines");
+        let (added, modified) = diff.added_modified(5);
+        assert_eq!(modified, HashSet::from([1]), "the rewritten line");
+        assert_eq!(added, HashSet::from([3, 4]), "the appended lines");
     }
 
     #[test]
