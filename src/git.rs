@@ -76,25 +76,6 @@ impl Hunk {
             })
     }
 
-    /// Whether new-file `line` is one of the hunk's added/changed lines
-    /// (the `+` lines — context lines are not the change itself).
-    pub fn is_changed_line(&self, line: usize) -> bool {
-        let mut new_idx = self.new_start.saturating_sub(1) as usize;
-        for l in &self.body {
-            match l.tag {
-                Tag::Add => {
-                    if new_idx == line {
-                        return true;
-                    }
-                    new_idx += 1;
-                }
-                Tag::Delete => {}
-                Tag::Context => new_idx += 1,
-            }
-        }
-        false
-    }
-
     /// The old-side lines of the hunk: context + deleted lines in order —
     /// exactly the ref's lines this hunk covers.
     pub fn old_lines(&self) -> Vec<String> {
@@ -256,13 +237,6 @@ impl Diff {
     /// line, or the owner line of a pure deletion. Context-only positions
     /// return `None` — the jump keys treat them as "not on a change" and
     /// land on the nearest hunk instead of stepping.
-    pub fn changed_at(&self, line: usize, new_len: usize) -> Option<usize> {
-        self.hunks.iter().position(|h| match h.new_range() {
-            Some(_) => h.is_changed_line(line),
-            None => h.owner(new_len) == line,
-        })
-    }
-
     /// The index of the hunk under new-file `line` (0-based): the hunk
     /// whose new range contains the line, or — for a pure-deletion hunk —
     /// the hunk whose following line (`owner`) is `line`.

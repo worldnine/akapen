@@ -2436,25 +2436,21 @@ fn jump_hunk(app: &mut App, dir: isize) {
     } else {
         app.cursor
     };
-    // Stepping requires the cursor to be ON a changed line (context
-    // positions count as "not on a change": the jump lands on the
-    // nearest hunk in `dir` instead).
-    let target = match diff.changed_at(line, new_len) {
-        Some(i) => {
-            let next = i as isize + dir;
-            if next < 0 || next >= n as isize {
-                app.flash_err(if dir > 0 { "no changes below" } else { "no changes above" });
-                return;
-            }
-            next as usize
-        }
-        None => {
-            if dir > 0 {
-                0
-            } else {
-                n - 1
-            }
-        }
+    // Stepping compares ANCHORS (each hunk's first changed line — or,
+    // for a pure deletion, its owner line): the next hunk is the one
+    // whose first change lies beyond the cursor. A cursor on a hunk's
+    // leading context lines still lands on THAT hunk; a cursor on its
+    // trailing lines (or on the owner line of a deletion-only hunk,
+    // where the jump itself lands) steps past it. The old "is the
+    // cursor on a changed line" check rewound to the first hunk there.
+    let target = if dir > 0 {
+        diff.hunks.iter().position(|h| h.anchor(new_len) > line)
+    } else {
+        diff.hunks.iter().rposition(|h| h.anchor(new_len) < line)
+    };
+    let Some(target) = target else {
+        app.flash_err(if dir > 0 { "no changes below" } else { "no changes above" });
+        return;
     };
     let label = hunk_label(&diff.hunks[target], new_len);
     app.flash(format!("change {}/{} · {label}", target + 1, n));
@@ -10283,6 +10279,66 @@ mod git_tests {
         assert_eq!(app.view.cursor, 14, "view Alt+j: next hunk");
         on_view_key(&mut app, KeyCode::Char('k'), KeyModifiers::ALT, None);
         assert_eq!(app.view.cursor, 4, "view Alt+k: previous hunk");
+    }
+
+    #[test]
+    fn n_stepping_never_rewinds_to_the_first_hunk() {
+        // The step target is measured by hunk POSITION, not "is the
+        // cursor on a changed line": landing on a deletion-only hunk
+        // (no added lines — the cursor sits on a context line there)
+        // used to make the next `n` rewind to the first hunk.
+        let lines: Vec<String> = (1..=30).map(|i| format!("line{i:02}")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &lines.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
+        // Delete lines 6-10 (a hunk with NO added lines) and change
+        // line 24: two hunks (7 blank lines apart — git keeps them
+        // separate), the first deletion-only.
+        let mut work: Vec<String> = (1..=5).map(|i| format!("line{i:02}")).collect();
+        work.extend((11..=23).map(|i| format!("line{i:02}")));
+        work.push("CHANGED-B".into());
+        work.extend((25..=30).map(|i| format!("line{i:02}")));
+        overwrite(&path, &work.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let mut app = git_app(path, Mode::Source);
+        {
+            let hunks = &app.git_diff.as_ref().unwrap().hunks;
+            assert_eq!(hunks.len(), 2, "deletion-only hunk + one change");
+            assert!(
+                !hunks[0].body.iter().any(|l| l.tag == crate::git::Tag::Add),
+                "hunk 0 has no added lines"
+            );
+        }
+        // n lands on the deletion-only hunk's owner line (a context
+        // line — NOT a changed line), the whole hunk range selected.
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        let landed = app.cursor;
+        let h0 = app.git_diff.as_ref().unwrap().hunks[0].new_range().unwrap();
+        assert_eq!(app.selection, Some(Selection { anchor: h0.0, cursor: h0.1 }));
+        // n again: the NEXT hunk — never a rewind to the top.
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 18, "steps to the second hunk's changed line");
+        assert!(
+            app.status.as_ref().unwrap().0.contains("change 2/2"),
+            "reports hunk 2 of 2: {}",
+            app.status.as_ref().unwrap().0
+        );
+        // At the end: a flash, not a wrap.
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        let (msg, _, is_error) = app.status.as_ref().unwrap();
+        assert!(*is_error && msg.contains("no changes below"), "{msg}");
+        assert_eq!(app.cursor, 18, "stays put");
+        // From the blank gap between the hunks, n goes FORWARD to the
+        // next hunk (the old code rewound to the first hunk).
+        app.selection = None;
+        app.cursor = 10; // between hunk 0 and hunk 1
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 18, "from the gap: the next hunk, not the first");
+        // N from the same gap goes BACK to hunk 0.
+        app.selection = None;
+        on_source_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, landed, "N from the gap: the previous hunk");
     }
 
     #[test]
