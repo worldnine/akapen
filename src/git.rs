@@ -14,6 +14,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use similar::{ChangeTag, TextDiff};
+
 /// One side of a unified-diff hunk body line.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tag {
@@ -251,6 +253,97 @@ impl Diff {
             Some((a, b)) => line >= a && line <= b,
             None => line == h.owner(new_len),
         })
+    }
+}
+
+/// Build a zero-context [`Diff`] from two file contents — the reload
+/// path's analogue of `git diff -U0` (the diff-scope step 1: the reload
+/// diff is normalized into the same structure the git snapshot uses, so
+/// marks, counts, old-side and navigation can share one consumer). The
+/// runs of inserted/deleted lines TextDiff finds become hunks; a
+/// modification (delete run immediately followed by an insert run) is
+/// ONE hunk, its body deletes-then-adds, no context lines.
+///
+/// Header conventions (what [`Hunk::owner`], [`Hunk::anchor`],
+/// [`Hunk::new_range`], [`Hunk::hunk_at`], [`Diff::added`] and
+/// [`Diff::deleted_before`] expect):
+/// - the non-empty side is 1-based: `old_start` = first deleted old
+///   line, `new_start` = first added new line (git's `-2,2 +2,2`);
+/// - a pure insertion carries its 0-based position on the zero-length
+///   old side (git's `-2,0 +3,2`);
+/// - a pure deletion carries the 1-based position of the deleted block
+///   on the zero-length new side — `new_start` = deletion position + 1,
+///   and 0 for a start-of-file deletion, exactly git's `+0,0`. Note
+///   that git's own zero-context output uses the BARE position (`+4,0`
+///   for a deletion after new line 4): that only lines up with
+///   `deleted_before`/`owner` because its default 3 context lines walk
+///   `new_idx` forward first — with zero context the bare form would
+///   put the deletion mark on the line BEFORE the deleted block (off
+///   by one from the reload convention). The +1 form is what the
+///   formulas expect when there are no context lines.
+pub fn synthesize_diff(old: &str, new: &str) -> Diff {
+    let mut hunks: Vec<Hunk> = Vec::new();
+    // The open hunk as (old position, new position, delete lines, add
+    // lines): positions are 0-based, captured when the hunk opens. Equal
+    // lines close it — a hunk is a maximal run of changes.
+    let mut open: Option<(usize, usize, Vec<HunkLine>, Vec<HunkLine>)> = None;
+    let mut old_idx = 0usize;
+    let mut new_idx = 0usize;
+    for change in TextDiff::from_lines(old, new).iter_all_changes() {
+        let value = change.value();
+        match change.tag() {
+            ChangeTag::Equal => {
+                let n = value.lines().count();
+                old_idx += n;
+                new_idx += n;
+                if let Some(h) = open.take() {
+                    hunks.push(finish_hunk(h));
+                }
+            }
+            ChangeTag::Delete => {
+                let slot = open.get_or_insert_with(|| (old_idx, new_idx, Vec::new(), Vec::new()));
+                for text in value.lines() {
+                    slot.2.push(HunkLine { tag: Tag::Delete, text: text.to_owned() });
+                }
+                old_idx += value.lines().count();
+            }
+            ChangeTag::Insert => {
+                let slot = open.get_or_insert_with(|| (old_idx, new_idx, Vec::new(), Vec::new()));
+                for text in value.lines() {
+                    slot.3.push(HunkLine { tag: Tag::Add, text: text.to_owned() });
+                }
+                new_idx += value.lines().count();
+            }
+        }
+    }
+    if let Some(h) = open.take() {
+        hunks.push(finish_hunk(h));
+    }
+    Diff { hunks, untracked: false }
+}
+
+/// Close an open hunk: the body in unified-diff order (deletes before
+/// adds) and the 1-based headers described on [`synthesize_diff`].
+fn finish_hunk(
+    (old_pos, new_pos, deletes, adds): (usize, usize, Vec<HunkLine>, Vec<HunkLine>),
+) -> Hunk {
+    let old_len = deletes.len() as u32;
+    let new_len = adds.len() as u32;
+    let mut body = deletes;
+    body.extend(adds);
+    Hunk {
+        old_start: if old_len > 0 { old_pos as u32 + 1 } else { old_pos as u32 },
+        old_len,
+        // Pure deletions (new_len == 0) carry the 1-based position of
+        // the deleted block — except a start-of-file deletion, which
+        // keeps git's `+0,0`.
+        new_start: if new_len > 0 || new_pos > 0 {
+            new_pos as u32 + 1
+        } else {
+            0
+        },
+        new_len,
+        body,
     }
 }
 
@@ -592,6 +685,144 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "x\n").unwrap();
         assert!(Diff::load("HEAD", &path).is_none(), "no repo, no diff");
+    }
+
+    /// The pre-normalization reload-diff scan (the old reload_source
+    /// walk): frozen here as the oracle the synthesized diff must
+    /// reproduce — the diff-scope step 1 promise was that marks and
+    /// counts stay exactly as before.
+    fn legacy_reload_scan(old: &str, new: &str) -> (HashSet<usize>, HashSet<usize>) {
+        use similar::{ChangeTag, TextDiff};
+        let diff = TextDiff::from_lines(old, new);
+        let mut changed: HashSet<usize> = HashSet::new();
+        let mut deleted_before: HashSet<usize> = HashSet::new();
+        let mut new_idx = 0usize;
+        let new_len = new.lines().count();
+        for change in diff.iter_all_changes() {
+            let n = change.value().lines().count();
+            match change.tag() {
+                ChangeTag::Equal => new_idx += n,
+                ChangeTag::Insert => {
+                    for i in 0..n {
+                        changed.insert(new_idx + i);
+                    }
+                    new_idx += n;
+                }
+                ChangeTag::Delete => {
+                    // The line at `new_idx` (or the last line for an
+                    // end-of-file deletion) follows this deletion block.
+                    let mark = new_idx.min(new_len.saturating_sub(1));
+                    if new_len > 0 {
+                        deleted_before.insert(mark);
+                    }
+                }
+            }
+        }
+        (changed, deleted_before)
+    }
+
+    /// Case table: (old, new, exact +N/-M) covering every shape the
+    /// reload diff can take.
+    const DIFF_CASES: &[(&str, &str, (usize, usize))] = &[
+        // 挿入のみ (mid-file): two lines spliced after old line 2.
+        ("one\ntwo\nthree\nfour\n", "one\ntwo\nX\nY\nthree\nfour\n", (2, 0)),
+        // 挿入のみ (start of file).
+        ("one\ntwo\nthree\n", "X\none\ntwo\nthree\n", (1, 0)),
+        // 削除のみ (mid-file): drop five,six,seven.
+        (
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n",
+            "one\ntwo\nthree\nfour\neight\nnine\nten\n",
+            (0, 3),
+        ),
+        // 削除のみ (EOF).
+        ("one\ntwo\nthree\nfour\n", "one\ntwo\n", (0, 2)),
+        // 削除のみ (start of file).
+        ("one\ntwo\nthree\n", "three\n", (0, 2)),
+        // 削除のみ (whole file).
+        ("one\ntwo\nthree\n", "", (0, 3)),
+        // 変更 (delete+insert 隣接): one old line → two new lines.
+        ("one\ntwo\nthree\nfour\nfive\n", "one\nX\nY\nthree\nfour\nfive\n", (2, 1)),
+        // 変更: two old lines → one new line.
+        ("one\ntwo\nthree\nfour\n", "one\nX\nfour\n", (1, 2)),
+        // 複数離れた変更: a replacement, a deletion, an append — the
+        // append merges into the last hunk (no equal lines between).
+        ("a\nb\nc\nd\ne\nf\ng\n", "A\nb\nC\nD\ne\nf\nG\nH\n", (5, 4)),
+        // 末尾改行なし (no trailing newline on either side).
+        ("a\nb", "a\nc", (1, 1)),
+        // 同一内容: no hunks at all.
+        ("a\nb\n", "a\nb\n", (0, 0)),
+    ];
+
+    #[test]
+    fn synthesize_diff_matches_the_legacy_reload_scan() {
+        // The important property (diff-scope step 1): the synthesized
+        // diff's mark sets must equal what the old direct TextDiff walk
+        // produced, case by case — marks are displayed behavior, so a
+        // mismatch would show up as changed gutters.
+        for (old, new, _) in DIFF_CASES {
+            let diff = synthesize_diff(old, new);
+            let new_len = new.lines().count();
+            let (want_added, want_deleted) = legacy_reload_scan(old, new);
+            assert_eq!(
+                diff.added(new_len),
+                want_added,
+                "added() diverges from the legacy scan — old:\n{old}new:\n{new}"
+            );
+            assert_eq!(
+                diff.deleted_before(new_len),
+                want_deleted,
+                "deleted_before() diverges from the legacy scan — old:\n{old}new:\n{new}"
+            );
+        }
+    }
+
+    #[test]
+    fn synthesize_diff_counts_are_exact() {
+        // The +N/-M badge is the sum of the hunks' counts() — it must
+        // equal the actual added/deleted line counts of each case.
+        for (old, new, want) in DIFF_CASES {
+            let diff = synthesize_diff(old, new);
+            let got = diff.hunks.iter().fold((0, 0), |(a, d), h| {
+                let (x, y) = h.counts();
+                (a + x, d + y)
+            });
+            assert_eq!(got, *want, "old:\n{old}new:\n{new}");
+        }
+    }
+
+    #[test]
+    fn synthesize_diff_emits_conventional_hunk_headers() {
+        // Pure insertion: git's own zero-length-side convention
+        // (`@@ -2,0 +3,2 @@`), body all adds.
+        let d = synthesize_diff("one\ntwo\nthree\nfour\n", "one\ntwo\nX\nY\nthree\nfour\n");
+        let h = &d.hunks[0];
+        assert_eq!((h.old_start, h.old_len, h.new_start, h.new_len), (2, 0, 3, 2));
+        assert_eq!(h.body.iter().map(|l| l.tag).collect::<Vec<_>>(), vec![Tag::Add, Tag::Add]);
+        assert_eq!(h.body[0].text, "X");
+        // Pure deletion mid-file: new_start is the 1-based position of
+        // the deleted block (the form owner/deleted_before need with
+        // zero context — git's bare `+4,0` assumes its 3 context lines).
+        let d = synthesize_diff(
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n",
+            "one\ntwo\nthree\nfour\neight\nnine\nten\n",
+        );
+        let h = &d.hunks[0];
+        assert_eq!((h.old_start, h.old_len, h.new_start, h.new_len), (5, 3, 5, 0));
+        assert_eq!(h.owner(7), 4, "the line following the deleted block");
+        assert_eq!(h.anchor(7), 4, "a jump lands on that line");
+        assert_eq!(d.hunk_at(4, 7), Some(0));
+        assert_eq!(d.hunk_at(3, 7), None, "the line before is not on the hunk");
+        assert_eq!(h.old_lines(), vec!["five", "six", "seven"]);
+        // Start-of-file deletion keeps git's `+0,0`.
+        let d = synthesize_diff("one\ntwo\nthree\n", "three\n");
+        assert_eq!((d.hunks[0].old_start, d.hunks[0].new_start), (1, 0));
+        // Modification: both sides 1-based, deletes before adds.
+        let d = synthesize_diff("one\ntwo\nthree\nfour\nfive\n", "one\nX\nY\nthree\nfour\nfive\n");
+        let h = &d.hunks[0];
+        assert_eq!((h.old_start, h.old_len, h.new_start, h.new_len), (2, 1, 2, 2));
+        let tags: Vec<Tag> = h.body.iter().map(|l| l.tag).collect();
+        assert_eq!(tags, vec![Tag::Delete, Tag::Add, Tag::Add]);
+        assert!(!d.untracked, "a synthesized diff is never untracked");
     }
 
     #[test]

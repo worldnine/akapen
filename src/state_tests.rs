@@ -1169,22 +1169,25 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn line_change_counts_trim_prefix_and_suffix() {
-        assert_eq!(line_change_counts(&[], &[]), (0, 0));
-        let old: Vec<String> = (1..=10).map(|i| format!("line{i}")).collect();
-        let mut new = old.clone();
-        assert_eq!(line_change_counts(&old, &new), (0, 0));
-        // Agent truncates the tail.
-        new.truncate(7);
-        assert_eq!(line_change_counts(&old, &new), (0, 3));
-        // Agent inserts lines in the middle.
-        new = old.clone();
-        new.splice(3..3, ["x".into(), "y".into()]);
-        assert_eq!(line_change_counts(&old, &new), (2, 0));
-        // Agent replaces a middle line (counts as +1/-1).
-        new = old.clone();
-        new[4] = "changed".into();
-        assert_eq!(line_change_counts(&old, &new), (1, 1));
+    fn reload_reports_exact_diff_counts() {
+        // The +N/-M badge used to be a prefix/suffix approximation; it is
+        // now the same hunks the marks derive from. This case splits the
+        // two: the old approximation reported +2/-2 here (prefix `line1`,
+        // no common suffix), the exact diff is +1/-1.
+        let (mut app, _dir) = make_app_keep(3, Mode::Source);
+        std::fs::write(app.current_file_path(), "line1\nline3\nX\n").unwrap();
+        assert!(reload_source(&mut app).is_ok());
+        assert_eq!(app.last_change, Some((1, 1)), "exact diff, not the old 2/-2 approximation");
+        let diff = app.last_diff.as_ref().expect("the reload diff is stored");
+        // Two hunks (the equal `line3` splits the deletion from the
+        // insertion), one line deleted and one added in total.
+        assert_eq!(diff.hunks.len(), 2);
+        assert_eq!(diff.hunks[0].counts(), (0, 1));
+        assert_eq!(diff.hunks[1].counts(), (1, 0));
+        // The marks and the badge derive from the same diff.
+        let len = app.source.len();
+        assert_eq!(app.last_added, diff.added(len));
+        assert_eq!(app.last_deleted_before, diff.deleted_before(len));
     }
 
     #[test]
@@ -1200,6 +1203,7 @@ use crate::comment::Selection;
         assert_eq!(app.source.len(), 2, "new content is loaded");
         assert!(app.last_added.is_empty(), "no diff gutters in reply mode");
         assert!(app.last_deleted_before.is_empty(), "no deletion markers");
+        assert!(app.last_diff.is_none(), "no reload diff in reply mode");
         assert_eq!(app.last_change, None, "no +N/-M badge in reply mode");
         assert!(!app.file_changed, "reload clears the pending prompt");
     }
@@ -1250,6 +1254,10 @@ use crate::comment::Selection;
         assert_eq!(app.source.len(), 6, "r replaces the in-memory source");
         assert!(!app.file_changed, "r clears the pending prompt");
         assert_eq!(app.last_change, Some((1, 0)));
+        let diff = app.last_diff.as_ref().expect("the reload diff is stored");
+        assert_eq!(diff.hunks.len(), 1);
+        assert_eq!(diff.hunks[0].counts(), (1, 0));
+        assert_eq!(app.last_added, diff.added(6), "the marks come from the stored diff");
         // A fresh change can be ignored with i.
         app.file_changed = true;
         on_source_key(&mut app, KeyCode::Char('i'), KeyModifiers::NONE, None);
@@ -2096,6 +2104,24 @@ use crate::comment::Selection;
         expire_chord(&mut app);
         assert_eq!(app.current_file_index, 0);
         assert_eq!(app.mode, Mode::View, "per-file mode restored");
+    }
+
+    #[test]
+    fn last_diff_rides_along_file_switches() {
+        // The reload diff is per-file state: it must survive a switch
+        // away and back (and not leak into the other file).
+        let (mut app, _dir) = make_session();
+        let d = crate::git::synthesize_diff("a\n", "a\nb\n");
+        app.last_diff = Some(d.clone());
+        on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
+        assert_eq!(app.current_file_index, 1);
+        assert!(app.last_diff.is_none(), "the other file has its own diff");
+        on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
+        expire_chord(&mut app);
+        let d = app.last_diff.expect("the diff comes back with the file");
+        assert_eq!(d.hunks.len(), 1);
+        assert_eq!(d.hunks[0].counts(), (1, 0));
     }
 
     #[test]

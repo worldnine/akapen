@@ -212,6 +212,7 @@ fn activate_first_file(app: &mut App) {
     app.view = std::mem::take(&mut fs.view);
     app.file_stamp = fs.file_stamp;
     app.last_loaded_stamp = fs.last_loaded_stamp;
+    app.last_diff = fs.last_diff.take();
     app.git_diff = fs.git_diff.take();
     app.git_added = std::mem::take(&mut fs.git_added);
     app.git_deleted_before = std::mem::take(&mut fs.git_deleted_before);

@@ -7,8 +7,6 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Instant, SystemTime};
 
-use similar::{ChangeTag, TextDiff};
-
 use ratatui::crossterm::cursor::Hide;
 
 use crate::app::App;
@@ -172,24 +170,6 @@ pub(crate) fn ignore_change(app: &mut App) {
     app.flash("file change ignored");
 }
 
-/// Approximate line-change counts: strip the common prefix and suffix, then
-/// count the remaining old lines as removed and new lines as added. Good
-/// enough for the reload toast (+N/-M); not a real diff (that is the
-/// v1.5 row-diff feature).
-pub(crate) fn line_change_counts(old: &[String], new: &[String]) -> (usize, usize) {
-    let mut p = 0usize;
-    while p < old.len() && p < new.len() && old[p] == new[p] {
-        p += 1;
-    }
-    let mut s = 0usize;
-    while s < old.len().saturating_sub(p) && s < new.len().saturating_sub(p)
-        && old[old.len() - 1 - s] == new[new.len() - 1 - s]
-    {
-        s += 1;
-    }
-    (new.len() - p - s, old.len() - p - s)
-}
-
 /// The git snapshot for one file (3-1): the diff vs `diff_ref` plus the
 /// per-line mark sets, ready to display. `None`/empty outside a git
 /// repository — the non-git behavior is preserved (no marks, `o`
@@ -227,7 +207,6 @@ pub(crate) fn reload_source(app: &mut App) -> anyhow::Result<()> {
         return Ok(()); // touched but unchanged
     }
     let old_content = app.source.content.clone();
-    let old_lines = std::mem::take(&mut app.source.lines);
 
     // Reply mode: each refresh replaces the whole message, so a diff would
     // just mark everything as changed — noise. Skip the diff and the
@@ -236,38 +215,24 @@ pub(crate) fn reload_source(app: &mut App) -> anyhow::Result<()> {
     let (added, removed) = if reply {
         app.last_added.clear();
         app.last_deleted_before.clear();
+        app.last_diff = None;
         (0, 0)
     } else {
-        let (added, removed) = line_change_counts(&old_lines, &new_source.lines);
-        // Diff for line-level highlighting: added/changed lines get a green
-        // `+` gutter; lines immediately after a deletion get a red `-`.
-        let diff = TextDiff::from_lines(&old_content, &new_source.content);
-        let mut changed: HashSet<usize> = HashSet::new();
-        let mut deleted_before: HashSet<usize> = HashSet::new();
-        let mut new_idx = 0usize;
+        // The reload diff, normalized into the same git::Diff structure
+        // the git snapshot uses (diff-scope step 1): the marks and the
+        // +N/-M badge derive from it, so they can never disagree (the
+        // +N/-M used to be a prefix/suffix approximation).
+        let diff = git::synthesize_diff(&old_content, &new_source.content);
         let new_len = new_source.lines.len();
-        for change in diff.iter_all_changes() {
-            let n = change.value().lines().count();
-            match change.tag() {
-                ChangeTag::Equal => new_idx += n,
-                ChangeTag::Insert => {
-                    for i in 0..n {
-                        changed.insert(new_idx + i);
-                    }
-                    new_idx += n;
-                }
-                ChangeTag::Delete => {
-                    // The line at `new_idx` (or the last line for an
-                    // end-of-file deletion) follows this deletion block.
-                    let mark = new_idx.min(new_len.saturating_sub(1));
-                    if new_len > 0 {
-                        deleted_before.insert(mark);
-                    }
-                }
-            }
-        }
-        app.last_added = changed;
-        app.last_deleted_before = deleted_before;
+        let added_set = diff.added(new_len);
+        let deleted_set = diff.deleted_before(new_len);
+        let (added, removed) = diff.hunks.iter().fold((0, 0), |(a, d), h| {
+            let (x, y) = h.counts();
+            (a + x, d + y)
+        });
+        app.last_diff = Some(diff);
+        app.last_added = added_set;
+        app.last_deleted_before = deleted_set;
         (added, removed)
     };
 

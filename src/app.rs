@@ -113,6 +113,11 @@ pub(crate) struct FileState {
     pub(crate) last_change: Option<(usize, usize)>,
     pub(crate) last_added: HashSet<usize>,
     pub(crate) last_deleted_before: HashSet<usize>,
+    /// The diff the last reload synthesized (diff-scope step 1: the
+    /// reload path now builds the same `git::Diff` structure the git
+    /// snapshot uses, so marks, +N/-M, old-side and navigation can share
+    /// one consumer). `None` in reply mode and before the first reload.
+    pub(crate) last_diff: Option<git::Diff>,
     /// Git integration (3章): the startup snapshot vs `git_ref` and the
     /// toggled old-side hunk, if any. `None`/empty outside a repository.
     pub(crate) git_diff: Option<git::Diff>,
@@ -246,6 +251,11 @@ pub(crate) struct App {
     /// Lines in the new file that immediately follow a deletion block
     /// (0-based indices). Marked with a red `-` gutter until next reload.
     pub(crate) last_deleted_before: HashSet<usize>,
+    /// The diff the last reload synthesized (diff-scope step 1): the
+    /// same `git::Diff` structure the git snapshot uses, so marks and
+    /// +N/-M derive from it and the scoped navigation can too. `None` in
+    /// reply mode.
+    pub(crate) last_diff: Option<git::Diff>,
     /// The diff base ref (3-2): HEAD today; a future generation shift
     /// changes this one field.
     pub(crate) git_ref: String,
@@ -357,6 +367,7 @@ impl App {
             last_change: None,
             last_added: HashSet::new(),
             last_deleted_before: HashSet::new(),
+            last_diff: None,
             git_ref: GIT_REF.to_string(),
             git_diff: None,
             git_added: HashSet::new(),
@@ -628,6 +639,7 @@ impl App {
         old.last_change = self.last_change.take();
         old.last_added = std::mem::take(&mut self.last_added);
         old.last_deleted_before = std::mem::take(&mut self.last_deleted_before);
+        old.last_diff = self.last_diff.take();
         old.git_diff = self.git_diff.take();
         old.git_added = std::mem::take(&mut self.git_added);
         old.git_deleted_before = std::mem::take(&mut self.git_deleted_before);
@@ -661,6 +673,7 @@ impl App {
         self.last_change = new.last_change.take();
         self.last_added = std::mem::take(&mut new.last_added);
         self.last_deleted_before = std::mem::take(&mut new.last_deleted_before);
+        self.last_diff = new.last_diff.take();
         self.git_diff = new.git_diff.take();
         self.git_added = std::mem::take(&mut new.git_added);
         self.git_deleted_before = std::mem::take(&mut new.git_deleted_before);
