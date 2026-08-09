@@ -3353,26 +3353,44 @@ fn open_composer(app: &mut App, return_to: Mode) {
         app.flash_err("empty file — nothing to comment");
         return;
     }
+    let new_len = app.source.len();
     let (start, end) = match app.selection {
         Some(s) => s.range(),
         // No selection: the exact cursor line — a hunk's inside line
         // included. Commenting the WHOLE hunk is a visible act instead:
         // `n`/`F7` jumps select the whole hunk (highlight band), and `c`
         // on that selection targets the hunk.
+        //
+        // EXCEPT on the old side: the whole hunk is what the display
+        // replaced, so `c` with the cursor inside that hunk reads as
+        // "comment this hunk" — a one-new-line note there would surprise
+        // (and the old side has no one-to-one lines anyway).
         None => {
             let line = if app.mode == Mode::View {
                 app.view.cursor
             } else {
                 app.cursor
             };
-            (line, line)
+            if let Some(os) = &app.old_side
+                && app.git_diff.as_ref().and_then(|d| d.hunk_at(line, new_len)) == Some(os.hunk)
+            {
+                let hunk = &app.git_diff.as_ref().unwrap().hunks[os.hunk];
+                match hunk.new_range() {
+                    Some((a, b)) => (a, b),
+                    None => {
+                        let o = hunk.owner(new_len);
+                        (o, o)
+                    }
+                }
+            } else {
+                (line, line)
+            }
         }
     };
     // The composer targets a HUNK when the selection covers exactly one
     // hunk's new range — the `n`/`F7` jump's selection does — or, for a
     // pure-deletion hunk (no new lines), its owner line. The snippet
     // then becomes the hunk's raw diff text.
-    let new_len = app.source.len();
     app.composer_hunk = app.git_diff.as_ref().and_then(|d| {
         d.hunks
             .iter()
@@ -9670,6 +9688,57 @@ mod git_tests {
         assert!(rows[8].starts_with("+ 9 "), "reload mark joins the git mark");
     }
 
+    #[test]
+    fn c_on_the_old_side_comments_the_whole_hunk() {
+        // Old side: the whole hunk IS the display — `c` with the cursor
+        // inside that hunk comments the hunk (raw diff snippet), not a
+        // single new-side line. Outside the hunk, `c` stays a line
+        // comment.
+        let lines: Vec<String> = (1..=20).map(|i| format!("line{i:02}")).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &lines.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
+        let mut work = lines.clone();
+        work[4] = "CHANGED-A".into();
+        work[14] = "CHANGED-B".into();
+        overwrite(&path, &work.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let mut app = git_app(path.clone(), Mode::View);
+        app.view.goto_source_line(4);
+        // o: hunk 0 を old 表示に。
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        assert_eq!(app.old_side.as_ref().unwrap().hunk, 0);
+        // その hunk 内で c (選択なし) → hunk 全体が対象。
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        assert_eq!((app.input_start, app.input_end), (1, 7), "the hunk range");
+        assert!(
+            app.composer_hunk.is_some(),
+            "the snippet becomes the hunk's raw diff"
+        );
+        for ch in "note".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        on_input_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.comments.len(), 1);
+        assert!(app.comments[0].hunk, "flagged as a hunk comment");
+        assert_eq!((app.comments[0].start, app.comments[0].end), (2, 8));
+        // old 表示中でも hunk 外の行ではカーソル行コメント。
+        app.view.goto_source_line(10);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!((app.input_start, app.input_end), (10, 10));
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // source モードでも同じ。
+        let mut app = git_app(path, Mode::Source);
+        app.cursor = 4;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!((app.input_start, app.input_end), (1, 7), "source old side: the hunk");
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    }
     #[test]
     fn o_toggles_the_hunk_to_old_side_in_source_mode() {
         // 3-2: `o` on a changed line replaces the hunk's new lines with
