@@ -67,7 +67,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `j` / `k` | move cursor (extends the range while selecting) |
 | `g` / `G`, `PgUp` / `PgDn`, `Ctrl+u` / `Ctrl+d` | jump / half-page moves |
 | `v` | start selecting lines |
-| `c` | comment on the selection (or cursor line). Re-selecting an existing comment's exact range edits it |
+| `c` | comment the selection (or the cursor line). An EXACT range match re-opens the comment for editing (text prefilled, Enter replaces). To comment a WHOLE hunk: jump with `n` / `F7` (the hunk becomes the visible selection) then `c` — the snippet is then the hunk's raw diff text, deletions included |
 | `n` / `N` | jump to the next / previous comment (selects that comment only — overlapping comments stay separate) |
 | `]` / `[` | next / previous file in the session |
 | `l` | all-comments overlay |

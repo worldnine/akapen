@@ -3348,59 +3348,40 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
 /// Open the inline composer anchored to the current selection (or cursor
 /// line). Shared by source-mode `c` and view-mode `c` (which selects the
 /// line first).
-/// The comment target when there is no selection: the cursor line —
-/// unless it sits on a git hunk, where the WHOLE hunk is the natural
-/// target (the same range `F7` selects). Commenting a single line still
-/// works via `v`; unchanged lines keep the cursor-line behavior. This
-/// also makes `c` while the old side is displayed anchor to the hunk
-/// instead of the old block's merged first line. The second element is
-/// the hunk's raw diff text for hunk targets (`None` otherwise): the
-/// comment's snippet becomes the hunk as-is, so the agent sees the
-/// change itself — deletions included.
-fn comment_target(app: &App) -> ((usize, usize), Option<String>) {
-    let line = if app.mode == Mode::View {
-        app.view.cursor
-    } else {
-        app.cursor
-    };
-    let new_len = app.source.len();
-    match app.git_diff.as_ref().and_then(|d| d.hunk_at(line, new_len)) {
-        Some(h) => {
-            let hunk = &app.git_diff.as_ref().unwrap().hunks[h];
-            let range = match hunk.new_range() {
-                Some(r) => r,
-                None => {
-                    let o = hunk.owner(new_len);
-                    (o, o)
-                }
-            };
-            (range, Some(hunk.diff_text()))
-        }
-        None => ((line, line), None),
-    }
-}
-
 fn open_composer(app: &mut App, return_to: Mode) {
     if app.source.is_empty() {
         app.flash_err("empty file — nothing to comment");
         return;
     }
-    let ((start, end), hunk_text) = match app.selection {
-        Some(s) => (s.range(), None),
+    let (start, end) = match app.selection {
+        Some(s) => s.range(),
+        // No selection: the exact cursor line — a hunk's inside line
+        // included. Commenting the WHOLE hunk is a visible act instead:
+        // `n`/`F7` jumps select the whole hunk (highlight band), and `c`
+        // on that selection targets the hunk.
         None => {
-            let t = comment_target(app);
-            // View mode selects the target so the highlight band shows
-            // while composing (source mode keeps its cursor-row band).
-            if app.mode == Mode::View {
-                app.selection = Some(Selection {
-                    anchor: t.0 .0,
-                    cursor: t.0 .1,
-                });
-            }
-            t
+            let line = if app.mode == Mode::View {
+                app.view.cursor
+            } else {
+                app.cursor
+            };
+            (line, line)
         }
     };
-    app.composer_hunk = hunk_text;
+    // The composer targets a HUNK when the selection covers exactly one
+    // hunk's new range — the `n`/`F7` jump's selection does — or, for a
+    // pure-deletion hunk (no new lines), its owner line. The snippet
+    // then becomes the hunk's raw diff text.
+    let new_len = app.source.len();
+    app.composer_hunk = app.git_diff.as_ref().and_then(|d| {
+        d.hunks
+            .iter()
+            .find(|h| match h.new_range() {
+                Some((a, b)) => (a, b) == (start, end),
+                None => start == end && h.owner(new_len) == start,
+            })
+            .map(|h| h.diff_text())
+    });
     // An EXACT range match flips the composer into re-edit mode: the
     // comment's text is prefilled and Enter replaces it instead of adding
     // a stacked duplicate. Any other range adds a new comment.
@@ -6886,9 +6867,8 @@ mod state_tests {
         on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
         assert_eq!(app.mode, Mode::Input, "c opens the composer right away");
         assert_eq!(
-            app.selection,
-            Some(Selection::new(0)),
-            "the cursor line is selected first"
+            app.selection, None,
+            "bare c does not manufacture a selection — the target line stays visible"
         );
         assert_eq!(app.input_start, 0);
         assert_eq!(app.input_end, 0);
@@ -10155,26 +10135,38 @@ mod git_tests {
 
     #[test]
     fn c_on_a_hunk_line_comments_the_whole_hunk() {
-        // `c` with no selection on a line inside a git hunk anchors the
-        // comment to the WHOLE hunk (the range F7 selects) — a bare `c`
-        // used to produce a single-line comment that read like a line
-        // note, not a change note. `v` still overrides with a custom
-        // range; unchanged lines keep the cursor-line behavior.
+        // The hunk-wide comment is a VISIBLE act: `n`/`F7` jumps select
+        // the whole hunk (highlight band), and `c` on that selection
+        // targets the hunk. A bare `c` (no selection) comments the exact
+        // cursor line — a hunk's inside line included — so single-line
+        // notes stay possible anywhere.
         let dir = tempfile::tempdir().unwrap();
         let path = init_repo(dir.path(), &["one", "two", "three", "four", "five"]);
         overwrite(&path, &["one", "two", "CHANGED", "four", "five"]);
         let mut app = git_app(path.clone(), Mode::Source);
+        // Bare c on the changed line: the exact line, not the hunk.
         app.cursor = 2; // the changed line, no selection
         on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
         assert_eq!(app.mode, Mode::Input);
-        // 5-line file, change at line 3: the hunk covers the whole file.
+        assert_eq!((app.input_start, app.input_end), (2, 2), "the cursor line");
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // Bare c on a CONTEXT line of the hunk: also the exact line.
+        app.cursor = 0;
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!((app.input_start, app.input_end), (0, 0));
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // n (or F7) selects the whole hunk first — the target is visible
+        // as the highlight band — and c then comments the HUNK.
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.selection, Some(Selection { anchor: 0, cursor: 4 }));
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
         assert_eq!((app.input_start, app.input_end), (0, 4), "the hunk range");
         for ch in "note".chars() {
             on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
         }
         on_input_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.comments.len(), 1);
-        assert_eq!((app.comments[0].start, app.comments[0].end), (1, 5));
         // The comment carries the hunk's raw diff as its snippet: the
         // agent sees the change itself, deletions included.
         let c = &app.comments[0];
@@ -10195,17 +10187,37 @@ mod git_tests {
         let reply = export::format_all_reply(&app.comments);
         assert!(reply.contains("> @@ -1,5 +1,5 @@"), "blockquoted diff: {reply}");
         assert!(reply.contains("> -three"), "blockquoted deletions: {reply}");
-        // A v-selection still wins (single line).
-        app.selection = Some(Selection::new(2));
+        // A v-selection of an arbitrary range comments that range (not
+        // the hunk) — and a non-hunk range is NOT flagged as a hunk.
+        app.comments.clear();
+        app.selection = None;
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
+        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 2 }));
         on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
-        assert_eq!((app.input_start, app.input_end), (2, 2));
-        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        // View mode: c on a hunk line also targets the hunk.
+        assert_eq!((app.input_start, app.input_end), (1, 2));
+        for ch in "line note".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        on_input_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let c = &app.comments[0];
+        assert!(!c.hunk, "a partial selection is a line comment, not a hunk");
+        assert_eq!((c.start, c.end), (2, 3));
+        // View mode: bare c comments the exact view line; c after an n
+        // jump (hunk selected) comments the hunk.
         let mut app = git_app(path.clone(), Mode::View);
         app.view.goto_source_line(2);
         on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
         assert_eq!(app.mode, Mode::Input);
-        assert_eq!((app.input_start, app.input_end), (0, 4), "view c targets the hunk");
+        assert_eq!((app.input_start, app.input_end), (2, 2), "view c: the exact line");
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // n from OUTSIDE the hunk (cursor 0) selects the whole hunk.
+        app.view.goto_source_line(0);
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.selection, Some(Selection { anchor: 0, cursor: 4 }));
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!((app.input_start, app.input_end), (0, 4), "view c on the hunk selection");
         on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     }
 
