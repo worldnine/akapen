@@ -1906,7 +1906,12 @@ fn open_composer(app: &mut App, return_to: Mode) {
     // The composer targets a HUNK when the selection covers exactly one
     // hunk's new range — the `n`/`F7` jump's selection does — or, for a
     // pure-deletion hunk (no new lines), its owner line. The snippet
-    // then becomes the hunk's raw diff text.
+    // then becomes the hunk's raw diff text. A bare `c` (no selection)
+    // on a deletion mark row (3-1) does too: the mark means "deleted
+    // above", and a one-line snippet of the surviving line would not
+    // tell the agent a deletion exists — the hunk that dropped the
+    // deletion carries it (reload-only marks have no git hunk to attach,
+    // so they stay plain line comments).
     app.composer_hunk = app.git_diff.as_ref().and_then(|d| {
         d.hunks
             .iter()
@@ -1915,6 +1920,17 @@ fn open_composer(app: &mut App, return_to: Mode) {
                 None => start == end && h.owner(new_len) == start,
             })
             .map(|h| h.diff_text())
+            .or_else(|| {
+                if app.selection.is_none()
+                    && start == end
+                    && (app.last_deleted_before.contains(&start)
+                        || app.git_deleted_before.contains(&start))
+                {
+                    deletion_hunk_at(d, start, new_len).map(|i| d.hunks[i].diff_text())
+                } else {
+                    None
+                }
+            })
     });
     // An EXACT range match flips the composer into re-edit mode: the
     // comment's text is prefilled and Enter replaces it instead of adding

@@ -508,8 +508,8 @@ pub(crate) fn view_changed_flags(marks: &HashSet<usize>, n_lines: usize) -> Vec<
 }
 
 /// Per-line flags: which source lines are in `marks` (the scoped mark
-/// set — see [`scoped_mark_sets`]). The view gutter shows a red `▌` for
-/// the lines following a deletion block.
+/// set — see [`scoped_mark_sets`]). The view gutter shows a red
+/// top-edge `▀` for the lines following a deletion block.
 pub(crate) fn view_deleted_flags(marks: &HashSet<usize>, n_lines: usize) -> Vec<bool> {
     let mut deleted = vec![false; n_lines];
     for &i in marks {
@@ -520,13 +520,73 @@ pub(crate) fn view_deleted_flags(marks: &HashSet<usize>, n_lines: usize) -> Vec<
     deleted
 }
 
+/// The number of deleted lines (vs the git ref) whose position mark (3-1)
+/// sits on new-file `line`: the sum of the Delete lines of every hunk
+/// whose deletion block ends right above `line` — the footer's
+/// `-N deleted above` hint reads it (see [`crate::chrome::footer_hints`]).
+/// The derivation lives here, in one place, mirroring
+/// [`git::Diff::deleted_before`] exactly (EOF clamp included), so a
+/// future diff-scope change swaps only this function and the caller never
+/// walks hunks itself.
+pub(crate) fn deleted_above_count(diff: &git::Diff, line: usize, new_len: usize) -> usize {
+    if new_len == 0 || line >= new_len {
+        return 0;
+    }
+    let mut count = 0usize;
+    for h in &diff.hunks {
+        // Walk the body tracking the new index; every Delete line drops
+        // its mark on the following new line, clamped to the last line
+        // for an EOF deletion — exactly `deleted_before`'s rule.
+        let mut new_idx = h.new_start.saturating_sub(1) as usize;
+        for l in &h.body {
+            match l.tag {
+                git::Tag::Add | git::Tag::Context => new_idx += 1,
+                git::Tag::Delete => {
+                    if new_idx.min(new_len - 1) == line {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// The index of the first hunk whose deletion block drops its position
+/// mark (3-1) on new-file `line` — the hunk a bare `c` on a deletion mark
+/// row attaches to as the comment's diff snippet (open_composer). Uses
+/// the same walk as
+/// [`deleted_above_count`] / [`git::Diff::deleted_before`] (EOF clamp
+/// included); when several hunks land on the same line (EOF clamps) the
+/// first one wins.
+pub(crate) fn deletion_hunk_at(diff: &git::Diff, line: usize, new_len: usize) -> Option<usize> {
+    if new_len == 0 || line >= new_len {
+        return None;
+    }
+    for (i, h) in diff.hunks.iter().enumerate() {
+        let mut new_idx = h.new_start.saturating_sub(1) as usize;
+        for l in &h.body {
+            match l.tag {
+                git::Tag::Add | git::Tag::Context => new_idx += 1,
+                git::Tag::Delete => {
+                    if new_idx.min(new_len - 1) == line {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod git_tests {
-    use super::{DiffSource, scoped_hunk_refs};
+    use super::{DiffSource, deleted_above_count, deletion_hunk_at, scoped_hunk_refs};
     use crate::app::{App, DiffScope, FileState, Mode};
     use crate::comment::Selection;
     use crate::config::{Config, EscQuit};
     use crate::export;
+    use crate::git;
     use crate::highlight::{Highlighter, syntax_for};
     use crate::overlay::{Overlay, OverlayTab};
     use crate::ime::ImeMode;
@@ -1969,5 +2029,219 @@ mod git_tests {
         // A content-changing reload under the unpinned Git scope
         // auto-transitions to Last (diff-scope step ①).
         assert_eq!(app.scope, DiffScope::Last, "the new edit is reviewed via the reload diff");
+    }
+
+    #[test]
+    fn deleted_above_count_sums_the_deletions_landing_on_a_line() {
+        // Pure-deletion hunk: both deleted lines sit above new line 1
+        // (0-based 0), so the count there is 2 and nowhere else.
+        let pure = git::Diff {
+            untracked: false,
+            hunks: vec![git::Hunk {
+                old_start: 1,
+                old_len: 2,
+                new_start: 1,
+                new_len: 0,
+                body: vec![
+                    git::HunkLine { tag: git::Tag::Delete, text: "a".into() },
+                    git::HunkLine { tag: git::Tag::Delete, text: "b".into() },
+                ],
+            }],
+        };
+        assert_eq!(deleted_above_count(&pure, 0, 5), 2);
+        assert_eq!(deleted_above_count(&pure, 1, 5), 0);
+
+        // Change hunk (delete+add pairs): one deleted line above each
+        // added line, none above the trailing context line.
+        let change = git::Diff {
+            untracked: false,
+            hunks: vec![git::Hunk {
+                old_start: 1,
+                old_len: 3,
+                new_start: 1,
+                new_len: 2,
+                body: vec![
+                    git::HunkLine { tag: git::Tag::Delete, text: "a".into() },
+                    git::HunkLine { tag: git::Tag::Add, text: "a2".into() },
+                    git::HunkLine { tag: git::Tag::Delete, text: "b".into() },
+                    git::HunkLine { tag: git::Tag::Add, text: "b2".into() },
+                    git::HunkLine { tag: git::Tag::Context, text: "c".into() },
+                ],
+            }],
+        };
+        assert_eq!(deleted_above_count(&change, 0, 5), 1, "above the first added line");
+        assert_eq!(deleted_above_count(&change, 1, 5), 1, "above the second added line");
+        assert_eq!(deleted_above_count(&change, 2, 5), 0, "context lines have nothing above");
+        assert_eq!(deleted_above_count(&change, 3, 5), 0);
+
+        // EOF deletion: the marks clamp to the file's last line (same
+        // rule as `deleted_before`), so the count lands there.
+        let eof = git::Diff {
+            untracked: false,
+            hunks: vec![git::Hunk {
+                old_start: 2,
+                old_len: 2,
+                new_start: 3,
+                new_len: 0,
+                body: vec![
+                    git::HunkLine { tag: git::Tag::Delete, text: "x".into() },
+                    git::HunkLine { tag: git::Tag::Delete, text: "y".into() },
+                ],
+            }],
+        };
+        assert_eq!(deleted_above_count(&eof, 1, 2), 2, "EOF deletion clamps to the last line");
+        assert_eq!(deleted_above_count(&eof, 0, 2), 0);
+        assert_eq!(deleted_above_count(&eof, 1, 0), 0, "an empty file has no marks");
+        assert_eq!(deleted_above_count(&eof, 2, 2), 0, "out-of-range lines count nothing");
+    }
+
+    #[test]
+    fn deletion_hunk_at_finds_the_first_hunk_dropping_a_deletion_on_the_line() {
+        // Same walk as `deleted_above_count`: the index of the first
+        // hunk whose Delete lands on `line` (EOF clamp included) — the
+        // hunk a bare `c` on a deletion mark row attaches to.
+        let pure = git::Diff {
+            untracked: false,
+            hunks: vec![git::Hunk {
+                old_start: 1,
+                old_len: 2,
+                new_start: 1,
+                new_len: 0,
+                body: vec![
+                    git::HunkLine { tag: git::Tag::Delete, text: "a".into() },
+                    git::HunkLine { tag: git::Tag::Delete, text: "b".into() },
+                ],
+            }],
+        };
+        assert_eq!(deletion_hunk_at(&pure, 0, 5), Some(0));
+        assert_eq!(deletion_hunk_at(&pure, 1, 5), None, "no deletion lands on line 1");
+        assert_eq!(deletion_hunk_at(&pure, 0, 0), None, "an empty file has no hunks");
+
+        // Change hunk: deletes land on lines 0 and 1, nowhere else.
+        let change = git::Diff {
+            untracked: false,
+            hunks: vec![git::Hunk {
+                old_start: 1,
+                old_len: 3,
+                new_start: 1,
+                new_len: 2,
+                body: vec![
+                    git::HunkLine { tag: git::Tag::Delete, text: "a".into() },
+                    git::HunkLine { tag: git::Tag::Add, text: "a2".into() },
+                    git::HunkLine { tag: git::Tag::Delete, text: "b".into() },
+                    git::HunkLine { tag: git::Tag::Add, text: "b2".into() },
+                    git::HunkLine { tag: git::Tag::Context, text: "c".into() },
+                ],
+            }],
+        };
+        assert_eq!(deletion_hunk_at(&change, 0, 5), Some(0));
+        assert_eq!(deletion_hunk_at(&change, 1, 5), Some(0));
+        assert_eq!(deletion_hunk_at(&change, 2, 5), None);
+
+        // EOF deletion clamps to the last line; when TWO hunks clamp to
+        // the same line the FIRST one wins.
+        let eof = git::Diff {
+            untracked: false,
+            hunks: vec![
+                git::Hunk {
+                    old_start: 2,
+                    old_len: 2,
+                    new_start: 3,
+                    new_len: 0,
+                    body: vec![
+                        git::HunkLine { tag: git::Tag::Delete, text: "x".into() },
+                        git::HunkLine { tag: git::Tag::Delete, text: "y".into() },
+                    ],
+                },
+                git::Hunk {
+                    old_start: 4,
+                    old_len: 1,
+                    new_start: 3,
+                    new_len: 0,
+                    body: vec![git::HunkLine { tag: git::Tag::Delete, text: "z".into() }],
+                },
+            ],
+        };
+        assert_eq!(deletion_hunk_at(&eof, 1, 2), Some(0), "both hunks clamp to the last line");
+        assert_eq!(deletion_hunk_at(&eof, 0, 2), None);
+    }
+
+    #[test]
+    fn c_on_a_deletion_mark_row_carries_the_hunk_diff() {
+        // A bare `c` (no selection) on a deletion mark row (3-1) must
+        // attach the hunk that dropped the deletion as the comment's
+        // snippet — a one-line snippet of the surviving line would not
+        // tell the agent a deletion exists. Mark-less lines and explicit
+        // selections keep their plain line-comment behavior.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three", "four", "five"]);
+        overwrite(&path, &["one", "two", "four", "FIVE"]); // -three, -five, +FIVE
+        let mut app = git_app(path.clone(), Mode::Source);
+        // Line 3 (0-based 2, "four") is a context line INSIDE the hunk
+        // and the mark row of the deleted "three": the bare c must carry
+        // the hunk's raw diff.
+        assert!(app.git_deleted_before.contains(&2), "the following line is marked");
+        app.cursor = 2;
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        let hunk_text = app
+            .composer_hunk
+            .clone()
+            .expect("the mark row's bare c attaches the hunk diff");
+        assert!(hunk_text.contains("-three"), "the deletion rides along: {hunk_text}");
+        assert!(hunk_text.contains("-five"), "the second deletion rides along: {hunk_text}");
+        assert!(hunk_text.contains("+FIVE"), "the add rides along: {hunk_text}");
+        for ch in "deleted".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        on_input_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let c = &app.comments[0];
+        assert!(c.hunk, "flagged as a hunk comment");
+        assert_eq!((c.start, c.end), (3, 3), "still a one-line comment");
+        assert!(c.lines.contains("-three"), "the snippet is the hunk diff: {}", c.lines);
+
+        // The other mark row (the changed line "FIVE", 0-based 3) and a
+        // mark-less line stay plain line comments.
+        app.cursor = 3;
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert!(
+            app.composer_hunk.is_some(),
+            "the changed line is a deletion mark row too"
+        );
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        app.cursor = 0;
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert!(app.composer_hunk.is_none(), "a mark-less line stays a line comment");
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // A reload-only mark (no git deletion above): nothing to attach.
+        app.last_deleted_before.insert(0);
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert!(
+            app.composer_hunk.is_none(),
+            "a reload-only mark has no git hunk to attach"
+        );
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // An explicit selection (even covering the mark row) keeps the
+        // selection behavior: the range is the comment, no hunk.
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert!(
+            app.composer_hunk.is_none(),
+            "an explicit selection is not the bare-c path"
+        );
+        assert_eq!((app.input_start, app.input_end), (1, 2));
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // View mode: the same bare-c path on the mark row.
+        let mut app = git_app(path.clone(), Mode::View);
+        app.view.goto_source_line(2);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert!(
+            app.composer_hunk.is_some(),
+            "view-mode c on the mark row attaches the hunk too"
+        );
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     }
 }
