@@ -380,7 +380,7 @@ pub(crate) fn help_rows(esc_quit: bool, reply: bool, in_git: bool) -> Vec<(&'sta
         rows.push((
             "marks",
             if in_git {
-                "m last/git/both/off"
+                "m last/git/off"
             } else {
                 "m last/off"
             },
@@ -827,7 +827,6 @@ pub(crate) fn draw_changes_overlay(f: &mut Frame, app: &App) {
             DiffScope::Off => " marks off — m: cycle scopes",
             DiffScope::Last => " no reload changes yet — r reloads",
             DiffScope::Git => " no changes yet (git diff vs HEAD)",
-            DiffScope::Both => " no changes yet",
         };
         lines.push(Line::from(Span::styled(empty, dark_gray)));
         lines.push(Line::from(""));

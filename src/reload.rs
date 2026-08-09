@@ -255,7 +255,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     // what the session reviews now. Skipped when the user pinned the
     // scope with `m` (scope_manual), when the reload came from `e` (an
     // edit of one's own is not up for review), and in reply mode (the
-    // scope machinery is off). Last/Both/Off stay put.
+    // scope machinery is off). Last/Off stay put.
     if !reply && !from_editor && app.scope == DiffScope::Git && !app.scope_manual {
         app.scope = DiffScope::Last;
     }

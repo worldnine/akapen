@@ -96,37 +96,33 @@ pub(crate) fn file_len(app: &App, file: usize) -> usize {
 }
 
 /// The diffs the active scope exposes, in resolution order (diff-scope
-/// step ③): Last → the reload diff, Git → the git snapshot, Both → last
-/// then git (last wins on a tie), Off → none. The footer hunk hint and
-/// the composer's hunk-snippet conditions walk this when they need a
-/// concrete diff rather than the merged hunk list.
+/// step ③): Last → the reload diff, Git → the git snapshot, Off → none.
+/// The footer hunk hint and the composer's hunk-snippet conditions walk
+/// this when they need a concrete diff rather than the hunk list.
 pub(crate) fn scoped_diffs(app: &App) -> Vec<&git::Diff> {
     match app.scope {
         DiffScope::Last => app.last_diff.iter().collect(),
         DiffScope::Git => app.git_diff.iter().collect(),
-        DiffScope::Both => app.last_diff.iter().chain(app.git_diff.iter()).collect(),
         DiffScope::Off => Vec::new(),
     }
 }
 
 /// The diff the old-side toggle compares against for the current scope
-/// (diff-scope step ②, spec 3-4): Last → the reload diff, Git / Both →
-/// the git snapshot, Off → none.
+/// (diff-scope step ②, spec 3-4): Last → the reload diff, Git → the
+/// git snapshot, Off → none.
 pub(crate) fn old_side_base_diff(app: &App) -> Option<&git::Diff> {
     match app.scope {
         DiffScope::Last => app.last_diff.as_ref(),
-        DiffScope::Git | DiffScope::Both => app.git_diff.as_ref(),
+        DiffScope::Git => app.git_diff.as_ref(),
         DiffScope::Off => None,
     }
 }
 
 /// The hunks the active scope makes navigable, in anchor order
 /// (diff-scope step ②): Last → the reload diff, Git → the git snapshot,
-/// Both → both merged (a shared anchor resolves ONCE — last wins, so a
-/// change visible in both diffs cannot stop navigation twice), Off →
-/// none. The single resolution the change navigation and the changes
-/// tab share, so "what is marked" and "what is reachable" always agree
-/// with [`scoped_mark_sets`].
+/// Off → none. The single resolution the change navigation and the
+/// changes tab share, so "what is marked" and "what is reachable"
+/// always agree with [`scoped_mark_sets`].
 pub(crate) fn scoped_hunk_refs(app: &App) -> Vec<HunkRef> {
     scoped_hunk_refs_for(app, app.current_file_index)
 }
@@ -142,28 +138,6 @@ pub(crate) fn scoped_hunk_refs_for(app: &App, file: usize) -> Vec<HunkRef> {
         DiffScope::Git => git_diff_for(app, file)
             .map(|d| hunk_refs(DiffSource::Git, d, new_len))
             .unwrap_or_default(),
-        DiffScope::Both => {
-            let mut out = last_diff_for(app, file)
-                .map(|d| hunk_refs(DiffSource::Last, d, new_len))
-                .unwrap_or_default();
-            // The git side joins in anchor order, skipping anchors the
-            // reload diff already covers (last wins).
-            let mut seen: HashSet<usize> = out.iter().map(|r| r.anchor).collect();
-            if let Some(d) = git_diff_for(app, file) {
-                for (i, h) in d.hunks.iter().enumerate() {
-                    let a = h.anchor(new_len);
-                    if seen.insert(a) {
-                        out.push(HunkRef {
-                            source: DiffSource::Git,
-                            index: i,
-                            anchor: a,
-                        });
-                    }
-                }
-            }
-            out.sort_by_key(|r| r.anchor);
-            out
-        }
         DiffScope::Off => Vec::new(),
     }
 }
@@ -190,8 +164,8 @@ pub(crate) fn hunk_ref(app: &App, r: HunkRef) -> Option<&git::Hunk> {
 
 /// The changes tab's entries: the active scope's hunks across every
 /// session file (Last: reload diffs only — files never reloaded have no
-/// entries; Git: the git hunks plus untracked files; Both: both merged
-/// per file, untracked row from the git side; Off: none), in file order.
+/// entries; Git: the git hunks plus untracked files; Off: none), in
+/// file order.
 pub(crate) fn changes_entries(app: &App) -> Vec<ChangesEntry> {
     if app.scope == DiffScope::Off {
         return Vec::new();
@@ -205,7 +179,7 @@ pub(crate) fn changes_entries(app: &App) -> Vec<ChangesEntry> {
                 hunk: r.index,
             });
         }
-        if matches!(app.scope, DiffScope::Git | DiffScope::Both)
+        if app.scope == DiffScope::Git
             && git_diff_for(app, fi).is_some_and(|d| d.untracked)
             && file_len(app, fi) > 0
         {
@@ -317,8 +291,8 @@ pub(crate) fn apply_old_side_state(app: &mut App) {
 
 /// `o`: toggle the hunk under the cursor between old and new display
 /// (3-2). The old-side base follows the scope (spec 3-4): Last compares
-/// against the last loaded content (the synthesized reload diff), Git /
-/// Both against `git_ref` (HEAD today; the loader takes the ref as an
+/// against the last loaded content (the synthesized reload diff), Git
+/// against `git_ref` (HEAD today; the loader takes the ref as an
 /// argument, so a future generation shift only changes what is passed
 /// there). Off disables the toggle.
 pub(crate) fn toggle_old_side(app: &mut App) {
@@ -330,7 +304,7 @@ pub(crate) fn toggle_old_side(app: &mut App) {
     };
     let base_label = match app.scope {
         DiffScope::Last => "last load",
-        DiffScope::Git | DiffScope::Both => "HEAD",
+        DiffScope::Git => "HEAD",
         DiffScope::Off => {
             app.flash_err("marks off — m: cycle scopes");
             return;
@@ -459,7 +433,6 @@ pub(crate) fn jump_hunk(app: &mut App, dir: isize) {
                 "untracked file — nothing to compare"
             }
             DiffScope::Git => "no git changes",
-            DiffScope::Both => "no changes",
         };
         app.flash_err(msg);
         return;
@@ -503,45 +476,21 @@ pub(crate) type Marks = (HashSet<usize>, HashSet<usize>, HashSet<usize>);
 /// The mark sets the active scope selects (diff-scope step ③) — the
 /// single place that turns the scope into concrete per-line mark sets,
 /// read by both the view gutter and the source gutter so they can never
-/// disagree. Returns the REGULAR marks and the git-only marks that
-/// render DIM under Both: `(regular, dim)`, each a [`Marks`] triple.
-/// Last/Git single scopes put everything in `regular` (dim empty); Both
-/// puts the reload marks in `regular` and the git marks no reload mark
-/// covers in `dim` (a line in both renders with the last side's regular
-/// mark — last wins). An untracked file contributes NO marks under the
-/// Git scope (git's all-lines-added mark is noise); under Both only the
-/// reload marks show.
-pub(crate) fn scoped_mark_sets(app: &App) -> (Marks, Marks) {
+/// disagree. An untracked file contributes NO marks under the Git scope
+/// (git's all-lines-added mark is noise).
+pub(crate) fn scoped_mark_sets(app: &App) -> Marks {
     let new_len = app.source.len();
-    let empty = || (HashSet::new(), HashSet::new(), HashSet::new());
-    let last = marks_of(app.last_diff.as_ref(), new_len, &app.last_deleted_before);
-    let untracked = app.git_diff.as_ref().is_some_and(|d| d.untracked);
-    let git = if untracked {
-        empty()
-    } else {
-        marks_of(app.git_diff.as_ref(), new_len, &app.git_deleted_before)
-    };
     match app.scope {
-        DiffScope::Last => (last, empty()),
-        DiffScope::Git => (git, empty()),
-        DiffScope::Both => {
-            // last 優先: a git mark line already covered by ANY last
-            // mark renders as the last side's regular mark; the rest is
-            // git-only (DIM).
-            let last_all: HashSet<usize> = last
-                .0
-                .union(&last.1)
-                .chain(last.2.iter())
-                .copied()
-                .collect();
-            let dim = (
-                git.0.difference(&last_all).copied().collect(),
-                git.1.difference(&last_all).copied().collect(),
-                git.2.difference(&last_all).copied().collect(),
-            );
-            (last, dim)
+        DiffScope::Last => marks_of(app.last_diff.as_ref(), new_len, &app.last_deleted_before),
+        DiffScope::Git => {
+            let untracked = app.git_diff.as_ref().is_some_and(|d| d.untracked);
+            if untracked {
+                (HashSet::new(), HashSet::new(), HashSet::new())
+            } else {
+                marks_of(app.git_diff.as_ref(), new_len, &app.git_deleted_before)
+            }
         }
-        DiffScope::Off => (empty(), empty()),
+        DiffScope::Off => (HashSet::new(), HashSet::new(), HashSet::new()),
     }
 }
 
@@ -666,7 +615,7 @@ mod git_tests {
         on_source_key, on_view_key,
     };
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::{Color, Style};
     use std::collections::HashSet;
     use std::process::Command;
 
@@ -757,9 +706,9 @@ mod git_tests {
         assert!(rows[3].contains("CHANGED"));
         assert!(rows[0].starts_with("> 1 "), "the cursor row keeps the > mark");
         assert!(!rows[9].starts_with("~") && !rows[9].starts_with("+"), "unchanged lines stay clean");
-        // Both merges the reload-diff marks with the git marks: a line
-        // the session itself added is marked too.
-        app.scope = DiffScope::Both;
+        // The Last scope shows the reload diff's marks instead: a line
+        // the session itself added.
+        app.scope = DiffScope::Last;
         app.last_diff = Some(crate::git::Diff {
             hunks: vec![crate::git::Hunk {
                 old_start: 8,
@@ -981,7 +930,6 @@ mod git_tests {
         // The marker column shows `~` on the block and `>` on the cursor.
         let (_, gutter) = app.view.visible_text(
             100,
-            &[],
             &[],
             &[],
             &[],
@@ -1277,8 +1225,8 @@ mod git_tests {
     fn untracked_files_disable_o_and_hide_git_marks() {
         // An untracked file has no HEAD side: the old-side toggle has
         // nothing to compare, and (diff-scope step ①) the Git scope shows
-        // NO marks — git's all-lines-added mark is noise. Both shows only
-        // the reload marks.
+        // NO marks — git's all-lines-added mark is noise. The reload
+        // diff's marks show under Last.
         let dir = tempfile::tempdir().unwrap();
         init_repo(dir.path(), &["tracked"]);
         let untracked = dir.path().join("new.md");
@@ -1293,7 +1241,7 @@ mod git_tests {
             rows[1]
         );
         // A reload diff (the session's own edit on the untracked file)
-        // shows under Both — the git side stays invisible.
+        // shows under Last.
         app.last_diff = Some(crate::git::Diff {
             hunks: vec![crate::git::Hunk {
                 old_start: 0,
@@ -1307,9 +1255,11 @@ mod git_tests {
             }],
             untracked: false,
         });
-        app.scope = DiffScope::Both;
+        app.scope = DiffScope::Last;
         let rows = source_rows(&app);
-        assert!(rows[1].starts_with("+2 "), "Both shows the reload marks: {}", rows[1]);
+        assert!(rows[1].starts_with("+2 "), "the Last scope shows the reload marks: {}", rows[1]);
+        // Git スコープに戻すと untracked ガードが効く（o 無効）。
+        app.scope = DiffScope::Git;
         app.cursor = 1;
         on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         assert!(app.old_side.is_none());
@@ -1942,85 +1892,10 @@ mod git_tests {
     }
 
     #[test]
-    fn both_scope_dims_git_only_marks() {
-        // Diff-scope step ③: under Both the reload marks render regular
-        // and the git-only marks DIM — a line covered by both sides
-        // renders with the last side's regular mark (last wins).
-        let dir = tempfile::tempdir().unwrap();
-        let path = init_repo(
-            dir.path(),
-            &["one", "two", "three", "four", "five", "six"],
-        );
-        overwrite(&path, &["one", "CHANGED", "three", "four", "five", "six"]);
-        let mut app = git_app(path, Mode::Source); // scope Git
-        // The session's own edit: a pure addition at line 5 (0-based).
-        app.last_diff = Some(crate::git::Diff {
-            hunks: vec![crate::git::Hunk {
-                old_start: 5,
-                old_len: 0,
-                new_start: 6,
-                new_len: 1,
-                body: vec![crate::git::HunkLine {
-                    tag: crate::git::Tag::Add,
-                    text: "six".into(),
-                }],
-            }],
-            untracked: false,
-        });
-        app.scope = DiffScope::Both;
-        let (text, _) = build_rows(&app, 100, 75);
-        let mark = |i: usize| text.lines[i].spans[0].clone();
-        assert_eq!(mark(1).content.as_ref(), "~", "git-only rewrite");
-        assert!(
-            mark(1).style.add_modifier.contains(Modifier::DIM),
-            "git-only marks render DIM"
-        );
-        assert_eq!(mark(5).content.as_ref(), "+", "reload addition");
-        assert!(
-            !mark(5).style.add_modifier.contains(Modifier::DIM),
-            "reload marks stay regular"
-        );
-        // Last alone: everything regular.
-        app.scope = DiffScope::Last;
-        let (text, _) = build_rows(&app, 100, 75);
-        assert!(
-            !text.lines[1].spans[0].style.add_modifier.contains(Modifier::DIM),
-            "single-scope marks are never DIM"
-        );
-        // A line both diffs mark: the last side's regular mark wins.
-        app.scope = DiffScope::Both;
-        app.last_diff = Some(crate::git::Diff {
-            hunks: vec![crate::git::Hunk {
-                old_start: 2,
-                old_len: 1,
-                new_start: 2,
-                new_len: 1,
-                body: vec![
-                    crate::git::HunkLine {
-                        tag: crate::git::Tag::Delete,
-                        text: "two".into(),
-                    },
-                    crate::git::HunkLine {
-                        tag: crate::git::Tag::Add,
-                        text: "CHANGED".into(),
-                    },
-                ],
-            }],
-            untracked: false,
-        });
-        let (text, _) = build_rows(&app, 100, 75);
-        assert!(
-            !text.lines[1].spans[0].style.add_modifier.contains(Modifier::DIM),
-            "a line in both diffs renders with the last side's regular mark"
-        );
-    }
-
-    #[test]
     fn hunk_hint_and_composer_follow_the_scope() {
         // Diff-scope step ④: the footer hunk hint and the composer's hunk
         // snippet resolve through the ACTIVE scope — Git shows the git
-        // hunk, Last the reload hunk, Both the merged list (last wins on
-        // the shared anchor), Off neither.
+        // hunk, Last the reload hunk, Off neither.
         let dir = tempfile::tempdir().unwrap();
         let path = init_repo(dir.path(), &["one", "two", "three", "four"]);
         overwrite(&path, &["one", "CHANGED", "three", "four"]);
@@ -2062,12 +1937,6 @@ mod git_tests {
             hints.starts_with("hunk L2-3 +2/-1 · o old side"),
             "last scope: {hints}"
         );
-        app.scope = DiffScope::Both;
-        let hints = footer_hints(&app);
-        assert!(
-            hints.starts_with("hunk L2-3 +2/-1 · o old side"),
-            "both merges last-first: {hints}"
-        );
         app.scope = DiffScope::Off;
         assert!(!footer_hints(&app).contains("hunk L"), "off shows no hint");
 
@@ -2099,7 +1968,7 @@ mod git_tests {
         on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         assert!(app.old_side.is_some());
         on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, DiffScope::Both);
+        assert_eq!(app.scope, DiffScope::Off);
         assert!(app.old_side.is_none(), "the scope switch closes the old side");
         let rows = source_rows(&app);
         assert!(rows[1].contains("CHANGED"), "the new side renders again: {}", rows[1]);
@@ -2164,10 +2033,9 @@ mod git_tests {
     }
 
     #[test]
-    fn both_scope_merges_hunks_by_anchor() {
-        // The Both scope walks both diffs as ONE anchor-ordered list; a
-        // shared anchor resolves once (last wins) so a change visible in
-        // both diffs cannot stop navigation twice.
+    fn scoped_hunk_refs_select_the_scope() {
+        // The navigable hunk list is the active scope's diff's hunks:
+        // Last → the reload diff, Git → the git snapshot, Off → none.
         let dir = tempfile::tempdir().unwrap();
         let path = init_repo(dir.path(), &["one", "two", "three", "four"]);
         let mut app = git_app(path, Mode::Source);
@@ -2189,17 +2057,14 @@ mod git_tests {
             hunks: vec![hunk_at(1), hunk_at(7)],
             untracked: false,
         });
-        app.scope = DiffScope::Both;
-        let refs = scoped_hunk_refs(&app);
-        let anchors: Vec<usize> = refs.iter().map(|r| r.anchor).collect();
-        assert_eq!(anchors, vec![1, 4, 7], "merged and anchor-ordered");
-        assert_eq!(refs[0].source, DiffSource::Last, "the shared anchor resolves as last");
-        assert_eq!(refs[2].source, DiffSource::Git);
-        // Single-scope resolutions are plain pass-throughs.
         app.scope = DiffScope::Last;
-        assert_eq!(scoped_hunk_refs(&app).len(), 2);
+        let anchors: Vec<usize> = scoped_hunk_refs(&app).iter().map(|r| r.anchor).collect();
+        assert_eq!(anchors, vec![1, 4], "last scope: the reload hunks");
+        assert!(scoped_hunk_refs(&app).iter().all(|r| r.source == DiffSource::Last));
         app.scope = DiffScope::Git;
-        assert_eq!(scoped_hunk_refs(&app).len(), 2);
+        let anchors: Vec<usize> = scoped_hunk_refs(&app).iter().map(|r| r.anchor).collect();
+        assert_eq!(anchors, vec![1, 7], "git scope: the snapshot hunks");
+        assert!(scoped_hunk_refs(&app).iter().all(|r| r.source == DiffSource::Git));
         app.scope = DiffScope::Off;
         assert!(scoped_hunk_refs(&app).is_empty());
     }

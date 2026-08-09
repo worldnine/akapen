@@ -203,8 +203,8 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
     };
     // While an external edit is pending the title shows ⚡ (it outranks
     // every scope's count); otherwise the active scope picks the badge
-    // (diff-scope step ①): Last/Both → the reload's +N/-M, Git → the
-    // git snapshot's g+K/-L, Off → nothing.
+    // (diff-scope step ①): Last → the reload's +N/-M, Git → the git
+    // snapshot's g+K/-L, Off → nothing.
     let change = if app.file_changed {
         " ⚡ ".to_string()
     } else {
@@ -365,7 +365,7 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The title's change badge for the active scope (diff-scope step ①).
-/// Last and Both show the last reload's `+N/-M`; Git shows the git
+/// Last shows the last reload's `+N/-M`; Git shows the git
 /// snapshot's `g+K/-L` — the sum of every hunk's [`Hunk::counts`] — and
 /// nothing for an untracked file (no ref side) or an empty diff; Off
 /// shows nothing. The pending ⚡ badge takes precedence (caller).
@@ -386,40 +386,13 @@ fn scoped_change_badge(app: &App) -> String {
             });
             format!(" g+{k}/-{l} ")
         }
-        // Both: the reload's +N/-M first, the git snapshot's g+K/-L
-        // alongside — the marks distinguish the two sources (step ③), so
-        // the title pairs their scales. The path yields to the longer
-        // badge via the existing truncation.
-        DiffScope::Both => {
-            let mut out = String::new();
-            if let Some((a, r)) = app.last_change {
-                out.push_str(&format!(" +{a}/-{r}"));
-            }
-            if let Some(diff) = &app.git_diff
-                && !diff.untracked
-                && !diff.hunks.is_empty()
-            {
-                let (k, l) = diff.hunks.iter().fold((0, 0), |(k, l), h| {
-                    let (a, d) = h.counts();
-                    (k + a, l + d)
-                });
-                if !out.is_empty() {
-                    out.push_str(" ·");
-                }
-                out.push_str(&format!(" g+{k}/-{l}"));
-            }
-            if !out.is_empty() {
-                out.push(' ');
-            }
-            out
-        }
         DiffScope::Off => String::new(),
     }
 }
 
 /// The footer's scope badge (diff-scope step ①): `m:last` / `m:git` /
-/// `m:both` / `m:off`, appended to the hints so the scope is always
-/// visible (spec 3-4). Hidden outside a git repository while Last — the
+/// `m:off`, appended to the hints so the scope is always visible
+/// (spec 3-4). Hidden outside a git repository while Last — the
 /// default there, and the non-git session must look exactly as before
 /// (P1) — and in reply mode, where the scope machinery is off.
 fn scope_footer_hint(app: &App) -> Option<&'static str> {
@@ -430,7 +403,6 @@ fn scope_footer_hint(app: &App) -> Option<&'static str> {
         (DiffScope::Last, false) => None,
         (DiffScope::Last, true) => Some("m:last"),
         (DiffScope::Git, _) => Some("m:git"),
-        (DiffScope::Both, _) => Some("m:both"),
         (DiffScope::Off, _) => Some("m:off"),
     }
 }
@@ -444,10 +416,8 @@ fn scope_footer_hint(app: &App) -> Option<&'static str> {
 /// `-N deleted above · o: old side` / count-less `deleted above · o: old
 /// side`. Deletion marks inside a hunk are covered by the counts' `-N`,
 /// so no separate mention is added. The hunk/rows resolve through the
-/// ACTIVE SCOPE (diff-scope step ④): Off shows no hint, Both walks the
-/// merged hunk list (last first) and sums the deletion counts of both
-/// diffs. On-demand only (cursor-anchored): no always-on information
-/// (P2).
+/// ACTIVE SCOPE (diff-scope step ④): Off shows no hint. On-demand only
+/// (cursor-anchored): no always-on information (P2).
 fn hunk_hint(app: &App) -> Option<String> {
     let line = match app.mode {
         Mode::View => app.view.cursor,
@@ -469,11 +439,11 @@ fn hunk_hint(app: &App) -> Option<String> {
     }
     // A deletion mark row outside every hunk: the mark must be one the
     // scope actually shows.
-    let ((_, _, deleted), (_, _, dim_deleted)) = scoped_mark_sets(app);
-    if !deleted.contains(&line) && !dim_deleted.contains(&line) {
+    let (_, _, deleted) = scoped_mark_sets(app);
+    if !deleted.contains(&line) {
         return None;
     }
-    // The count sums over the scope's diffs (Both: last + git).
+    // The count sums over the scope's diffs.
     let count: usize = scoped_diffs(app)
         .iter()
         .map(|d| deleted_above_count(d, line, new_len))

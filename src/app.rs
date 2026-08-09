@@ -25,8 +25,11 @@ use crate::{
 /// the title counts — the 3-4 scope switch of the git-integration spec.
 /// `Last` = the last reload's diff (the ONLY scope outside a git
 /// repository — P1: the non-git session must look exactly as before);
-/// `Git` = the git snapshot vs `git_ref`; `Both` = the union; `Off` =
-/// none. Navigation and the old-side toggle join in step ②.
+/// `Git` = the git snapshot vs `git_ref`; `Off` = none. Navigation and
+/// the old-side toggle follow the same scope. (`Both` existed until
+/// step ③ and was removed: its DIM channel was terminal-dependent and
+/// the anchor-merge rule too implicit — `m` switching between last and
+/// git covers the same story.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum DiffScope {
     /// The last reload's diff.
@@ -34,8 +37,6 @@ pub(crate) enum DiffScope {
     Last,
     /// The git snapshot vs the diff base (`git_ref`).
     Git,
-    /// The union of Last and Git.
-    Both,
     /// No marks or counts at all.
     Off,
 }
@@ -46,7 +47,6 @@ impl DiffScope {
         match self {
             DiffScope::Last => "last",
             DiffScope::Git => "git",
-            DiffScope::Both => "both",
             DiffScope::Off => "off",
         }
     }
@@ -652,9 +652,9 @@ impl App {
     /// open, from [`draw_view`] — before the visible window is built, so
     /// the splice below lands on the adjusted offset.
     /// Cycle the diff scope with `m` (diff-scope step ①): Last → Git →
-    /// Both → Off → Last inside a git repository, Last ↔ Off outside one
-    /// (P1: the non-git session only ever has the reload diff). The
-    /// first press pins the scope as user-chosen, which disables the
+    /// Off → Last inside a git repository, Last ↔ Off outside one (P1:
+    /// the non-git session only ever has the reload diff). The first
+    /// press pins the scope as user-chosen, which disables the
     /// automatic Git → Last transition on reload. Reply mode: the scope
     /// machinery is off entirely — the key is a no-op.
     pub(crate) fn cycle_scope(&mut self) {
@@ -664,12 +664,11 @@ impl App {
         self.scope_manual = true;
         self.scope = match (self.scope, self.git_diff.is_some()) {
             (DiffScope::Last, true) => DiffScope::Git,
-            (DiffScope::Git, true) => DiffScope::Both,
-            (DiffScope::Both, true) => DiffScope::Off,
+            (DiffScope::Git, true) => DiffScope::Off,
             (DiffScope::Off, true) => DiffScope::Last,
             (DiffScope::Last, false) => DiffScope::Off,
-            // Outside a repo Git/Both are unreachable; anything else
-            // falls back to Last.
+            // Outside a repo Git is unreachable; anything else falls
+            // back to Last.
             (_, false) => DiffScope::Last,
         };
         // A toggled old side belongs to the PREVIOUS scope's diff — its

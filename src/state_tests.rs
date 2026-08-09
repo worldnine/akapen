@@ -328,14 +328,14 @@ use crate::comment::Selection;
         let rows = help_rows(false, false, true);
         assert!(rows
             .iter()
-            .any(|(l, k)| *l == "marks" && k.contains("last/git/both/off")));
+            .any(|(l, k)| *l == "marks" && k.contains("last/git/off")));
         let rows = help_rows(false, false, false);
         assert!(rows
             .iter()
             .any(|(l, k)| *l == "marks" && k.contains("last/off")));
         assert!(!rows
             .iter()
-            .any(|(l, k)| *l == "marks" && k.contains("git/both")));
+            .any(|(l, k)| *l == "marks" && k.contains("last/git/off")));
         let rows = help_rows(false, true, true);
         assert!(!rows.iter().any(|(l, _)| *l == "marks"));
     }
@@ -1078,7 +1078,6 @@ use crate::comment::Selection;
             &marked,
             &[],
             &[],
-            &[],
             None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
@@ -1213,24 +1212,24 @@ use crate::comment::Selection;
 
     #[test]
     fn m_cycles_the_scope_and_flashes_the_name() {
-        // Diff-scope step ①: `m` cycles Last → Git → Both → Off inside a
+        // Diff-scope: `m` cycles Last → Git → Off → Last inside a
         // repository, pins the scope as user-chosen, and flashes the name.
         let (mut app, _dir) = make_app_keep(5, Mode::Source);
         app.git_diff = Some(crate::git::Diff::default());
         app.scope = crate::app::DiffScope::Git; // run() の初期値
         on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Both);
+        assert_eq!(app.scope, crate::app::DiffScope::Off);
         assert!(app.scope_manual, "m pins the scope");
         assert!(app
             .status
             .as_ref()
-            .is_some_and(|(m, _, _)| m.contains("marks: both")));
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Off);
+            .is_some_and(|(m, _, _)| m.contains("marks: off")));
         on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
         assert_eq!(app.scope, crate::app::DiffScope::Last);
         on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Git, "one full cycle");
+        assert_eq!(app.scope, crate::app::DiffScope::Git);
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, crate::app::DiffScope::Off, "one full cycle");
         // View モードでも同じキーが効く。
         let (mut app2, _dir2) = make_app_keep(5, Mode::View);
         app2.git_diff = Some(crate::git::Diff::default());
@@ -1241,7 +1240,7 @@ use crate::comment::Selection;
 
     #[test]
     fn m_outside_a_repo_cycles_last_and_off_only() {
-        // P1: git 外ではサイクルは Last ↔ Off のみ — Git/Both には
+        // P1: git 外ではサイクルは Last ↔ Off のみ — Git には
         // 到達しない（表示すべき git マークが存在しない）。
         let (mut app, _dir) = make_app_keep(5, Mode::Source);
         assert!(app.git_diff.is_none());
@@ -1282,11 +1281,10 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn reload_keeps_last_both_and_off_scopes() {
+    fn reload_keeps_last_and_off_scopes() {
         // 自動遷移は Git → Last のみ: 他のスコープは無条件で維持。
         for scope in [
             crate::app::DiffScope::Last,
-            crate::app::DiffScope::Both,
             crate::app::DiffScope::Off,
         ] {
             let (mut app, _dir) = make_app_keep(5, Mode::Source);
@@ -1331,7 +1329,7 @@ use crate::comment::Selection;
         std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
         assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.last_change, Some((1, 0)));
-        let ((added, _, _), _) = scoped_mark_sets(&app);
+        let (added, _, _) = scoped_mark_sets(&app);
         assert!(added.contains(&5), "the Last scope shows the reload marks");
         on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
         assert_eq!(app.scope, crate::app::DiffScope::Off);
@@ -1379,42 +1377,29 @@ use crate::comment::Selection;
         });
         app.last_deleted_before = HashSet::from([3]);
         app.git_deleted_before = HashSet::from([0]);
-        let empty = || (HashSet::new(), HashSet::new(), HashSet::new());
         app.scope = crate::app::DiffScope::Last;
         assert_eq!(
             scoped_mark_sets(&app),
-            ((HashSet::from([2]), HashSet::from([1]), HashSet::from([3])), empty()),
+            (HashSet::from([2]), HashSet::from([1]), HashSet::from([3])),
             "last: pure addition at 2, rewrite at 1"
         );
         app.scope = crate::app::DiffScope::Git;
         assert_eq!(
             scoped_mark_sets(&app),
-            ((HashSet::new(), HashSet::from([1, 3]), HashSet::from([0])), empty()),
+            (HashSet::new(), HashSet::from([1, 3]), HashSet::from([0])),
             "git: rewrites at 1 and 3"
         );
-        app.scope = crate::app::DiffScope::Both;
+        app.scope = crate::app::DiffScope::Off;
         assert_eq!(
             scoped_mark_sets(&app),
-            (
-                (HashSet::from([2]), HashSet::from([1]), HashSet::from([3])),
-                // git-only: 位置 1 の書き換えは last の modified に被る
-                // ので通常色（last 優先）、位置 3 の書き換えも last の
-                // 削除マークに被る — 残る DIM は位置 0 の削除マークのみ。
-                (HashSet::new(), HashSet::new(), HashSet::from([0])),
-            ),
-            "both: last regular, git-only dim"
+            (HashSet::new(), HashSet::new(), HashSet::new())
         );
-        app.scope = crate::app::DiffScope::Off;
-        assert_eq!(scoped_mark_sets(&app), (empty(), empty()));
-        // untracked: Git は空（全行マークはノイズ）、Both は last 分のみ。
+        // untracked: Git は空（全行マークはノイズ）。
         app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
         app.scope = crate::app::DiffScope::Git;
-        assert_eq!(scoped_mark_sets(&app), (empty(), empty()));
-        app.scope = crate::app::DiffScope::Both;
         assert_eq!(
             scoped_mark_sets(&app),
-            ((HashSet::from([2]), HashSet::from([1]), HashSet::from([3])), empty()),
-            "untracked × Both: only the reload marks"
+            (HashSet::new(), HashSet::new(), HashSet::new())
         );
     }
 
@@ -1429,14 +1414,6 @@ use crate::comment::Selection;
         app.git_diff = Some(diff);
         app.scope = crate::app::DiffScope::Git;
         assert_eq!(title_metrics(&app, 100).change, " g+2/-1 ");
-        // Both: リロードの +N/-M に git の g+K/-L を併記（diff-scope
-        // step ③）— マークで区別される 2 源をタイトルも対で示す。
-        app.last_change = Some((3, 2));
-        app.scope = crate::app::DiffScope::Both;
-        assert_eq!(title_metrics(&app, 100).change, " +3/-2 · g+2/-1 ");
-        // 未リロード（last なし）なら git 側だけ。
-        app.last_change = None;
-        assert_eq!(title_metrics(&app, 100).change, " g+2/-1 ");
         // Last: リロードの +N/-M のみ。
         app.last_change = Some((3, 2));
         app.scope = crate::app::DiffScope::Last;
@@ -1444,15 +1421,12 @@ use crate::comment::Selection;
         // Off: なし。
         app.scope = crate::app::DiffScope::Off;
         assert_eq!(title_metrics(&app, 100).change, "");
-        // untracked / 空 diff × Git: なし。Both でも git 側は出さない。
+        // untracked / 空 diff × Git: なし。
         app.scope = crate::app::DiffScope::Git;
         app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
         assert_eq!(title_metrics(&app, 100).change, "");
         app.git_diff = Some(crate::git::Diff::default());
         assert_eq!(title_metrics(&app, 100).change, "", "no hunks, no badge");
-        app.scope = crate::app::DiffScope::Both;
-        app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
-        assert_eq!(title_metrics(&app, 100).change, " +3/-2 ", "untracked × Both: last only");
         // ⚡ pending は全スコープより優先。
         app.file_changed = true;
         assert_eq!(title_metrics(&app, 100).change, " ⚡ ");
@@ -1469,8 +1443,6 @@ use crate::comment::Selection;
         assert!(footer_hints(&app).contains("m:git"));
         app.scope = crate::app::DiffScope::Last;
         assert!(footer_hints(&app).contains("m:last"));
-        app.scope = crate::app::DiffScope::Both;
-        assert!(footer_hints(&app).contains("m:both"));
         app.scope = crate::app::DiffScope::Off;
         assert!(footer_hints(&app).contains("m:off"));
         // Reply モード: 出さない。
@@ -1503,8 +1475,7 @@ use crate::comment::Selection;
     fn changes_entries_follow_the_scope() {
         // Diff-scope step ②: the changes tab lists the active scope's
         // hunks per file — Last: reload diffs only (files never reloaded
-        // have no entries); Git: the git hunks; Both: merged per file;
-        // Off: none.
+        // have no entries); Git: the git hunks; Off: none.
         let (mut app, _dir) = make_session();
         app.last_diff = Some(diff_at(&[1, 4]));
         app.git_diff = Some(diff_at(&[1, 7]));
@@ -1520,15 +1491,6 @@ use crate::comment::Selection;
         app.scope = crate::app::DiffScope::Git;
         let e = changes_entries(&app);
         assert_eq!(e.len(), 3);
-        // Both: merged per file — the shared anchor 1 resolves once as
-        // last, git's anchor 7 joins, file 1 contributes its git hunk.
-        app.scope = crate::app::DiffScope::Both;
-        let e = changes_entries(&app);
-        assert_eq!(e.len(), 4, "2 last + 1 git (file 0) + 1 git (file 1)");
-        assert!(matches!(
-            e[0],
-            ChangesEntry::Hunk { file: 0, source: crate::hunknav::DiffSource::Last, .. }
-        ));
         // Off: empty.
         app.scope = crate::app::DiffScope::Off;
         assert!(changes_entries(&app).is_empty());
@@ -1574,7 +1536,7 @@ use crate::comment::Selection;
         // scope / scope_manual はファイルごとの状態: 切替で保存・復元
         // され、他ファイルに漏れない。
         let (mut app, _dir) = make_session();
-        app.scope = crate::app::DiffScope::Both;
+        app.scope = crate::app::DiffScope::Git;
         app.scope_manual = true;
         on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
         expire_chord(&mut app);
@@ -1583,7 +1545,7 @@ use crate::comment::Selection;
         assert!(!app.scope_manual);
         on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
         expire_chord(&mut app);
-        assert_eq!(app.scope, crate::app::DiffScope::Both, "the scope comes back");
+        assert_eq!(app.scope, crate::app::DiffScope::Git, "the scope comes back");
         assert!(app.scope_manual);
     }
 
@@ -2076,7 +2038,6 @@ use crate::comment::Selection;
             &[],
             &[],
             &[],
-            &[],
             None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
@@ -2181,7 +2142,6 @@ use crate::comment::Selection;
         let (_, gutter) = view.visible_text(
             10,
             &[false; 6],
-            &[],
             &[],
             &[],
             Some((1, 1)),

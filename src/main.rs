@@ -1252,8 +1252,7 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         KeyCode::Char('n') => jump_hunk(app, 1),
         KeyCode::Char('N') => jump_hunk(app, -1),
         // m: cycle the diff scope (diff-scope step ①) — which diff
-        // drives the marks and title counts (last/git/both/off). The
-        // change-navigation keys keep the union until step ②.
+        // drives the marks and title counts (last/git/off).
         KeyCode::Char('m') => app.cycle_scope(),
         KeyCode::Tab => {
             // View is only reachable for Markdown-family files; a source
@@ -1919,9 +1918,9 @@ fn open_composer(app: &mut App, return_to: Mode) {
     // deletion carries it (reload-only marks have no git hunk to attach,
     // so they stay plain line comments).
     // The hunk conditions resolve through the ACTIVE SCOPE (diff-scope
-    // step ④): the merged hunk list for the exact-range match (Both
-    // walks last first), and the scope's diffs for the deletion-mark
-    // row. Off attaches nothing — a plain line comment.
+    // step ④): the scope's hunk list for the exact-range match, and the
+    // scope's diffs for the deletion-mark row. Off attaches nothing — a
+    // plain line comment.
     app.composer_hunk = if app.scope == DiffScope::Off {
         None
     } else {
@@ -1936,11 +1935,8 @@ fn open_composer(app: &mut App, return_to: Mode) {
                 }
             })
             .or_else(|| {
-                let ((_, _, deleted), (_, _, dim_deleted)) = scoped_mark_sets(app);
-                if app.selection.is_none()
-                    && start == end
-                    && (deleted.contains(&start) || dim_deleted.contains(&start))
-                {
+                let (_, _, deleted) = scoped_mark_sets(app);
+                if app.selection.is_none() && start == end && deleted.contains(&start) {
                     scoped_diffs(app)
                         .iter()
                         .find_map(|d| {
@@ -2220,19 +2216,13 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     let sel = app.selection.map(|s| s.range());
     // The scoped mark sets: one selection point for view and source
     // gutters (diff-scope step ③). The view keeps its two-class
-    // vocabulary (added ∪ modified = a green ▌) and renders the git-only
-    // rows DIM under Both.
-    let ((added, modified, deleted_set), (dim_added, dim_modified, dim_deleted)) =
-        scoped_mark_sets(app);
+    // vocabulary: added ∪ modified = a green ▌.
+    let (added, modified, deleted_set) = scoped_mark_sets(app);
     let n = app.source.len();
     let mut changed_set = added;
     changed_set.extend(modified);
     let changed = view_changed_flags(&changed_set, n);
     let deleted = view_deleted_flags(&deleted_set, n);
-    let mut dim_set = dim_added;
-    dim_set.extend(dim_modified);
-    dim_set.extend(dim_deleted);
-    let dim = view_changed_flags(&dim_set, n);
     // The composer opened from view mode (`c` in view) is drawn inline
     // right under the cursor line, so the comment can be typed without
     // leaving the rendered view. While it is open it is part of the
@@ -2252,7 +2242,6 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         &marked,
         &changed,
         &deleted,
-        &dim,
         sel,
         app.ui_selected_bg,
         border_style,
@@ -2462,10 +2451,8 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     let mut composer_cursor: Option<(u16, u16)> = None;
     let width = content_width as usize;
     // The scoped mark sets (diff-scope step ③): one selection point,
-    // computed once so every line reads the same scope. `dim` marks the
-    // git-only rows under Both (DIM glyphs).
-    let ((scoped_added, scoped_modified, scoped_deleted), (dim_added, dim_modified, dim_deleted)) =
-        scoped_mark_sets(app);
+    // computed once so every line reads the same scope.
+    let (scoped_added, scoped_modified, scoped_deleted) = scoped_mark_sets(app);
     // Comment bars span the whole pane (gutter included), pi.dev-style.
     let full_width = (content_width + app.gutter_cols) as usize;
     // The current file's cards (the edited one is hidden while composing).
@@ -2536,13 +2523,10 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         let selected = app.selection.is_some_and(|s| s.contains(idx));
         let commented = app.comments.iter().any(|c| c.covers(idx) && c.file_path == app.current_file_path());
         // The scoped mark sets (diff-scope step ③): computed once at the
-        // top of build_rows, so every line reads the same selection. The
-        // git-only side (dim) selects the SAME glyph — its classification
-        // (add/rewrite/deletion) is the git diff's — and renders DIM.
-        let added = scoped_added.contains(&idx) || dim_added.contains(&idx);
-        let modified = scoped_modified.contains(&idx) || dim_modified.contains(&idx);
-        let deleted_before = scoped_deleted.contains(&idx) || dim_deleted.contains(&idx);
-        let dim = dim_added.contains(&idx) || dim_modified.contains(&idx) || dim_deleted.contains(&idx);
+        // top of build_rows, so every line reads the same selection.
+        let added = scoped_added.contains(&idx);
+        let modified = scoped_modified.contains(&idx);
+        let deleted_before = scoped_deleted.contains(&idx);
         let is_cursor = idx == app.cursor;
         // The three-class source vocabulary (user-agreed spec): `+` a
         // pure addition, `~` a rewritten line (paired delete+add — `o`
@@ -2601,19 +2585,16 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // Additions: green `+`. Rewrites: yellow `~` — the number stays
         // green (yellow is the commented-line color); the glyph alone
         // tells "this line replaced an old one, `o` shows it". Deleted-
-        // before lines: red `▀`. Git-only rows under Both render DIM.
+        // before lines: red `▀`.
         let mark_style = if is_cursor {
             let s = Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
         } else if modified && !cursor_bg {
-            let s = Style::default().fg(Color::Yellow).bg(app.ui_changed_bg);
-            if dim { s.add_modifier(Modifier::DIM) } else { s }
+            Style::default().fg(Color::Yellow).bg(app.ui_changed_bg)
         } else if changed_bg {
-            let s = Style::default().fg(Color::Green).bg(app.ui_changed_bg);
-            if dim { s.add_modifier(Modifier::DIM) } else { s }
+            Style::default().fg(Color::Green).bg(app.ui_changed_bg)
         } else if deleted_fg {
-            let s = Style::default().fg(Color::Red);
-            if dim { s.add_modifier(Modifier::DIM) } else { s }
+            Style::default().fg(Color::Red)
         } else {
             gutter_style
         };
