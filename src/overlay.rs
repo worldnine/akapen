@@ -12,11 +12,11 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Mode, supports_view};
+use crate::app::{App, DiffScope, Mode, supports_view};
 use crate::clip_ellipsis;
 use crate::comment::{Comment, Selection};
 use crate::hunknav::{
-    ChangesEntry, changes_entries, changes_rows, diff_for, file_len, hunk_label, land_on_hunk,
+    ChangesEntry, changes_entries, changes_rows, entry_diff, file_len, hunk_label, land_on_hunk,
 };
 use crate::reload::file_externally_changed;
 use crate::replace_view_preserving_cursor;
@@ -213,7 +213,10 @@ pub(crate) fn activate_overlay_selection(app: &mut App) {
                 };
                 app.overlay = None;
                 match e {
-                    ChangesEntry::Hunk { file, hunk } => {
+                    // The entry's hunk index is an index into the scope's
+                    // merged hunk list (scoped_hunk_refs), which is what
+                    // land_on_hunk resolves after the switch.
+                    ChangesEntry::Hunk { file, hunk, .. } => {
                         if file != app.current_file_index {
                             app.switch_to_file(file);
                         }
@@ -818,10 +821,15 @@ pub(crate) fn draw_changes_overlay(f: &mut Frame, app: &App) {
 
     if count == 0 {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " no changes yet (git diff vs HEAD)",
-            dark_gray,
-        )));
+        // The empty state explains the scope (diff-scope step ②): Off
+        // points at `m`, Last at the reload that has not happened yet.
+        let empty = match app.scope {
+            DiffScope::Off => " marks off — m: cycle scopes",
+            DiffScope::Last => " no reload changes yet — r reloads",
+            DiffScope::Git => " no changes yet (git diff vs HEAD)",
+            DiffScope::Both => " no changes yet",
+        };
+        lines.push(Line::from(Span::styled(empty, dark_gray)));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             " Tab:tab  Esc/q:close",
@@ -869,8 +877,9 @@ pub(crate) fn draw_changes_overlay(f: &mut Frame, app: &App) {
                     yellow
                 };
                 match &entries[*entry_pos] {
-                    ChangesEntry::Hunk { file, hunk } => {
-                        let diff = diff_for(app, *file).expect("entry implies a diff");
+                    ChangesEntry::Hunk { file, source, hunk } => {
+                        let diff =
+                            entry_diff(app, *file, *source).expect("entry implies a diff");
                         let h = &diff.hunks[*hunk];
                         let (a, d) = h.counts();
                         let label = hunk_label(h, file_len(app, *file));

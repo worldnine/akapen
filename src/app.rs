@@ -672,6 +672,12 @@ impl App {
             // falls back to Last.
             (_, false) => DiffScope::Last,
         };
+        // A toggled old side belongs to the PREVIOUS scope's diff — its
+        // hunk index means nothing in the new one. Close it and rebuild
+        // the layout (diff-scope step ②).
+        if self.old_side.take().is_some() {
+            crate::hunknav::apply_old_side_state(self);
+        }
         self.flash(format!("marks: {}", self.scope.label()));
     }
 

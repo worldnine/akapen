@@ -14,11 +14,36 @@ use crate::highlight::{Span as HiSpan, syntax_for};
 use crate::source::Source;
 use crate::replace_view_preserving_cursor;
 
-/// One selectable entry of the changes tab: a hunk of a file, or an
-/// untracked file (every line is a change, no hunks exist).
+/// Which diff a hunk reference points into (diff-scope step ②).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DiffSource {
+    /// The last reload's synthesized diff.
+    Last,
+    /// The git snapshot vs `git_ref`.
+    Git,
+}
+
+/// A hunk under the active scope: the diff it lives in, its index, and
+/// its precomputed anchor (the new-file line the navigation compares
+/// against — the first changed line, or the following line for a pure
+/// deletion).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HunkRef {
+    pub(crate) source: DiffSource,
+    pub(crate) index: usize,
+    pub(crate) anchor: usize,
+}
+
+/// One selectable entry of the changes tab: a hunk of a file (under the
+/// active scope), or an untracked file (every line is a change, no
+/// hunks exist — git-side only).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ChangesEntry {
-    Hunk { file: usize, hunk: usize },
+    Hunk {
+        file: usize,
+        source: DiffSource,
+        hunk: usize,
+    },
     Untracked { file: usize },
 }
 
@@ -30,13 +55,34 @@ impl ChangesEntry {
     }
 }
 
-/// The git diff for `file` (the current file's diff lives in the live
-/// App fields; the others in their FileState slots).
-pub(crate) fn diff_for(app: &App, file: usize) -> Option<&git::Diff> {
+/// The diff of `file` for a hunk source (the current file's diffs live
+/// in the live App fields; the others in their FileState slots).
+pub(crate) fn entry_diff(
+    app: &App,
+    file: usize,
+    source: DiffSource,
+) -> Option<&git::Diff> {
+    match source {
+        DiffSource::Last => last_diff_for(app, file),
+        DiffSource::Git => git_diff_for(app, file),
+    }
+}
+
+/// The git snapshot diff for `file`.
+pub(crate) fn git_diff_for(app: &App, file: usize) -> Option<&git::Diff> {
     if file == app.current_file_index {
         app.git_diff.as_ref()
     } else {
         app.file_states.get(file).and_then(|fs| fs.git_diff.as_ref())
+    }
+}
+
+/// The last-reload diff for `file`.
+pub(crate) fn last_diff_for(app: &App, file: usize) -> Option<&git::Diff> {
+    if file == app.current_file_index {
+        app.last_diff.as_ref()
+    } else {
+        app.file_states.get(file).and_then(|fs| fs.last_diff.as_ref())
     }
 }
 
@@ -49,20 +95,96 @@ pub(crate) fn file_len(app: &App, file: usize) -> usize {
     }
 }
 
-/// The changes tab's entries: one per hunk across every session file,
-/// plus one per untracked file, in file order.
+/// The hunks the active scope makes navigable, in anchor order
+/// (diff-scope step ②): Last → the reload diff, Git → the git snapshot,
+/// Both → both merged (a shared anchor resolves ONCE — last wins, so a
+/// change visible in both diffs cannot stop navigation twice), Off →
+/// none. The single resolution the change navigation and the changes
+/// tab share, so "what is marked" and "what is reachable" always agree
+/// with [`scoped_mark_sets`].
+pub(crate) fn scoped_hunk_refs(app: &App) -> Vec<HunkRef> {
+    scoped_hunk_refs_for(app, app.current_file_index)
+}
+
+/// [`scoped_hunk_refs`] for a specific file — the changes tab walks
+/// every file's FileState this way.
+pub(crate) fn scoped_hunk_refs_for(app: &App, file: usize) -> Vec<HunkRef> {
+    let new_len = file_len(app, file);
+    match app.scope {
+        DiffScope::Last => last_diff_for(app, file)
+            .map(|d| hunk_refs(DiffSource::Last, d, new_len))
+            .unwrap_or_default(),
+        DiffScope::Git => git_diff_for(app, file)
+            .map(|d| hunk_refs(DiffSource::Git, d, new_len))
+            .unwrap_or_default(),
+        DiffScope::Both => {
+            let mut out = last_diff_for(app, file)
+                .map(|d| hunk_refs(DiffSource::Last, d, new_len))
+                .unwrap_or_default();
+            // The git side joins in anchor order, skipping anchors the
+            // reload diff already covers (last wins).
+            let mut seen: HashSet<usize> = out.iter().map(|r| r.anchor).collect();
+            if let Some(d) = git_diff_for(app, file) {
+                for (i, h) in d.hunks.iter().enumerate() {
+                    let a = h.anchor(new_len);
+                    if seen.insert(a) {
+                        out.push(HunkRef {
+                            source: DiffSource::Git,
+                            index: i,
+                            anchor: a,
+                        });
+                    }
+                }
+            }
+            out.sort_by_key(|r| r.anchor);
+            out
+        }
+        DiffScope::Off => Vec::new(),
+    }
+}
+
+fn hunk_refs(source: DiffSource, diff: &git::Diff, new_len: usize) -> Vec<HunkRef> {
+    diff.hunks
+        .iter()
+        .enumerate()
+        .map(|(i, h)| HunkRef {
+            source,
+            index: i,
+            anchor: h.anchor(new_len),
+        })
+        .collect()
+}
+
+/// Resolve a [`HunkRef`] to the hunk itself.
+pub(crate) fn hunk_ref(app: &App, r: HunkRef) -> Option<&git::Hunk> {
+    match r.source {
+        DiffSource::Last => app.last_diff.as_ref()?.hunks.get(r.index),
+        DiffSource::Git => app.git_diff.as_ref()?.hunks.get(r.index),
+    }
+}
+
+/// The changes tab's entries: the active scope's hunks across every
+/// session file (Last: reload diffs only — files never reloaded have no
+/// entries; Git: the git hunks plus untracked files; Both: both merged
+/// per file, untracked row from the git side; Off: none), in file order.
 pub(crate) fn changes_entries(app: &App) -> Vec<ChangesEntry> {
+    if app.scope == DiffScope::Off {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for fi in 0..app.files.len() {
-        let Some(diff) = diff_for(app, fi) else { continue };
-        if diff.untracked {
-            if file_len(app, fi) > 0 {
-                out.push(ChangesEntry::Untracked { file: fi });
-            }
-        } else {
-            for h in 0..diff.hunks.len() {
-                out.push(ChangesEntry::Hunk { file: fi, hunk: h });
-            }
+        for r in scoped_hunk_refs_for(app, fi) {
+            out.push(ChangesEntry::Hunk {
+                file: fi,
+                source: r.source,
+                hunk: r.index,
+            });
+        }
+        if matches!(app.scope, DiffScope::Git | DiffScope::Both)
+            && git_diff_for(app, fi).is_some_and(|d| d.untracked)
+            && file_len(app, fi) > 0
+        {
+            out.push(ChangesEntry::Untracked { file: fi });
         }
     }
     out
@@ -168,10 +290,12 @@ pub(crate) fn apply_old_side_state(app: &mut App) {
     app.offset = app.offset.min(app.max_offset(app.source_viewport_rows() as u16));
 }
 
-/// `o`: toggle the hunk under the cursor between old (HEAD) and new
-/// display (3-2). The diff base is fixed at `git_ref` (HEAD today); the
-/// loader takes the ref as an argument, so a future generation shift
-/// only changes what is passed there.
+/// `o`: toggle the hunk under the cursor between old and new display
+/// (3-2). The old-side base follows the scope (spec 3-4): Last compares
+/// against the last loaded content (the synthesized reload diff), Git /
+/// Both against `git_ref` (HEAD today; the loader takes the ref as an
+/// argument, so a future generation shift only changes what is passed
+/// there). Off disables the toggle.
 pub(crate) fn toggle_old_side(app: &mut App) {
     let new_len = app.source.len();
     let line = if app.mode == Mode::View {
@@ -179,11 +303,30 @@ pub(crate) fn toggle_old_side(app: &mut App) {
     } else {
         app.cursor
     };
-    let Some(diff) = app.git_diff.clone() else {
-        app.flash_err("not in a git repository — o disabled");
-        return;
+    let (base, base_label) = match app.scope {
+        DiffScope::Off => {
+            app.flash_err("marks off — m: cycle scopes");
+            return;
+        }
+        DiffScope::Last => (app.last_diff.clone(), "last load"),
+        DiffScope::Git | DiffScope::Both => (app.git_diff.clone(), "HEAD"),
     };
-    if diff.untracked {
+    let Some(diff) = base else {
+        match app.scope {
+            DiffScope::Last => {
+                app.flash_err("no reload diff yet — r reloads");
+                return;
+            }
+            _ => {
+                app.flash_err("not in a git repository — o disabled");
+                return;
+            }
+        }
+    };
+    // The untracked guard applies to the git-based scopes only: the
+    // reload diff is usable for an untracked file (Last has no ref side
+    // to miss).
+    if app.scope != DiffScope::Last && diff.untracked {
         app.flash_err("untracked file — nothing to compare against HEAD");
         return;
     }
@@ -233,7 +376,7 @@ pub(crate) fn toggle_old_side(app: &mut App) {
         Some((a, b)) => format!("L{}-{}", a + 1, b + 1),
         None => format!("before L{}", owner + 1),
     };
-    app.flash(format!("old side vs HEAD · {where_}"));
+    app.flash(format!("old side vs {base_label} · {where_}"));
 }
 
 /// 1-based location label for a hunk: `L5-9`, or `before L5` for a pure
@@ -251,8 +394,8 @@ pub(crate) fn hunk_label(hunk: &git::Hunk, new_len: usize) -> String {
 /// (`anchor` — the review position), while the selection covers the
 /// whole hunk range (the owner line for a pure deletion).
 pub(crate) fn land_on_hunk(app: &mut App, h: usize) {
-    let Some(diff) = &app.git_diff else { return };
-    let Some(hunk) = diff.hunks.get(h) else { return };
+    let Some(r) = scoped_hunk_refs(app).get(h).copied() else { return };
+    let Some(hunk) = hunk_ref(app, r) else { return };
     let new_len = app.source.len();
     let (start, end) = match hunk.new_range() {
         Some((a, b)) => (a, b),
@@ -280,19 +423,23 @@ pub(crate) fn land_on_hunk(app: &mut App, h: usize) {
 /// the jump lands on the nearest hunk in `dir`; at the ends it flashes
 /// instead of wrapping (like `n`/`N`).
 pub(crate) fn jump_hunk(app: &mut App, dir: isize) {
-    let Some(diff) = &app.git_diff else {
-        app.flash_err("not in a git repository");
-        return;
-    };
-    if diff.untracked {
-        app.flash_err("untracked file — nothing to compare");
+    let refs = scoped_hunk_refs(app);
+    if refs.is_empty() {
+        // Scope-specific explanations; the git-based scopes keep the
+        // pre-scope wording.
+        let msg = match app.scope {
+            DiffScope::Off => "marks off — m: cycle scopes",
+            DiffScope::Last => "no reload diff yet — r reloads",
+            DiffScope::Git if app.git_diff.as_ref().is_some_and(|d| d.untracked) => {
+                "untracked file — nothing to compare"
+            }
+            DiffScope::Git => "no git changes",
+            DiffScope::Both => "no changes",
+        };
+        app.flash_err(msg);
         return;
     }
-    let n = diff.hunks.len();
-    if n == 0 {
-        app.flash_err("no git changes");
-        return;
-    }
+    let n = refs.len();
     let new_len = app.source.len();
     let line = if app.mode == Mode::View {
         app.view.cursor
@@ -307,15 +454,16 @@ pub(crate) fn jump_hunk(app: &mut App, dir: isize) {
     // where the jump itself lands) steps past it. The old "is the
     // cursor on a changed line" check rewound to the first hunk there.
     let target = if dir > 0 {
-        diff.hunks.iter().position(|h| h.anchor(new_len) > line)
+        refs.iter().position(|r| r.anchor > line)
     } else {
-        diff.hunks.iter().rposition(|h| h.anchor(new_len) < line)
+        refs.iter().rposition(|r| r.anchor < line)
     };
     let Some(target) = target else {
         app.flash_err(if dir > 0 { "no changes below" } else { "no changes above" });
         return;
     };
-    let label = hunk_label(&diff.hunks[target], new_len);
+    let hunk = hunk_ref(app, refs[target]).expect("refs resolve");
+    let label = hunk_label(hunk, new_len);
     app.flash(format!("change {}/{} · {label}", target + 1, n));
     land_on_hunk(app, target);
 }
@@ -374,6 +522,7 @@ pub(crate) fn view_deleted_flags(marks: &HashSet<usize>, n_lines: usize) -> Vec<
 
 #[cfg(test)]
 mod git_tests {
+    use super::{DiffSource, scoped_hunk_refs};
     use crate::app::{App, DiffScope, FileState, Mode};
     use crate::comment::Selection;
     use crate::config::{Config, EscQuit};
@@ -1317,6 +1466,7 @@ mod git_tests {
         app.git_diff = diff;
         app.git_added = added;
         app.git_deleted_before = deleted;
+        app.scope = DiffScope::Git; // run() のリポジトリ内初期スコープ
         // `]` then `c`: the chord completes into a jump. The tests go
         // through on_key — the chord resolution lives in the dispatcher,
         // not in the per-mode handlers.
@@ -1445,6 +1595,7 @@ mod git_tests {
         app.git_diff = diff;
         app.git_added = added;
         app.git_deleted_before = deleted;
+        app.scope = DiffScope::Git; // run() のリポジトリ内初期スコープ
         on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
         assert_eq!(app.overlay, Some(Overlay::Comments));
         on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
@@ -1509,6 +1660,7 @@ mod git_tests {
         app.git_diff = diff;
         app.git_added = added;
         app.git_deleted_before = deleted;
+        app.scope = DiffScope::Git; // run() のリポジトリ内初期スコープ
         on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
         on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -1530,7 +1682,8 @@ mod git_tests {
 
     #[test]
     fn f7_without_git_flashes() {
-        // P1: outside a repository the jump keys explain themselves and
+        // P1: outside a repository the session runs on the Last scope —
+        // the jump keys explain themselves (nothing reloaded yet) and
         // change nothing.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
@@ -1538,8 +1691,199 @@ mod git_tests {
         let mut app = git_app(path, Mode::Source);
         on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
         let (msg, _, _) = app.status.as_ref().expect("a flash explains");
-        assert!(msg.contains("not in a git repository"), "{msg}");
+        assert!(msg.contains("no reload diff yet"), "{msg}");
         assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn o_last_scope_shows_the_reload_diffs_old_side() {
+        // Diff-scope step ②: under Last, `o` compares against the last
+        // loaded content — the synthesized reload diff, usable outside a
+        // repository too (P1 untouched: git is not required for it).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let mut app = git_app(path.clone(), Mode::Source); // no repo → Last scope
+        overwrite(&path, &["one", "CHANGED", "three"]);
+        assert!(reload_source(&mut app, false).is_ok());
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let os = app.old_side.as_ref().expect("the reload hunk is toggled");
+        assert_eq!(os.old_lines, vec!["two"], "the pre-reload content");
+        assert_eq!(os.old_numbers, vec![2], "old numbers from the synthesized diff");
+        assert_eq!(os.range, Some((1, 1)));
+        let (msg, _, _) = app.status.as_ref().expect("a flash names the base");
+        assert!(msg.contains("old side vs last load"), "{msg}");
+        // A second `o` on the same hunk returns to the new side.
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none(), "toggled back");
+    }
+
+    #[test]
+    fn o_last_scope_without_a_reload_flashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let mut app = git_app(path, Mode::Source);
+        assert!(app.last_diff.is_none(), "nothing reloaded yet");
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none());
+        let (msg, _, is_error) = app.status.as_ref().expect("a flash explains");
+        assert!(*is_error, "it is an error toast: {msg}");
+        assert!(msg.contains("no reload diff yet"), "{msg}");
+    }
+
+    #[test]
+    fn o_off_scope_flashes() {
+        // Off disables the toggle even inside a repository with changes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three"]);
+        overwrite(&path, &["one", "CHANGED", "three"]);
+        let mut app = git_app(path, Mode::Source);
+        app.scope = DiffScope::Off;
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none());
+        let (msg, _, _) = app.status.as_ref().expect("a flash explains");
+        assert!(msg.contains("marks off"), "{msg}");
+    }
+
+    #[test]
+    fn o_untracked_last_scope_uses_the_reload_diff() {
+        // The untracked guard applies to the git-based scopes only: Last
+        // has a usable reload diff for an untracked file.
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path(), &["tracked"]);
+        let untracked = dir.path().join("new.md");
+        std::fs::write(&untracked, "one\ntwo\nthree\n").unwrap();
+        let mut app = git_app(untracked.clone(), Mode::Source); // in repo → Git scope
+        assert!(app.git_diff.as_ref().unwrap().untracked);
+        // The agent edits; reload auto-transitions Git → Last.
+        overwrite(&untracked, &["one", "CHANGED", "three"]);
+        assert!(reload_source(&mut app, false).is_ok());
+        assert_eq!(app.scope, DiffScope::Last);
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        let os = app.old_side.as_ref().expect("the reload hunk is toggled");
+        assert_eq!(os.old_lines, vec!["two"], "old side works despite untracked");
+    }
+
+    #[test]
+    fn m_closes_the_toggled_old_side() {
+        // A scope switch invalidates the open old side's hunk index (it
+        // pointed into the previous scope's diff): `m` closes it and
+        // rebuilds the layout.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three", "four"]);
+        overwrite(&path, &["one", "CHANGED", "three", "four"]);
+        let mut app = git_app(path, Mode::Source);
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+        assert_eq!(app.scope, DiffScope::Both);
+        assert!(app.old_side.is_none(), "the scope switch closes the old side");
+        let rows = source_rows(&app);
+        assert!(rows[1].contains("CHANGED"), "the new side renders again: {}", rows[1]);
+    }
+
+    #[test]
+    fn jump_follows_the_scope() {
+        // The navigable hunk list switches with the scope: Git walks the
+        // snapshot's two hunks, Last the reload diff's single hunk. The
+        // changes sit far enough apart (line 2 and line 10 of a 12-line
+        // file) that git's 3 context lines keep them in separate hunks.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &[
+                "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                "eleven", "twelve",
+            ],
+        );
+        overwrite(
+            &path,
+            &["one", "CHANGED1", "three", "four", "five", "six", "seven", "eight", "nine", "CHANGED2", "eleven", "twelve"],
+        );
+        let mut app = git_app(path.clone(), Mode::Source);
+        assert_eq!(app.scope, DiffScope::Git);
+        assert_eq!(app.git_diff.as_ref().unwrap().hunks.len(), 2);
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 1, "first git change");
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 9, "second git change");
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert!(app.status.as_ref().unwrap().0.contains("no changes below"));
+        // The agent rewrites only the second change away; reload
+        // auto-transitions to Last, whose diff has one hunk.
+        overwrite(
+            &path,
+            &["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "CHANGED2", "eleven", "twelve"],
+        );
+        assert!(reload_source(&mut app, false).is_ok());
+        assert_eq!(app.scope, DiffScope::Last);
+        assert_eq!(app.last_diff.as_ref().unwrap().hunks.len(), 1);
+        // The reload diff describes THIS reload's delta — line 2 being
+        // reverted — not the pre-existing CHANGED2.
+        app.cursor = 0;
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 1, "the reload diff's change (line 2 reverted)");
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert!(app.status.as_ref().unwrap().0.contains("no changes below"));
+    }
+
+    #[test]
+    fn jump_off_scope_flashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three"]);
+        overwrite(&path, &["one", "CHANGED", "three"]);
+        let mut app = git_app(path, Mode::Source);
+        app.scope = DiffScope::Off;
+        on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
+        assert!(app.selection.is_none());
+        let (msg, _, _) = app.status.as_ref().expect("a flash explains");
+        assert!(msg.contains("marks off"), "{msg}");
+    }
+
+    #[test]
+    fn both_scope_merges_hunks_by_anchor() {
+        // The Both scope walks both diffs as ONE anchor-ordered list; a
+        // shared anchor resolves once (last wins) so a change visible in
+        // both diffs cannot stop navigation twice.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three", "four"]);
+        let mut app = git_app(path, Mode::Source);
+        let hunk_at = |a: u32| crate::git::Hunk {
+            old_start: a,
+            old_len: 0,
+            new_start: a + 1,
+            new_len: 1,
+            body: vec![crate::git::HunkLine {
+                tag: crate::git::Tag::Add,
+                text: "x".into(),
+            }],
+        };
+        app.last_diff = Some(crate::git::Diff {
+            hunks: vec![hunk_at(1), hunk_at(4)],
+            untracked: false,
+        });
+        app.git_diff = Some(crate::git::Diff {
+            hunks: vec![hunk_at(1), hunk_at(7)],
+            untracked: false,
+        });
+        app.scope = DiffScope::Both;
+        let refs = scoped_hunk_refs(&app);
+        let anchors: Vec<usize> = refs.iter().map(|r| r.anchor).collect();
+        assert_eq!(anchors, vec![1, 4, 7], "merged and anchor-ordered");
+        assert_eq!(refs[0].source, DiffSource::Last, "the shared anchor resolves as last");
+        assert_eq!(refs[2].source, DiffSource::Git);
+        // Single-scope resolutions are plain pass-throughs.
+        app.scope = DiffScope::Last;
+        assert_eq!(scoped_hunk_refs(&app).len(), 2);
+        app.scope = DiffScope::Git;
+        assert_eq!(scoped_hunk_refs(&app).len(), 2);
+        app.scope = DiffScope::Off;
+        assert!(scoped_hunk_refs(&app).is_empty());
     }
 
     #[test]

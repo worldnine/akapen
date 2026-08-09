@@ -1416,6 +1416,97 @@ use crate::comment::Selection;
         assert!(!footer_hints(&app).contains("m:"));
     }
 
+    /// A minimal hunk whose anchor is `a` (one added line at `a`).
+    fn hunk_at(a: u32) -> crate::git::Hunk {
+        crate::git::Hunk {
+            old_start: a,
+            old_len: 0,
+            new_start: a + 1,
+            new_len: 1,
+            body: vec![crate::git::HunkLine {
+                tag: crate::git::Tag::Add,
+                text: "x".into(),
+            }],
+        }
+    }
+
+    fn diff_at(anchors: &[u32]) -> crate::git::Diff {
+        crate::git::Diff {
+            hunks: anchors.iter().map(|a| hunk_at(*a)).collect(),
+            untracked: false,
+        }
+    }
+
+    #[test]
+    fn changes_entries_follow_the_scope() {
+        // Diff-scope step ②: the changes tab lists the active scope's
+        // hunks per file — Last: reload diffs only (files never reloaded
+        // have no entries); Git: the git hunks; Both: merged per file;
+        // Off: none.
+        let (mut app, _dir) = make_session();
+        app.last_diff = Some(diff_at(&[1, 4]));
+        app.git_diff = Some(diff_at(&[1, 7]));
+        app.file_states[0].last_diff = app.last_diff.clone();
+        app.file_states[0].git_diff = app.git_diff.clone();
+        app.file_states[1].git_diff = Some(diff_at(&[2]));
+        // Last: only file 0's reload hunks (file 1 was never reloaded).
+        app.scope = crate::app::DiffScope::Last;
+        let e = changes_entries(&app);
+        assert_eq!(e.len(), 2, "last hunks of file 0 only");
+        assert!(e.iter().all(|x| x.file() == 0));
+        // Git: both files' snapshot hunks.
+        app.scope = crate::app::DiffScope::Git;
+        let e = changes_entries(&app);
+        assert_eq!(e.len(), 3);
+        // Both: merged per file — the shared anchor 1 resolves once as
+        // last, git's anchor 7 joins, file 1 contributes its git hunk.
+        app.scope = crate::app::DiffScope::Both;
+        let e = changes_entries(&app);
+        assert_eq!(e.len(), 4, "2 last + 1 git (file 0) + 1 git (file 1)");
+        assert!(matches!(
+            e[0],
+            ChangesEntry::Hunk { file: 0, source: crate::hunknav::DiffSource::Last, .. }
+        ));
+        // Off: empty.
+        app.scope = crate::app::DiffScope::Off;
+        assert!(changes_entries(&app).is_empty());
+    }
+
+    #[test]
+    fn changes_tab_enter_jumps_within_the_scope() {
+        // Enter on a Last-scope entry lands on the reload diff's hunk.
+        let (mut app, _dir) = make_session();
+        app.mode = Mode::Source;
+        app.last_diff = Some(crate::git::synthesize_diff("a\nb\nc\n", "a\nX\nc\n"));
+        app.scope = crate::app::DiffScope::Last;
+        on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.overlay_tab, OverlayTab::Changes);
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, None, "Enter closes the overlay");
+        assert_eq!(app.cursor, 1, "landed on the reload diff's change");
+        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 1 }));
+    }
+
+    #[test]
+    fn changes_tab_off_scope_shows_the_m_hint() {
+        // The tab still opens under Off; its empty state points at `m`.
+        let (mut app, _dir) = make_session();
+        app.scope = crate::app::DiffScope::Off;
+        on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let frame: String = t
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(frame.contains("marks off"), "the empty state points at m: {frame}");
+    }
+
     #[test]
     fn scope_state_rides_along_file_switches() {
         // scope / scope_manual はファイルごとの状態: 切替で保存・復元
