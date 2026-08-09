@@ -340,7 +340,7 @@ pub(crate) fn view_changed_flags(
 
 /// Per-line flags: which source lines immediately follow a deletion block
 /// — from the last reload and/or the git diff (3-1). The view gutter
-/// shows a red top-edge `▔` for them.
+/// shows a red top-edge `▀` for them.
 pub(crate) fn view_deleted_flags(
     last_deleted_before: &HashSet<usize>,
     git_deleted_before: &HashSet<usize>,
