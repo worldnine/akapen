@@ -67,15 +67,12 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `j` / `k` | move cursor (extends the range while selecting) |
 | `g` / `G`, `PgUp` / `PgDn`, `Ctrl+u` / `Ctrl+d` | jump / half-page moves |
 | `v` | start selecting lines |
-| `c` | comment the selection (or the cursor line). An EXACT range match re-opens the comment for editing (text prefilled, Enter replaces). To comment a WHOLE hunk: jump with `n` / `F7` (the hunk becomes the visible selection) then `c` — the snippet is then the hunk's raw diff text, deletions included |
-| `n` / `N` | jump to the next / previous comment (selects that comment only — overlapping comments stay separate) |
+| `c` | comment the selection (or the cursor line); re-selecting an existing comment's exact range edits it |
+| `n` / `N` | jump to the next / previous change hunk — the hunk becomes the visible selection, so `c` then comments the WHOLE hunk (snippet = the hunk's raw diff, deletions included) |
 | `]` / `[` | next / previous file in the session |
-| `l` | all-comments overlay |
-| `Ctrl+p` | file-list overlay |
 | `?` | key reference |
 | `r` / `i` | on external change: reload / ignore |
 | `o` | toggle the hunk under the cursor to its old side vs HEAD (git repositories only; `o` again returns) |
-| `n` / `N` | jump to the next / previous change hunk (the standard diff-tool keys — delta, less, magit; `F7` / `Shift+F7` work too) |
 | `F7` / `Shift+F7` | jump to the next / previous change hunk (the `]c` / `[c` chord is the fallback for terminals without F-keys; `Alt+j` / `Alt+k` too) |
 | `Ctrl+n` / `Ctrl+p` | jump to the next / previous comment (moved from `n` / `N`) |
 | `Ctrl+o` | file picker (moved from `Ctrl+p`) |
