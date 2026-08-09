@@ -11,7 +11,7 @@
 //! (3-2: 世代移動は後付け可能にしておく).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// One side of a unified-diff hunk body line.
@@ -162,8 +162,14 @@ impl Diff {
     /// e.g. HEAD on a fresh repo): the caller keeps the non-git behavior.
     pub fn load(diff_ref: &str, path: &Path) -> Option<Diff> {
         let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+        // Run git with the file's directory as cwd (a relative launch
+        // path must resolve from wherever the user started akapen) but
+        // pass an ABSOLUTE path: with a relative path git would resolve
+        // it against the cwd and look for `src/src/main.rs` — missing —
+        // marking a tracked file untracked (and diffing nothing).
+        let abs = absolutize(path);
         let mut cmd = Command::new("git");
-        cmd.arg("diff").arg(diff_ref).arg("--").arg(path);
+        cmd.arg("diff").arg(diff_ref).arg("--").arg(&abs);
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
@@ -177,7 +183,7 @@ impl Diff {
         // it. `ls-files --error-unmatch` distinguishes that from a tracked
         // file without changes.
         let mut ls = Command::new("git");
-        ls.args(["ls-files", "--error-unmatch", "--"]).arg(path);
+        ls.args(["ls-files", "--error-unmatch", "--"]).arg(&abs);
         if let Some(dir) = dir {
             ls.current_dir(dir);
         }
@@ -245,6 +251,17 @@ impl Diff {
             Some((a, b)) => line >= a && line <= b,
             None => line == h.owner(new_len),
         })
+    }
+}
+
+/// Resolve a launch path against the process cwd: git calls receive an
+/// absolute path, so a relative argument like `src/main.rs` cannot be
+/// mis-resolved against the file's own directory.
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
     }
 }
 
@@ -519,6 +536,22 @@ mod tests {
         assert!(!diff.untracked);
         assert_eq!(diff.hunks.len(), 1);
         assert_eq!(diff.hunks[0].old_lines(), vec!["one", "two", "three", "four"]);
+    }
+
+    #[test]
+    fn load_absolutizes_relative_paths() {
+        // Launching `akapen src/main.rs` from the repo root passes a
+        // relative path; the git calls must receive it ABSOLUTE, or git
+        // resolves it against the file's own directory (cwd) and looks
+        // for `src/src/main.rs` — missing — marking a tracked file
+        // untracked. (The full git round-trip is covered by
+        // load_reads_the_diff_vs_head with an absolute path.)
+        let abs = absolutize(Path::new("sub/doc.md"));
+        assert!(abs.is_absolute(), "{abs:?}");
+        assert!(abs.ends_with("sub/doc.md"), "{abs:?}");
+        // An absolute path passes through untouched.
+        let p = Path::new("/tmp/x.md");
+        assert_eq!(absolutize(p), p.to_path_buf());
     }
 
     #[test]
