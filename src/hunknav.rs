@@ -748,10 +748,11 @@ mod git_tests {
         on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         assert!(app.old_side.is_some());
         assert_eq!(app.old_side.as_ref().unwrap().hunk, 0);
-        // その hunk 内で c (選択なし) → hunk 全体が対象。
+        // その hunk 内で c (選択なし) → hunk 全体が対象 (-U0: the hunk
+        // is the single changed line 5, 1-based).
         on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
         assert_eq!(app.mode, Mode::Input);
-        assert_eq!((app.input_start, app.input_end), (1, 7), "the hunk range");
+        assert_eq!((app.input_start, app.input_end), (4, 4), "the hunk range");
         assert!(
             app.composer_hunk.is_some(),
             "the snippet becomes the hunk's raw diff"
@@ -762,7 +763,7 @@ mod git_tests {
         on_input_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.comments.len(), 1);
         assert!(app.comments[0].hunk, "flagged as a hunk comment");
-        assert_eq!((app.comments[0].start, app.comments[0].end), (2, 8));
+        assert_eq!((app.comments[0].start, app.comments[0].end), (5, 5));
         // old 表示中でも hunk 外の行ではカーソル行コメント。
         app.view.goto_source_line(10);
         on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
@@ -774,7 +775,7 @@ mod git_tests {
         on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         assert!(app.old_side.is_some());
         on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
-        assert_eq!((app.input_start, app.input_end), (1, 7), "source old side: the hunk");
+        assert_eq!((app.input_start, app.input_end), (4, 4), "source old side: the hunk");
         on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     }
     #[test]
@@ -789,16 +790,14 @@ mod git_tests {
         app.cursor = 3; // on the changed line
         on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         let os = app.old_side.as_ref().expect("the hunk is toggled");
-        // Change at line 4 with 3 context lines: the hunk is old 1-7.
-        assert_eq!(os.old_lines, vec!["one", "two", "three", "four", "five", "six", "seven"]);
-        assert_eq!(os.old_numbers, vec![1, 2, 3, 4, 5, 6, 7], "HEAD line numbers");
-        assert_eq!(os.range, Some((0, 6)), "the hunk's new-line range");
+        // -U0: the hunk is exactly the changed line — no context.
+        assert_eq!(os.old_lines, vec!["four"]);
+        assert_eq!(os.old_numbers, vec![4], "HEAD line number");
+        assert_eq!(os.range, Some((3, 3)), "the changed line only");
         let rows = source_rows(&app);
-        assert!(rows[0].starts_with("> 1 "), "the block opens with the cursor mark: {}", rows[0]);
-        assert!(rows[3].starts_with("~ 4 "), "old line 4 with a faint mark: {}", rows[3]);
+        assert!(rows[3].starts_with("> 4 "), "the block opens with the cursor mark: {}", rows[3]);
         assert!(rows[3].contains("four"), "the old content shows: {}", rows[3]);
         assert!(!rows.iter().any(|r| r.contains("CHANGED")), "the new content is replaced");
-        assert!(rows[7].starts_with("  8 "), "the hunk's trailing context follows: {}", rows[7]);
         // A second `o` with the cursor still on the hunk returns to new.
         on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         assert!(app.old_side.is_none(), "toggled back");
@@ -921,8 +920,8 @@ mod git_tests {
         );
         assert_eq!(
             app.view.old_side_lines,
-            Some((0, 6)),
-            "the hunk's new lines 1-7 (1-based)"
+            Some((3, 3)),
+            "-U0: the changed line only (1-based 4)"
         );
         // The cursor (on a range line) sits on the block and spans it.
         assert_eq!(app.view.cursor_row(), range.start);
@@ -971,12 +970,14 @@ mod git_tests {
                 "次の段落。",
             ],
         );
+        // -U0: the hunk is the changed lines only, so the change covers
+        // the whole bullet (all four lines, each rewritten).
         overwrite(
             &path,
             &[
-                "- **変更行マーク（3-1）**: 追加・変更行は再読込 diff と同じ緑 `+` ガター / `▌` マーカーで",
-                "  表示（両者はマージされ、セッション内の変更と git の変更が同じ信号に統合）。",
-                "  削除行は**位置に薄いマークのみ**（削除ブロック直後の行に赤 `-`。内容は出さず、",
+                "- **変更行マーク（3-1）**: 追加・変更行は再読込 diff と同じ緑 `+` ガター / `▌` マーカーで表示",
+                "  表示（両者はマージされ、セッション内の変更と git の変更が同じ信号に統合されます）。",
+                "  削除行は**位置に薄いマークのみ**（削除ブロック直後の行に赤 `-`。内容は出さずに、",
                 "  `o` で確認できます）",
                 "",
                 "次の段落。",
@@ -1022,17 +1023,19 @@ mod git_tests {
                 "|---|---|",
                 "| j / k | 移動 |",
                 "| o | old side トグル |",
+                "| F7 | 次の変更へ |",
             ],
         );
-        // A row added to the table: the hunk covers the table's end.
+        // -U0: two table rows rewritten — the hunk is those two rows, so
+        // the old side still has a table fragment to render.
         overwrite(
             &path,
             &[
                 "| Key | 動作 |",
                 "|---|---|",
                 "| j / k | 移動 |",
-                "| o | old side トグル |",
-                "| F7 | 次の変更へ |",
+                "| o | old side トグル（変更後） |",
+                "| F7 | 次の変更へ（変更後） |",
             ],
         );
         let mut app = git_app(path, Mode::View);
@@ -1044,8 +1047,11 @@ mod git_tests {
             .iter()
             .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
             .collect();
+        // -U0: the old side is the rewritten data rows only (no header),
+        // so the fragment renders as a body-only table — the box frame
+        // still proves it is a table, not raw pipe text.
         assert!(
-            rows.iter().any(|r| r.contains('┌') || r.contains('├')),
+            rows.iter().any(|r| r.contains('│') || r.contains('└')),
             "the table renders with box frames: {rows:?}"
         );
         assert!(
@@ -1074,15 +1080,13 @@ mod git_tests {
                 "| Key | 動作 |",
                 "|---|---|",
                 "| ? | キーリファレンス |",
-                "| r / i | 再読込 / 無視 |",
-                "| o | old side トグル |",
-                "| F7 | 次の変更へ |",
-                "| e | 編集 |",
+                "| r / i | 再読込（変更後） |",
+                "| e | 編集（変更後） |",
                 "| y | コピー |",
             ],
         );
         let mut app = git_app(path, Mode::View);
-        app.view.goto_source_line(3); // 挿入位置直前のコンテキスト行
+        app.view.goto_source_line(3); // the first rewritten row
         on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         let range = app.view.old_side_rows.clone();
         assert!(!range.is_empty());
@@ -1090,15 +1094,21 @@ mod git_tests {
             .iter()
             .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
             .collect();
+        // -U0: the old side is the rewritten body rows only (no header),
+        // so the fragment renders as a body-only table — the box frame
+        // still proves it is a table, not raw pipe text.
         assert!(
-            rows.iter().any(|r| r.contains('┌') || r.contains('├')),
+            rows.iter().any(|r| r.contains('│') || r.contains('└')),
             "body-only fragment still renders as a table: {rows:?}"
         );
         assert!(
             !rows.iter().any(|r| r.trim_start().starts_with("| ")),
             "no raw pipe text: {rows:?}"
         );
-        assert!(rows.iter().any(|r| r.contains("キーリファレンス")));
+        // -U0: the old side is exactly the two rewritten rows (the
+        // "キーリファレンス" row is outside the hunk now).
+        assert!(rows.iter().any(|r| r.contains("再読込 / 無視")));
+        assert!(rows.iter().any(|r| r.contains("編集")));
     }
 
     #[test]
@@ -1109,7 +1119,9 @@ mod git_tests {
         // hunk's line structure).
         let dir = tempfile::tempdir().unwrap();
         let path = init_repo(dir.path(), &["line one", "line two", "line three"]);
-        overwrite(&path, &["line one CHANGED", "line two", "line three"]);
+        // -U0: all three lines rewritten, so the hunk is the three lines
+        // (a single-line hunk would have nothing to separate).
+        overwrite(&path, &["line one CHANGED", "line two CHANGED", "line three CHANGED"]);
         let mut app = git_app(path, Mode::View);
         app.view.goto_source_line(0);
         on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
@@ -1198,8 +1210,11 @@ mod git_tests {
         assert!(!view.contains("CHANGED"), "new content hidden: {view}");
         assert!(view.contains('~'), "the old-side marker is drawn");
         // Same pane in source mode: the block renders with old numbers.
+        // (The cursor leaves the hunk first — its own row shows `>`, not
+        // the `~` mark, and a -U0 hunk is a single row.)
         on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
         assert_eq!(app.mode, Mode::Source);
+        app.cursor = 0;
         let source = capture(&mut app);
         assert!(source.contains("four"), "old content in source mode: {source}");
         assert!(!source.contains("CHANGED"));
@@ -1292,10 +1307,10 @@ mod git_tests {
         // n (or F7) selects the whole hunk first — the target is visible
         // as the highlight band — and c then comments the HUNK.
         on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.selection, Some(Selection { anchor: 0, cursor: 4 }));
+        assert_eq!(app.selection, Some(Selection { anchor: 2, cursor: 2 }));
         on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
         assert_eq!(app.mode, Mode::Input);
-        assert_eq!((app.input_start, app.input_end), (0, 4), "the hunk range");
+        assert_eq!((app.input_start, app.input_end), (2, 2), "the hunk range");
         for ch in "note".chars() {
             on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
         }
@@ -1304,22 +1319,22 @@ mod git_tests {
         // The comment carries the hunk's raw diff as its snippet: the
         // agent sees the change itself, deletions included.
         let c = &app.comments[0];
-        assert_eq!((c.start, c.end), (1, 5), "the hunk range");
+        assert_eq!((c.start, c.end), (3, 3), "-U0: the changed line only");
         assert!(c.hunk, "flagged as a hunk comment");
         assert!(
-            c.lines.contains("@@ -1,5 +1,5 @@"),
+            c.lines.contains("@@ -3,1 +3,1 @@"),
             "the raw diff header: {}",
             c.lines
         );
         assert!(c.lines.contains("-three"), "deleted lines ride along: {}", c.lines);
         assert!(c.lines.contains("+CHANGED"), "added lines ride along: {}", c.lines);
         let out = export::format_all(&app.comments);
-        assert!(out.contains("doc.md:1-5"), "the hunk range location: {out}");
-        assert!(out.contains("@@ -1,5 +1,5 @@"), "exported as-is: {out}");
+        assert!(out.contains("doc.md:3"), "the hunk range location: {out}");
+        assert!(out.contains("@@ -3,1 +3,1 @@"), "exported as-is: {out}");
         assert!(!out.contains("1: @"), "no line numbering on the diff: {out}");
         // Reply mode blockquotes the raw diff the same way.
         let reply = export::format_all_reply(&app.comments);
-        assert!(reply.contains("> @@ -1,5 +1,5 @@"), "blockquoted diff: {reply}");
+        assert!(reply.contains("> @@ -3,1 +3,1 @@"), "blockquoted diff: {reply}");
         assert!(reply.contains("> -three"), "blockquoted deletions: {reply}");
         // A v-selection of an arbitrary range comments that range (not
         // the hunk) — and a non-hunk range is NOT flagged as a hunk.
@@ -1349,9 +1364,9 @@ mod git_tests {
         // n from OUTSIDE the hunk (cursor 0) selects the whole hunk.
         app.view.goto_source_line(0);
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.selection, Some(Selection { anchor: 0, cursor: 4 }));
+        assert_eq!(app.selection, Some(Selection { anchor: 2, cursor: 2 }));
         on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
-        assert_eq!((app.input_start, app.input_end), (0, 4), "view c on the hunk selection");
+        assert_eq!((app.input_start, app.input_end), (2, 2), "view c on the hunk selection");
         on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     }
 
@@ -1376,13 +1391,13 @@ mod git_tests {
         assert_eq!(app.cursor, 4, "lands on the first changed line");
         // The selection covers the whole hunk (context included), like
         // the `o` toggle's replacement range.
-        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 7 }));
+        assert_eq!(app.selection, Some(Selection { anchor: 4, cursor: 4 }));
         let (msg, _, _) = app.status.as_ref().unwrap();
         assert!(msg.contains("change 1/2"), "toast reports the position: {msg}");
         // F7 again: the second hunk.
         on_source_key(&mut app, KeyCode::F(7), KeyModifiers::NONE, None);
         assert_eq!(app.cursor, 14);
-        assert_eq!(app.selection, Some(Selection { anchor: 11, cursor: 17 }));
+        assert_eq!(app.selection, Some(Selection { anchor: 14, cursor: 14 }));
         assert!(app.status.as_ref().unwrap().0.contains("change 2/2"));
         // Shift+F7: back to the first.
         on_source_key(&mut app, KeyCode::F(7), KeyModifiers::SHIFT, None);
@@ -1460,8 +1475,14 @@ mod git_tests {
         // line — NOT a changed line), the whole hunk range selected.
         on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
         let landed = app.cursor;
-        let h0 = app.git_diff.as_ref().unwrap().hunks[0].new_range().unwrap();
-        assert_eq!(app.selection, Some(Selection { anchor: h0.0, cursor: h0.1 }));
+        let h0 = &app.git_diff.as_ref().unwrap().hunks[0];
+        // -U0: a pure-deletion hunk has no new range — the selection is
+        // its owner line (where the jump landed).
+        let (a, b) = match h0.new_range() {
+            Some((a, b)) => (a, b),
+            None => (h0.owner(app.source.len()), h0.owner(app.source.len())),
+        };
+        assert_eq!(app.selection, Some(Selection { anchor: a, cursor: b }));
         // n again: the NEXT hunk — never a rewind to the top.
         on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
         assert_eq!(app.cursor, 18, "steps to the second hunk's changed line");
@@ -1582,7 +1603,7 @@ mod git_tests {
         assert_eq!(app.current_file_index, 0, "no file switch");
         assert!(app.pending_chord.is_none(), "the chord was consumed");
         assert_eq!(app.cursor, 1, "landed on the changed line");
-        assert_eq!(app.selection, Some(Selection { anchor: 0, cursor: 2 }));
+        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 1 }));
         assert_eq!(app.mode, Mode::Source, "c was the chord, not the composer");
         // `[c` jumps back to the previous hunk (none above: flashes).
         on_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
@@ -1728,7 +1749,7 @@ mod git_tests {
         on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.overlay, None);
         assert_eq!(app.cursor, 1, "landed on the changed line");
-        assert_eq!(app.selection, Some(Selection { anchor: 0, cursor: 4 }));
+        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 1 }));
         // Tab back to comments.
         on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
         on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
@@ -1928,8 +1949,8 @@ mod git_tests {
         app.cursor = 1;
         let hints = footer_hints(&app);
         assert!(
-            hints.starts_with("hunk L1-4 +1/-1 · o old side"),
-            "git scope: {hints}"
+            hints.starts_with("hunk L2-2 +1/-1 · o old side"),
+            "git scope (-U0: the changed line only): {hints}"
         );
         app.scope = DiffScope::Last;
         let hints = footer_hints(&app);
@@ -2298,11 +2319,10 @@ mod git_tests {
         // selections keep their plain line-comment behavior.
         let dir = tempfile::tempdir().unwrap();
         let path = init_repo(dir.path(), &["one", "two", "three", "four", "five"]);
-        overwrite(&path, &["one", "two", "four", "FIVE"]); // -three, -five, +FIVE
+        // -three, -four, -five, +FIVE: one -U0 hunk (three deletions +
+        // the rewrite), whose deletion marks all land on line 3.
+        overwrite(&path, &["one", "two", "FIVE"]);
         let mut app = git_app(path.clone(), Mode::Source);
-        // Line 3 (0-based 2, "four") is a context line INSIDE the hunk
-        // and the mark row of the deleted "three": the bare c must carry
-        // the hunk's raw diff.
         assert!(app.git_deleted_before.contains(&2), "the following line is marked");
         app.cursor = 2;
         on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
@@ -2312,7 +2332,8 @@ mod git_tests {
             .clone()
             .expect("the mark row's bare c attaches the hunk diff");
         assert!(hunk_text.contains("-three"), "the deletion rides along: {hunk_text}");
-        assert!(hunk_text.contains("-five"), "the second deletion rides along: {hunk_text}");
+        assert!(hunk_text.contains("-four"), "the second deletion rides along: {hunk_text}");
+        assert!(hunk_text.contains("-five"), "the third deletion rides along: {hunk_text}");
         assert!(hunk_text.contains("+FIVE"), "the add rides along: {hunk_text}");
         for ch in "deleted".chars() {
             on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
@@ -2323,9 +2344,10 @@ mod git_tests {
         assert_eq!((c.start, c.end), (3, 3), "still a one-line comment");
         assert!(c.lines.contains("-three"), "the snippet is the hunk diff: {}", c.lines);
 
-        // The other mark row (the changed line "FIVE", 0-based 3) and a
-        // mark-less line stay plain line comments.
-        app.cursor = 3;
+        // The changed line "FIVE" (0-based 2) is a deletion mark row too
+        // — the bare c still attaches the hunk; a mark-less line stays
+        // a plain line comment.
+        app.cursor = 2;
         on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
         assert!(
             app.composer_hunk.is_some(),

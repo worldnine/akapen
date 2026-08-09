@@ -171,7 +171,14 @@ impl Diff {
         // marking a tracked file untracked (and diffing nothing).
         let abs = absolutize(path);
         let mut cmd = Command::new("git");
-        cmd.arg("diff").arg(diff_ref).arg("--").arg(&abs);
+        // -U0: zero context lines. With the default 3 context lines,
+        // nearby distinct changes fuse into one giant hunk — `o` then
+        // flips half the screen — and the hunk boundaries become
+        // unreadable from the marks. With 0 context, a run of adjacent
+        // mark rows is ALWAYS one hunk, so the boundaries line up with
+        // the mark gaps. `synthesize_diff` (the reload path) already
+        // produces this shape, so both sides of the app now agree.
+        cmd.arg("diff").arg("-U0").arg(diff_ref).arg("--").arg(&abs);
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
@@ -181,6 +188,13 @@ impl Diff {
         }
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let mut diff = parse_diff(&stdout);
+        // Normalize git's raw zero-context output to the internal hunk
+        // convention (the one `synthesize_diff` produces and every
+        // consumer — owner/deleted_before/hunk_at — expects). This is
+        // the ONLY conversion point from git's raw shape; parse_diff
+        // stays a pure parser (its unit tests feed it internal-format
+        // text directly, so normalizing there would double-count).
+        normalize_zero_context(&mut diff);
         // An untracked file has no HEAD side: `git diff` prints nothing for
         // it. `ls-files --error-unmatch` distinguishes that from a tracked
         // file without changes.
@@ -283,7 +297,10 @@ impl Diff {
 /// Build a zero-context [`Diff`] from two file contents — the reload
 /// path's analogue of `git diff -U0` (the diff-scope step 1: the reload
 /// diff is normalized into the same structure the git snapshot uses, so
-/// marks, counts, old-side and navigation can share one consumer). The
+/// marks, counts, old-side and navigation can share one consumer).
+/// The git snapshot side ([`Diff::load`]) now ALSO runs `git diff -U0`
+/// and normalizes its pure-deletion hunks to this same internal
+/// convention, so both sides of the app produce identical hunk shapes. The
 /// runs of inserted/deleted lines TextDiff finds become hunks; a
 /// modification (delete run immediately followed by an insert run) is
 /// ONE hunk, its body deletes-then-adds, no context lines.
@@ -357,6 +374,21 @@ pub fn synthesize_diff(old: &str, new: &str) -> Diff {
     Diff {
         hunks: hunks.into_iter().map(|(_, _, h)| h).collect(),
         untracked: false,
+    }
+}
+
+/// Normalize git's raw `-U0` output to the internal hunk convention:
+/// git writes the zero-length side of a pure-deletion hunk as the bare
+/// 0-based position (`+4,0` = "after new line 4"), while the internal
+/// convention (and every consumer: [`Hunk::owner`], [`Diff::deleted_before`],
+/// [`Hunk::hunk_at`]) expects `new_start - 1` to be the deletion
+/// position — i.e. `new_start` 1-based, 0 for a start-of-file deletion
+/// (git's `+0,0`, which is already internal-form).
+fn normalize_zero_context(diff: &mut Diff) {
+    for h in &mut diff.hunks {
+        if h.new_len == 0 && h.new_start != 0 {
+            h.new_start += 1;
+        }
     }
 }
 
@@ -665,8 +697,13 @@ mod tests {
         std::fs::write(&path, "one\ntwo\nchanged\nfour\nfive\n").unwrap();
         let diff = Diff::load("HEAD", &path).expect("inside a git repo");
         assert!(!diff.untracked);
-        assert_eq!(diff.hunks.len(), 1);
-        assert_eq!(diff.hunks[0].old_lines(), vec!["one", "two", "three", "four"]);
+        // -U0: the rewrite and the appended line are separate hunks, each
+        // with zero context lines.
+        assert_eq!(diff.hunks.len(), 2);
+        assert_eq!(diff.hunks[0].old_lines(), vec!["three"], "the rewritten line");
+        assert_eq!(diff.hunks[0].new_range(), Some((2, 2)));
+        assert!(diff.hunks[1].old_lines().is_empty(), "a pure addition");
+        assert_eq!(diff.hunks[1].new_range(), Some((4, 4)));
     }
 
     #[test]
@@ -703,7 +740,7 @@ mod tests {
         std::fs::write(&path, "one\nCHANGED\nthree\n").unwrap();
         let diff = Diff::load("HEAD~1", &path).expect("HEAD~1 resolves");
         assert_eq!(diff.hunks.len(), 1);
-        assert_eq!(diff.hunks[0].old_lines(), vec!["one", "two"], "HEAD~1 has no `three`");
+        assert_eq!(diff.hunks[0].old_lines(), vec!["two"], "HEAD~1 has no `three` — the rewritten line");
     }
 
     #[test]
@@ -852,15 +889,111 @@ mod tests {
     #[test]
     fn added_modified_works_on_real_git_diffs() {
         // The same split must hold for a parsed real git diff: a
-        // rewritten line plus appended lines in one hunk.
+        // rewritten line plus appended lines (separate -U0 hunks).
         let dir = tempfile::tempdir().unwrap();
         let path = init_repo(dir.path(), &["one", "two", "three"]);
         std::fs::write(&path, "one\nCHANGED\nthree\nfour\nfive\n").unwrap();
         let diff = Diff::load("HEAD", &path).expect("inside a git repo");
-        assert_eq!(diff.hunks.len(), 1, "one hunk with 3 context lines");
+        assert_eq!(diff.hunks.len(), 2, "-U0 splits the rewrite from the append");
         let (added, modified) = diff.added_modified(5);
         assert_eq!(modified, HashSet::from([1]), "the rewritten line");
         assert_eq!(added, HashSet::from([3, 4]), "the appended lines");
+    }
+
+    #[test]
+    fn u0_normalization_keeps_the_mark_positions() {
+        // The -U0 switch changes the hunk STRUCTURE (nearby changes
+        // split apart), but the marks — added/modified/deleted_before —
+        // must land on exactly the same lines as the pre-U0 3-context
+        // snapshots: the marks are what the gutters paint, so they are
+        // the behavior contract. The old shape is reproduced by parsing
+        // git's explicit `-U3` output.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &["one", "two", "three", "four", "five", "six", "seven", "eight"],
+        );
+        // two rewritten, four deleted, seven rewritten, NINE appended.
+        std::fs::write(&path, "one\nCHANGED\nthree\nfive\nsix\nSEVEN\neight\nNINE\n").unwrap();
+        let new_len = 8;
+        let abs = absolutize(&path);
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["diff", "-U3", "HEAD", "--"])
+            .arg(&abs)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git -U3 runs");
+        let old = parse_diff(&String::from_utf8_lossy(&out.stdout));
+        assert!(old.hunks.len() < 4, "3 context fuses the changes: {}", old.hunks.len());
+        let new = Diff::load("HEAD", &path).expect("inside the repo");
+        assert!(new.hunks.len() > old.hunks.len(), "-U0 splits them apart");
+        assert_eq!(new.added(new_len), old.added(new_len), "added marks unchanged");
+        assert_eq!(
+            new.deleted_before(new_len),
+            old.deleted_before(new_len),
+            "deletion marks unchanged"
+        );
+        // The -U0 split also makes the add/rewrite classification EXACT:
+        // with 3 context lines the fused hunk's min(D,A) rule swallowed
+        // the appended line into `modified`; the separated hunks classify
+        // it as a pure addition.
+        let (na, nm) = new.added_modified(new_len);
+        assert_eq!(na, HashSet::from([7]), "NINE is a pure addition");
+        assert_eq!(nm, HashSet::from([1, 5]), "the two rewrites");
+    }
+
+    #[test]
+    fn u0_pure_deletion_hunks_normalize_to_the_internal_convention() {
+        // git's raw -U0 output writes a pure-deletion hunk's new_start as
+        // the bare 0-based position; the internal convention (what
+        // owner/deleted_before/hunk_at expect) is position+1, with 0 for
+        // a start-of-file deletion. The normalization in load must land
+        // the deletion marks on the same lines as before.
+        let dir = tempfile::tempdir().unwrap();
+        // Mid-file deletion: four dropped from an 8-line file.
+        let path = init_repo(
+            dir.path(),
+            &["one", "two", "three", "four", "five", "six", "seven", "eight"],
+        );
+        std::fs::write(&path, "one\ntwo\nthree\nfive\nsix\nseven\neight\n").unwrap();
+        let diff = Diff::load("HEAD", &path).expect("inside the repo");
+        assert_eq!(diff.hunks.len(), 1);
+        let h = &diff.hunks[0];
+        assert_eq!((h.old_start, h.old_len, h.new_start, h.new_len), (4, 1, 4, 0));
+        assert_eq!(h.owner(7), 3, "the following line (0-based)");
+        assert_eq!(diff.deleted_before(7), HashSet::from([3]));
+        // Start-of-file deletion: git's `+0,0` is already internal-form.
+        std::fs::write(&path, "two\nthree\nfour\nfive\nsix\nseven\neight\n").unwrap();
+        let diff = Diff::load("HEAD", &path).expect("inside the repo");
+        assert_eq!((diff.hunks[0].new_start, diff.hunks[0].new_len), (0, 0));
+        assert_eq!(diff.deleted_before(7), HashSet::from([0]));
+        // EOF deletion: the mark clamps to the last new line.
+        std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+        let diff = Diff::load("HEAD", &path).expect("inside the repo");
+        assert_eq!((diff.hunks[0].new_start, diff.hunks[0].new_len), (7, 0));
+        assert_eq!(diff.deleted_before(6), HashSet::from([5]), "clamped to the last line");
+    }
+
+    #[test]
+    fn u0_splits_nearby_changes_into_separate_hunks() {
+        // With the default 3 context lines, two changes separated by a
+        // single unchanged line fuse into one giant hunk; -U0 keeps them
+        // apart, so a run of adjacent mark rows is always exactly one
+        // hunk (the hunk boundaries read off the mark gaps).
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &["one", "two", "three", "four", "five", "six", "seven"],
+        );
+        // two rewritten, four rewritten — one unchanged line (three)
+        // between them.
+        std::fs::write(&path, "one\nCHANGED\nthree\nFOUR\nfive\nsix\nseven\n").unwrap();
+        let diff = Diff::load("HEAD", &path).expect("inside the repo");
+        assert_eq!(diff.hunks.len(), 2, "one unchanged line keeps them apart");
+        assert_eq!(diff.hunks[0].new_range(), Some((1, 1)));
+        assert_eq!(diff.hunks[1].new_range(), Some((3, 3)));
     }
 
     #[test]
