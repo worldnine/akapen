@@ -360,12 +360,45 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// The deletion-position hint (3-1): when the cursor sits on a line
+/// marked "deleted block above" (reload and/or git), a snippet leading
+/// the footer — `-N deleted above · o: old side` with N derived from the
+/// git hunks when the mark is a git one, the bare `deleted above · o:
+/// old side` when only reload marks exist and the count is unknowable.
+/// On-demand only (cursor-anchored): no always-on information (P2).
+fn deletion_hint(app: &App) -> Option<String> {
+    let line = match app.mode {
+        Mode::View => app.view.cursor,
+        Mode::Source => app.cursor,
+        Mode::Input => return None,
+    };
+    if !app.last_deleted_before.contains(&line) && !app.git_deleted_before.contains(&line) {
+        return None;
+    }
+    let count = if app.git_deleted_before.contains(&line) {
+        app.git_diff
+            .as_ref()
+            .map(|d| crate::hunknav::deleted_above_count(d, line, app.source.len()))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Some(if count > 0 {
+        format!("-{count} deleted above · o: old side")
+    } else {
+        "deleted above · o: old side".to_string()
+    })
+}
+
 /// The footer's mode hint: the cursor's position as `L{line}/{total}`
 /// (1-based source line — the cursor IS the review anchor, so the line
 /// number is more actionable than a %), a few labeled actions for the
 /// current context, then `? help` for the full key reference. Keys keep
 /// their relative order across modes so a mode switch never rearranges
-/// the hints.
+/// the hints. A deletion mark row under the cursor leads the hints with
+/// the `deleted above` snippet (see [`deletion_hint`]) — it is prepended,
+/// so the footer's existing right-edge truncation drops the generic hints
+/// first when the terminal is narrow.
 pub(crate) fn footer_hints(app: &App) -> String {
     let pos = |line: usize, total: usize| {
         if total == 0 {
@@ -374,6 +407,9 @@ pub(crate) fn footer_hints(app: &App) -> String {
             format!("L{}/{}", line + 1, total)
         }
     };
+    let lead = deletion_hint(app)
+        .map(|d| format!("{d} · "))
+        .unwrap_or_default();
     match app.mode {
         Mode::Input => "Enter confirm · ^j newline · ←→↑↓ move · Esc cancel".to_string(),
         Mode::View => {
@@ -386,9 +422,9 @@ pub(crate) fn footer_hints(app: &App) -> String {
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
-                    format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
+                    format!("{lead}{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
-                None => format!("{p} · j/k scroll · v select · c comment · ? help"),
+                None => format!("{lead}{p} · j/k scroll · v select · c comment · ? help"),
             }
         }
         Mode::Source => {
@@ -396,9 +432,9 @@ pub(crate) fn footer_hints(app: &App) -> String {
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
-                    format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
+                    format!("{lead}{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
-                None => format!("{p} · j/k move · v select · c comment · ? help"),
+                None => format!("{lead}{p} · j/k move · v select · c comment · ? help"),
             }
         }
     }

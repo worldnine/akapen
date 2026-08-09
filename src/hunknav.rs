@@ -355,12 +355,46 @@ pub(crate) fn view_deleted_flags(
     deleted
 }
 
+/// The number of deleted lines (vs the git ref) whose position mark (3-1)
+/// sits on new-file `line`: the sum of the Delete lines of every hunk
+/// whose deletion block ends right above `line` — the footer's
+/// `-N deleted above` hint reads it (see [`crate::chrome::footer_hints`]).
+/// The derivation lives here, in one place, mirroring
+/// [`git::Diff::deleted_before`] exactly (EOF clamp included), so a
+/// future diff-scope change swaps only this function and the caller never
+/// walks hunks itself.
+pub(crate) fn deleted_above_count(diff: &git::Diff, line: usize, new_len: usize) -> usize {
+    if new_len == 0 || line >= new_len {
+        return 0;
+    }
+    let mut count = 0usize;
+    for h in &diff.hunks {
+        // Walk the body tracking the new index; every Delete line drops
+        // its mark on the following new line, clamped to the last line
+        // for an EOF deletion — exactly `deleted_before`'s rule.
+        let mut new_idx = h.new_start.saturating_sub(1) as usize;
+        for l in &h.body {
+            match l.tag {
+                git::Tag::Add | git::Tag::Context => new_idx += 1,
+                git::Tag::Delete => {
+                    if new_idx.min(new_len - 1) == line {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod git_tests {
+    use super::deleted_above_count;
     use crate::app::{App, FileState, Mode};
     use crate::comment::Selection;
     use crate::config::{Config, EscQuit};
     use crate::export;
+    use crate::git;
     use crate::highlight::{Highlighter, syntax_for};
     use crate::overlay::{Overlay, OverlayTab};
     use crate::ime::ImeMode;
@@ -1583,5 +1617,69 @@ mod git_tests {
         assert!(app.git_added.contains(&2), "the new change is marked: {:?}", app.git_added);
         assert!(!app.git_added.contains(&5), "stale marks are gone");
         assert!(app.old_side.is_none());
+    }
+
+    #[test]
+    fn deleted_above_count_sums_the_deletions_landing_on_a_line() {
+        // Pure-deletion hunk: both deleted lines sit above new line 1
+        // (0-based 0), so the count there is 2 and nowhere else.
+        let pure = git::Diff {
+            untracked: false,
+            hunks: vec![git::Hunk {
+                old_start: 1,
+                old_len: 2,
+                new_start: 1,
+                new_len: 0,
+                body: vec![
+                    git::HunkLine { tag: git::Tag::Delete, text: "a".into() },
+                    git::HunkLine { tag: git::Tag::Delete, text: "b".into() },
+                ],
+            }],
+        };
+        assert_eq!(deleted_above_count(&pure, 0, 5), 2);
+        assert_eq!(deleted_above_count(&pure, 1, 5), 0);
+
+        // Change hunk (delete+add pairs): one deleted line above each
+        // added line, none above the trailing context line.
+        let change = git::Diff {
+            untracked: false,
+            hunks: vec![git::Hunk {
+                old_start: 1,
+                old_len: 3,
+                new_start: 1,
+                new_len: 2,
+                body: vec![
+                    git::HunkLine { tag: git::Tag::Delete, text: "a".into() },
+                    git::HunkLine { tag: git::Tag::Add, text: "a2".into() },
+                    git::HunkLine { tag: git::Tag::Delete, text: "b".into() },
+                    git::HunkLine { tag: git::Tag::Add, text: "b2".into() },
+                    git::HunkLine { tag: git::Tag::Context, text: "c".into() },
+                ],
+            }],
+        };
+        assert_eq!(deleted_above_count(&change, 0, 5), 1, "above the first added line");
+        assert_eq!(deleted_above_count(&change, 1, 5), 1, "above the second added line");
+        assert_eq!(deleted_above_count(&change, 2, 5), 0, "context lines have nothing above");
+        assert_eq!(deleted_above_count(&change, 3, 5), 0);
+
+        // EOF deletion: the marks clamp to the file's last line (same
+        // rule as `deleted_before`), so the count lands there.
+        let eof = git::Diff {
+            untracked: false,
+            hunks: vec![git::Hunk {
+                old_start: 2,
+                old_len: 2,
+                new_start: 3,
+                new_len: 0,
+                body: vec![
+                    git::HunkLine { tag: git::Tag::Delete, text: "x".into() },
+                    git::HunkLine { tag: git::Tag::Delete, text: "y".into() },
+                ],
+            }],
+        };
+        assert_eq!(deleted_above_count(&eof, 1, 2), 2, "EOF deletion clamps to the last line");
+        assert_eq!(deleted_above_count(&eof, 0, 2), 0);
+        assert_eq!(deleted_above_count(&eof, 1, 0), 0, "an empty file has no marks");
+        assert_eq!(deleted_above_count(&eof, 2, 2), 0, "out-of-range lines count nothing");
     }
 }

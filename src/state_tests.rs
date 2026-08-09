@@ -2735,6 +2735,67 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn footer_hints_lead_with_deleted_above_on_a_deletion_mark_row() {
+        // 3-1: a cursor on a deletion mark row (reload or git) leads the
+        // footer with `-N deleted above · o: old side` (N derived from
+        // the git hunks) — or the bare `deleted above · o: old side`
+        // when only reload marks exist and the count is unknowable. Off
+        // the mark row the footer stays exactly as before.
+        let mut app = make_app(5, Mode::View);
+        app.view.goto_source_line(2);
+        app.last_deleted_before.insert(2); // reload-only mark on line 3
+        let hints = footer_hints(&app);
+        assert!(
+            hints.starts_with("deleted above · o: old side · L3/5"),
+            "reload marks get the count-less hint, leading the footer: {hints}"
+        );
+
+        // A git mark derives the count from its hunk: 2 lines deleted
+        // above line 4 (0-based 3).
+        app.view.goto_source_line(3);
+        app.git_deleted_before.insert(3);
+        app.git_diff = Some(crate::git::Diff {
+            untracked: false,
+            hunks: vec![crate::git::Hunk {
+                old_start: 1,
+                old_len: 2,
+                new_start: 4,
+                new_len: 0,
+                body: vec![
+                    crate::git::HunkLine {
+                        tag: crate::git::Tag::Delete,
+                        text: "old a".into(),
+                    },
+                    crate::git::HunkLine {
+                        tag: crate::git::Tag::Delete,
+                        text: "old b".into(),
+                    },
+                ],
+            }],
+        });
+        let hints = footer_hints(&app);
+        assert!(
+            hints.starts_with("-2 deleted above · o: old side · L4/5"),
+            "git marks derive the count from the hunks: {hints}"
+        );
+
+        // Off the mark row: no deletion hint at all.
+        app.view.goto_source_line(0);
+        let hints = footer_hints(&app);
+        assert!(!hints.contains("deleted above"), "{hints}");
+
+        // Source mode anchors the hint to `app.cursor` (its own gutter
+        // `-` mark stays as-is).
+        let mut app = make_app(5, Mode::Source);
+        app.cursor = 1;
+        app.last_deleted_before.insert(1);
+        let hints = footer_hints(&app);
+        assert!(hints.starts_with("deleted above · o: old side · L2/5"), "{hints}");
+        app.cursor = 0;
+        assert!(!footer_hints(&app).contains("deleted above"));
+    }
+
+    #[test]
     fn footer_badge_shows_the_state_not_just_the_mode() {
         // The badge leads the footer and flips with the transient states:
         // SELECT while a selection is active (both modes — the selection
