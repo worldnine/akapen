@@ -279,7 +279,18 @@ pub(crate) fn substitute_old_side(app: &App, os: &OldSide) -> (Source, usize, us
     let mut lines: Vec<String> = Vec::with_capacity(app.source.len() + block_len);
     lines.extend(app.source.lines[..a].iter().cloned());
     lines.extend(block);
-    lines.extend(app.source.lines[b + 1..].iter().cloned());
+    if span == 0 {
+        // Pure deletion: the block INSERTS before the owner line — the
+        // owner row survives below the block. (Replacing it, as the
+        // range path does, broke the source_starts inverse mapping: at
+        // EOF the owner's lookup fell off the end and old_side_rows
+        // ballooned over the whole document. sub_index/remapped_line
+        // already assume the owner survives — their `j + block_len` /
+        // `i - block_len` shifts are exactly this layout.)
+        lines.extend(app.source.lines[a..].iter().cloned());
+    } else {
+        lines.extend(app.source.lines[b + 1..].iter().cloned());
+    }
     let content = lines.join("\n") + "\n";
     let source = Source {
         path: app.current_file_path().to_path_buf(),
@@ -924,6 +935,123 @@ mod git_tests {
         // The owner row (cursor on it) shows the `>` marker; the red `-`
         // deletion mark was asserted above, before the toggle.
         assert!(rows[4].starts_with(">2 e"), "the following line keeps its place: {}", rows[4]);
+    }
+
+    #[test]
+    fn o_on_an_eof_pure_deletion_keeps_the_owner_row() {
+        // -U0 の純削除（EOF）で view の o: the block INSERTS before the
+        // owner row, so the owner heading stays on screen and the `~`
+        // marker covers only the block. Regression: substitute_old_side
+        // REPLACED the owner row (the range path's lines[b+1..]), which
+        // broke the source_starts inverse mapping — at EOF the owner's
+        // lookup fell off the end and old_side_rows ballooned over the
+        // whole document, painting `~` everywhere.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &[
+                "# one", "# two", "# three", "# four", "# five", "# six", "# seven", "# eight",
+            ],
+        );
+        std::fs::write(&path, "# one\n# two\n# three\n# four\n# five\n# six\n").unwrap();
+        let mut app = git_app(path, Mode::View);
+        let diff = app.git_diff.as_ref().unwrap();
+        assert_eq!(diff.hunks.len(), 1);
+        assert_eq!(diff.hunks[0].new_len, 0, "pure deletion");
+        let owner = diff.hunks[0].owner(app.source.len());
+        assert_eq!(owner, 5, "clamped to the last new line");
+        app.view.goto_source_line(owner);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        let rows = app.view.old_side_rows.clone();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.end < app.view.rows.len(),
+            "the ~ block is bounded (owner row follows): {rows:?} vs {} rows",
+            app.view.rows.len()
+        );
+        // The owner heading survives below the block; the deleted
+        // headings render inside it.
+        let all: String = app.view
+            .rows
+            .iter()
+            .flatten()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(all.contains("six"), "the owner row stays on screen");
+        assert!(all.contains("seven") && all.contains("eight"), "the old content shows");
+        // The view's attribution still maps every source line (the
+        // inverse mapping did not drift).
+        assert_eq!(
+            app.view.source_starts.len(),
+            app.source.len(),
+            "every new-file line maps"
+        );
+    }
+
+    #[test]
+    fn o_on_a_mid_file_pure_deletion_keeps_the_owner_row() {
+        // 行中間の純削除も同じ: owner 行が残り、もう一度 o で戻る。
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(
+            dir.path(),
+            &[
+                "# one", "# two", "# three", "# four", "# five", "# six", "# seven", "# eight",
+            ],
+        );
+        std::fs::write(&path, "# one\n# two\n# three\n# six\n# seven\n# eight\n").unwrap();
+        let mut app = git_app(path, Mode::View);
+        let diff = app.git_diff.as_ref().unwrap();
+        assert_eq!(diff.hunks[0].new_len, 0, "pure deletion");
+        let owner = diff.hunks[0].owner(app.source.len());
+        assert_eq!(owner, 3, "the row following the deleted block");
+        app.view.goto_source_line(owner);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        let rows = app.view.old_side_rows.clone();
+        assert!(!rows.is_empty() && rows.end < app.view.rows.len(), "{rows:?}");
+        let all: String = app.view
+            .rows
+            .iter()
+            .flatten()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(all.contains("six"), "the owner row stays");
+        assert!(all.contains("four") && all.contains("five"), "the old content shows");
+        // もう一度 o で new side に戻る。
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none(), "toggled back");
+    }
+
+    #[test]
+    fn o_on_a_whole_file_deletion_renders_only_the_block() {
+        // 全ファイル削除（`+0,0`）のエッジ: the block is the whole
+        // substituted document — no owner row exists. Must render and
+        // toggle back without panicking (regression guard).
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["# one", "# two", "# three"]);
+        std::fs::write(&path, "").unwrap();
+        let mut app = git_app(path, Mode::View);
+        let diff = app.git_diff.as_ref().unwrap();
+        assert_eq!(diff.hunks[0].new_start, 0, "+0,0");
+        assert_eq!(diff.hunks[0].new_len, 0);
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_some());
+        let rows = app.view.old_side_rows.clone();
+        assert!(
+            !rows.is_empty() && rows.end <= app.view.rows.len(),
+            "the block fills the empty document: {rows:?}"
+        );
+        let all: String = app.view
+            .rows
+            .iter()
+            .flatten()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(all.contains("one") && all.contains("three"), "the old content shows");
+        // もう一度 o で戻る（空ファイルに）。
+        on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none(), "toggled back");
     }
 
     #[test]
