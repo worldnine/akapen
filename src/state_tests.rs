@@ -1078,6 +1078,7 @@ use crate::comment::Selection;
             &marked,
             &[],
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
@@ -1330,7 +1331,7 @@ use crate::comment::Selection;
         std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
         assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.last_change, Some((1, 0)));
-        let (added, _) = scoped_mark_sets(&app);
+        let ((added, _, _), _) = scoped_mark_sets(&app);
         assert!(added.contains(&5), "the Last scope shows the reload marks");
         on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
         assert_eq!(app.scope, crate::app::DiffScope::Off);
@@ -1339,30 +1340,82 @@ use crate::comment::Selection;
         assert!(!footer_hints(&app).contains("m:"), "non-git look is unchanged (P1)");
     }
 
+    /// A hunk that deletes one old line and adds `n` new ones at 1-based
+    /// position `p`: with n = 1 it is a pure rewrite, with n = 2 one
+    /// rewrite + one pure addition.
+    fn rewrite_hunk(p: u32, n: u32) -> crate::git::Hunk {
+        crate::git::Hunk {
+            old_start: p,
+            old_len: 1,
+            new_start: p,
+            new_len: n,
+            body: std::iter::once(crate::git::HunkLine {
+                tag: crate::git::Tag::Delete,
+                text: "old".into(),
+            })
+            .chain((0..n).map(|i| crate::git::HunkLine {
+                tag: crate::git::Tag::Add,
+                text: format!("new{i}"),
+            }))
+            .collect(),
+        }
+    }
+
     #[test]
     fn scoped_marks_select_the_scope() {
         // マーク選択は 1 箇所 (scoped_mark_sets) に集約され、view と
-        // source の両ガターが同じ集合を読む。
+        // source の両ガターが同じ集合を読む。added/modified の分解は
+        // diff から導出される（diff-scope step ③）。
         let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        app.last_added = HashSet::from([1, 2]);
+        // last: 位置 2 の書き換え + 純追加（delete 1 + add 2）。
+        app.last_diff = Some(crate::git::Diff {
+            hunks: vec![rewrite_hunk(2, 2)],
+            untracked: false,
+        });
+        // git: 位置 2 の書き換えのみ（last と同一位置）+ 位置 4 の書き換え。
+        app.git_diff = Some(crate::git::Diff {
+            hunks: vec![rewrite_hunk(2, 1), rewrite_hunk(4, 1)],
+            untracked: false,
+        });
         app.last_deleted_before = HashSet::from([3]);
-        app.git_added = HashSet::from([2, 4]);
         app.git_deleted_before = HashSet::from([0]);
-        app.git_diff = Some(crate::git::Diff::default());
+        let empty = || (HashSet::new(), HashSet::new(), HashSet::new());
         app.scope = crate::app::DiffScope::Last;
-        assert_eq!(scoped_mark_sets(&app), (HashSet::from([1, 2]), HashSet::from([3])));
+        assert_eq!(
+            scoped_mark_sets(&app),
+            ((HashSet::from([2]), HashSet::from([1]), HashSet::from([3])), empty()),
+            "last: pure addition at 2, rewrite at 1"
+        );
         app.scope = crate::app::DiffScope::Git;
-        assert_eq!(scoped_mark_sets(&app), (HashSet::from([2, 4]), HashSet::from([0])));
+        assert_eq!(
+            scoped_mark_sets(&app),
+            ((HashSet::new(), HashSet::from([1, 3]), HashSet::from([0])), empty()),
+            "git: rewrites at 1 and 3"
+        );
         app.scope = crate::app::DiffScope::Both;
-        assert_eq!(scoped_mark_sets(&app), (HashSet::from([1, 2, 4]), HashSet::from([0, 3])));
+        assert_eq!(
+            scoped_mark_sets(&app),
+            (
+                (HashSet::from([2]), HashSet::from([1]), HashSet::from([3])),
+                // git-only: 位置 1 の書き換えは last の modified に被る
+                // ので通常色（last 優先）、位置 3 の書き換えも last の
+                // 削除マークに被る — 残る DIM は位置 0 の削除マークのみ。
+                (HashSet::new(), HashSet::new(), HashSet::from([0])),
+            ),
+            "both: last regular, git-only dim"
+        );
         app.scope = crate::app::DiffScope::Off;
-        assert_eq!(scoped_mark_sets(&app), (HashSet::new(), HashSet::new()));
+        assert_eq!(scoped_mark_sets(&app), (empty(), empty()));
         // untracked: Git は空（全行マークはノイズ）、Both は last 分のみ。
         app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
         app.scope = crate::app::DiffScope::Git;
-        assert_eq!(scoped_mark_sets(&app), (HashSet::new(), HashSet::new()));
+        assert_eq!(scoped_mark_sets(&app), (empty(), empty()));
         app.scope = crate::app::DiffScope::Both;
-        assert_eq!(scoped_mark_sets(&app), (HashSet::from([1, 2]), HashSet::from([3])));
+        assert_eq!(
+            scoped_mark_sets(&app),
+            ((HashSet::from([2]), HashSet::from([1]), HashSet::from([3])), empty()),
+            "untracked × Both: only the reload marks"
+        );
     }
 
     #[test]
@@ -1376,21 +1429,30 @@ use crate::comment::Selection;
         app.git_diff = Some(diff);
         app.scope = crate::app::DiffScope::Git;
         assert_eq!(title_metrics(&app, 100).change, " g+2/-1 ");
-        // Last / Both: リロードの +N/-M。
+        // Both: リロードの +N/-M に git の g+K/-L を併記（diff-scope
+        // step ③）— マークで区別される 2 源をタイトルも対で示す。
         app.last_change = Some((3, 2));
         app.scope = crate::app::DiffScope::Both;
-        assert_eq!(title_metrics(&app, 100).change, " +3/-2 ");
+        assert_eq!(title_metrics(&app, 100).change, " +3/-2 · g+2/-1 ");
+        // 未リロード（last なし）なら git 側だけ。
+        app.last_change = None;
+        assert_eq!(title_metrics(&app, 100).change, " g+2/-1 ");
+        // Last: リロードの +N/-M のみ。
+        app.last_change = Some((3, 2));
         app.scope = crate::app::DiffScope::Last;
         assert_eq!(title_metrics(&app, 100).change, " +3/-2 ");
         // Off: なし。
         app.scope = crate::app::DiffScope::Off;
         assert_eq!(title_metrics(&app, 100).change, "");
-        // untracked / 空 diff × Git: なし。
+        // untracked / 空 diff × Git: なし。Both でも git 側は出さない。
         app.scope = crate::app::DiffScope::Git;
         app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
         assert_eq!(title_metrics(&app, 100).change, "");
         app.git_diff = Some(crate::git::Diff::default());
         assert_eq!(title_metrics(&app, 100).change, "", "no hunks, no badge");
+        app.scope = crate::app::DiffScope::Both;
+        app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
+        assert_eq!(title_metrics(&app, 100).change, " +3/-2 ", "untracked × Both: last only");
         // ⚡ pending は全スコープより優先。
         app.file_changed = true;
         assert_eq!(title_metrics(&app, 100).change, " ⚡ ");
@@ -2014,6 +2076,7 @@ use crate::comment::Selection;
             &[],
             &[],
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
@@ -2118,6 +2181,7 @@ use crate::comment::Selection;
         let (_, gutter) = view.visible_text(
             10,
             &[false; 6],
+            &[],
             &[],
             &[],
             Some((1, 1)),
@@ -3116,7 +3180,9 @@ use crate::comment::Selection;
 
         // A git mark whose hunk has no new range (pure deletion) is the
         // hunk's owner line: the hunk display wins, the counts' `-2`
-        // carrying the deletion scale.
+        // carrying the deletion scale. The git hunk resolves under the
+        // Git scope (run()'s in-repo default, diff-scope step ④).
+        app.scope = crate::app::DiffScope::Git;
         app.view.goto_source_line(3);
         app.git_deleted_before.insert(3);
         app.git_diff = Some(crate::git::Diff {
@@ -3148,6 +3214,7 @@ use crate::comment::Selection;
         // the hunk display has nothing to say, so the deletion hint shows
         // the count derived from the hunks.
         let mut app = make_app(5, Mode::Source);
+        app.scope = crate::app::DiffScope::Git;
         app.cursor = 4;
         app.git_deleted_before.insert(4);
         app.git_diff = Some(crate::git::Diff {
@@ -3241,10 +3308,8 @@ use crate::comment::Selection;
             ],
         }]);
         let mut app = make_app(5, Mode::Source);
-        app.git_diff = Some(change);
-        // リポジトリ内なら run() は Git を初期スコープにする (diff-scope
-        // step ①): フッター末尾に m:git バッジが付く。
         app.scope = crate::app::DiffScope::Git;
+        app.git_diff = Some(change);
         app.cursor = 0;
         let hints = footer_hints(&app);
         assert!(
@@ -3272,6 +3337,7 @@ use crate::comment::Selection;
 
         // A pure-addition hunk omits the `-0` side.
         let mut app = make_app(5, Mode::Source);
+        app.scope = crate::app::DiffScope::Git;
         app.git_diff = Some(diff(vec![crate::git::Hunk {
             old_start: 1,
             old_len: 1,
@@ -3296,6 +3362,7 @@ use crate::comment::Selection;
 
         // A pure-deletion hunk shows its owner line and only `-N`.
         let mut app = make_app(5, Mode::Source);
+        app.scope = crate::app::DiffScope::Git;
         app.git_diff = Some(diff(vec![crate::git::Hunk {
             old_start: 1,
             old_len: 2,

@@ -389,6 +389,7 @@ impl ViewState {
         marked: &[bool],
         changed: &[bool],
         deleted: &[bool],
+        dim: &[bool],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
         border_style: Style,
@@ -428,6 +429,10 @@ impl ViewState {
         let group_marked = group_or(marked);
         let group_changed = group_or(changed);
         let group_deleted = group_or(deleted);
+        // The git-only rows under Both render their marker DIM (diff-
+        // scope step ③): a dim flag per source line, folded per group
+        // like the other flags.
+        let group_dim = group_or(dim);
         let end = (self.offset + viewport).min(self.rows.len());
         let mut start = self.cursor_row();
         let mut c_end = self.cursor_end_row() + 1;
@@ -572,15 +577,20 @@ impl ViewState {
             } else if marked_row {
                 ("▌", Style::default().fg(Color::Yellow))
             } else if changed_row {
-                ("▌", Style::default().fg(Color::Green))
+                let s = Style::default().fg(Color::Green);
+                let s = if group_dim[src] { s.add_modifier(Modifier::DIM) } else { s };
+                ("▌", s)
             } else if deleted_row {
                 // Deleted blocks are shown by POSITION only (3-1): the
                 // `▀` (upper half of this row) reads as "something above
                 // was deleted" — a full-height `▌` would read as a
                 // deleted/changed LINE at a glance, and the upper-half
                 // block keeps the same weight as the green `▌` (both
-                // half-blocks). `o` shows the content.
-                ("▀", Style::default().fg(Color::Red))
+                // half-blocks). `o` shows the content. The git-only rows
+                // under Both render DIM.
+                let s = Style::default().fg(Color::Red);
+                let s = if group_dim[src] { s.add_modifier(Modifier::DIM) } else { s };
+                ("▀", s)
             } else {
                 ("│", border_style)
             };
@@ -770,9 +780,8 @@ mod tests {
         ViewState,
     };
     use crate::highlight::Highlighter;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier, Style};
     use crate::source::Source;
-    use ratatui::style::Style;
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -803,7 +812,7 @@ mod tests {
     /// The concatenated text of `visible_text`'s row `i` (content only —
     /// the marker column is separate; see [`gutter_at`]).
     fn row_text(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> String {
-        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .0
             .lines[i]
             .spans
@@ -815,7 +824,7 @@ mod tests {
     /// The marker glyph of `visible_text`'s row `i` (the cell drawn over
     /// the frame's left border).
     fn gutter_at(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> &'static str {
-        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .1
             .get(i)
             .map(|c| c.glyph)
@@ -825,7 +834,7 @@ mod tests {
     /// The highlighted (selection-background) span contents of `visible_text`'s
     /// row `i`.
     fn bg_spans(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> Vec<String> {
-        view.visible_text(100, &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .0
             .lines[i]
             .spans
@@ -867,7 +876,7 @@ mod tests {
         );
         // The layout is untouched: same number of rows either way.
         assert_eq!(
-            view.visible_text(100, &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
+            view.visible_text(100, &[], &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
                 .0
                 .lines
                 .len(),
@@ -1057,7 +1066,7 @@ mod tests {
         // Can't easily inspect styles through Text, so just ensure the rows
         // render without panicking and the cursor row stays in bounds.
         assert_eq!(
-            view.visible_text(10, &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
+            view.visible_text(10, &[], &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
                 .0
                 .lines
                 .len(),
@@ -1082,6 +1091,7 @@ mod tests {
         let (_, gutter) = view.visible_text(
             10,
             &marked,
+            &[],
             &[],
             &[],
             None,
@@ -1111,6 +1121,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             Some((1, 3)),
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -1128,6 +1139,7 @@ mod tests {
         // Without a selection the cursor row still shows `>`.
         let (_, gutter) = view.visible_text(
             10,
+            &[],
             &[],
             &[],
             &[],
@@ -1489,6 +1501,7 @@ mod tests {
             &marked,
             &changed,
             &deleted,
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -1527,6 +1540,7 @@ mod tests {
             &[],
             &[],
             &deleted,
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -1538,6 +1552,48 @@ mod tests {
         assert_eq!(gutter[4].glyph, "│", "the merged block's later rows stay clean");
         assert_eq!(gutter[1].style.fg, Some(Color::Red), "deletion marks are red");
         assert_eq!(gutter[3].style.fg, Some(Color::Red), "deletion marks are red");
+    }
+
+    #[test]
+    fn dim_rows_render_their_marker_dim() {
+        // Diff-scope step ③: the git-only rows under Both get a DIM
+        // marker (green ▌ and red ▀ alike) — the view keeps its
+        // two-class vocabulary, only the weight distinguishes the
+        // origin. A dim row outside every mark stays a plain border.
+        let view = ViewState {
+            rows: vec![vec![]; 5],
+            offset: 0,
+            cursor: 4, // the only unmarked row keeps the > marker
+            source_starts: vec![0, 1, 2, 3, 4],
+            ..Default::default()
+        };
+        let changed = vec![true, false, true, false, false];
+        let deleted = vec![false, true, false, false, false];
+        let dim = vec![true, true, false, false, false];
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &changed,
+            &deleted,
+            &dim,
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[0].glyph, "▌", "changed row");
+        assert!(
+            gutter[0].style.add_modifier.contains(Modifier::DIM),
+            "git-only changed rows render DIM"
+        );
+        assert_eq!(gutter[1].glyph, "▀", "deleted row");
+        assert!(gutter[1].style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(gutter[2].glyph, "▌", "reload-side changed row");
+        assert!(
+            !gutter[2].style.add_modifier.contains(Modifier::DIM),
+            "regular marks stay full weight"
+        );
+        assert_eq!(gutter[3].glyph, "│", "a dim row without a mark stays plain");
+        assert_eq!(gutter[4].glyph, ">", "the cursor row keeps its marker");
     }
 
     #[test]
@@ -1559,6 +1615,7 @@ mod tests {
         let (_, gutter) = view.visible_text(
             10,
             &marked,
+            &[],
             &[],
             &[],
             None,
