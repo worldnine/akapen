@@ -205,7 +205,14 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
     // every scope's count); otherwise the active scope picks the badge
     // (diff-scope step ①): Last → the reload's +N/-M, Git → the git
     // snapshot's g+K/-L, Off → nothing.
-    let change = if app.file_changed {
+    let change = if app.is_historical() {
+        app.history()
+            .map(|history| {
+                let chronological = history.revisions.len().saturating_sub(history.position);
+                format!(" PAST {chronological}/{} ", history.revisions.len())
+            })
+            .unwrap_or_default()
+    } else if app.file_changed {
         " ⚡ ".to_string()
     } else {
         scoped_change_badge(app)
@@ -557,10 +564,20 @@ pub(crate) fn footer_hints(app: &App) -> String {
             }
         }
     };
-    // The scope badge rides the hints' tail (diff-scope step ①).
+    // In view mode the document timeline is the primary navigation. Git
+    // scope remains available as a fallback at the live working tree.
+    let hints = if app.mode == Mode::View {
+        app.history()
+            .filter(|history| history.revisions.len() > 1)
+            .and_then(|history| history.label())
+            .map(|label| format!("{hints} · ← older · newer → · {label}"))
+            .unwrap_or(hints)
+    } else {
+        hints
+    };
     match scope_footer_hint(app) {
-        Some(scope) => format!("{hints} · {scope}"),
-        None => hints,
+        Some(scope) if !app.is_historical() => format!("{hints} · {scope}"),
+        _ => hints,
     }
 }
 

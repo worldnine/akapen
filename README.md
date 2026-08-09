@@ -4,6 +4,8 @@
 
 A standalone TUI for reviewing documents in the terminal: read markdown beautifully rendered, select lines, attach comments, and send them to your coding agent — like a teacher grading homework with a red pen. Built for the agent review loop: the agent writes, you mark it up, the agent revises, and akapen shows you exactly what changed.
 
+For Markdown, it is also a **document time-machine**: Left/Right moves through committed versions without leaving the rendered document, keeps the nearest heading anchored, briefly lights appearing blocks, and fades disappearing blocks before they collapse. History effects use neutral brightness rather than add/delete colors, and the page frame changes while viewing the past. Arrow input scrubs the lightweight revision label immediately; Markdown renders once after 300ms idle. Comments made in the past carry the exact revision and historical snippet to the agent.
+
 日本語版 README は [README.ja.md](README.ja.md) にあります。
 
 Based on the line-comment experience of [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr), reworked for markdown-first reading in a single-pane, two-mode design.
@@ -63,6 +65,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 
 | Key | Action |
 |---|---|
+| `Left` / `Right` (view / source) | select an older / newer document from oldest `1/N` to present `NOW N/N`; input scrubs labels, then the final Markdown renders after 300ms idle |
 | `Tab` | toggle view ⇄ source (selection carries over; non-markdown files are source-only) |
 | `j` / `k` | move cursor (extends the range while selecting) |
 | `g` / `G`, `PgUp` / `PgDn`, `Ctrl+u` / `Ctrl+d` | jump / half-page moves |

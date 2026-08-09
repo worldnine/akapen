@@ -29,6 +29,12 @@ const SELECTED_BG_LIGHT: Color = Color::Rgb(210, 210, 220);
 const CHANGED_BG_DARK: Color = Color::Rgb(40, 55, 40);
 /// Changed-line background for light terminal themes: a pale mint.
 const CHANGED_BG_LIGHT: Color = Color::Rgb(210, 240, 210);
+const HISTORY_GLOW_BG_DARK: Color = Color::Rgb(70, 73, 88);
+const HISTORY_GLOW_BG_LIGHT: Color = Color::Rgb(218, 220, 228);
+const HISTORY_BORDER_DARK: Color = Color::Rgb(170, 150, 215);
+const HISTORY_BORDER_LIGHT: Color = Color::Rgb(105, 85, 155);
+const HISTORY_FRAME_FLASH_DARK: Color = Color::Rgb(235, 235, 245);
+const HISTORY_FRAME_FLASH_LIGHT: Color = Color::Rgb(50, 50, 65);
 
 pub fn selected_bg(light: bool) -> Color {
     if light { SELECTED_BG_LIGHT } else { SELECTED_BG_DARK }
@@ -36,6 +42,23 @@ pub fn selected_bg(light: bool) -> Color {
 
 pub fn changed_bg(light: bool) -> Color {
     if light { CHANGED_BG_LIGHT } else { CHANGED_BG_DARK }
+}
+
+/// A deliberately visible neutral flash, separate from diff's semantic
+/// red/green colors. History direction can invert add/delete meaning, so
+/// this only communicates that a block appeared.
+pub fn history_glow_bg(light: bool) -> Color {
+    if light { HISTORY_GLOW_BG_LIGHT } else { HISTORY_GLOW_BG_DARK }
+}
+
+/// The page frame while viewing a committed snapshot rather than now.
+pub fn history_border_color(light: bool) -> Color {
+    if light { HISTORY_BORDER_LIGHT } else { HISTORY_BORDER_DARK }
+}
+
+/// Brief neutral pulse when a selected history revision finishes rendering.
+pub fn history_frame_flash_color(light: bool) -> Color {
+    if light { HISTORY_FRAME_FLASH_LIGHT } else { HISTORY_FRAME_FLASH_DARK }
 }
 
 /// View-mode frame border color.
@@ -382,7 +405,7 @@ impl ViewState {
     /// phrase segment (see [`Segment`]), so merged rows highlight only the
     /// selected lines' text — rows without segments (blanks, unattributed
     /// wraps) fall back to the row span.
-    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn visible_text(
         &self,
         viewport: usize,
@@ -392,6 +415,34 @@ impl ViewState {
         emphasized: &[bool],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
+        border_style: Style,
+    ) -> (Text<'static>, Vec<GutterCell>) {
+        self.visible_text_with_glow(
+            viewport,
+            marked,
+            changed,
+            &[],
+            deleted,
+            emphasized,
+            selection,
+            selected_bg,
+            HISTORY_GLOW_BG_DARK,
+            border_style,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn visible_text_with_glow(
+        &self,
+        viewport: usize,
+        marked: &[bool],
+        changed: &[bool],
+        glowing: &[bool],
+        deleted: &[bool],
+        emphasized: &[bool],
+        selection: Option<(usize, usize)>,
+        selected_bg: Color,
+        glow_bg: Color,
         border_style: Style,
     ) -> (Text<'static>, Vec<GutterCell>) {
         if self.rows.is_empty() {
@@ -428,6 +479,7 @@ impl ViewState {
         };
         let group_marked = group_or(marked);
         let group_changed = group_or(changed);
+        let group_glowing = group_or(glowing);
         let group_deleted = group_or(deleted);
         // The cursor's hunk's marks render bold + bright (diff-scope
         // step ④): the `o` toggle's flip range is readable from the
@@ -491,6 +543,7 @@ impl ViewState {
             // a backward scan (see the fold above).
             let marked_row = group_marked[src];
             let changed_row = group_changed[src];
+            let glowing_row = group_glowing[src];
             // The deletion mark is a TOP-EDGE block (`▀`): it means "a
             // block was deleted above this row's top edge", so it sits on
             // the marked line's FIRST display row only — a wrap
@@ -618,7 +671,9 @@ impl ViewState {
             } else {
                 ("│", border_style)
             };
-            if gutter_hl {
+            if glowing_row {
+                marker_style = marker_style.bg(glow_bg);
+            } else if gutter_hl {
                 marker_style = marker_style.bg(selected_bg);
             }
             gutter.push(GutterCell { glyph, style: marker_style });
@@ -627,7 +682,9 @@ impl ViewState {
             // right). Cursor/selection rows carry the highlight background
             // over the pads too, so the band runs unbroken from the marker
             // to the frame.
-            let pad_style = if gutter_hl {
+            let pad_style = if glowing_row {
+                Style::default().bg(glow_bg)
+            } else if gutter_hl {
                 highlight_style
             } else {
                 Style::default()
@@ -640,7 +697,9 @@ impl ViewState {
                 .map(|s| {
                     let range = (off, off + s.text.len());
                     off = range.1;
-                    let style = if span_hl(range) {
+                    let style = if glowing_row {
+                        s.style.bg(glow_bg).add_modifier(Modifier::BOLD)
+                    } else if span_hl(range) {
                         s.style.bg(selected_bg)
                     } else {
                         s.style
@@ -800,8 +859,8 @@ pub(crate) fn is_table_delimiter_line(ghost: &[Option<String>], line: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        is_table_delimiter_line, scroll_offset_at, scroll_offset_drag, scroll_thumb, selected_bg, Span,
-        ViewState,
+        Span, ViewState, history_border_color, history_glow_bg, is_table_delimiter_line,
+        scroll_offset_at, scroll_offset_drag, scroll_thumb, selected_bg,
     };
     use crate::highlight::Highlighter;
     use ratatui::style::{Color, Modifier, Style};
@@ -1649,6 +1708,40 @@ mod tests {
         assert_eq!(gutter[3].glyph, ">");
         assert_eq!(gutter[3].style.fg, Some(Color::LightCyan));
         assert!(gutter[3].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn history_glow_paints_the_block_not_only_the_gutter() {
+        let source = Source::from_content("doc.md".into(), "# Heading\n\nparagraph\n".into());
+        let view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let glow = history_glow_bg(false);
+        let glowing = vec![false, false, true];
+        let (text, _) = view.visible_text_with_glow(
+            10,
+            &[],
+            &[],
+            &glowing,
+            &[],
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            glow,
+            Style::default(),
+        );
+        let row = view.source_starts[2];
+        assert!(
+            text.lines[row]
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(glow)),
+            "the rendered paragraph gets a neutral flash background"
+        );
+    }
+
+    #[test]
+    fn historical_page_has_a_distinct_frame_color() {
+        assert_ne!(history_border_color(false), super::border_color(false));
+        assert_ne!(history_border_color(true), super::border_color(true));
     }
 
     #[test]

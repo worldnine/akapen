@@ -109,6 +109,7 @@ use crate::comment::Selection;
             end: end as u32,
             lines: app.source.snippet(start as u32, end as u32),
             hunk: false,
+            revision: None,
             text: text.into(),
         });
     }
@@ -962,6 +963,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line3".into(),
             hunk: false,
+            revision: None,
             text: "c1".into(),
         });
         app.comments.push(Comment {
@@ -970,6 +972,7 @@ use crate::comment::Selection;
             end: 7,
             lines: "line7".into(),
             hunk: false,
+            revision: None,
             text: "c2".into(),
         });
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
@@ -1100,6 +1103,7 @@ use crate::comment::Selection;
                 end: 5,
                 lines: String::new(),
                 hunk: false,
+                revision: None,
                 text: "c1".into(),
             },
             Comment {
@@ -1108,6 +1112,7 @@ use crate::comment::Selection;
                 end: 9,
                 lines: String::new(),
                 hunk: false,
+                revision: None,
                 text: "c2".into(),
             },
         ];
@@ -1133,6 +1138,7 @@ use crate::comment::Selection;
                 end: 5,
                 lines: String::new(),
                 hunk: false,
+                revision: None,
                 text: "c1".into(),
             },
             Comment {
@@ -1141,6 +1147,7 @@ use crate::comment::Selection;
                 end: 6,
                 lines: String::new(),
                 hunk: false,
+                revision: None,
                 text: "c2".into(),
             },
             Comment {
@@ -1149,6 +1156,7 @@ use crate::comment::Selection;
                 end: 9,
                 lines: String::new(),
                 hunk: false,
+                revision: None,
                 text: "c3".into(),
             },
         ];
@@ -1578,6 +1586,7 @@ use crate::comment::Selection;
             end: 10,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "c".into(),
         });
         // The agent rewrites the file down to 7 lines.
@@ -1791,6 +1800,7 @@ use crate::comment::Selection;
             end: 1,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "c".into(),
         });
         on_source_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, None);
@@ -1809,6 +1819,7 @@ use crate::comment::Selection;
             end: 1,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "c".into(),
         });
         on_view_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, None);
@@ -1832,6 +1843,7 @@ use crate::comment::Selection;
             end: 4,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "c1".into(),
         });
         app.comments.push(Comment {
@@ -1840,6 +1852,7 @@ use crate::comment::Selection;
             end: 7,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "c2".into(),
         });
         app.comments.push(Comment {
@@ -1848,6 +1861,7 @@ use crate::comment::Selection;
             end: 7,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "c3".into(),
         });
         on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
@@ -2010,6 +2024,7 @@ use crate::comment::Selection;
             end: 3,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "card body".into(),
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -2121,6 +2136,7 @@ use crate::comment::Selection;
             end: 2,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "card".into(),
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -2198,6 +2214,7 @@ use crate::comment::Selection;
             end: 4,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "mid-block".into(),
         }];
         let base = ViewState::render(&source, 60, &highlight);
@@ -2528,6 +2545,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "line2".into(),
             hunk: false,
+            revision: None,
             text: "on a".into(),
         });
         app.comments.push(Comment {
@@ -2536,6 +2554,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "fn main".into(),
             hunk: false,
+            revision: None,
             text: "on b".into(),
         });
         on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
@@ -2558,6 +2577,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line3".into(),
             hunk: false,
+            revision: None,
             text: "note".into(),
         });
         // Start on b.rs (index 1); jump via the list back to a.md line 3.
@@ -2585,6 +2605,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "on a".into(),
         });
         app.comments.push(Comment {
@@ -2593,6 +2614,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "y".into(),
             hunk: false,
+            revision: None,
             text: "on b".into(),
         });
         std::fs::write(&a, "# a\n\nchanged\n").unwrap();
@@ -2684,6 +2706,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "one".into(),
         });
         app.comments.push(Comment {
@@ -2692,6 +2715,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "two".into(),
         });
         app.comments.push(Comment {
@@ -2700,6 +2724,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "y".into(),
             hunk: false,
+            revision: None,
             text: "three".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -2752,6 +2777,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "c".into(),
         });
         assert!(capture(&mut app).contains("▌ 1"), "indicator appears with comments");
@@ -2846,6 +2872,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "c".into(),
         });
         assert!(capture(&mut app, 80).contains("y copy"));
@@ -2868,6 +2895,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "c".into(),
         });
         let click = |row: u16, col: u16| MouseEvent {
@@ -3031,6 +3059,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "one".into(),
         });
         app.comments.push(Comment {
@@ -3039,6 +3068,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "two".into(),
         });
         app.comments.push(Comment {
@@ -3047,6 +3077,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "y".into(),
             hunk: false,
+            revision: None,
             text: "three".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -3451,6 +3482,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "c".into(),
         });
         request_quit(&mut app); // arms the confirmation + a toast
@@ -3550,6 +3582,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line3".into(),
             hunk: false,
+            revision: None,
             text: "note".into(),
         });
         // Start on b.rs (index 1), open the comment list.
@@ -3653,6 +3686,7 @@ use crate::comment::Selection;
             end: 5,
             lines: "line3\nline4\nline5".into(),
             hunk: false,
+            revision: None,
             text: "old".into(),
         });
         app.selection = Some(Selection {
@@ -3686,6 +3720,7 @@ use crate::comment::Selection;
             end: 5,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "existing".into(),
         });
         app.selection = Some(Selection {
@@ -3713,6 +3748,7 @@ use crate::comment::Selection;
             end: 3,
             lines: String::new(),
             hunk: false,
+            revision: None,
             text: "old".into(),
         });
         app.selection = Some(Selection::new(2));
@@ -3816,6 +3852,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "a1".into(),
         });
         app.comments.push(Comment {
@@ -3824,6 +3861,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "b1".into(),
         });
         app.comments.push(Comment {
@@ -3832,6 +3870,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "x".into(),
             hunk: false,
+            revision: None,
             text: "a2".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -3858,6 +3897,7 @@ use crate::comment::Selection;
             end: 5,
             lines: "line3\nline4\nline5".into(),
             hunk: false,
+            revision: None,
             text: "old".into(),
         });
         app.selection = Some(Selection {
@@ -3907,6 +3947,7 @@ use crate::comment::Selection;
             end: 5,
             lines: "line3\nline4\nline5".into(),
             hunk: false,
+            revision: None,
             text: "old".into(),
         });
         replace_view_preserving_cursor(&mut app); // fold the card in
@@ -3940,6 +3981,139 @@ use crate::comment::Selection;
         assert!(
             after.contains("comment · 3-5"),
             "the card returns on cancel: {after}"
+        );
+    }
+
+    #[test]
+    fn history_selection_defers_markdown_render_until_settled() {
+        let mut app = make_app(1, Mode::View);
+        app.histories = vec![crate::history::DocumentHistory {
+            revisions: vec![
+                crate::history::Revision {
+                    id: None,
+                    short_id: "now".into(),
+                    summary: "working tree".into(),
+                    content: "line1\n".into(),
+                },
+                crate::history::Revision {
+                    id: Some("abc".into()),
+                    short_id: "abc".into(),
+                    summary: "old".into(),
+                    content: "# Old\n".into(),
+                },
+            ],
+            position: 0,
+            rendered_position: 0,
+        }];
+        app.history_scopes = vec![None];
+        select_history(&mut app, 1);
+        assert_eq!(app.histories[0].position, 1);
+        assert_eq!(app.source.content, "line1\n", "selection is immediate but cheap");
+        assert!(app.history_render_due.is_some());
+        select_history(&mut app, 1);
+        assert!(
+            matches!(app.status.as_ref(), Some((message, _, false)) if message.starts_with("PAST")),
+            "the edge label stays informational until that revision is rendered"
+        );
+        render_history_when_settled(&mut app);
+        assert_eq!(app.source.content, "line1\n", "renderer waits for the debounce");
+        app.history_render_due = Some(std::time::Instant::now());
+        render_history_when_settled(&mut app);
+        assert_eq!(app.source.content, "# Old\n");
+        assert!(app.history_render_due.is_none());
+        assert!(app.history_frame_flash_pending);
+        assert!(
+            app.history_frame_flash_until.is_none(),
+            "the pulse does not overlap the first paint of the rendered document"
+        );
+        begin_history_frame_flash_after_draw(&mut app);
+        assert!(!app.history_frame_flash_pending);
+        assert!(app.history_frame_flash_until.is_some());
+        select_history(&mut app, 1);
+        assert!(
+            matches!(app.status.as_ref(), Some((message, _, true)) if message == "oldest document version"),
+            "the edge becomes an error only after its document is visible"
+        );
+        select_history(&mut app, -1);
+        select_history(&mut app, -1);
+        assert!(
+            matches!(app.status.as_ref(), Some((message, _, false)) if message.starts_with("NOW")),
+            "the present label also stays informational until it is rendered"
+        );
+        app.history_render_due = Some(std::time::Instant::now());
+        render_history_when_settled(&mut app);
+        select_history(&mut app, -1);
+        assert!(
+            matches!(app.status.as_ref(), Some((message, _, true)) if message == "already at the present"),
+            "the present boundary becomes an error after its document is visible"
+        );
+    }
+
+    #[test]
+    fn source_mode_shares_the_markdown_timeline_and_tab_keeps_the_revision() {
+        let mut app = make_app(1, Mode::Source);
+        app.histories = vec![crate::history::DocumentHistory {
+            revisions: vec![
+                crate::history::Revision {
+                    id: None,
+                    short_id: "now".into(),
+                    summary: "working tree".into(),
+                    content: "line1\n".into(),
+                },
+                crate::history::Revision {
+                    id: Some("abc".into()),
+                    short_id: "abc".into(),
+                    summary: "old".into(),
+                    content: "# Old\n\nsource history\n".into(),
+                },
+            ],
+            position: 0,
+            rendered_position: 0,
+        }];
+        app.history_scopes = vec![None];
+
+        assert_eq!(
+            history_key_direction(&app, KeyCode::Left, KeyModifiers::NONE),
+            Some(1)
+        );
+        on_source_key(&mut app, KeyCode::Left, KeyModifiers::NONE, None);
+        assert_eq!(app.histories[0].position, 1);
+        assert_eq!(app.source.content, "line1\n", "source scrubbing is deferred too");
+        app.history_render_due = Some(std::time::Instant::now());
+        render_history_when_settled(&mut app);
+        assert_eq!(app.source.content, "# Old\n\nsource history\n");
+
+        on_source_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::View);
+        assert_eq!(app.source.content, "# Old\n\nsource history\n");
+        on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Source);
+        assert_eq!(app.histories[0].position, 1);
+    }
+
+    #[test]
+    fn source_history_uses_neutral_line_glow_and_gutter_landing_pulse() {
+        let mut app = make_app(3, Mode::Source);
+        app.cursor = 0;
+        app.history_changed.insert(2);
+        app.history_changed_until = Some(std::time::Instant::now() + Duration::from_secs(1));
+        app.history_frame_flash_until = Some(std::time::Instant::now() + Duration::from_secs(1));
+        app.gutter_cols = 4;
+        app.ensure_row_cache(60);
+        app.refresh_line_rows();
+
+        let (text, _) = build_rows(&app, 10, 60);
+        assert!(
+            text.lines[2]
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(app.ui_history_glow_bg)),
+            "a history-changed source line uses the neutral glow"
+        );
+        assert_eq!(
+            text.lines[2].spans[1].style.fg,
+            Some(app.ui_history_frame_flash),
+            "the line-number rail pulses after landing"
         );
     }
 

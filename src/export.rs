@@ -50,8 +50,13 @@ fn format_comment_with(
     number: Option<usize>,
 ) -> String {
     if include_location {
+        let revision = comment
+            .revision
+            .as_ref()
+            .map(|revision| format!("\nRevision: {revision}"))
+            .unwrap_or_default();
         format!(
-            "{}\n{}\n{}",
+            "{}{revision}\n{}\n{}",
             comment.location(),
             numbered_snippet(comment),
             normalize_text(&comment.text)
@@ -85,7 +90,12 @@ fn format_comment_with(
                 .join("\n"),
             None => text,
         };
-        format!("{quote}\n\n{text}")
+        let revision = comment
+            .revision
+            .as_ref()
+            .map(|revision| format!("Revision: {revision}\n\n"))
+            .unwrap_or_default();
+        format!("{revision}{quote}\n\n{text}")
     }
 }
 
@@ -438,6 +448,7 @@ mod tests {
             end,
             lines: lines.into(),
             hunk: false,
+            revision: None,
             text: text.into(),
         }
     }
@@ -455,6 +466,15 @@ mod tests {
             format_comment(&c),
             "wiki/cases/aozora-plan.md:31-33\n31: 一覧に出ない」は仕様 → 利用手引の更新を確認\n32: \n33: ここ、手引の文言と実装のズレがまだ残ってる。\nこのコメント、利用手引の該当箇所も直して。"
         );
+    }
+
+    #[test]
+    fn historical_comment_tells_the_agent_which_document_it_saw() {
+        let mut c = comment("doc.md", 2, 2, "old paragraph", "この簡潔さを戻したい");
+        c.revision = Some("abc123 (abc123full) — simplify intro".into());
+        let out = format_comment(&c);
+        assert!(out.contains("Revision: abc123 (abc123full) — simplify intro"));
+        assert!(out.contains("2: old paragraph"));
     }
 
     #[test]

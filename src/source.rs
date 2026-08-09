@@ -25,6 +25,19 @@ pub struct Source {
 }
 
 impl Source {
+    /// Build a source from text that did not come from the working tree
+    /// (for example a historical Git revision).
+    pub fn from_content(path: PathBuf, content: String) -> Self {
+        let lines: Vec<String> = content.lines().map(str::to_owned).collect();
+        let gutter_width = lines.len().to_string().len().max(1);
+        Self {
+            path,
+            content,
+            lines,
+            gutter_width,
+        }
+    }
+
     /// Load `path`, split into lines, and compute the gutter width.
     ///
     /// Deliberately STRICT UTF-8 (no `from_utf8_lossy`): a binary file or
@@ -35,14 +48,7 @@ impl Source {
     pub fn load(path: PathBuf) -> Result<Self> {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let lines: Vec<String> = content.lines().map(str::to_owned).collect();
-        let gutter_width = lines.len().to_string().len().max(1);
-        Ok(Self {
-            path,
-            content,
-            lines,
-            gutter_width,
-        })
+        Ok(Self::from_content(path, content))
     }
 
     /// Number of source lines (0 for an empty file).

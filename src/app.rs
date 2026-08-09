@@ -12,10 +12,14 @@ use crate::comment::{Comment, Selection};
 use crate::config::{Config, EscQuit};
 use crate::git;
 use crate::highlight::{Highlighter, Span as HiSpan, wrap_spans};
+use crate::history::DocumentHistory;
 use crate::ime;
 use crate::overlay::{Overlay, OverlayTab};
 use crate::source::Source;
-use crate::view::{ViewState, border_color, changed_bg, scrollbar_thumb, selected_bg};
+use crate::view::{
+    ViewState, border_color, changed_bg, history_border_color, history_frame_flash_color,
+    history_glow_bg, scrollbar_thumb, selected_bg,
+};
 use crate::{
     card_line_count, composer_line_count, replace_view_preserving_cursor, view_composer_anchor,
     view_content_width, view_render_width,
@@ -172,6 +176,30 @@ pub(crate) struct App {
     pub(crate) current_file_index: usize,
     /// Per-file state; index mirrors `files`.
     pub(crate) file_states: Vec<FileState>,
+    /// Complete Markdown snapshots for the time-machine view. This stays
+    /// indexed by `files`, so it does not need to be moved through the live
+    /// FileState slot when switching files.
+    pub(crate) histories: Vec<DocumentHistory>,
+    /// Diff scope to restore when returning from a historical snapshot.
+    pub(crate) history_scopes: Vec<Option<DiffScope>>,
+    /// Lines replaced by the most recent time jump. The existing rendered
+    /// change color provides a short "block just arrived" afterglow.
+    pub(crate) history_changed: HashSet<usize>,
+    pub(crate) history_changed_until: Option<Instant>,
+    /// Until this instant the rendered view contains dim old blocks that
+    /// are about to collapse out of the document.
+    pub(crate) history_ghost_until: Option<Instant>,
+    /// The history cursor may move ahead of the rendered document while an
+    /// arrow is held. Once input settles, this deadline triggers one render
+    /// of the final selected revision.
+    pub(crate) history_render_due: Option<Instant>,
+    /// Brief whole-frame pulse confirming that the selected revision has
+    /// finished rendering, even when no changed block is in the viewport.
+    pub(crate) history_frame_flash_until: Option<Instant>,
+    /// Set once the new Markdown view is built. The event loop paints that
+    /// view once without a pulse, then turns this into `flash_until` so the
+    /// completion signal starts on the following frame.
+    pub(crate) history_frame_flash_pending: bool,
     /// The overlay currently open (Ctrl+p files / `l` comments / `?`
     /// help), if any.
     pub(crate) overlay: Option<Overlay>,
@@ -318,7 +346,10 @@ pub(crate) struct App {
     /// Resolved UI colors for the current `--light` / dark mode.
     pub(crate) ui_selected_bg: Color,
     pub(crate) ui_changed_bg: Color,
+    pub(crate) ui_history_glow_bg: Color,
     pub(crate) ui_border: Color,
+    pub(crate) ui_history_border: Color,
+    pub(crate) ui_history_frame_flash: Color,
     pub(crate) ui_scrollbar: Color,
     /// Active scrollbar drag: `(start track row, start scroll offset)` —
     /// set on a thumb press, cleared on release (viewport-only scroll, so
@@ -369,6 +400,14 @@ impl App {
             files,
             current_file_index: 0,
             file_states: Vec::new(),
+            histories: Vec::new(),
+            history_scopes: Vec::new(),
+            history_changed: HashSet::new(),
+            history_changed_until: None,
+            history_ghost_until: None,
+            history_render_due: None,
+            history_frame_flash_until: None,
+            history_frame_flash_pending: false,
             overlay: None,
             overlay_tab: OverlayTab::default(),
             pending_chord: None,
@@ -427,7 +466,10 @@ impl App {
             running: true,
             ui_selected_bg: selected_bg(light),
             ui_changed_bg: changed_bg(light),
+            ui_history_glow_bg: history_glow_bg(light),
             ui_border: border_color(light),
+            ui_history_border: history_border_color(light),
+            ui_history_frame_flash: history_frame_flash_color(light),
             ui_scrollbar: scrollbar_thumb(light),
             scrollbar_drag: None,
         }
@@ -532,6 +574,7 @@ impl App {
         let current = self.current_file_path().to_path_buf();
         for (raw, c) in self.comments.iter().enumerate() {
             if c.file_path != current
+                || c.revision != self.current_revision_context()
                 || (self.mode == Mode::Input && self.editing_comment == Some(raw))
             {
                 continue;
@@ -764,6 +807,12 @@ impl App {
         self.old_side = new.old_side.take();
 
         self.current_file_index = new_index;
+        self.history_changed.clear();
+        self.history_changed_until = None;
+        self.history_ghost_until = None;
+        self.history_render_due = None;
+        self.history_frame_flash_until = None;
+        self.history_frame_flash_pending = false;
         self.confirm_quit = false;
         self.confirm_edit = false;
         self.confirm_reload = false;
@@ -791,6 +840,28 @@ impl App {
 
     pub(crate) fn current_file_path(&self) -> &Path {
         &self.files[self.current_file_index]
+    }
+
+    pub(crate) fn history(&self) -> Option<&DocumentHistory> {
+        self.histories.get(self.current_file_index)
+    }
+
+    pub(crate) fn is_historical(&self) -> bool {
+        self.history().is_some_and(|history| history.position > 0)
+    }
+
+    pub(crate) fn current_revision_context(&self) -> Option<String> {
+        let history = self.history()?;
+        if history.position == 0 {
+            return None;
+        }
+        let revision = history.current()?;
+        Some(format!(
+            "{} ({}) — {}",
+            revision.short_id,
+            revision.id.as_deref().unwrap_or("unknown"),
+            revision.summary
+        ))
     }
 
     pub(crate) fn terminal_height(&self) -> u16 {

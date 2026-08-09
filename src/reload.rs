@@ -269,6 +269,13 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
 
     let width = source_content_width(app);
     app.source = new_source;
+    if let Some(history) = app.histories.get_mut(app.current_file_index)
+        && let Some(live) = history.revisions.first_mut()
+    {
+        live.content = app.source.content.clone();
+        history.position = 0;
+        history.rendered_position = 0;
+    }
     app.spans = app
         .highlight
         .highlight_with(&app.source.content, syntax_for(app.current_file_path()));

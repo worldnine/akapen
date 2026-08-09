@@ -16,6 +16,7 @@ mod config;
 mod export;
 mod git;
 mod highlight;
+mod history;
 mod hunknav;
 mod ime;
 mod overlay;
@@ -50,6 +51,7 @@ use crate::chrome::*;
 use crate::comment::{Comment, Selection};
 use crate::config::{Action, Config};
 use crate::highlight::{Highlighter, Span as HiSpan, syntax_for, wrap_spans};
+use crate::history::DocumentHistory;
 use crate::hunknav::*;
 use crate::overlay::*;
 use crate::reload::*;
@@ -96,7 +98,7 @@ fn main() -> Result<()> {
                  \x20                   stays a pure cancel)\n\
                  \n\
                  keys:\n\
-                 \x20 view mode:    j/k/arrows scroll, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
+                 \x20 view/source:  j/k scroll, Left/Right time travel, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
                  \x20                v select, c comment, s send, y copy, d delete, e edit,\n\
                  \x20                r reload, o old side (git), n/F7/]c next change, ]/[ files,\n\
                  \x20                l comments/changes, Ctrl+o files, Tab source mode\n\
@@ -303,6 +305,12 @@ fn run(config: Config) -> Result<()> {
     // state back into it before leaving the file). Extracted so tests
     // exercise the same wiring (git_tests::startup_activation_...).
     let mut app = App::new(config, Source::default(), highlight, ViewState::default(), light);
+    app.histories = files
+        .iter()
+        .zip(file_states.iter())
+        .map(|(path, state)| DocumentHistory::load(path, &state.source.content, 64))
+        .collect();
+    app.history_scopes = vec![None; files.len()];
     app.file_states = file_states;
     activate_first_file(&mut app);
     // Command mode always runs in ASCII so j/k etc. are never swallowed by
@@ -336,6 +344,7 @@ fn run(config: Config) -> Result<()> {
 /// Events processed per frame at most, so a pathological input flood can't
 /// starve the draw (the rest is handled on the next frame).
 const MAX_EVENTS_PER_FRAME: usize = 64;
+const HISTORY_RENDER_DEBOUNCE: Duration = Duration::from_millis(300);
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     // Paint the initial frame before waiting for input.
@@ -353,10 +362,25 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
                     break;
                 }
                 match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        on_key(app, key.code, key.modifiers, Some(terminal))
+                    Event::Key(key)
+                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    {
+                        let history_direction = history_key_direction(app, key.code, key.modifiers);
+                        if let Some(direction) = history_direction {
+                            select_history(app, direction);
+                        } else if key.kind == KeyEventKind::Press {
+                            render_pending_history(app, true);
+                            on_key(app, key.code, key.modifiers, Some(terminal));
+                        }
                     }
-                    Event::Mouse(mouse) => on_mouse(app, mouse),
+                    // Releasing an arrow does not force an immediate render:
+                    // the short settle window intentionally groups quick
+                    // taps and holds into one A→D document transition.
+                    Event::Key(key) if key.kind == KeyEventKind::Release => {}
+                    Event::Mouse(mouse) => {
+                        render_pending_history(app, true);
+                        on_mouse(app, mouse);
+                    }
                     Event::Resize(..) => mark_view_dirty(app),
                     _ => {}
                 }
@@ -364,7 +388,10 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         }
         // Expire a pending `]`/`[` chord into its default file switch.
         expire_pending_chord(app);
+        render_history_when_settled(app);
+        expire_history_ghosts(app);
         terminal.draw(|f| draw(f, app))?;
+        begin_history_frame_flash_after_draw(app);
         // Resize debounce: re-render the view once the pane settles.
         if app.view_dirty {
             let since = app.view_dirty_since.unwrap_or_else(Instant::now);
@@ -1033,6 +1060,245 @@ pub(crate) fn replace_view_preserving_cursor(app: &mut App) {
     app.view = view;
 }
 
+fn history_key_direction(
+    app: &App,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<isize> {
+    if app.overlay.is_some()
+        || !matches!(app.mode, Mode::View | Mode::Source)
+        || !supports_view(app.current_file_path())
+        || !modifiers.is_empty()
+    {
+        return None;
+    }
+    match key {
+        KeyCode::Left => Some(1),
+        KeyCode::Right => Some(-1),
+        _ => None,
+    }
+}
+
+/// Move only the lightweight history cursor. The rendered Markdown remains
+/// untouched until input settles, so holding an arrow can scan dozens of
+/// revisions without paying the renderer cost for intermediate choices.
+fn select_history(app: &mut App, delta: isize) -> bool {
+    if app.config.reply {
+        app.flash_err("history unavailable in reply mode");
+        return false;
+    }
+    let index = app.current_file_index;
+    let old_position = app.histories.get(index).map_or(0, |h| h.position);
+    let moved = app
+        .histories
+        .get_mut(index)
+        .is_some_and(|history| history.move_by(delta));
+    if !moved {
+        let Some(history) = app.histories.get(index) else {
+            return false;
+        };
+        // The lightweight cursor can reach an edge before its Markdown has
+        // rendered. Keep the useful yellow timeline label visible while the
+        // debounce catches up; reporting a boundary error here would hide
+        // the destination throughout a held-arrow scrub.
+        if history.rendered_position != history.position {
+            if let Some(label) = history.label() {
+                app.flash(label);
+            }
+            return false;
+        }
+        let message = if delta > 0 {
+            "oldest document version"
+        } else {
+            "already at the present"
+        };
+        app.flash_err(message);
+        return false;
+    }
+
+    let (new_position, label) = {
+        let history = &app.histories[index];
+        (history.position, history.label().unwrap_or_default())
+    };
+    if old_position == 0 && new_position > 0 {
+        app.history_scopes[index] = Some(app.scope);
+    }
+    if new_position > 0 {
+        app.scope = DiffScope::Off;
+        app.old_side = None;
+    } else {
+        app.scope = app.history_scopes[index]
+            .take()
+            .unwrap_or(if app.git_diff.is_some() { DiffScope::Git } else { DiffScope::Last });
+    }
+    app.history_render_due = Some(Instant::now() + HISTORY_RENDER_DEBOUNCE);
+    // A previous landing pulse must not bleed into the first frame of the
+    // next selected document.
+    app.history_frame_flash_until = None;
+    app.history_frame_flash_pending = false;
+    app.flash(label);
+    true
+}
+
+/// Render the final revision selected by [`select_history`]. This is the
+/// only expensive half of time travel and runs once after the arrow stops.
+fn render_pending_history(app: &mut App, animate: bool) -> bool {
+    if app.history_render_due.take().is_none() {
+        return false;
+    }
+    let index = app.current_file_index;
+    let Some((position, content)) = app
+        .histories
+        .get(index)
+        .and_then(|history| {
+            history
+                .current()
+                .map(|revision| (history.position, revision.content.clone()))
+        })
+    else {
+        return false;
+    };
+    if let Some(history) = app.histories.get_mut(index) {
+        history.rendered_position = position;
+    }
+    if app.source.content == content {
+        app.history_frame_flash_pending = true;
+        return true;
+    }
+
+    let old_lines = app.source.lines.clone();
+    let source_mode = app.mode == Mode::Source;
+    let old_cursor = if source_mode { app.cursor } else { app.view.cursor };
+    let screen_row = if source_mode {
+        let row = if app.line_rows.is_empty() {
+            old_cursor
+        } else {
+            app.row_of(old_cursor)
+        };
+        row as isize - app.offset as isize
+    } else {
+        app.view.cursor_row() as isize - app.view.offset as isize
+    };
+    let path = app.current_file_path().to_path_buf();
+    let new_source = Source::from_content(path.clone(), content);
+    let anchor = history::anchored_line(&old_lines, &new_source.lines, old_cursor);
+    let (changed_blocks, deleted_blocks) =
+        history::block_transition(&old_lines, &new_source.lines);
+    app.source = new_source;
+    app.history_changed = changed_blocks;
+    app.history_changed_until = Some(Instant::now() + Duration::from_millis(450));
+    app.history_ghost_until = None;
+    app.spans = app
+        .highlight
+        .highlight_with(&app.source.content, syntax_for(&path));
+    app.selection = None;
+    app.cursor = anchor;
+    app.base_rows.clear();
+    app.line_rows.clear();
+
+    let file_comments: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
+    let mut view = render_current_view(app, &file_comments);
+    if animate && !source_mode && !deleted_blocks.is_empty() {
+        insert_history_ghosts(
+            &mut view,
+            &deleted_blocks,
+            &app.highlight,
+            &path,
+        );
+        app.history_ghost_until = Some(Instant::now() + Duration::from_millis(650));
+    }
+    view.goto_source_line(anchor);
+    if source_mode {
+        // Source and rendered view wrap differently. Rebuild the source row
+        // cache first, then preserve the anchored line's physical screen row.
+        app.view = view;
+        let width = source_content_width(app);
+        app.ensure_row_cache(width);
+        app.refresh_line_rows();
+        let target = app.row_of(anchor) as isize - screen_row;
+        let max_offset = app.max_offset(app.source_viewport_rows() as u16) as isize;
+        app.offset = target.clamp(0, max_offset.max(0)) as usize;
+    } else {
+        let target = view.cursor_row() as isize - screen_row;
+        let max_offset = view.rows.len().saturating_sub(app.view_viewport_rows()) as isize;
+        view.offset = target.clamp(0, max_offset.max(0)) as usize;
+        app.view = view;
+    }
+    app.history_frame_flash_pending = true;
+    true
+}
+
+/// Start the landing pulse only after one complete terminal paint of the
+/// newly rendered document. This keeps the pulse a completion signal rather
+/// than part of the document transition itself.
+fn begin_history_frame_flash_after_draw(app: &mut App) {
+    if app.history_frame_flash_pending {
+        app.history_frame_flash_pending = false;
+        app.history_frame_flash_until = Some(Instant::now() + Duration::from_millis(250));
+    }
+}
+
+fn render_history_when_settled(app: &mut App) {
+    if app
+        .history_render_due
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        render_pending_history(app, true);
+    }
+}
+
+/// Insert deleted Markdown blocks into the new render as dim, non-interactive
+/// rows. They remain rendered Markdown, then [`expire_history_ghosts`]
+/// rebuilds the current document without them to produce the collapse.
+fn insert_history_ghosts(
+    view: &mut ViewState,
+    deleted: &[history::DeletedBlock],
+    highlighter: &Highlighter,
+    path: &Path,
+) {
+    let mut ordered = deleted.to_vec();
+    ordered.sort_by_key(|block| std::cmp::Reverse(block.anchor));
+    for block in ordered {
+        let source = Source::from_content(path.to_path_buf(), block.content);
+        let ghost = ViewState::render(&source, view.width.max(1) as u16, highlighter);
+        if ghost.rows.is_empty() {
+            continue;
+        }
+        let insert_at = if block.anchor >= view.source_starts.len() {
+            view.rows.len()
+        } else {
+            view.source_starts[block.anchor]
+        };
+        let count = ghost.rows.len();
+        for start in &mut view.source_starts {
+            if *start >= insert_at {
+                *start += count;
+            }
+        }
+        for (offset, mut row) in ghost.rows.into_iter().enumerate() {
+            for span in &mut row {
+                span.style = span
+                    .style
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::DIM | Modifier::ITALIC);
+            }
+            view.rows.insert(insert_at + offset, row);
+            view.row_segments.insert(insert_at + offset, Vec::new());
+            view.card_rows.insert(insert_at + offset, true);
+        }
+    }
+}
+
+fn expire_history_ghosts(app: &mut App) {
+    if app
+        .history_ghost_until
+        .is_some_and(|until| Instant::now() >= until)
+    {
+        app.history_ghost_until = None;
+        replace_view_preserving_cursor(app);
+    }
+}
+
 /// View → comment handoff. The view cursor is already a source line; a
 /// merged paragraph row can cover several source lines at once, so without
 /// a selection we land on the head of the row (what a user means by "this
@@ -1173,6 +1439,15 @@ fn view_move_cursor(app: &mut App, dir: isize) {
 pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut ratatui::DefaultTerminal>) {
     let viewport = app.view_viewport_rows();
     match key {
+        // The rendered document is the timeline. No diff pane is opened:
+        // only the blocks that differ are replaced by the new render while
+        // the reader remains anchored around the same heading.
+        KeyCode::Left if modifiers.is_empty() && supports_view(app.current_file_path()) => {
+            select_history(app, 1);
+        }
+        KeyCode::Right if modifiers.is_empty() && supports_view(app.current_file_path()) => {
+            select_history(app, -1);
+        }
         // Alt+j / Alt+k: the next/previous change hunk — the same jump
         // as F7/`]c`/n, for 40%-keyboard layouts where neither F7 nor
         // `[`/`]` sit on the base layer (j/k are already the movement
@@ -1277,7 +1552,15 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         KeyCode::Char('y') => export_all(app, false),
         KeyCode::Char('s') => export_all(app, true),
         KeyCode::Char('q') => request_quit(app),
-        KeyCode::Char('r') => reload_now(app),
+        KeyCode::Char('r') => {
+            if let Some(position) = app.history().map(|history| history.position)
+                && position > 0
+            {
+                select_history(app, -(position as isize));
+                render_pending_history(app, false);
+            }
+            reload_now(app);
+        }
         KeyCode::Char('i') => ignore_change(app),
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             if app.config.reply {
@@ -1371,7 +1654,8 @@ fn extend_view_selection(app: &mut App, dir: isize) {
 /// lands on the comment's extent (bottom) — the selection model's
 /// invariant is cursor == selection extent.
 fn jump_comment(app: &mut App, dir: isize) {
-    let regions = comment_regions(&app.comments, app.source.len(), app.current_file_path());
+    let visible: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
+    let regions = comment_regions(&visible, app.source.len(), app.current_file_path());
     if regions.is_empty() {
         return;
     }
@@ -1495,6 +1779,14 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
     // bottom rows.
     let viewport = app.source_viewport_rows() as u16;
     match key {
+        // Source and rendered view share one document timeline. Only the
+        // representation changes when Tab is pressed.
+        KeyCode::Left if modifiers.is_empty() && supports_view(app.current_file_path()) => {
+            select_history(app, 1);
+        }
+        KeyCode::Right if modifiers.is_empty() && supports_view(app.current_file_path()) => {
+            select_history(app, -1);
+        }
         KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
             source_move_cursor_display(app, (viewport / 2) as isize, viewport);
         }
@@ -1759,12 +2051,14 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                         false,
                     ),
                 };
+                let revision = app.current_revision_context();
                 app.comments.push(Comment {
                     file_path: app.current_file_path().to_path_buf(),
                     start: app.input_start as u32 + 1,
                     end: app.input_end as u32 + 1,
                     lines,
                     hunk,
+                    revision,
                     text,
                 });
                 app.flash(format!("comment added ({} total)", app.comments.len()));
@@ -1956,8 +2250,10 @@ fn open_composer(app: &mut App, return_to: Mode) {
     // comment's text is prefilled and Enter replaces it instead of adding
     // a stacked duplicate. Any other range adds a new comment.
     let current = app.current_file_path().to_path_buf();
+    let revision = app.current_revision_context();
     let edit_idx = app.comments.iter().position(|c| {
         c.file_path == current
+            && c.revision == revision
             && (c.start.saturating_sub(1) as usize) == start
             && (c.end.saturating_sub(1) as usize) == end
     });
@@ -2016,7 +2312,10 @@ fn delete_comment_at_cursor(app: &mut App) {
     };
     let before = app.comments.len();
     let current_file = app.current_file_path().to_path_buf();
-    app.comments.retain(|c| !(c.file_path == current_file && c.covers(line)));
+    let revision = app.current_revision_context();
+    app.comments.retain(|c| {
+        !(c.file_path == current_file && c.revision == revision && c.covers(line))
+    });
     let removed = before - app.comments.len();
     if removed > 0 {
         // The view folds the cards into its layout; drop the deleted ones.
@@ -2214,7 +2513,8 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // is added). Every line of a multi-line comment is flagged; the column
     // renders one marker on each line's first display row only, so the
     // range reads as a clean column instead of a noisy band.
-    let marked = view_marker_flags(&app.comments, app.source.len(), app.current_file_path());
+    let visible: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
+    let marked = view_marker_flags(&visible, app.source.len(), app.current_file_path());
     // The selection is the LINE range itself (comment-identical);
     // `visible_text` resolves it to the exact spans via the phrase
     // segments.
@@ -2227,6 +2527,14 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     let n = app.source.len();
     let mut changed_set = added;
     changed_set.extend(modified);
+    let glowing = if app
+        .history_changed_until
+        .is_some_and(|until| Instant::now() < until)
+    {
+        view_changed_flags(&app.history_changed, n)
+    } else {
+        vec![false; n]
+    };
     let changed = view_changed_flags(&changed_set, n);
     let deleted = view_deleted_flags(&deleted_set, n);
     let emphasized = view_changed_flags(&emphasized_mark_lines(app), n);
@@ -2243,15 +2551,31 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     if composing {
         app.keep_composer_visible_view(inner.height as usize);
     }
-    let border_style = Style::default().fg(app.ui_border);
-    let (mut text, mut gutter) = app.view.visible_text(
+    let frame_flashing = app
+        .history_frame_flash_until
+        .is_some_and(|until| Instant::now() < until);
+    let page_border = if frame_flashing {
+        app.ui_history_frame_flash
+    } else if app.is_historical() {
+        app.ui_history_border
+    } else {
+        app.ui_border
+    };
+    let border_style = if frame_flashing {
+        Style::default().fg(page_border).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(page_border)
+    };
+    let (mut text, mut gutter) = app.view.visible_text_with_glow(
         inner.height as usize,
         &marked,
         &changed,
+        &glowing,
         &deleted,
         &emphasized,
         sel,
         app.ui_selected_bg,
+        app.ui_history_glow_bg,
         border_style,
     );
     if composing {
@@ -2308,7 +2632,7 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // sank into the background.
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.ui_border));
+        .border_style(border_style);
     // The text already starts at `offset` (see [`ViewState::visible_text`]),
     // so no Paragraph scroll is needed — the renderer only ever builds the
     // visible window.
@@ -2463,6 +2787,12 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     // hunk's marks emphasize (step ④).
     let (scoped_added, scoped_modified, scoped_deleted) = scoped_mark_sets(app);
     let emphasized_marks = emphasized_mark_lines(app);
+    let history_glow_active = app
+        .history_changed_until
+        .is_some_and(|until| Instant::now() < until);
+    let history_landing_pulse = app
+        .history_frame_flash_until
+        .is_some_and(|until| Instant::now() < until);
     // Comment bars span the whole pane (gutter included), pi.dev-style.
     let full_width = (content_width + app.gutter_cols) as usize;
     // The current file's cards (the edited one is hidden while composing).
@@ -2531,7 +2861,12 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             // bars render below the block.
         }
         let selected = app.selection.is_some_and(|s| s.contains(idx));
-        let commented = app.comments.iter().any(|c| c.covers(idx) && c.file_path == app.current_file_path());
+        let revision = app.current_revision_context();
+        let commented = app.comments.iter().any(|c| {
+            c.covers(idx)
+                && c.file_path == app.current_file_path()
+                && c.revision == revision
+        });
         // The scoped mark sets (diff-scope step ③): computed once at the
         // top of build_rows, so every line reads the same selection.
         let added = scoped_added.contains(&idx);
@@ -2562,10 +2897,15 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // selection edge. Changed lines get a subtle green background
         // (additions and rewrites alike).
         let cursor_bg = is_cursor || selected;
-        let changed_bg = (added || modified) && !cursor_bg;
-        let deleted_fg = deleted_before && !cursor_bg && !changed_bg;
+        let history_glow_bg = history_glow_active
+            && app.history_changed.contains(&idx)
+            && !cursor_bg;
+        let changed_bg = (added || modified) && !cursor_bg && !history_glow_bg;
+        let deleted_fg = deleted_before && !cursor_bg && !history_glow_bg && !changed_bg;
         let gutter_style = if cursor_bg {
             Style::default().bg(app.ui_selected_bg)
+        } else if history_glow_bg {
+            Style::default().bg(app.ui_history_glow_bg)
         } else if changed_bg {
             Style::default().bg(app.ui_changed_bg)
         } else {
@@ -2576,8 +2916,10 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // typed under. Commented lines: yellow (no `#` marker), so the
         // gutter shows at a glance which lines carry comments. Changed
         // lines: green `+` marker and green number.
-        let num_style = if selected {
+        let mut num_style = if selected {
             Style::default().fg(Color::Cyan).bg(app.ui_selected_bg)
+        } else if history_glow_bg {
+            Style::default().fg(Color::DarkGray).bg(app.ui_history_glow_bg)
         } else if commented && !is_cursor {
             Style::default().fg(Color::Yellow)
         } else if changed_bg {
@@ -2587,6 +2929,14 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         } else {
             gutter_style
         };
+        // Source has no permanent frame, so its completion pulse uses the
+        // stable line-number rail instead. It starts only after the newly
+        // selected source has already been painted once.
+        if history_landing_pulse {
+            num_style = num_style
+                .fg(app.ui_history_frame_flash)
+                .add_modifier(Modifier::BOLD);
+        }
         let num = Span::styled(
             format!("{:>width$} ", idx + 1, width = app.source.gutter_width),
             num_style,
@@ -2612,6 +2962,10 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             };
             let s = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
+        } else if history_glow_bg {
+            Style::default()
+                .fg(Color::DarkGray)
+                .bg(app.ui_history_glow_bg)
         } else if modified && !cursor_bg {
             let s = Style::default().fg(Color::Yellow).bg(app.ui_changed_bg);
             if emphasized { s.add_modifier(Modifier::BOLD).fg(Color::LightYellow) } else { s }
@@ -2638,6 +2992,8 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 // block.
                 let indent_style = if cursor_bg {
                     Style::default().bg(app.ui_selected_bg)
+                } else if history_glow_bg {
+                    Style::default().bg(app.ui_history_glow_bg)
                 } else if changed_bg {
                     Style::default().bg(app.ui_changed_bg)
                 } else {
@@ -2651,6 +3007,8 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             for f in frags {
                 let style = if cursor_bg {
                     f.style.bg(app.ui_selected_bg)
+                } else if history_glow_bg {
+                    f.style.bg(app.ui_history_glow_bg)
                 } else if changed_bg {
                     f.style.bg(app.ui_changed_bg)
                 } else {
@@ -2663,13 +3021,15 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             // — the text extent alone made the selection ragged and easy
             // to misread. This also covers blank lines (no fragments)
             // with no extra glyph.
-            if cursor_bg || changed_bg {
+            if cursor_bg || history_glow_bg || changed_bg {
                 let used: usize = spans
                     .iter()
                     .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                     .sum();
                 let bg = if cursor_bg {
                     app.ui_selected_bg
+                } else if history_glow_bg {
+                    app.ui_history_glow_bg
                 } else {
                     app.ui_changed_bg
                 };
@@ -2956,6 +3316,7 @@ mod bar_tests {
             text: text.into(),
             lines: text.into(),
             hunk: false,
+            revision: None,
         }
     }
 
@@ -3156,6 +3517,7 @@ mod mouse_tests {
             text: "テスト".into(),
             lines: "テスト".into(),
             hunk: false,
+            revision: None,
         });
         app.refresh_line_rows();
         app
@@ -3530,3 +3892,33 @@ mod mouse_view_tests {
     }
 }
 
+#[cfg(test)]
+mod history_animation_tests {
+    use super::*;
+
+    #[test]
+    fn deleted_block_is_inserted_dimly_then_can_be_rebuilt_away() {
+        let highlight = Highlighter::new(None, false);
+        let source = Source::from_content("doc.md".into(), "# Next\n\ntext\n".into());
+        let mut view = ViewState::render(&source, 60, &highlight);
+        let original_rows = view.rows.len();
+        let original_start = view.source_starts[0];
+        insert_history_ghosts(
+            &mut view,
+            &[history::DeletedBlock {
+                anchor: 0,
+                content: "## Gone\n\nold text".into(),
+            }],
+            &highlight,
+            Path::new("doc.md"),
+        );
+        assert!(view.rows.len() > original_rows);
+        assert!(view.source_starts[0] > original_start);
+        assert!(
+            view.rows[..view.source_starts[0]]
+                .iter()
+                .flatten()
+                .all(|span| span.style.add_modifier.contains(Modifier::DIM))
+        );
+    }
+}

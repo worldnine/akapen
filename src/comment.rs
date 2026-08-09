@@ -52,6 +52,9 @@ pub struct Comment {
     /// reads the change itself, deletions included (a pure-deletion
     /// hunk's new-side snippet would otherwise be empty).
     pub hunk: bool,
+    /// Exact historical document revision this comment was made against.
+    /// `None` means the live working tree.
+    pub revision: Option<String>,
     /// The comment body.
     pub text: String,
 }
@@ -125,6 +128,7 @@ mod tests {
             end,
             lines: "snippet".into(),
             hunk: false,
+            revision: None,
             text: "text".into(),
         }
     }

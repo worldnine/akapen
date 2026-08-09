@@ -131,11 +131,13 @@ pub(crate) fn overlay_visible_rows() -> usize {
 /// already carries the text, so `comment` + `edit` never pile up).
 pub(crate) fn visible_cards(app: &App) -> Vec<&Comment> {
     let current = app.current_file_path();
+    let revision = app.current_revision_context();
     app.comments
         .iter()
         .enumerate()
         .filter(|(i, c)| {
             c.file_path == *current
+                && c.revision == revision
                 && !(app.mode == Mode::Input && app.editing_comment == Some(*i))
         })
         .map(|(_, c)| c)
@@ -374,6 +376,7 @@ pub(crate) fn help_rows(esc_quit: bool, reply: bool, in_git: bool) -> Vec<(&'sta
         rows.push(("reload", "auto-reload on change · r manual"));
     } else {
         rows.insert(1, ("file", "]/[ · ^o files"));
+        rows.insert(2, ("time", "← older · newer → · hold:scrub"));
         rows.push(("reload", "r reload · i ignore · e edit"));
         rows.push(("git", "n/N next/prev change · F7/]c/Alt+j next · o old side vs HEAD"));
         // Outside a repository the cycle is Last ↔ Off only (P1).
@@ -758,11 +761,21 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
                 } else {
                     Style::default().fg(Color::Gray)
                 };
-                let used = 2 + UnicodeWidthStr::width(range.as_str()) + 2;
+                let revision = c
+                    .revision
+                    .as_deref()
+                    .and_then(|context| context.split_whitespace().next())
+                    .map(|short| format!(" [{short}]"))
+                    .unwrap_or_default();
+                let used = 2
+                    + UnicodeWidthStr::width(range.as_str())
+                    + UnicodeWidthStr::width(revision.as_str())
+                    + 2;
                 let budget = inner.saturating_sub(used);
                 let body = clip_if_needed(body_first, budget);
                 lines.push(Line::from(vec![
                     Span::styled(format!("{cursor_mark}{range}"), loc_style),
+                    Span::styled(revision, Style::default().fg(Color::Magenta)),
                     Span::styled(format!("  {body}"), body_style),
                 ]));
             }
