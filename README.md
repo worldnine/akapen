@@ -14,7 +14,7 @@ Based on the line-comment experience of [herdr-reviewr](https://github.com/persi
 - **source mode**: raw source with line numbers and syntect highlighting (100+ languages). Long lines wrap with gutter-aligned indentation; tabs expand to 8-column stops.
 - **Comment anywhere**: line cursor and range selection work identically in both modes — `v` to select, `c` to comment, without leaving the rendered view. Comments appear as inline cards right under the lines they refer to.
 - **Your files are never modified.** akapen is strictly read-only; comments are exported through a separate channel (clipboard, stdout, or a send command).
-- **Built for the agent loop**: when the agent edits a file you have open, akapen detects it (`⚡`), and on reload highlights added/changed lines (green `+` gutter) and deletions (red `-` gutter) so re-review means reviewing the diff.
+- **Built for the agent loop**: when the agent edits a file you have open, akapen detects it (`⚡`), and on reload highlights the changes (green `+` = added, yellow `~` = rewritten, red `▀` = deleted above) so re-review means reviewing the diff.
 - **Session mode, always**: open one file or twenty with the same keybindings. `]` / `[` switch files; cursor, selection, and mode are remembered per file.
 - **Terminal-native colors**: UI chrome uses plain ANSI colors and follows your terminal palette; syntax colors come from two-face themes (32 built-ins) or any `.tmTheme` file. Light/dark is auto-detected via OSC 11.
 - **CJK-correct**: all width math uses `unicode-width`, so Japanese text never misaligns. On macOS, the input source is pinned to ASCII in command mode and restored on exit (`--ime jp` switches to Japanese while composing).
@@ -72,7 +72,8 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `]` / `[` | next / previous file in the session |
 | `?` | key reference |
 | `r` / `i` | on external change: reload / ignore |
-| `o` | toggle the hunk under the cursor to its old side vs HEAD (git repositories only; `o` again returns) |
+| `o` | toggle the hunk under the cursor to its old side — vs HEAD in `git` scope, vs the last reload in `last` scope (`o` again returns; added-only hunks have no old side) |
+| `m` | cycle the diff-mark scope: `last` (changes since the last reload) → `git` (uncommitted vs HEAD) → `off` — the footer badge `m:last` shows the current scope |
 | `F7` / `Shift+F7` | jump to the next / previous change hunk (the `]c` / `[c` chord is the fallback for terminals without F-keys; `Alt+j` / `Alt+k` too) |
 | `Ctrl+n` / `Ctrl+p` | jump to the next / previous comment (moved from `n` / `N`) |
 | `Ctrl+o` | file picker (moved from `Ctrl+p`) |
@@ -92,19 +93,22 @@ akapen assumes a loop of *send comments → the agent edits the file → re-revi
 
 1. Read the document (rendered), mark up lines, press `s`.
 2. The agent edits the file. akapen notices (300 ms debounce) and shows `⚡ file changed — r reload · i ignore`. Nothing is replaced behind your back.
-3. Press `r`: the title badge turns into `+N/-M`, and changed lines are highlighted (green `+` gutter for added/modified lines, red `-` for deletions, `▌` markers in view mode) until the next reload.
+3. Press `r`: the title badge turns into `+N/-M`, and changed lines are highlighted (source gutter: green `+` = added, yellow `~` = rewritten, red `▀` = a block was deleted above; view mode: green `▌` / red `▀`) until the next reload. In a git repository the mark scope auto-switches to `last`, so the marks show exactly this reload's changes.
 4. Comments on the reloaded file are cleared (their line anchors refer to the old content); comments on other session files are untouched.
 
 While the comment composer is open, change detection is suspended — a comment being written is never disturbed.
 
 ## Git integration
 
-When a file is opened **inside a git repository**, akapen reads `git diff HEAD -- <file>` once at startup (and again on each `r` reload) and fuses it into the review UI. Outside a repository — or with no `HEAD` yet — nothing changes.
+When a file is opened **inside a git repository**, akapen reads `git diff -U0 HEAD -- <file>` once at startup (and again on each `r` reload) and fuses it into the review UI. Outside a repository — or with no `HEAD` yet — nothing changes.
 
-- **Changed-line marks (3-1)**: added/modified lines get the same green `+` gutter and `▌` marker the reload diff uses (they merge, so session and git changes share one signal); lines immediately after a deleted block get the red `-` position mark — a thin marker only, the deleted content itself is shown with `o`.
-- **Old-side toggle (3-2)**: `o` replaces the hunk under the cursor with its HEAD content — old line numbers in source mode; in the rendered view the document re-renders with the hunk's old lines substituted, so tables and paragraphs keep the document's context. Both show a faint `~` mark. The display stays inside the hunk even when the line counts differ; `o` again (cursor still on the hunk) returns to the new side. The diff base is fixed at `HEAD`, but the loader takes the ref as an argument, so generation movement (`HEAD^`, tags, …) is a one-line change.
-- **Change navigation**: `n` / `N` (same as delta, less, magit) jump to the next / previous hunk; `F7` / `Shift+F7`, the `]c` / `[c` chord, and `Alt+j` / `Alt+k` do the same. The cursor lands on the first changed line, the hunk is selected. Terminals that do not deliver F-keys can use the `]c` / `[c` chord instead — `]`/`[` alone still switch files (after a short chord window), `]c`/`[c` jump to the changes. The `l` overlay has a `changes` tab (Tab toggles) listing every hunk across the session files with its location, `+N/-M`, and a preview; Enter jumps to it.
-- **Untracked files** have no HEAD side: every line counts as added (the whole file is new) and `o` is disabled with an explanation.
+- **Diff scope (3-4)**: `m` cycles what the marks show — `last` (changes since the last reload = the agent's latest pass), `git` (everything uncommitted vs HEAD), `off`. Sessions start in `git`; a content-changing reload auto-switches to `last` (pressing `m` during a pending ⚡ pins your choice for that episode; `e` edits of your own never switch). The footer badge (`m:last` …) always shows the scope, and the title count follows it: `+N/-M` for `last`, `g+K/-L` (green `+K`, red `-L`) for `git`.
+- **Changed-line marks (3-1)**: the source gutter distinguishes three cases — green `+` = a purely added line, yellow `~` = a rewritten line (`o` shows what it replaced), red `▀` = a block was deleted **above** this line (position only; the content is shown with `o`). View mode keeps two classes: green `▌` (added ∪ rewritten) and red `▀`. The cursor `>` inherits the mark's color, so a one-line hunk stays readable under the cursor.
+- **Hunk granularity**: with `-U0`, touching changes always share one hunk, so a contiguous run of marks is exactly one hunk — hunk boundaries are the gaps between marks. Moving the cursor into a hunk highlights all of its marks (bold + bright): what lights up is what `o` will flip. The footer shows the hunk under the cursor as `hunk L29-33 +1/-2 · o old side`.
+- **Old-side toggle (3-2)**: `o` swaps the hunk under the cursor to its old content — vs HEAD in `git` scope, vs the pre-reload content in `last` scope. A rewrite hunk is replaced in place, a pure deletion expands the deleted lines at the `▀` position (the surviving line stays), and a pure addition refuses with a flash (there was nothing before). Old rows carry a faint `~` mark; `o` again returns. The loader takes the ref as an argument, so generation movement (`HEAD^`, tags, …) is a one-line change.
+- **Change navigation**: `n` / `N` (same as delta, less, magit) jump to the next / previous hunk of the active scope; `F7` / `Shift+F7`, the `]c` / `[c` chord, and `Alt+j` / `Alt+k` do the same. The cursor lands on the first changed line, the hunk is selected. The `l` overlay has a `changes` tab (Tab toggles) listing every hunk across the session files with its location, `+N/-M`, and a preview; Enter jumps to it.
+- **Comments on deletions**: a bare `c` on a `▀` row attaches the hunk's raw diff as the comment's snippet — the agent receives the deleted lines themselves, not just the surviving line.
+- **Untracked files** have no HEAD side: under the `git` scope they carry no marks (the changes tab still lists the file) and `o` is disabled; the `last` scope works normally after a reload.
 - Snapshot semantics: the diff is taken at startup/reload only — mid-session divergence between the file and HEAD is ignored, and there is no line tracking or persistence (P3/P4).
 
 ## Output format
