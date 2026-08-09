@@ -396,6 +396,15 @@ pub(crate) fn toggle_old_side(app: &mut App) {
     };
     let hunk = &diff.hunks[h];
     let old_lines = hunk.old_lines();
+    // A pure-addition hunk has nothing to show old-side (with -U0 the
+    // body is adds only — under -U3 context lines used to fill it):
+    // opening it would balloon the old-side rows over the whole
+    // document at EOF. Refuse with an explanation instead (regression:
+    // last and git scopes alike).
+    if old_lines.is_empty() {
+        app.flash_err("added lines — nothing here before");
+        return;
+    }
     let range = hunk.new_range();
     let owner = range.map_or_else(|| hunk.owner(new_len), |(a, _)| a);
     let old_numbers: Vec<u32> = (hunk.old_start..).take(old_lines.len()).collect();
@@ -666,7 +675,7 @@ mod git_tests {
     use crate::view::ViewState;
     use crate::{
         activate_first_file, build_rows, draw, on_input_key, on_key, on_overlay_key,
-        on_source_key, on_view_key,
+        on_source_key, on_view_key, render_current_view,
     };
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::style::{Color, Modifier, Style};
@@ -1053,6 +1062,77 @@ mod git_tests {
         // もう一度 o で戻る（空ファイルに）。
         on_view_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
         assert!(app.old_side.is_none(), "toggled back");
+    }
+
+    #[test]
+    fn o_on_a_pure_addition_hunk_is_a_no_op_with_a_flash() {
+        // -U0: a pure-addition hunk has no old lines (under -U3 the
+        // context lines used to fill them) — `o` would balloon the
+        // old-side rows over the whole document at EOF. The toggle is
+        // refused with an explanation. Regression, git scope first.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three"]);
+        // EOF addition.
+        overwrite(&path, &["one", "two", "three", "four", "five"]);
+        let mut app = git_app(path.clone(), Mode::Source);
+        assert!(app.git_diff.as_ref().unwrap().hunks[0].old_lines().is_empty());
+        app.cursor = 4;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none(), "nothing to show old-side");
+        let (msg, _, is_error) = app.status.as_ref().expect("a flash explains");
+        assert!(*is_error, "an error toast: {msg}");
+        assert!(msg.contains("added lines"), "{msg}");
+        // 行中間の純追加も同様。
+        overwrite(&path, &["one", "X", "Y", "two", "three"]);
+        let mut app = git_app(path.clone(), Mode::Source);
+        assert!(app.git_diff.as_ref().unwrap().hunks[0].old_lines().is_empty());
+        app.cursor = 1;
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none());
+        // last スコープ（reload 経由）の EOF 純追加。
+        let mut app = git_app(path.clone(), Mode::Source);
+        overwrite(&path, &["one", "X", "Y", "two", "three", "six"]);
+        assert!(reload_source(&mut app, false).is_ok());
+        assert_eq!(app.scope, DiffScope::Last);
+        assert!(app
+            .last_diff
+            .as_ref()
+            .unwrap()
+            .hunks
+            .iter()
+            .any(|h| h.old_lines().is_empty()));
+        app.cursor = 5; // the appended line
+        on_source_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, None);
+        assert!(app.old_side.is_none());
+        let (msg, _, _) = app.status.as_ref().expect("a flash explains");
+        assert!(msg.contains("added lines"), "last scope: {msg}");
+    }
+
+    #[test]
+    fn empty_old_block_collapses_the_old_side_rows_range() {
+        // Defense: an empty old-side block (block_len 0, e.g. a pure
+        // addition) must collapse old_side_rows to an EMPTY range —
+        // never balloon to row 0 .. whole document (the regression).
+        // The toggle guard normally prevents this path; this pins the
+        // render side anyway.
+        let dir = tempfile::tempdir().unwrap();
+        let path = init_repo(dir.path(), &["one", "two", "three", "four", "five", "six"]);
+        let mut app = git_app(path, Mode::View);
+        app.old_side = Some(crate::app::OldSide {
+            hunk: 0,
+            old_lines: vec![],
+            old_spans: vec![],
+            row_counts: vec![],
+            range: Some((5, 5)), // anchored at the last line
+            owner: 5,
+            old_numbers: vec![],
+        });
+        let view = render_current_view(&app, &[]);
+        assert!(
+            view.old_side_rows.is_empty(),
+            "empty block collapses to an empty range: {:?}",
+            view.old_side_rows
+        );
     }
 
     #[test]

@@ -931,7 +931,7 @@ fn insert_cards(view: &mut ViewState, comments: &[Comment], columns: usize) {
 /// isolated fragment render, the old side then keeps the document's
 /// context: a table keeps its header, delimiter, and column widths, and
 /// renders as one table instead of a disconnected fragment.
-fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
+pub(crate) fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let width = view_render_width(w);
     let Some(os) = &app.old_side else {
@@ -943,7 +943,12 @@ fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     // gutter range, computed from the substituted render's attribution
     // before the remap below.
     let sub_starts = view.source_starts.clone();
-    view.old_side_rows = sub_starts.get(a).copied().unwrap_or(0)
+    // Defense: if the block's start row does not exist (a zero-length
+    // block at EOF, e.g. an empty old side), collapse to an EMPTY range
+    // — never to row 0, which ballooned the `~` markers over the whole
+    // document (regression: the same blow-up as the pure-deletion fix,
+    // different trigger). The toggle guard normally prevents this.
+    view.old_side_rows = sub_starts.get(a).copied().unwrap_or(view.rows.len())
         ..sub_starts.get(a + block_len).copied().unwrap_or(view.rows.len());
     view.old_side_lines = os.range.or(Some((os.owner, os.owner)));
     // Remap the substituted attribution back to NEW-file line numbers:
