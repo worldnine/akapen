@@ -356,10 +356,48 @@ fn run(config: Config) -> Result<()> {
 const MAX_EVENTS_PER_FRAME: usize = 64;
 const HISTORY_RENDER_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// Whether this process still has a controlling terminal — i.e. the
+/// pane/window this TUI runs in is alive. Cheap (one open(2) on
+/// `/dev/tty`), so it is safe to poll every tick.
+///
+/// Why this matters: when the session leader exits (window/pane closed),
+/// the kernel releases the controlling terminal. Crossterm never notices
+/// — the pty master can stay open (herdr keeps it for scrollback), so
+/// reads just block and draws keep succeeding, and no signal arrives.
+/// Once the terminal is released, `/dev/tty` stops opening (ENXIO), the
+/// only reliable "session is dead" signal from inside the process.
+fn controlling_terminal_alive() -> bool {
+    std::fs::OpenOptions::new().read(true).open("/dev/tty").is_ok()
+}
+
+/// Whether stdin's writer is gone (POLLHUP): a pipe-based virtual
+/// terminal (e.g. a herdr plugin pane) whose owner closed. Reads would
+/// return EOF forever — crossterm never surfaces that as an event.
+fn stdin_hung_up() -> bool {
+    let mut pfd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: 0,
+        revents: 0,
+    };
+    // SAFETY: poll(2) on fd 0, which is open here (crossterm owns it).
+    let n = unsafe { libc::poll(&mut pfd, 1, 0) };
+    n > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0
+}
+
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     // Paint the initial frame before waiting for input.
     terminal.draw(|f| draw(f, app))?;
+    // Death watchdog: exit cleanly when the session dies under us. With
+    // a controlling terminal we watch `/dev/tty`; without one from the
+    // start (pipe-based virtual terminal) we watch stdin for HUP.
+    let watch_terminal = controlling_terminal_alive();
+    let watch_stdin = !watch_terminal;
     loop {
+        if (watch_terminal && !controlling_terminal_alive())
+            || (watch_stdin && stdin_hung_up())
+        {
+            return Err(anyhow::anyhow!("terminal gone; exiting"));
+        }
         // Wait up to one tick for input, then drain everything that
         // arrived. A fast wheel flick queues dozens of mouse events, and
         // each one used to trigger its own full redraw — on a large
