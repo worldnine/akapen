@@ -159,7 +159,7 @@ akapen ... --send-agent --reply
 - **Auto-reload, no diff**: the document reloads automatically when it changes on disk, and the reload skips the diff — in reply mode the doc is a single agent message, so every refresh replaces the whole content.
 - **Reply-mode UI**: the title shows `reply` (not the temp path), `]`/`[` moves between the recent messages, `e` (edit) and the file picker are disabled.
 
-The companion script [`scripts/akp`](scripts/akp) builds the document set: it resolves the sole agent in the current herdr tab, extracts the most recent text-bearing assistant messages from the session transcript (pi/claude JSONL located by session id, hermes SQLite), and opens akapen on them. Re-invoking refreshes the documents in place.
+The companion script [`scripts/akp`](scripts/akp) builds the document set: it resolves the sole agent in the current herdr tab, extracts the most recent text-bearing assistant messages from the session transcript (pi/claude/codex JSONL located by session id, hermes SQLite), and opens akapen on them. Codex timestamp-prefixed rollout files and its `response_item` / `output_text` records are supported. Re-invoking refreshes the documents in place.
 
 ### herdr plugin
 

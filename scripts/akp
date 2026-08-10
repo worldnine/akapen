@@ -131,9 +131,10 @@ def session_path(agent):
 
     Resolution strategy: no per-agent path construction. herdr reports
     either a direct path (pi) or a session id; ids are unique, so we
-    search the candidate JSONL roots for `<id>.jsonl`, then fall back to
-    the SQLite backends (hermes, opencode) that key their transcript
-    tables by the same id.
+    search the candidate JSONL roots for the backend's session filename,
+    then fall back to the SQLite backends (hermes, opencode) that key
+    their transcript tables by the same id. Codex rollout files prefix
+    the id with a timestamp (`rollout-...-<id>.jsonl`).
 
     Returns ("jsonl", path) or ("sqlite", db_path, session_id).
     """
@@ -142,13 +143,16 @@ def session_path(agent):
         return ("jsonl", s["value"])
     if s.get("kind") == "id" and s.get("value"):
         sid = s["value"]
+        kind = agent.get("agent")
         for root in JSONL_ROOTS:
-            matches = list(root.glob(f"**/{sid}.jsonl"))
+            patterns = [f"**/{sid}.jsonl"]
+            if kind == "codex":
+                patterns.append(f"**/*-{sid}.jsonl")
+            matches = sorted({path for pattern in patterns for path in root.glob(pattern)})
             if len(matches) == 1:
                 return ("jsonl", str(matches[0]))
             if len(matches) > 1:
                 sys.exit(f"akp: ambiguous session {sid}: {matches}")
-        kind = agent.get("agent")
         db = SQLITE_ROOTS.get(kind)
         if db and Path(db).exists():
             return ("sqlite", db, sid)
@@ -184,9 +188,32 @@ def message_text(message):
         return "\n".join(
             b.get("text", "")
             for b in content
-            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+            if isinstance(b, dict)
+            and b.get("type") in ("text", "output_text")
+            and b.get("text")
         )
     return ""
+
+
+def record_message(rec):
+    """Return a normalized assistant-message object from a JSONL record.
+
+    Claude and pi put it in top-level `message`; Codex records Responses
+    API items as `type=response_item` with the message in `payload`.
+    Event records such as Codex's `agent_message` are intentionally not
+    read because they duplicate response items.
+    """
+    message = rec.get("message")
+    if isinstance(message, dict):
+        return message
+    payload = rec.get("payload")
+    if (
+        rec.get("type") == "response_item"
+        and isinstance(payload, dict)
+        and payload.get("type") == "message"
+    ):
+        return payload
+    return None
 
 
 def latest_text_messages(source, n):
@@ -215,8 +242,8 @@ def _latest_texts_jsonl(path, n):
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            message = rec.get("message")
-            if not isinstance(message, dict):
+            message = record_message(rec)
+            if message is None:
                 continue
             if message.get("role") != "assistant":
                 continue
