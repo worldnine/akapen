@@ -20,7 +20,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::comment::Comment;
 
-/// One comment as its export block: location, numbered snippet, then text.
+/// One comment as its export block: optional revision, location, numbered
+/// snippet, then text.
 pub fn format_comment(comment: &Comment) -> String {
     format_comment_with(comment, true, None)
 }
@@ -53,11 +54,11 @@ fn format_comment_with(
         let revision = comment
             .revision
             .as_ref()
-            .map(|revision| format!("\nRevision: {revision}"))
+            .map(|revision| format!("Revision: {revision}\n"))
             .unwrap_or_default();
         format!(
-            "{}{revision}\n{}\n{}",
-            comment.location(),
+            "{revision}{}\n{}\n{}",
+            export_location(comment),
             numbered_snippet(comment),
             normalize_text(&comment.text)
         )
@@ -99,6 +100,20 @@ fn format_comment_with(
     }
 }
 
+/// Export a resolvable path when the commented file still exists. UI
+/// labels retain the concise command-line spelling, while the agent-facing
+/// location does not depend on inheriting akapen's working directory.
+fn export_location(comment: &Comment) -> String {
+    let Ok(path) = std::fs::canonicalize(&comment.file_path) else {
+        return comment.location();
+    };
+    if comment.start == comment.end {
+        format!("{}:{}", path.display(), comment.start)
+    } else {
+        format!("{}:{}-{}", path.display(), comment.start, comment.end)
+    }
+}
+
 /// The snippet's lines, pinned to the location's `start-end` range (short
 /// `lines` are padded, extra parts dropped) — the range is the single
 /// source of truth for how many lines a snippet shows.
@@ -118,12 +133,6 @@ fn snippet_parts(comment: &Comment) -> Vec<&str> {
 /// dropped) — adapters like scripts/akapen2hunk rely on that to split
 /// the snippet from the comment text.
 fn numbered_snippet(comment: &Comment) -> String {
-    // A hunk comment carries the raw diff text as its snippet: export it
-    // as-is (the agent reads the change itself — `@@` header, `-`/`+`
-    // prefixes; numbering the diff lines would only add noise).
-    if comment.hunk {
-        return comment.lines.clone();
-    }
     snippet_parts(comment)
         .iter()
         .enumerate()
@@ -137,14 +146,6 @@ fn numbered_snippet(comment: &Comment) -> String {
 /// reference nothing without a file) would be noise. Blank lines in the
 /// selection render as `> ` so they still read as quoted.
 fn quoted_snippet(comment: &Comment) -> String {
-    if comment.hunk {
-        return comment
-            .lines
-            .split('\n')
-            .map(|l| format!("> {l}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
     snippet_parts(comment)
         .iter()
         .map(|text| format!("> {text}"))
@@ -447,7 +448,6 @@ mod tests {
             start,
             end,
             lines: lines.into(),
-            hunk: false,
             revision: None,
             text: text.into(),
         }
@@ -473,8 +473,20 @@ mod tests {
         let mut c = comment("doc.md", 2, 2, "old paragraph", "この簡潔さを戻したい");
         c.revision = Some("abc123 (abc123full) — simplify intro".into());
         let out = format_comment(&c);
-        assert!(out.contains("Revision: abc123 (abc123full) — simplify intro"));
+        assert!(out.starts_with("Revision: abc123 (abc123full) — simplify intro\ndoc.md:2"));
         assert!(out.contains("2: old paragraph"));
+    }
+
+    #[test]
+    fn existing_files_are_exported_with_an_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "line\n").unwrap();
+        let mut c = comment("unused", 1, 1, "line", "note");
+        c.file_path = path.clone();
+
+        let canonical = std::fs::canonicalize(path).unwrap();
+        assert!(format_comment(&c).starts_with(&format!("{}:1\n", canonical.display())));
     }
 
     #[test]

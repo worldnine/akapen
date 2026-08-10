@@ -46,12 +46,6 @@ pub struct Comment {
     pub end: u32,
     /// The verbatim source snippet the comment anchors to.
     pub lines: String,
-    /// Whether this comment targets a git hunk: `lines` then holds the
-    /// hunk's raw diff text (`@@` header + `-`/`+`/` ` prefixed body),
-    /// exported as-is instead of as numbered source lines — the agent
-    /// reads the change itself, deletions included (a pure-deletion
-    /// hunk's new-side snippet would otherwise be empty).
-    pub hunk: bool,
     /// Exact historical document revision this comment was made against.
     /// `None` means the live working tree.
     pub revision: Option<String>,
@@ -127,7 +121,6 @@ mod tests {
             start,
             end,
             lines: "snippet".into(),
-            hunk: false,
             revision: None,
             text: "text".into(),
         }

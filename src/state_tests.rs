@@ -8,7 +8,6 @@
 /// would — only the rendering is bypassed.
 use crate::*;
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::comment::Selection;
@@ -47,6 +46,9 @@ use crate::comment::Selection;
         app.spans = app
             .highlight
             .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        let mut history = DocumentHistory::load(&app.files[0], &app.source.content, 0);
+        history.acknowledge_in_memory(&app.source.content);
+        app.histories = vec![history];
         app.mode = mode;
         app.gutter_cols = 3;
         app.ensure_row_cache(75);
@@ -84,6 +86,9 @@ use crate::comment::Selection;
         app.spans = app
             .highlight
             .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        let mut history = DocumentHistory::load(&app.files[0], &app.source.content, 0);
+        history.acknowledge_in_memory(&app.source.content);
+        app.histories = vec![history];
         app.mode = mode;
         app.gutter_cols = 3;
         app.ensure_row_cache(75);
@@ -108,7 +113,6 @@ use crate::comment::Selection;
             start: start as u32,
             end: end as u32,
             lines: app.source.snippet(start as u32, end as u32),
-            hunk: false,
             revision: None,
             text: text.into(),
         });
@@ -323,22 +327,13 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn help_advertises_the_scope_cycle() {
-        // Diff-scope step ①: the full cycle inside a repository, the
-        // Last ↔ Off cycle outside one (P1), nothing in reply mode.
+    fn help_advertises_review_navigation() {
         let rows = help_rows(false, false, true);
         assert!(rows
             .iter()
-            .any(|(l, k)| *l == "marks" && k.contains("last/git/off")));
-        let rows = help_rows(false, false, false);
-        assert!(rows
-            .iter()
-            .any(|(l, k)| *l == "marks" && k.contains("last/off")));
-        assert!(!rows
-            .iter()
-            .any(|(l, k)| *l == "marks" && k.contains("last/git/off")));
+            .any(|(l, k)| *l == "compare" && k.contains("a acknowledge")));
         let rows = help_rows(false, true, true);
-        assert!(!rows.iter().any(|(l, _)| *l == "marks"));
+        assert!(!rows.iter().any(|(l, _)| *l == "compare"));
     }
 
     #[test]
@@ -962,7 +957,6 @@ use crate::comment::Selection;
             start: 3,
             end: 3,
             lines: "line3".into(),
-            hunk: false,
             revision: None,
             text: "c1".into(),
         });
@@ -971,7 +965,6 @@ use crate::comment::Selection;
             start: 7,
             end: 7,
             lines: "line7".into(),
-            hunk: false,
             revision: None,
             text: "c2".into(),
         });
@@ -1102,7 +1095,6 @@ use crate::comment::Selection;
                 start: 3,
                 end: 5,
                 lines: String::new(),
-                hunk: false,
                 revision: None,
                 text: "c1".into(),
             },
@@ -1111,7 +1103,6 @@ use crate::comment::Selection;
                 start: 9,
                 end: 9,
                 lines: String::new(),
-                hunk: false,
                 revision: None,
                 text: "c2".into(),
             },
@@ -1137,7 +1128,6 @@ use crate::comment::Selection;
                 start: 2,
                 end: 5,
                 lines: String::new(),
-                hunk: false,
                 revision: None,
                 text: "c1".into(),
             },
@@ -1146,7 +1136,6 @@ use crate::comment::Selection;
                 start: 4,
                 end: 6,
                 lines: String::new(),
-                hunk: false,
                 revision: None,
                 text: "c2".into(),
             },
@@ -1155,7 +1144,6 @@ use crate::comment::Selection;
                 start: 8,
                 end: 9,
                 lines: String::new(),
-                hunk: false,
                 revision: None,
                 text: "c3".into(),
             },
@@ -1198,367 +1186,6 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn reload_reports_exact_diff_counts() {
-        // The +N/-M badge used to be a prefix/suffix approximation; it is
-        // now the same hunks the marks derive from. This case splits the
-        // two: the old approximation reported +2/-2 here (prefix `line1`,
-        // no common suffix), the exact diff is +1/-1.
-        let (mut app, _dir) = make_app_keep(3, Mode::Source);
-        std::fs::write(app.current_file_path(), "line1\nline3\nX\n").unwrap();
-        assert!(reload_source(&mut app, false).is_ok());
-        assert_eq!(app.last_change, Some((1, 1)), "exact diff, not the old 2/-2 approximation");
-        let diff = app.last_diff.as_ref().expect("the reload diff is stored");
-        // Two hunks (the equal `line3` splits the deletion from the
-        // insertion), one line deleted and one added in total.
-        assert_eq!(diff.hunks.len(), 2);
-        assert_eq!(diff.hunks[0].counts(), (0, 1));
-        assert_eq!(diff.hunks[1].counts(), (1, 0));
-        // The marks and the badge derive from the same diff.
-        let len = app.source.len();
-        assert_eq!(app.last_added, diff.added(len));
-        assert_eq!(app.last_deleted_before, diff.deleted_before(len));
-    }
-
-    #[test]
-    fn m_cycles_the_scope_and_flashes_the_name() {
-        // Diff-scope: `m` cycles Last → Git → Off → Last inside a
-        // repository, pins the scope as user-chosen, and flashes the name.
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        app.git_diff = Some(crate::git::Diff::default());
-        app.scope = crate::app::DiffScope::Git; // run() の初期値
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Off);
-        assert!(app.scope_manual, "m pins the scope");
-        assert!(app
-            .status
-            .as_ref()
-            .is_some_and(|(m, _, _)| m.contains("marks: off")));
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Last);
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Git);
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Off, "one full cycle");
-        // View モードでも同じキーが効く。
-        let (mut app2, _dir2) = make_app_keep(5, Mode::View);
-        app2.git_diff = Some(crate::git::Diff::default());
-        app2.scope = crate::app::DiffScope::Last;
-        on_view_key(&mut app2, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app2.scope, crate::app::DiffScope::Git);
-    }
-
-    #[test]
-    fn m_outside_a_repo_cycles_last_and_off_only() {
-        // P1: git 外ではサイクルは Last ↔ Off のみ — Git には
-        // 到達しない（表示すべき git マークが存在しない）。
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        assert!(app.git_diff.is_none());
-        app.scope = crate::app::DiffScope::Last;
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Off);
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Last);
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Off);
-    }
-
-    #[test]
-    fn reload_auto_transitions_git_to_last_unless_pinned_or_self_edited() {
-        // 内容が変わる reload で、ピンされていない Git スコープは
-        // Last に遷移する — 新しい外部編集は last で採点する。
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        app.git_diff = Some(crate::git::Diff::default());
-        app.scope = crate::app::DiffScope::Git;
-        std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
-        assert!(reload_source(&mut app, false).is_ok());
-        assert_eq!(app.scope, crate::app::DiffScope::Last, "the new edit is reviewed via last");
-        // ピン済み (m で選択): 遷移しない。
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        app.git_diff = Some(crate::git::Diff::default());
-        app.scope = crate::app::DiffScope::Git;
-        app.scope_manual = true;
-        std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
-        assert!(reload_source(&mut app, false).is_ok());
-        assert_eq!(app.scope, crate::app::DiffScope::Git, "a pinned scope survives the reload");
-        // e 経由 (from_editor): 自分の編集は採点対象ではない — 遷移しない。
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        app.git_diff = Some(crate::git::Diff::default());
-        app.scope = crate::app::DiffScope::Git;
-        std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
-        assert!(finish_reload(&mut app, true));
-        assert_eq!(app.scope, crate::app::DiffScope::Git, "an edit of one's own is not up for review");
-    }
-
-    #[test]
-    fn reload_keeps_last_and_off_scopes() {
-        // 自動遷移は Git → Last のみ: 他のスコープは無条件で維持。
-        for scope in [
-            crate::app::DiffScope::Last,
-            crate::app::DiffScope::Off,
-        ] {
-            let (mut app, _dir) = make_app_keep(5, Mode::Source);
-            app.git_diff = Some(crate::git::Diff::default());
-            app.scope = scope;
-            std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
-            assert!(reload_source(&mut app, false).is_ok());
-            assert_eq!(app.scope, scope, "{scope:?} stays put");
-        }
-    }
-
-    #[test]
-    fn notify_file_changed_resets_the_scope_pin() {
-        // 新しい ⚡ エピソードは自動遷移を再武装する: ピンは旧変更に
-        // 対するもの。
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        app.scope_manual = true;
-        notify_file_changed(&mut app);
-        assert!(!app.scope_manual, "a new change episode re-arms the auto transition");
-        assert!(app.file_changed);
-    }
-
-    #[test]
-    fn m_is_a_no_op_in_reply_mode() {
-        // Reply モードではスコープ機構ごと無効: m は何も変えない。
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        app.config.reply = true;
-        app.scope = crate::app::DiffScope::Git;
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Git, "reply mode keeps the machinery off");
-        assert!(!app.scope_manual);
-    }
-
-    #[test]
-    fn outside_a_repo_the_session_keeps_its_look() {
-        // P1 回帰: git 外ではデフォルト Last のまま、リロード後に last
-        // マークが出る（従来挙動）、m は Last ↔ Off のみ、フッターに
-        // バッジは出ない。
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        assert!(app.git_diff.is_none());
-        assert_eq!(app.scope, crate::app::DiffScope::Last, "non-git default is Last");
-        std::fs::write(app.current_file_path(), "line1\nline2\nline3\nline4\nline5\nline6\n").unwrap();
-        assert!(reload_source(&mut app, false).is_ok());
-        assert_eq!(app.last_change, Some((1, 0)));
-        let (added, _, _) = scoped_mark_sets(&app);
-        assert!(added.contains(&5), "the Last scope shows the reload marks");
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Off);
-        on_source_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
-        assert_eq!(app.scope, crate::app::DiffScope::Last);
-        assert!(!footer_hints(&app).contains("m:"), "non-git look is unchanged (P1)");
-    }
-
-    /// A hunk that deletes one old line and adds `n` new ones at 1-based
-    /// position `p`: with n = 1 it is a pure rewrite, with n = 2 one
-    /// rewrite + one pure addition.
-    fn rewrite_hunk(p: u32, n: u32) -> crate::git::Hunk {
-        crate::git::Hunk {
-            old_start: p,
-            old_len: 1,
-            new_start: p,
-            new_len: n,
-            body: std::iter::once(crate::git::HunkLine {
-                tag: crate::git::Tag::Delete,
-                text: "old".into(),
-            })
-            .chain((0..n).map(|i| crate::git::HunkLine {
-                tag: crate::git::Tag::Add,
-                text: format!("new{i}"),
-            }))
-            .collect(),
-        }
-    }
-
-    #[test]
-    fn scoped_marks_select_the_scope() {
-        // マーク選択は 1 箇所 (scoped_mark_sets) に集約され、view と
-        // source の両ガターが同じ集合を読む。added/modified の分解は
-        // diff から導出される（diff-scope step ③）。
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        // last: 位置 2 の書き換え + 純追加（delete 1 + add 2）。
-        app.last_diff = Some(crate::git::Diff {
-            hunks: vec![rewrite_hunk(2, 2)],
-            untracked: false,
-        });
-        // git: 位置 2 の書き換えのみ（last と同一位置）+ 位置 4 の書き換え。
-        app.git_diff = Some(crate::git::Diff {
-            hunks: vec![rewrite_hunk(2, 1), rewrite_hunk(4, 1)],
-            untracked: false,
-        });
-        app.last_deleted_before = HashSet::from([3]);
-        app.git_deleted_before = HashSet::from([0]);
-        app.scope = crate::app::DiffScope::Last;
-        assert_eq!(
-            scoped_mark_sets(&app),
-            (HashSet::from([2]), HashSet::from([1]), HashSet::from([3])),
-            "last: pure addition at 2, rewrite at 1"
-        );
-        app.scope = crate::app::DiffScope::Git;
-        assert_eq!(
-            scoped_mark_sets(&app),
-            (HashSet::new(), HashSet::from([1, 3]), HashSet::from([0])),
-            "git: rewrites at 1 and 3"
-        );
-        app.scope = crate::app::DiffScope::Off;
-        assert_eq!(
-            scoped_mark_sets(&app),
-            (HashSet::new(), HashSet::new(), HashSet::new())
-        );
-        // untracked: Git は空（全行マークはノイズ）。
-        app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
-        app.scope = crate::app::DiffScope::Git;
-        assert_eq!(
-            scoped_mark_sets(&app),
-            (HashSet::new(), HashSet::new(), HashSet::new())
-        );
-    }
-
-    #[test]
-    fn title_badge_follows_the_scope() {
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        // Git スコープ: g+K/-L が hunk counts の合計と一致。
-        let diff = crate::git::synthesize_diff(
-            "one\ntwo\nthree\nfour\nfive\n",
-            "one\nX\nY\nthree\nfour\nfive\n",
-        );
-        app.git_diff = Some(diff);
-        app.scope = crate::app::DiffScope::Git;
-        assert_eq!(title_metrics(&app, 100).change, " g+2/-1 ");
-        // Last: リロードの +N/-M のみ。
-        app.last_change = Some((3, 2));
-        app.scope = crate::app::DiffScope::Last;
-        assert_eq!(title_metrics(&app, 100).change, " +3/-2 ");
-        // Off: なし。
-        app.scope = crate::app::DiffScope::Off;
-        assert_eq!(title_metrics(&app, 100).change, "");
-        // untracked / 空 diff × Git: なし。
-        app.scope = crate::app::DiffScope::Git;
-        app.git_diff = Some(crate::git::Diff { untracked: true, ..Default::default() });
-        assert_eq!(title_metrics(&app, 100).change, "");
-        app.git_diff = Some(crate::git::Diff::default());
-        assert_eq!(title_metrics(&app, 100).change, "", "no hunks, no badge");
-        // ⚡ pending は全スコープより優先。
-        app.file_changed = true;
-        assert_eq!(title_metrics(&app, 100).change, " ⚡ ");
-    }
-
-    #[test]
-    fn footer_shows_the_scope_badge() {
-        let (mut app, _dir) = make_app_keep(5, Mode::View);
-        // git 外のデフォルト (Last): バッジなし (P1)。
-        assert!(!footer_hints(&app).contains("m:"));
-        // git 内: 常に出る。
-        app.git_diff = Some(crate::git::Diff::default());
-        app.scope = crate::app::DiffScope::Git;
-        assert!(footer_hints(&app).contains("m:git"));
-        app.scope = crate::app::DiffScope::Last;
-        assert!(footer_hints(&app).contains("m:last"));
-        app.scope = crate::app::DiffScope::Off;
-        assert!(footer_hints(&app).contains("m:off"));
-        // Reply モード: 出さない。
-        app.config.reply = true;
-        assert!(!footer_hints(&app).contains("m:"));
-    }
-
-    /// A minimal hunk whose anchor is `a` (one added line at `a`).
-    fn hunk_at(a: u32) -> crate::git::Hunk {
-        crate::git::Hunk {
-            old_start: a,
-            old_len: 0,
-            new_start: a + 1,
-            new_len: 1,
-            body: vec![crate::git::HunkLine {
-                tag: crate::git::Tag::Add,
-                text: "x".into(),
-            }],
-        }
-    }
-
-    fn diff_at(anchors: &[u32]) -> crate::git::Diff {
-        crate::git::Diff {
-            hunks: anchors.iter().map(|a| hunk_at(*a)).collect(),
-            untracked: false,
-        }
-    }
-
-    #[test]
-    fn changes_entries_follow_the_scope() {
-        // Diff-scope step ②: the changes tab lists the active scope's
-        // hunks per file — Last: reload diffs only (files never reloaded
-        // have no entries); Git: the git hunks; Off: none.
-        let (mut app, _dir) = make_session();
-        app.last_diff = Some(diff_at(&[1, 4]));
-        app.git_diff = Some(diff_at(&[1, 7]));
-        app.file_states[0].last_diff = app.last_diff.clone();
-        app.file_states[0].git_diff = app.git_diff.clone();
-        app.file_states[1].git_diff = Some(diff_at(&[2]));
-        // Last: only file 0's reload hunks (file 1 was never reloaded).
-        app.scope = crate::app::DiffScope::Last;
-        let e = changes_entries(&app);
-        assert_eq!(e.len(), 2, "last hunks of file 0 only");
-        assert!(e.iter().all(|x| x.file() == 0));
-        // Git: both files' snapshot hunks.
-        app.scope = crate::app::DiffScope::Git;
-        let e = changes_entries(&app);
-        assert_eq!(e.len(), 3);
-        // Off: empty.
-        app.scope = crate::app::DiffScope::Off;
-        assert!(changes_entries(&app).is_empty());
-    }
-
-    #[test]
-    fn changes_tab_enter_jumps_within_the_scope() {
-        // Enter on a Last-scope entry lands on the reload diff's hunk.
-        let (mut app, _dir) = make_session();
-        app.mode = Mode::Source;
-        app.last_diff = Some(crate::git::synthesize_diff("a\nb\nc\n", "a\nX\nc\n"));
-        app.scope = crate::app::DiffScope::Last;
-        on_source_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
-        on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(app.overlay_tab, OverlayTab::Changes);
-        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(app.overlay, None, "Enter closes the overlay");
-        assert_eq!(app.cursor, 1, "landed on the reload diff's change");
-        assert_eq!(app.selection, Some(Selection { anchor: 1, cursor: 1 }));
-    }
-
-    #[test]
-    fn changes_tab_off_scope_shows_the_m_hint() {
-        // The tab still opens under Off; its empty state points at `m`.
-        let (mut app, _dir) = make_session();
-        app.scope = crate::app::DiffScope::Off;
-        on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
-        on_overlay_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-        t.draw(|f| draw(f, &mut app)).unwrap();
-        let frame: String = t
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
-        assert!(frame.contains("marks off"), "the empty state points at m: {frame}");
-    }
-
-    #[test]
-    fn scope_state_rides_along_file_switches() {
-        // scope / scope_manual はファイルごとの状態: 切替で保存・復元
-        // され、他ファイルに漏れない。
-        let (mut app, _dir) = make_session();
-        app.scope = crate::app::DiffScope::Git;
-        app.scope_manual = true;
-        on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
-        expire_chord(&mut app);
-        assert_eq!(app.current_file_index, 1);
-        assert_eq!(app.scope, crate::app::DiffScope::Last, "the other file has its own scope");
-        assert!(!app.scope_manual);
-        on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
-        expire_chord(&mut app);
-        assert_eq!(app.scope, crate::app::DiffScope::Git, "the scope comes back");
-        assert!(app.scope_manual);
-    }
-
-    #[test]
     fn reply_mode_reload_skips_diff_and_badge() {
         // --reply: the doc is a single agent message; each refresh replaces
         // the whole thing, so a diff would mark everything as changed.
@@ -1569,10 +1196,7 @@ use crate::comment::Selection;
         writeln!(f, "new message line 2").unwrap();
         assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.source.len(), 2, "new content is loaded");
-        assert!(app.last_added.is_empty(), "no diff gutters in reply mode");
-        assert!(app.last_deleted_before.is_empty(), "no deletion markers");
-        assert!(app.last_diff.is_none(), "no reload diff in reply mode");
-        assert_eq!(app.last_change, None, "no +N/-M badge in reply mode");
+        assert!(app.review_changed.is_empty(), "reply mode has no review marks");
         assert!(!app.file_changed, "reload clears the pending prompt");
     }
 
@@ -1585,7 +1209,6 @@ use crate::comment::Selection;
             start: 9,
             end: 10,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "c".into(),
         });
@@ -1597,11 +1220,7 @@ use crate::comment::Selection;
         assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.source.len(), 7);
         assert_eq!(app.cursor, 6, "cursor clamps to the new last line");
-        assert!(
-            app.comments.is_empty(),
-            "comments are cleared on reload — anchors are stale"
-        );
-        assert_eq!(app.last_change, Some((0, 3)), "toast reports the tail cut");
+        assert_eq!(app.comments.len(), 1, "the comment stays on its generation");
         assert!(!app.file_changed, "the pending prompt clears on reload");
         assert!(app.selection.is_none(), "selection is cleared");
     }
@@ -1622,11 +1241,7 @@ use crate::comment::Selection;
         on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
         assert_eq!(app.source.len(), 6, "r replaces the in-memory source");
         assert!(!app.file_changed, "r clears the pending prompt");
-        assert_eq!(app.last_change, Some((1, 0)));
-        let diff = app.last_diff.as_ref().expect("the reload diff is stored");
-        assert_eq!(diff.hunks.len(), 1);
-        assert_eq!(diff.hunks[0].counts(), (1, 0));
-        assert_eq!(app.last_added, diff.added(6), "the marks come from the stored diff");
+        assert!(app.review_changed.contains(&5), "the new line needs review");
         // A fresh change can be ignored with i.
         app.file_changed = true;
         on_source_key(&mut app, KeyCode::Char('i'), KeyModifiers::NONE, None);
@@ -1638,100 +1253,151 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn r_with_comments_requires_a_second_r() {
-        // The reload clears this file's comments, so `r` asks first — the
-        // same two-press pattern as `e`/`q`. The agent's rewrite is the
-        // most frequent action; the comments it invalidated must not
-        // vanish on one stray key.
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        add_comment(&mut app, 2, 2, "note");
-        // The agent appends a line.
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(app.current_file_path())
-            .unwrap();
-        writeln!(f, "line6").unwrap();
-        // Simulate the poll's detection of the external edit.
-        app.file_changed = true;
-        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
-        assert!(app.confirm_reload, "first r only arms the confirmation");
-        assert_eq!(app.source.len(), 5, "no reload yet");
-        assert_eq!(app.comments.len(), 1, "comments untouched");
-        assert!(app.file_changed, "the pending prompt stays up");
-        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
-        assert!(!app.confirm_reload, "second r confirms");
-        assert_eq!(app.source.len(), 6, "second r reloads");
-        assert!(app.comments.is_empty(), "comments cleared on reload");
-        assert!(!app.file_changed, "the pending prompt clears");
+    fn acknowledge_clears_review_marks_and_moves_the_baseline() {
+        let (mut app, _dir) = make_app_keep(3, Mode::Source);
+        std::fs::write(app.current_file_path(), "line1\nchanged\nline3\n").unwrap();
+        reload_source(&mut app, false).unwrap();
+        assert!(!app.review_changed.is_empty());
+        app.review_changed.clear();
+        app.review_changed.insert(1);
+        app.comparison_changed.clear();
+        app.comparison_changed.insert(1);
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 1, "n lands on the unreviewed block");
+
+        on_source_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, None);
+
+        assert!(app.review_changed.is_empty());
+        assert!(app.review_deleted_before.is_empty());
+        assert!(app.selection.is_none(), "a leaves source SELECT state");
+        assert_eq!(
+            app.histories[0].reviewed_content.as_deref(),
+            Some(app.source.content.as_str())
+        );
     }
 
     #[test]
-    fn r_without_comments_reloads_in_one_press() {
-        // No comments to lose: one `r` reloads immediately (the pre-fix
-        // behavior stays for the common no-comment case).
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(app.current_file_path())
-            .unwrap();
-        writeln!(f, "line6").unwrap();
-        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
-        assert!(!app.confirm_reload, "no confirmation needed");
-        assert_eq!(app.source.len(), 6, "one r reloads with no comments");
+    fn acknowledge_leaves_view_select_state() {
+        let mut app = make_app(3, Mode::View);
+        app.selection = Some(Selection {
+            anchor: 0,
+            cursor: 2,
+        });
+
+        on_view_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, None);
+
+        assert!(app.selection.is_none());
+        assert_eq!(app.mode, Mode::View);
     }
 
     #[test]
-    fn esc_cancels_the_reload_confirmation() {
-        // Esc must abort the armed reload: comments AND file content stay
-        // exactly as they were (nothing reloaded, nothing cleared).
-        let (mut app, _dir) = make_app_keep(5, Mode::Source);
-        add_comment(&mut app, 2, 2, "note");
-        let content_before = app.source.content.clone();
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(app.current_file_path())
-            .unwrap();
-        writeln!(f, "line6").unwrap();
-        on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
-        assert!(app.confirm_reload);
-        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
-        assert!(!app.confirm_reload, "Esc clears the confirmation");
-        assert_eq!(app.source.content, content_before, "content unchanged");
-        assert_eq!(app.comments.len(), 1, "comments kept");
-        // Esc in view mode cancels the same way.
-        let (mut app, _dir) = make_app_keep(5, Mode::View);
-        add_comment(&mut app, 2, 2, "note");
-        on_view_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
-        assert!(app.confirm_reload);
-        on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
-        assert!(!app.confirm_reload);
+    fn acknowledge_on_a_historical_generation_selects_it_as_the_baseline() {
+        let mut app = make_app(3, Mode::Source);
+        let old = "old first line\nline2\nline3\n";
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: old.into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+
+        on_source_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, None);
+
+        assert_eq!(app.histories[0].reviewed_content.as_deref(), Some(old));
+        assert!(app.review_changed.contains(&0));
+        assert_eq!(app.histories[0].position, 1, "selecting a baseline does not leave the past");
     }
 
     #[test]
-    fn switching_file_cancels_the_reload_confirmation() {
-        // ]/[ (and Tab's mode flip) move the user's context away from the
-        // pending reload; the armed confirmation must not fire on a later
-        // `r` in the new context.
-        let (mut app, _dir) = make_session();
-        add_comment(&mut app, 1, 1, "note");
-        assert_eq!(app.mode, Mode::View, "a.md opens in view mode");
-        on_view_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
-        assert!(app.confirm_reload);
-        on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
-        expire_chord(&mut app); // the chord's default: file switch
-        assert!(!app.confirm_reload, "file switch cancels the confirmation");
-        assert_eq!(app.current_file_index, 1);
-        // Back on a.md (view mode), arm again: Tab's mode flip cancels
-        // too — the prompt's context is the pane the user looked at.
-        on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
-        expire_chord(&mut app);
-        assert_eq!(app.current_file_index, 0);
-        assert_eq!(app.mode, Mode::View, "a.md restores to view mode");
-        on_view_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
-        assert!(app.confirm_reload);
-        on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
-        assert!(!app.confirm_reload, "mode switch cancels the confirmation");
-        assert_eq!(app.mode, Mode::Source);
+    fn historical_generation_shows_and_navigates_baseline_relative_marks() {
+        let mut app = make_app(3, Mode::Source);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: "old first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+
+        assert_eq!(app.source.lines[0], "old first line");
+        assert!(!app.comparison_changed.is_empty());
+        assert!(app.review_changed.is_empty(), "NOW review state remains independent");
+        assert_eq!(app.selection.unwrap().range(), (0, 2));
+    }
+
+    #[test]
+    fn review_count_measures_groups_instead_of_source_lines() {
+        let mut app = make_app(10, Mode::Source);
+        app.review_changed = [1, 2, 5].into_iter().collect();
+        app.review_deleted_before = [0, 2, 8].into_iter().collect();
+
+        assert_eq!(
+            app.file_review_count(0),
+            4,
+            "one changed block counts once and a deletion at the same anchor is not doubled"
+        );
+    }
+
+    #[test]
+    fn review_navigation_wraps_and_can_select_the_only_mark_under_the_cursor() {
+        let mut app = make_app(3, Mode::Source);
+        app.review_changed.insert(0);
+        app.comparison_changed.insert(0);
+        app.cursor = 0;
+
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+
+        assert_eq!(app.selection.unwrap().range(), (0, 0));
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn source_review_range_centers_as_far_as_document_edges_allow() {
+        let mut app = make_app(20, Mode::Source);
+
+        app.center_source_range(7, 9, 5);
+        assert_eq!(app.offset, 6);
+        app.center_source_range(19, 19, 5);
+        assert_eq!(app.offset, 15);
+    }
+
+    #[test]
+    fn reload_pins_live_comments_to_the_previous_local_generation() {
+        let (mut app, dir) = make_app_keep(3, Mode::Source);
+        let cache = SnapshotCache::at(dir.path().join("snapshot-cache"));
+        app.histories = vec![
+            DocumentHistory::load_cached(
+                app.current_file_path(),
+                &app.source.content,
+                0,
+                &cache,
+            )
+            .unwrap(),
+        ];
+        app.snapshot_cache = Some(cache.clone());
+        add_comment(&mut app, 2, 2, "keep this context");
+
+        std::fs::write(app.current_file_path(), "line1\nchanged\nline3\n").unwrap();
+        reload_source(&mut app, false).unwrap();
+
+        let revision = app.comments[0]
+            .revision
+            .as_deref()
+            .expect("the former NOW becomes a LOCAL generation");
+        assert!(revision.starts_with("local:"));
+        let cached = cache.load(app.current_file_path()).unwrap();
+        assert!(
+            cached
+                .snapshots
+                .iter()
+                .any(|snapshot| snapshot.pinned && snapshot.content.contains("line2"))
+        );
     }
 
     #[test]
@@ -1768,7 +1434,6 @@ use crate::comment::Selection;
         let file = app.current_file_path().to_path_buf();
         std::fs::write(&file, std::fs::read_to_string(&file).unwrap()).unwrap();
         assert!(reload_source(&mut app, false).is_ok(), "a touch is handled");
-        assert_eq!(app.last_change, None, "no diff to report");
     }
 
     #[test]
@@ -1799,7 +1464,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "c".into(),
         });
@@ -1818,7 +1482,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "c".into(),
         });
@@ -1842,7 +1505,6 @@ use crate::comment::Selection;
             start: 2,
             end: 4,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "c1".into(),
         });
@@ -1851,7 +1513,6 @@ use crate::comment::Selection;
             start: 7,
             end: 7,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "c2".into(),
         });
@@ -1860,7 +1521,6 @@ use crate::comment::Selection;
             start: 7,
             end: 7,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "c3".into(),
         });
@@ -2023,7 +1683,6 @@ use crate::comment::Selection;
             start: 2,
             end: 3,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "card body".into(),
         }];
@@ -2135,7 +1794,6 @@ use crate::comment::Selection;
             start: 2,
             end: 2,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "card".into(),
         }];
@@ -2213,7 +1871,6 @@ use crate::comment::Selection;
             start: 3,
             end: 4,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "mid-block".into(),
         }];
@@ -2485,23 +2142,6 @@ use crate::comment::Selection;
         assert_eq!(app.mode, Mode::View, "per-file mode restored");
     }
 
-    #[test]
-    fn last_diff_rides_along_file_switches() {
-        // The reload diff is per-file state: it must survive a switch
-        // away and back (and not leak into the other file).
-        let (mut app, _dir) = make_session();
-        let d = crate::git::synthesize_diff("a\n", "a\nb\n");
-        app.last_diff = Some(d.clone());
-        on_view_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE, None);
-        expire_chord(&mut app);
-        assert_eq!(app.current_file_index, 1);
-        assert!(app.last_diff.is_none(), "the other file has its own diff");
-        on_source_key(&mut app, KeyCode::Char('['), KeyModifiers::NONE, None);
-        expire_chord(&mut app);
-        let d = app.last_diff.expect("the diff comes back with the file");
-        assert_eq!(d.hunks.len(), 1);
-        assert_eq!(d.hunks[0].counts(), (1, 0));
-    }
 
     #[test]
     fn ctrl_o_opens_the_file_picker_and_enter_switches() {
@@ -2544,7 +2184,6 @@ use crate::comment::Selection;
             start: 2,
             end: 2,
             lines: "line2".into(),
-            hunk: false,
             revision: None,
             text: "on a".into(),
         });
@@ -2553,7 +2192,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "fn main".into(),
-            hunk: false,
             revision: None,
             text: "on b".into(),
         });
@@ -2576,7 +2214,6 @@ use crate::comment::Selection;
             start: 3,
             end: 3,
             lines: "line3".into(),
-            hunk: false,
             revision: None,
             text: "note".into(),
         });
@@ -2593,9 +2230,7 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn reload_clears_only_the_current_files_comments() {
-        // `r` re-anchors nothing: it clears the CURRENT file's comments
-        // (stale anchors) but must not touch other files' comments.
+    fn reload_preserves_comments_on_all_files() {
         let (mut app, _dir) = make_session();
         let a = app.files[0].clone();
         let b = app.files[1].clone();
@@ -2604,7 +2239,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "on a".into(),
         });
@@ -2613,14 +2247,14 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "y".into(),
-            hunk: false,
             revision: None,
             text: "on b".into(),
         });
         std::fs::write(&a, "# a\n\nchanged\n").unwrap();
         assert!(reload_source(&mut app, false).is_ok());
-        assert_eq!(app.comments.len(), 1, "only a.md's comment is cleared");
-        assert_eq!(app.comments[0].text, "on b");
+        assert_eq!(app.comments.len(), 2);
+        assert!(app.comments.iter().any(|comment| comment.text == "on a"));
+        assert!(app.comments.iter().any(|comment| comment.text == "on b"));
     }
 
     #[test]
@@ -2705,7 +2339,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "one".into(),
         });
@@ -2714,7 +2347,6 @@ use crate::comment::Selection;
             start: 2,
             end: 2,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "two".into(),
         });
@@ -2723,7 +2355,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "y".into(),
-            hunk: false,
             revision: None,
             text: "three".into(),
         });
@@ -2776,7 +2407,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "c".into(),
         });
@@ -2871,7 +2501,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "c".into(),
         });
@@ -2894,7 +2523,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "c".into(),
         });
@@ -3058,7 +2686,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "one".into(),
         });
@@ -3067,7 +2694,6 @@ use crate::comment::Selection;
             start: 2,
             end: 2,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "two".into(),
         });
@@ -3076,7 +2702,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "y".into(),
-            hunk: false,
             revision: None,
             text: "three".into(),
         });
@@ -3151,233 +2776,6 @@ use crate::comment::Selection;
         // An empty file reports L0/0 instead of an out-of-range line.
         let app3 = make_app(0, Mode::Source);
         assert!(footer_hints(&app3).contains("L0/0"));
-    }
-
-    #[test]
-    fn footer_hints_lead_with_deleted_above_on_a_deletion_mark_row() {
-        // 3-1: a cursor on a deletion mark row leads the footer. Inside a
-        // git hunk the hunk display wins (`hunk L… +A/-D` — the counts')
-        // `-N` covers the deletion); outside every hunk (reload-only
-        // marks, or a git mark the EOF clamp dropped outside every hunk
-        // range) the deletion hint appears: `-N deleted above · o: old
-        // side` when the count is derivable from the git hunks, the bare
-        // `deleted above · o: old side` when only reload marks exist.
-        // Off the mark row the footer stays exactly as before.
-        let mut app = make_app(5, Mode::View);
-        app.view.goto_source_line(2);
-        app.last_deleted_before.insert(2); // reload-only mark on line 3
-        let hints = footer_hints(&app);
-        assert!(
-            hints.starts_with("deleted above · o: old side · L3/5"),
-            "reload marks get the count-less hint, leading the footer: {hints}"
-        );
-
-        // A git mark whose hunk has no new range (pure deletion) is the
-        // hunk's owner line: the hunk display wins, the counts' `-2`
-        // carrying the deletion scale. The git hunk resolves under the
-        // Git scope (run()'s in-repo default, diff-scope step ④).
-        app.scope = crate::app::DiffScope::Git;
-        app.view.goto_source_line(3);
-        app.git_deleted_before.insert(3);
-        app.git_diff = Some(crate::git::Diff {
-            untracked: false,
-            hunks: vec![crate::git::Hunk {
-                old_start: 1,
-                old_len: 2,
-                new_start: 4,
-                new_len: 0,
-                body: vec![
-                    crate::git::HunkLine {
-                        tag: crate::git::Tag::Delete,
-                        text: "old a".into(),
-                    },
-                    crate::git::HunkLine {
-                        tag: crate::git::Tag::Delete,
-                        text: "old b".into(),
-                    },
-                ],
-            }],
-        });
-        let hints = footer_hints(&app);
-        assert!(
-            hints.starts_with("hunk L4 -2 · o old side · L4/5"),
-            "the owner row of a pure-deletion hunk shows the hunk: {hints}"
-        );
-
-        // A git mark the EOF clamp dropped OUTSIDE every hunk's range:
-        // the hunk display has nothing to say, so the deletion hint shows
-        // the count derived from the hunks.
-        let mut app = make_app(5, Mode::Source);
-        app.scope = crate::app::DiffScope::Git;
-        app.cursor = 4;
-        app.git_deleted_before.insert(4);
-        app.git_diff = Some(crate::git::Diff {
-            untracked: false,
-            hunks: vec![crate::git::Hunk {
-                old_start: 3,
-                old_len: 3,
-                new_start: 3,
-                new_len: 2,
-                body: vec![
-                    crate::git::HunkLine {
-                        tag: crate::git::Tag::Context,
-                        text: "c1".into(),
-                    },
-                    crate::git::HunkLine {
-                        tag: crate::git::Tag::Context,
-                        text: "c2".into(),
-                    },
-                    crate::git::HunkLine {
-                        tag: crate::git::Tag::Delete,
-                        text: "d1".into(),
-                    },
-                    crate::git::HunkLine {
-                        tag: crate::git::Tag::Delete,
-                        text: "d2".into(),
-                    },
-                ],
-            }],
-        });
-        let hints = footer_hints(&app);
-        assert!(
-            hints.starts_with("-2 deleted above · o: old side · L5/5"),
-            "an EOF-clamped mark outside every hunk keeps the counted hint: {hints}"
-        );
-
-        // Off the mark row: no deletion hint at all.
-        app.cursor = 0;
-        let hints = footer_hints(&app);
-        assert!(!hints.contains("deleted above"), "{hints}");
-
-        // Source mode anchors the hint to `app.cursor` (its own gutter
-        // `-` mark stays as-is).
-        let mut app = make_app(5, Mode::Source);
-        app.cursor = 1;
-        app.last_deleted_before.insert(1);
-        let hints = footer_hints(&app);
-        assert!(hints.starts_with("deleted above · o: old side · L2/5"), "{hints}");
-        app.cursor = 0;
-        assert!(!footer_hints(&app).contains("deleted above"));
-    }
-
-    #[test]
-    fn footer_hints_show_the_hunk_range_and_scale_inside_a_hunk() {
-        // Cursor inside a git hunk (added, deleted and context lines
-        // alike): the footer leads with `hunk L{a}-{b} +A/-D · o old
-        // side` — the 1-based new range and the hunk's counts, zero
-        // sides omitted. Deletion marks inside the hunk are absorbed by
-        // the counts, so no separate `deleted above` mention appears.
-        let diff = |hunks: Vec<crate::git::Hunk>| crate::git::Diff {
-            untracked: false,
-            hunks,
-        };
-        // A change hunk: 2 adds + 2 deletes over new lines 1-2, with a
-        // trailing context line outside the range.
-        let change = diff(vec![crate::git::Hunk {
-            old_start: 1,
-            old_len: 3,
-            new_start: 1,
-            new_len: 2,
-            body: vec![
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Delete,
-                    text: "a".into(),
-                },
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Add,
-                    text: "a2".into(),
-                },
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Delete,
-                    text: "b".into(),
-                },
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Add,
-                    text: "b2".into(),
-                },
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Context,
-                    text: "c".into(),
-                },
-            ],
-        }]);
-        let mut app = make_app(5, Mode::Source);
-        app.scope = crate::app::DiffScope::Git;
-        app.git_diff = Some(change);
-        app.cursor = 0;
-        let hints = footer_hints(&app);
-        assert!(
-            hints.starts_with("hunk L1-2 +2/-2 · o old side · L1/5"),
-            "both count sides show: {hints}"
-        );
-        app.cursor = 1;
-        assert!(footer_hints(&app).contains("hunk L1-2 +2/-2 · o old side"));
-        // A deletion mark row INSIDE the hunk stays on the hunk display:
-        // the counts already say `-2`.
-        app.git_deleted_before.insert(1);
-        let hints = footer_hints(&app);
-        assert!(
-            hints.starts_with("hunk L1-2 +2/-2 · o old side") && !hints.contains("deleted above"),
-            "the hunk display absorbs the deletion: {hints}"
-        );
-        // Outside the hunk (the trailing context line's position): no
-        // hint — the row is neither in a hunk nor on a mark. The scope
-        // badge still rides the tail.
-        app.cursor = 2;
-        assert_eq!(
-            footer_hints(&app),
-            "L3/5 · j/k move · v select · c comment · ? help · m:git"
-        );
-
-        // A pure-addition hunk omits the `-0` side.
-        let mut app = make_app(5, Mode::Source);
-        app.scope = crate::app::DiffScope::Git;
-        app.git_diff = Some(diff(vec![crate::git::Hunk {
-            old_start: 1,
-            old_len: 1,
-            new_start: 1,
-            new_len: 2,
-            body: vec![
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Context,
-                    text: "a".into(),
-                },
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Add,
-                    text: "b".into(),
-                },
-            ],
-        }]));
-        app.cursor = 0;
-        assert!(
-            footer_hints(&app).starts_with("hunk L1-2 +1 · o old side"),
-            "the zero deletion side is omitted"
-        );
-
-        // A pure-deletion hunk shows its owner line and only `-N`.
-        let mut app = make_app(5, Mode::Source);
-        app.scope = crate::app::DiffScope::Git;
-        app.git_diff = Some(diff(vec![crate::git::Hunk {
-            old_start: 1,
-            old_len: 2,
-            new_start: 1,
-            new_len: 0,
-            body: vec![
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Delete,
-                    text: "a".into(),
-                },
-                crate::git::HunkLine {
-                    tag: crate::git::Tag::Delete,
-                    text: "b".into(),
-                },
-            ],
-        }]));
-        app.cursor = 0;
-        assert!(
-            footer_hints(&app).starts_with("hunk L1 -2 · o old side"),
-            "pure deletion: the owner line and the count"
-        );
     }
 
     #[test]
@@ -3481,7 +2879,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "c".into(),
         });
@@ -3581,7 +2978,6 @@ use crate::comment::Selection;
             start: 3,
             end: 3,
             lines: "line3".into(),
-            hunk: false,
             revision: None,
             text: "note".into(),
         });
@@ -3685,7 +3081,6 @@ use crate::comment::Selection;
             start: 3,
             end: 5,
             lines: "line3\nline4\nline5".into(),
-            hunk: false,
             revision: None,
             text: "old".into(),
         });
@@ -3719,7 +3114,6 @@ use crate::comment::Selection;
             start: 3,
             end: 5,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "existing".into(),
         });
@@ -3747,7 +3141,6 @@ use crate::comment::Selection;
             start: 3,
             end: 3,
             lines: String::new(),
-            hunk: false,
             revision: None,
             text: "old".into(),
         });
@@ -3851,7 +3244,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "a1".into(),
         });
@@ -3860,7 +3252,6 @@ use crate::comment::Selection;
             start: 1,
             end: 1,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "b1".into(),
         });
@@ -3869,7 +3260,6 @@ use crate::comment::Selection;
             start: 2,
             end: 2,
             lines: "x".into(),
-            hunk: false,
             revision: None,
             text: "a2".into(),
         });
@@ -3896,7 +3286,6 @@ use crate::comment::Selection;
             start: 3,
             end: 5,
             lines: "line3\nline4\nline5".into(),
-            hunk: false,
             revision: None,
             text: "old".into(),
         });
@@ -3946,7 +3335,6 @@ use crate::comment::Selection;
             start: 3,
             end: 5,
             lines: "line3\nline4\nline5".into(),
-            hunk: false,
             revision: None,
             text: "old".into(),
         });
@@ -3994,25 +3382,28 @@ use crate::comment::Selection;
                     short_id: "now".into(),
                     summary: "working tree".into(),
                     content: "line1\n".into(),
+                    source: crate::history::RevisionSource::Now,
                 },
                 crate::history::Revision {
                     id: Some("abc".into()),
                     short_id: "abc".into(),
                     summary: "old".into(),
                     content: "# Old\n".into(),
+                    source: crate::history::RevisionSource::Git,
                 },
             ],
             position: 0,
             rendered_position: 0,
+            reviewed_id: None,
+            reviewed_content: Some("line1\n".into()),
         }];
-        app.history_scopes = vec![None];
         select_history(&mut app, 1);
         assert_eq!(app.histories[0].position, 1);
         assert_eq!(app.source.content, "line1\n", "selection is immediate but cheap");
         assert!(app.history_render_due.is_some());
         select_history(&mut app, 1);
         assert!(
-            matches!(app.status.as_ref(), Some((message, _, false)) if message.starts_with("PAST")),
+            matches!(app.status.as_ref(), Some((message, _, false)) if message.starts_with("COMMIT")),
             "the edge label stays informational until that revision is rendered"
         );
         render_history_when_settled(&mut app);
@@ -4037,7 +3428,7 @@ use crate::comment::Selection;
         select_history(&mut app, -1);
         select_history(&mut app, -1);
         assert!(
-            matches!(app.status.as_ref(), Some((message, _, false)) if message.starts_with("NOW")),
+            matches!(app.status.as_ref(), Some((message, _, false)) if message.contains("NOW")),
             "the present label also stays informational until it is rendered"
         );
         app.history_render_due = Some(std::time::Instant::now());
@@ -4059,18 +3450,21 @@ use crate::comment::Selection;
                     short_id: "now".into(),
                     summary: "working tree".into(),
                     content: "line1\n".into(),
+                    source: crate::history::RevisionSource::Now,
                 },
                 crate::history::Revision {
                     id: Some("abc".into()),
                     short_id: "abc".into(),
                     summary: "old".into(),
                     content: "# Old\n\nsource history\n".into(),
+                    source: crate::history::RevisionSource::Git,
                 },
             ],
             position: 0,
             rendered_position: 0,
+            reviewed_id: None,
+            reviewed_content: Some("line1\n".into()),
         }];
-        app.history_scopes = vec![None];
 
         assert_eq!(
             history_key_direction(&app, KeyCode::Left, KeyModifiers::NONE),

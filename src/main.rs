@@ -14,20 +14,20 @@ mod chrome;
 mod comment;
 mod config;
 mod export;
-mod git;
 mod highlight;
 mod history;
-mod hunknav;
 mod ime;
 mod overlay;
 mod reload;
 mod render;
+mod snapshot;
 mod source;
 mod theme;
 mod view;
 
 
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
@@ -52,9 +52,9 @@ use crate::comment::{Comment, Selection};
 use crate::config::{Action, Config};
 use crate::highlight::{Highlighter, Span as HiSpan, syntax_for, wrap_spans};
 use crate::history::DocumentHistory;
-use crate::hunknav::*;
 use crate::overlay::*;
 use crate::reload::*;
+use crate::snapshot::SnapshotCache;
 use crate::source::Source;
 use crate::view::{
     is_table_delimiter_line, scroll_offset_at, scroll_offset_drag, scroll_thumb, GutterCell,
@@ -100,12 +100,12 @@ fn main() -> Result<()> {
                  keys:\n\
                  \x20 view/source:  j/k scroll, Left/Right time travel, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
                  \x20                v select, c comment, s send, y copy, d delete, e edit,\n\
-                 \x20                r reload, o old side (git), n/F7/]c next change, ]/[ files,\n\
-                 \x20                l comments/changes, Ctrl+o files, Tab source mode\n\
+                 \x20                r reload, a acknowledge/set baseline, n/F7/]c next difference, ]/[ files,\n\
+                 \x20                l comments, Ctrl+o files, Tab source mode\n\
                  \x20 source mode:  j/k move, v select, c comment, s send,\n\
                  \x20                y copy, d delete, e edit, r reload, ^n/^p next comment,\n\
-                 \x20                o old side (git), n/F7/]c next change, ]/[ files,\n\
-                 \x20                l comments/changes, Ctrl+p files, Tab view mode (Markdown only)\n\
+                 \x20                a acknowledge/set baseline, n/F7/]c next difference, ]/[ files,\n\
+                 \x20                l comments, Ctrl+o files, Tab view mode (Markdown only)\n\
                  \x20 overlays:     j/k move, Enter jump/switch, d delete (comments),\n\
                  \x20                ? help, Esc/q close, click outside close\n\
                  \x20 input:        Enter confirm, Ctrl+j newline, Esc cancel"
@@ -203,10 +203,8 @@ impl Drop for TerminalGuard {
 
 /// Move the first file's per-file state into the live App fields —
 /// run()'s startup activation. Every field switch_to_file saves/restores
-/// must ride along (the git snapshot included: without it the first file
-/// opens with no marks and `o` claims "not in a git repository" until a
-/// file switch). Kept as a function so the wiring is exercised by tests
-/// instead of only by the TUI path.
+/// must ride along. Kept as a function so the wiring is exercised by
+/// tests instead of only by the TUI path.
 fn activate_first_file(app: &mut App) {
     let fs = &mut app.file_states[0];
     app.source = std::mem::take(&mut fs.source);
@@ -214,13 +212,10 @@ fn activate_first_file(app: &mut App) {
     app.view = std::mem::take(&mut fs.view);
     app.file_stamp = fs.file_stamp;
     app.last_loaded_stamp = fs.last_loaded_stamp;
-    app.last_diff = fs.last_diff.take();
-    app.scope = fs.scope;
-    app.scope_manual = fs.scope_manual;
-    app.git_diff = fs.git_diff.take();
-    app.git_added = std::mem::take(&mut fs.git_added);
-    app.git_deleted_before = std::mem::take(&mut fs.git_deleted_before);
-    app.old_side = fs.old_side.take();
+    app.review_changed = std::mem::take(&mut fs.review_changed);
+    app.review_deleted_before = std::mem::take(&mut fs.review_deleted_before);
+    app.comparison_changed = std::mem::take(&mut fs.comparison_changed);
+    app.comparison_deleted_before = std::mem::take(&mut fs.comparison_deleted_before);
 }
 
 fn run(config: Config) -> Result<()> {
@@ -275,21 +270,6 @@ fn run(config: Config) -> Result<()> {
             mode: if supports_view(f) { Mode::View } else { Mode::Source },
             ..Default::default()
         };
-        // Git snapshot (3-1): marks for lines changed vs HEAD, and the
-        // diff behind the `o` toggle. Reply mode skips it — the doc is a
-        // temp copy of the agent's message, never part of a repo.
-        if !config.reply {
-            let (diff, added, deleted) = git_snapshot(GIT_REF, f, fs.source.len());
-            fs.git_diff = diff;
-            fs.git_added = added;
-            fs.git_deleted_before = deleted;
-        }
-        // The initial scope (diff-scope step ①): Git inside a repository
-        // (the marks describe the working tree vs HEAD); Last outside one
-        // — the non-git session keeps its exact pre-scope look (P1).
-        // Reply mode never loads a git snapshot, so it stays on Last,
-        // which the scope machinery keeps invisible.
-        fs.scope = if fs.git_diff.is_some() { DiffScope::Git } else { DiffScope::Last };
         // Record the on-disk stamp so the first poll doesn't treat the file
         // as freshly edited.
         if let Ok(meta) = std::fs::metadata(f) {
@@ -304,13 +284,43 @@ fn run(config: Config) -> Result<()> {
     // emptied slot is never read: switch_to_file always saves the live
     // state back into it before leaving the file). Extracted so tests
     // exercise the same wiring (git_tests::startup_activation_...).
+    let snapshot_cache = if config.reply {
+        None
+    } else {
+        SnapshotCache::discover()
+    };
     let mut app = App::new(config, Source::default(), highlight, ViewState::default(), light);
-    app.histories = files
+    let histories: Vec<DocumentHistory> = files
         .iter()
         .zip(file_states.iter())
-        .map(|(path, state)| DocumentHistory::load(path, &state.source.content, 64))
+        .map(|(path, state)| {
+            snapshot_cache
+                .as_ref()
+                .and_then(|cache| {
+                    DocumentHistory::open_cached(path, &state.source.content, 64, cache).ok()
+                })
+                .unwrap_or_else(|| DocumentHistory::load(path, &state.source.content, 64))
+        })
         .collect();
-    app.history_scopes = vec![None; files.len()];
+    for ((state, history), path) in file_states
+        .iter_mut()
+        .zip(histories.iter())
+        .zip(files.iter())
+    {
+        if let Some(reviewed) = history.reviewed_content.as_deref() {
+            let (changed, deleted) = history::review_transition(
+                supports_view(path),
+                reviewed,
+                &state.source.content,
+            );
+            state.review_changed = changed;
+            state.review_deleted_before = deleted;
+            state.comparison_changed = state.review_changed.clone();
+            state.comparison_deleted_before = state.review_deleted_before.clone();
+        }
+    }
+    app.histories = histories;
+    app.snapshot_cache = snapshot_cache;
     app.file_states = file_states;
     activate_first_file(&mut app);
     // Command mode always runs in ASCII so j/k etc. are never swallowed by
@@ -445,7 +455,7 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
         return on_overlay_key(app, key, modifiers);
     }
     // A pending `]`/`[` chord resolves on the next key: `c` within the
-    // window completes it into a hunk jump (the F7 fallback), `]`/`[`
+    // window completes it into a review-mark jump (the F7 fallback), `]`/`[`
     // again falls back to the file switch and arms the new bracket, Esc
     // cancels entirely (no file switch), and any other key falls back to
     // the file switch and is then processed normally.
@@ -453,7 +463,7 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
         match key {
             KeyCode::Char('c') if modifiers.is_empty() => {
                 app.pending_chord = None;
-                jump_hunk(app, if bracket == ']' { 1 } else { -1 });
+                jump_review_mark(app, if bracket == ']' { 1 } else { -1 });
                 return;
             }
             KeyCode::Char(']') | KeyCode::Char('[') if modifiers.is_empty() => {
@@ -548,7 +558,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             }
             MouseEventKind::ScrollDown => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, app.git_diff.is_some())
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false)
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = (app.overlay_cursor + 1).min(max);
@@ -570,7 +580,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             },
             MouseEventKind::ScrollUp => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, app.git_diff.is_some())
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false)
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = app.overlay_cursor.saturating_sub(1).min(max);
@@ -806,12 +816,10 @@ fn source_line_at(app: &App, width: usize, display_row: usize) -> Option<usize> 
             let line_rows = app.base_rows.get(idx).copied().unwrap_or(1);
             let card_rows: usize = cards
                 .iter()
-                .filter(|c| fold_bar_target(&app.old_side, c.end as usize - 1) == idx)
+                .filter(|c| c.end as usize - 1 == idx)
                 .map(|c| card_line_count(c, full_width))
                 .sum();
-            let composer_rows = if app.mode == Mode::Input
-                && fold_bar_target(&app.old_side, app.input_end) == idx
-            {
+            let composer_rows = if app.mode == Mode::Input && app.input_end == idx {
                 composer_line_count(&app.input, app.input_cursor, full_width)
             } else {
                 0
@@ -948,64 +956,11 @@ fn insert_cards(view: &mut ViewState, comments: &[Comment], columns: usize) {
     view.card_rows = card_rows;
 }
 
-/// Render the current file's view with the comment cards AND the toggled
-/// old-side block (3-2) folded in. Every view rebuild (comment edits,
-/// resize, mode handoffs) goes through here, so the toggle survives
-/// re-renders at the same width.
-///
-/// The old side is rendered by SUBSTITUTING the hunk's new lines with
-/// the old lines and re-rendering the whole document — unlike an
-/// isolated fragment render, the old side then keeps the document's
-/// context: a table keeps its header, delimiter, and column widths, and
-/// renders as one table instead of a disconnected fragment.
+/// Render the current complete document with its inline comment cards.
 pub(crate) fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let width = view_render_width(w);
-    let Some(os) = &app.old_side else {
-        return render_view_with_cards(&app.source, width, &app.highlight, comments);
-    };
-    let (sub_source, a, span, block_len) = substitute_old_side(app, os);
-    let mut view = ViewState::render(&sub_source, width, &app.highlight);
-    // The block's rows (the old content + its separators): the `~`
-    // gutter range, computed from the substituted render's attribution
-    // before the remap below.
-    let sub_starts = view.source_starts.clone();
-    // Defense: if the block's start row does not exist (a zero-length
-    // block at EOF, e.g. an empty old side), collapse to an EMPTY range
-    // — never to row 0, which ballooned the `~` markers over the whole
-    // document (regression: the same blow-up as the pure-deletion fix,
-    // different trigger). The toggle guard normally prevents this.
-    view.old_side_rows = sub_starts.get(a).copied().unwrap_or(view.rows.len())
-        ..sub_starts.get(a + block_len).copied().unwrap_or(view.rows.len());
-    view.old_side_lines = os.range.or(Some((os.owner, os.owner)));
-    // Remap the substituted attribution back to NEW-file line numbers:
-    // the block's lines (old content + separators) all belong to the
-    // hunk's first new line (merged-block), lines after shift by
-    // `block_len - span`.
-    for segs in &mut view.row_segments {
-        for seg in segs {
-            seg.line = remapped_line(seg.line, a, span, block_len);
-        }
-    }
-    let sub_ghost = std::mem::take(&mut view.ghost);
-    view.source_starts = (0..app.source.len())
-        .map(|j| {
-            sub_starts
-                .get(sub_index(j, a, span, block_len))
-                .copied()
-                .unwrap_or(0)
-        })
-        .collect();
-    view.ghost = (0..app.source.len())
-        .map(|j| {
-            sub_ghost
-                .get(sub_index(j, a, span, block_len))
-                .cloned()
-                .flatten()
-        })
-        .collect();
-    insert_cards(&mut view, comments, width as usize);
-    view
+    render_view_with_cards(&app.source, width, &app.highlight, comments)
 }
 
 
@@ -1067,7 +1022,6 @@ fn history_key_direction(
 ) -> Option<isize> {
     if app.overlay.is_some()
         || !matches!(app.mode, Mode::View | Mode::Source)
-        || !supports_view(app.current_file_path())
         || !modifiers.is_empty()
     {
         return None;
@@ -1079,6 +1033,53 @@ fn history_key_direction(
     }
 }
 
+/// Recompute the active file's one, cumulative review mark set. Git and the
+/// currently displayed historical generation do not affect this baseline.
+pub(crate) fn refresh_review_marks(app: &mut App) {
+    let index = app.current_file_index;
+    let reviewed = app
+        .histories
+        .get(index)
+        .and_then(|history| history.reviewed_content.clone());
+    let Some(reviewed) = reviewed else {
+        app.review_changed.clear();
+        app.review_deleted_before.clear();
+        app.comparison_changed.clear();
+        app.comparison_deleted_before.clear();
+        return;
+    };
+    let (changed, deleted) = history::review_transition(
+        supports_view(app.current_file_path()),
+        &reviewed,
+        &app.histories[index].revisions[0].content,
+    );
+    app.review_changed = changed;
+    app.review_deleted_before = deleted;
+    refresh_comparison_marks(app);
+}
+
+/// Recompute baseline-relative marks for the complete document currently
+/// rendered on screen. This is distinct from the durable NOW review set:
+/// historical generations can be inspected without changing what remains
+/// unreviewed in the working document.
+fn refresh_comparison_marks(app: &mut App) {
+    let Some(reviewed) = app
+        .history()
+        .and_then(|history| history.reviewed_content.as_deref())
+    else {
+        app.comparison_changed.clear();
+        app.comparison_deleted_before.clear();
+        return;
+    };
+    let (changed, deleted) = history::review_transition(
+        supports_view(app.current_file_path()),
+        reviewed,
+        &app.source.content,
+    );
+    app.comparison_changed = changed;
+    app.comparison_deleted_before = deleted;
+}
+
 /// Move only the lightweight history cursor. The rendered Markdown remains
 /// untouched until input settles, so holding an arrow can scan dozens of
 /// revisions without paying the renderer cost for intermediate choices.
@@ -1088,7 +1089,6 @@ fn select_history(app: &mut App, delta: isize) -> bool {
         return false;
     }
     let index = app.current_file_index;
-    let old_position = app.histories.get(index).map_or(0, |h| h.position);
     let moved = app
         .histories
         .get_mut(index)
@@ -1116,21 +1116,10 @@ fn select_history(app: &mut App, delta: isize) -> bool {
         return false;
     }
 
-    let (new_position, label) = {
+    let label = {
         let history = &app.histories[index];
-        (history.position, history.label().unwrap_or_default())
+        history.label().unwrap_or_default()
     };
-    if old_position == 0 && new_position > 0 {
-        app.history_scopes[index] = Some(app.scope);
-    }
-    if new_position > 0 {
-        app.scope = DiffScope::Off;
-        app.old_side = None;
-    } else {
-        app.scope = app.history_scopes[index]
-            .take()
-            .unwrap_or(if app.git_diff.is_some() { DiffScope::Git } else { DiffScope::Last });
-    }
     app.history_render_due = Some(Instant::now() + HISTORY_RENDER_DEBOUNCE);
     // A previous landing pulse must not bleed into the first frame of the
     // next selected document.
@@ -1162,6 +1151,7 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
         history.rendered_position = position;
     }
     if app.source.content == content {
+        refresh_comparison_marks(app);
         app.history_frame_flash_pending = true;
         return true;
     }
@@ -1185,6 +1175,7 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
     let (changed_blocks, deleted_blocks) =
         history::block_transition(&old_lines, &new_source.lines);
     app.source = new_source;
+    refresh_comparison_marks(app);
     app.history_changed = changed_blocks;
     app.history_changed_until = Some(Instant::now() + Duration::from_millis(450));
     app.history_ghost_until = None;
@@ -1442,18 +1433,18 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // The rendered document is the timeline. No diff pane is opened:
         // only the blocks that differ are replaced by the new render while
         // the reader remains anchored around the same heading.
-        KeyCode::Left if modifiers.is_empty() && supports_view(app.current_file_path()) => {
+        KeyCode::Left if modifiers.is_empty() => {
             select_history(app, 1);
         }
-        KeyCode::Right if modifiers.is_empty() && supports_view(app.current_file_path()) => {
+        KeyCode::Right if modifiers.is_empty() => {
             select_history(app, -1);
         }
-        // Alt+j / Alt+k: the next/previous change hunk — the same jump
+        // Alt+j / Alt+k: next/previous difference from the baseline.
         // as F7/`]c`/n, for 40%-keyboard layouts where neither F7 nor
         // `[`/`]` sit on the base layer (j/k are already the movement
         // keys, so Alt+move is the bigger step, like Ctrl+d/Ctrl+u).
-        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_hunk(app, 1),
-        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_hunk(app, -1),
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, 1),
+        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, -1),
         KeyCode::Char('j') | KeyCode::Down => {
             if app.selection.is_some() {
                 extend_view_selection(app, 1);
@@ -1518,22 +1509,22 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         }
         // Ctrl+n/Ctrl+N and Ctrl+p/Ctrl+P jump between comments: n and
         // p move forward (next), the shifted variants backward (prev).
-        // The hunk jumps below come AFTER the Ctrl arms, so the shifted
+        // Review jumps come after the Ctrl arms, so the shifted
         // keys stay unambiguous.
         KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
         KeyCode::Char('N') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
         KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
         KeyCode::Char('P') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
-        // n/N: the next/previous change hunk — the standard diff-tool
+        // n/N: next/previous difference from the baseline.
         // keys (delta, less, magit), reachable on any layout: no F-keys,
         // no `[`/`]`, no Alt. No modifier guard: some terminals report
         // Shift+N as 'N' WITH the SHIFT flag set, which the is_empty
         // guard would drop.
-        KeyCode::Char('n') => jump_hunk(app, 1),
-        KeyCode::Char('N') => jump_hunk(app, -1),
-        // m: cycle the diff scope (diff-scope step ①) — which diff
-        // drives the marks and title counts (last/git/off).
-        KeyCode::Char('m') => app.cycle_scope(),
+        KeyCode::Char('n') => jump_review_mark(app, 1),
+        KeyCode::Char('N') => jump_review_mark(app, -1),
+        KeyCode::Char('a') => {
+            acknowledge_review(app, true);
+        }
         KeyCode::Tab => {
             // View is only reachable for Markdown-family files; a source
             // file (e.g. .rs) never leaves source mode. A mode flip
@@ -1571,7 +1562,6 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
                 open_overlay(app, Overlay::Files, app.current_file_index);
             }
         }
-        KeyCode::Char('o') => toggle_old_side(app),
         KeyCode::Char('e') => {
             if app.config.reply {
                 // Reply mode: the doc is the agent's message — editing the
@@ -1585,8 +1575,8 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // [`CHORD_MS`] window expires, or on the next non-chord key); `c`
         // within the window jumps to the next/previous change instead
         // (the F7 fallback). F7/Shift+F7 jump directly.
-        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_hunk(app, -1),
-        KeyCode::F(7) => jump_hunk(app, 1),
+        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_review_mark(app, -1),
+        KeyCode::F(7) => jump_review_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
         // `l` opens the all-comments list; Ctrl+p opens the file picker;
@@ -1713,6 +1703,153 @@ fn jump_comment(app: &mut App, dir: isize) {
     }
 }
 
+fn review_targets(app: &App) -> Vec<(usize, usize)> {
+    let mut lines: Vec<usize> = app.comparison_changed.iter().copied().collect();
+    lines.sort_unstable();
+    lines.dedup();
+    let mut targets = Vec::new();
+    for line in lines {
+        match targets.last_mut() {
+            Some((_, end)) if line == *end + 1 => *end = line,
+            _ => targets.push((line, line)),
+        }
+    }
+    for line in &app.comparison_deleted_before {
+        if !targets.iter().any(|(a, b)| line >= a && line <= b) {
+            targets.push((*line, *line));
+        }
+    }
+    targets.sort_unstable();
+    targets
+}
+
+fn active_review_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
+    (
+        app.comparison_changed.clone(),
+        app.comparison_deleted_before.clone(),
+    )
+}
+
+fn jump_review_mark(app: &mut App, dir: isize) {
+    // If an arrow scrub selected a generation that has not rendered yet,
+    // materialize it before navigating its baseline-relative marks. A mark
+    // must always point into the document the user can actually see.
+    if app
+        .history()
+        .is_some_and(|history| history.position != history.rendered_position)
+    {
+        render_pending_history(app, false);
+    }
+    let targets = review_targets(app);
+    if targets.is_empty() {
+        app.flash("no differences from review baseline");
+        return;
+    }
+    let line = if app.mode == Mode::View {
+        app.view.cursor
+    } else {
+        app.cursor
+    };
+    let target = if dir > 0 {
+        targets
+            .iter()
+            .position(|(start, _)| *start > line)
+            .unwrap_or(0)
+    } else {
+        targets
+            .iter()
+            .rposition(|(_, end)| *end < line)
+            .unwrap_or(targets.len() - 1)
+    };
+    let (start, end) = targets[target];
+    app.selection = Some(Selection {
+        anchor: start,
+        cursor: end,
+    });
+    app.cursor = end;
+    app.view.goto_source_line(end);
+    if app.mode == Mode::View {
+        app.view
+            .center_source_range(start, end, app.view_viewport_rows());
+    } else {
+        app.center_source_range(start, end, app.source_viewport_rows() as u16);
+    }
+    app.flash(format!(
+        "difference {}/{} · L{}{}",
+        target + 1,
+        targets.len(),
+        start + 1,
+        if end > start {
+            format!("-{}", end + 1)
+        } else {
+            String::new()
+        }
+    ));
+}
+
+pub(crate) fn acknowledge_review(app: &mut App, announce: bool) -> bool {
+    if app.config.reply {
+        return false;
+    }
+    let index = app.current_file_index;
+    let path = app.current_file_path().to_path_buf();
+    let at_now = app.history().is_none_or(|history| history.at_now());
+    // `position` is authoritative even while fast scrubbing: app.source may
+    // still contain the last rendered generation until the debounce ends.
+    let content = app
+        .history()
+        .and_then(|history| history.current())
+        .map(|revision| revision.content.clone())
+        .unwrap_or_else(|| app.source.content.clone());
+    let baseline_label = (!at_now)
+        .then(|| app.history().and_then(|history| history.label()))
+        .flatten();
+    let result = if let Some(cache) = app.snapshot_cache.clone() {
+        app.histories
+            .get_mut(index)
+            .map(|history| {
+                if at_now {
+                    history.acknowledge(&path, &content, &cache)
+                } else {
+                    history.set_baseline(&path, &content, &cache)
+                }
+            })
+            .transpose()
+    } else {
+        if let Some(history) = app.histories.get_mut(index) {
+            history.acknowledge_in_memory(&content);
+        }
+        Ok(None)
+    };
+    if let Err(error) = result {
+        app.flash_err(format!("review checkpoint failed: {error:#}"));
+        return false;
+    }
+    // Acknowledging or choosing a baseline completes the current review
+    // action. Leave SELECT state consistently in both rendered and source
+    // modes; Input keeps treating `a` as ordinary text.
+    app.selection = None;
+    refresh_review_marks(app);
+    if announce {
+        if let Some(label) = baseline_label {
+            app.flash(format!("review baseline set · {label}"));
+        } else {
+            app.flash("reviewed");
+        }
+    }
+    true
+}
+
+fn pin_current_snapshot(app: &mut App) {
+    let Some(cache) = app.snapshot_cache.clone() else {
+        return;
+    };
+    let path = app.current_file_path().to_path_buf();
+    if let Some(history) = app.histories.get(app.current_file_index) {
+        let _ = history.pin_current(&path, &cache);
+    }
+}
+
 /// Flag the view for re-rendering after the resize debounce.
 fn mark_view_dirty(app: &mut App) {
     app.view_dirty = true;
@@ -1781,10 +1918,10 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
     match key {
         // Source and rendered view share one document timeline. Only the
         // representation changes when Tab is pressed.
-        KeyCode::Left if modifiers.is_empty() && supports_view(app.current_file_path()) => {
+        KeyCode::Left if modifiers.is_empty() => {
             select_history(app, 1);
         }
-        KeyCode::Right if modifiers.is_empty() && supports_view(app.current_file_path()) => {
+        KeyCode::Right if modifiers.is_empty() => {
             select_history(app, -1);
         }
         KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1805,11 +1942,11 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
                 app.confirm_quit = true;
             }
         }
-        // Alt+j / Alt+k: the next/previous change hunk — the same jump
+        // Alt+j / Alt+k: next/previous difference from the baseline.
         // as F7/`]c`/n, for 40%-keyboard layouts where neither F7 nor
         // `[`/`]` sit on the base layer.
-        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_hunk(app, 1),
-        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_hunk(app, -1),
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, 1),
+        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, -1),
         KeyCode::Char('j') | KeyCode::Down => {
             if app.selection.is_some() {
                 extend_selection(app, 1, viewport);
@@ -1888,9 +2025,6 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         KeyCode::Char('q') => request_quit(app),
         KeyCode::Char('r') => reload_now(app),
         KeyCode::Char('i') => ignore_change(app),
-        // m: cycle the diff scope (diff-scope step ①) — same as view
-        // mode: marks and title counts switch, navigation stays until ②.
-        KeyCode::Char('m') => app.cycle_scope(),
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             if app.config.reply {
                 // The file picker shows temp-file names — meaningless in
@@ -1900,7 +2034,6 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
                 open_overlay(app, Overlay::Files, app.current_file_index);
             }
         }
-        KeyCode::Char('o') => toggle_old_side(app),
         KeyCode::Char('e') => {
             if app.config.reply {
                 // Reply mode: the doc is the agent's message — editing the
@@ -1912,25 +2045,28 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         }
         // Ctrl+n/Ctrl+N and Ctrl+p/Ctrl+P jump between comments: n and
         // p move forward (next), the shifted variants backward (prev).
-        // The hunk jumps below come AFTER the Ctrl arms, so the shifted
+        // Review jumps come after the Ctrl arms, so the shifted
         // keys stay unambiguous.
         KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
         KeyCode::Char('N') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
         KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, -1),
         KeyCode::Char('P') if modifiers.contains(KeyModifiers::CONTROL) => jump_comment(app, 1),
-        // n/N: the next/previous change hunk — the standard diff-tool
+        // n/N: next/previous difference from the baseline.
         // keys (delta, less, magit), reachable on any layout: no F-keys,
         // no `[`/`]`, no Alt. No modifier guard: some terminals report
         // Shift+N as 'N' WITH the SHIFT flag set, which the is_empty
         // guard would drop.
-        KeyCode::Char('n') => jump_hunk(app, 1),
-        KeyCode::Char('N') => jump_hunk(app, -1),
+        KeyCode::Char('n') => jump_review_mark(app, 1),
+        KeyCode::Char('N') => jump_review_mark(app, -1),
+        KeyCode::Char('a') => {
+            acknowledge_review(app, true);
+        }
         // `]`/`[` arm the chord: alone they switch files (when the
         // [`CHORD_MS`] window expires, or on the next non-chord key); `c`
         // within the window jumps to the next/previous change instead
         // (the F7 fallback). F7/Shift+F7 jump directly.
-        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_hunk(app, -1),
-        KeyCode::F(7) => jump_hunk(app, 1),
+        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_review_mark(app, -1),
+        KeyCode::F(7) => jump_review_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
         // `l` opens the all-comments list; Ctrl+p opens the file picker;
@@ -1999,7 +2135,6 @@ fn input_move_line(s: &str, cursor: usize, dir: isize) -> usize {
 fn cancel_composer(app: &mut App) {
     app.input.clear();
     app.input_cursor = 0;
-    app.composer_hunk = None;
     app.mode = app.composer_return;
     app.ime_guard = None;
     // A re-edit rendered the view without the edited card
@@ -2030,39 +2165,28 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                 return;
             }
             if let Some(idx) = app.editing_comment {
-                // Re-edit: replace the comment text only — the snippet
-                // (a hunk comment's raw diff, or a line comment's source
-                // lines) stays as it was.
+                // Re-edit: replace the text and refresh its source snippet.
                 if let Some(c) = app.comments.get_mut(idx) {
                     c.text = text;
-                    if !c.hunk {
-                        c.lines = app.source.snippet(c.start, c.end);
-                    }
+                    c.lines = app.source.snippet(c.start, c.end);
                 }
-                app.composer_hunk = None;
                 app.flash(format!("comment updated ({} total)", app.comments.len()));
             } else {
-                let hunk_text = app.composer_hunk.take();
-                let (lines, hunk) = match &hunk_text {
-                    Some(text) => (text.clone(), true),
-                    None => (
-                        app.source
-                            .snippet(app.input_start as u32 + 1, app.input_end as u32 + 1),
-                        false,
-                    ),
-                };
+                let lines = app
+                    .source
+                    .snippet(app.input_start as u32 + 1, app.input_end as u32 + 1);
                 let revision = app.current_revision_context();
                 app.comments.push(Comment {
                     file_path: app.current_file_path().to_path_buf(),
                     start: app.input_start as u32 + 1,
                     end: app.input_end as u32 + 1,
                     lines,
-                    hunk,
                     revision,
                     text,
                 });
                 app.flash(format!("comment added ({} total)", app.comments.len()));
             }
+            pin_current_snapshot(app);
             app.editing_comment = None;
             // The view folds cards into its layout; add the new one so a
             // later Tab to view shows it in place.
@@ -2167,84 +2291,16 @@ fn open_composer(app: &mut App, return_to: Mode) {
         app.flash_err("empty file — nothing to comment");
         return;
     }
-    let new_len = app.source.len();
     let (start, end) = match app.selection {
         Some(s) => s.range(),
-        // No selection: the exact cursor line — a hunk's inside line
-        // included. Commenting the WHOLE hunk is a visible act instead:
-        // `n`/`F7` jumps select the whole hunk (highlight band), and `c`
-        // on that selection targets the hunk.
-        //
-        // EXCEPT on the old side: the whole hunk is what the display
-        // replaced, so `c` with the cursor inside that hunk reads as
-        // "comment this hunk" — a one-new-line note there would surprise
-        // (and the old side has no one-to-one lines anyway).
         None => {
             let line = if app.mode == Mode::View {
                 app.view.cursor
             } else {
                 app.cursor
             };
-            // The old side came from the scope's base diff (diff-scope
-            // step ②), so the hunk index resolves there too.
-            if let Some(os) = &app.old_side {
-                if let Some(d) = old_side_base_diff(app)
-                    && d.hunk_at(line, new_len) == Some(os.hunk)
-                {
-                    let hunk = &d.hunks[os.hunk];
-                    match hunk.new_range() {
-                        Some((a, b)) => (a, b),
-                        None => {
-                            let o = hunk.owner(new_len);
-                            (o, o)
-                        }
-                    }
-                } else {
-                    (line, line)
-                }
-            } else {
-                (line, line)
-            }
+            (line, line)
         }
-    };
-    // The composer targets a HUNK when the selection covers exactly one
-    // hunk's new range — the `n`/`F7` jump's selection does — or, for a
-    // pure-deletion hunk (no new lines), its owner line. The snippet
-    // then becomes the hunk's raw diff text. A bare `c` (no selection)
-    // on a deletion mark row (3-1) does too: the mark means "deleted
-    // above", and a one-line snippet of the surviving line would not
-    // tell the agent a deletion exists — the hunk that dropped the
-    // deletion carries it (reload-only marks have no git hunk to attach,
-    // so they stay plain line comments).
-    // The hunk conditions resolve through the ACTIVE SCOPE (diff-scope
-    // step ④): the scope's hunk list for the exact-range match, and the
-    // scope's diffs for the deletion-mark row. Off attaches nothing — a
-    // plain line comment.
-    app.composer_hunk = if app.scope == DiffScope::Off {
-        None
-    } else {
-        scoped_hunk_refs(app)
-            .iter()
-            .find_map(|r| {
-                let h = hunk_ref(app, *r)?;
-                match h.new_range() {
-                    Some((a, b)) if (a, b) == (start, end) => Some(h.diff_text()),
-                    None if start == end && h.owner(new_len) == start => Some(h.diff_text()),
-                    _ => None,
-                }
-            })
-            .or_else(|| {
-                let (_, _, deleted) = scoped_mark_sets(app);
-                if app.selection.is_none() && start == end && deleted.contains(&start) {
-                    scoped_diffs(app)
-                        .iter()
-                        .find_map(|d| {
-                            deletion_hunk_at(d, start, new_len).map(|i| d.hunks[i].diff_text())
-                        })
-                } else {
-                    None
-                }
-            })
     };
     // An EXACT range match flips the composer into re-edit mode: the
     // comment's text is prefilled and Enter replaces it instead of adding
@@ -2475,6 +2531,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
 /// keep_cursor_visible here — like source mode, the wheel scrolls the
 /// viewport only and the cursor is an absolute position that may sit off
 /// screen; keyboard navigation, clicks, and the mode handoffs reveal it.
+fn review_flags(marks: &HashSet<usize>, line_count: usize) -> Vec<bool> {
+    (0..line_count).map(|line| marks.contains(&line)).collect()
+}
+
 fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // View mode always draws the frame: the bordered "page" is the reading
     // mode's visual signature (source mode is the frameless raw editor).
@@ -2519,25 +2579,20 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // `visible_text` resolves it to the exact spans via the phrase
     // segments.
     let sel = app.selection.map(|s| s.range());
-    // The scoped mark sets: one selection point for view and source
-    // gutters (diff-scope step ③). The view keeps its two-class
-    // vocabulary: added ∪ modified = a green ▌. The cursor's hunk's
-    // marks emphasize (step ④) so the `o` flip range is readable.
-    let (added, modified, deleted_set) = scoped_mark_sets(app);
+    // View and source read the same baseline → displayed-generation marks.
+    let (changed_set, deleted_set) = active_review_mark_sets(app);
     let n = app.source.len();
-    let mut changed_set = added;
-    changed_set.extend(modified);
     let glowing = if app
         .history_changed_until
         .is_some_and(|until| Instant::now() < until)
     {
-        view_changed_flags(&app.history_changed, n)
+        review_flags(&app.history_changed, n)
     } else {
         vec![false; n]
     };
-    let changed = view_changed_flags(&changed_set, n);
-    let deleted = view_deleted_flags(&deleted_set, n);
-    let emphasized = view_changed_flags(&emphasized_mark_lines(app), n);
+    let changed = review_flags(&changed_set, n);
+    let deleted = review_flags(&deleted_set, n);
+    let emphasized = vec![false; n];
     // The composer opened from view mode (`c` in view) is drawn inline
     // right under the cursor line, so the comment can be typed without
     // leaving the rendered view. While it is open it is part of the
@@ -2782,11 +2837,9 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     let mut out: Vec<Line> = Vec::new();
     let mut composer_cursor: Option<(u16, u16)> = None;
     let width = content_width as usize;
-    // The scoped mark sets (diff-scope step ③): one selection point,
-    // computed once so every line reads the same scope. The cursor's
-    // hunk's marks emphasize (step ④).
-    let (scoped_added, scoped_modified, scoped_deleted) = scoped_mark_sets(app);
-    let emphasized_marks = emphasized_mark_lines(app);
+    // Compute baseline → displayed-generation marks once for this frame.
+    // Green means present/changed; red means deleted before a line.
+    let (scoped_added, scoped_deleted) = active_review_mark_sets(app);
     let history_glow_active = app
         .history_changed_until
         .is_some_and(|until| Instant::now() < until);
@@ -2799,13 +2852,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     let cards = visible_cards(app);
     let mut row = 0usize;
     for idx in 0..app.source.len() {
-        let old_side = app.old_side.as_ref();
-        let range = old_side.and_then(|os| os.range);
-        let in_old_range = range.is_some_and(|(a, b)| idx >= a && idx <= b);
-        let range_first = range.is_some_and(|(a, _)| a == idx);
-        // A pure-deletion hunk's block renders at its owner line, above
-        // the owner's own content.
-        let is_owner = old_side.is_some_and(|os| os.range.is_none() && os.owner == idx);
         let line_rows = app.rows_of(idx);
         if row + line_rows <= app.offset {
             row += line_rows;
@@ -2814,52 +2860,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         if row >= app.offset + height as usize {
             break;
         }
-        if in_old_range && !range_first {
-            // The block already rendered at the range's first line; this
-            // member line's rows (0 base — bars were folded onto the
-            // range's first line) paint nothing but still advance `row`.
-            row += line_rows;
-            continue;
-        }
-        if in_old_range || is_owner {
-            let os = old_side.unwrap();
-            // The old side replaces the hunk's new lines (3-2): each old
-            // line renders with its HEAD number and a faint `~` mark.
-            out.extend(old_block_rows(app, os, width, full_width));
-            // Bars anchored inside the toggled range render after the
-            // block, in anchor order (their own rows are gone).
-            for c in cards.iter().filter(|c| {
-                range.is_some_and(|(a, b)| {
-                    let i = c.end as usize - 1;
-                    i >= a && i <= b
-                })
-            }) {
-                out.extend(comment_bar_lines(c, full_width));
-            }
-            // The composer anchored inside the range sits below the block
-            // too (fold_bar_target folds its rows onto the first line).
-            if app.mode == Mode::Input
-                && range.is_some_and(|(a, b)| app.input_end >= a && app.input_end <= b)
-            {
-                let start_row = out.len();
-                out.extend(composer_lines(
-                    &app.input,
-                    app.input_cursor,
-                    app.input_start,
-                    app.input_end,
-                    full_width,
-                    app.editing_comment.is_some(),
-                ));
-                let (crow, ccol) = composer_cursor_pos(&app.input, app.input_cursor, full_width);
-                composer_cursor = Some((ccol as u16, (start_row + 1 + crow) as u16));
-            }
-            if in_old_range {
-                row += line_rows;
-                continue;
-            }
-            // Pure-deletion owner: fall through so its own content and
-            // bars render below the block.
-        }
         let selected = app.selection.is_some_and(|s| s.contains(idx));
         let revision = app.current_revision_context();
         let commented = app.comments.iter().any(|c| {
@@ -2867,24 +2867,14 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 && c.file_path == app.current_file_path()
                 && c.revision == revision
         });
-        // The scoped mark sets (diff-scope step ③): computed once at the
-        // top of build_rows, so every line reads the same selection.
         let added = scoped_added.contains(&idx);
-        let modified = scoped_modified.contains(&idx);
         let deleted_before = scoped_deleted.contains(&idx);
-        // The cursor's hunk's mark rows emphasize (bold + bright).
-        let emphasized = emphasized_marks.contains(&idx);
         let is_cursor = idx == app.cursor;
-        // The three-class source vocabulary (user-agreed spec): `+` a
-        // pure addition, `~` a rewritten line (paired delete+add — `o`
-        // shows the old content), `▀` a deletion position (same top-edge
-        // word as view mode; the old `-` is gone).
+        // `▌` is a current changed line; `▀` is a deletion position.
         let cursor_mark = if is_cursor {
             ">"
         } else if added {
-            "+"
-        } else if modified {
-            "~"
+            "▌"
         } else if deleted_before {
             "▀"
         } else {
@@ -2894,13 +2884,13 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // mode (text colors untouched — a full-row reversal was fatiguing
         // and clashed with the syntax highlighting). A selected row shares
         // the background; the `>` marker keeps the cursor visible at the
-        // selection edge. Changed lines get a subtle green background
-        // (additions and rewrites alike).
+        // selection edge. Present/changed review lines get a restrained
+        // green background; pure deletions use only their red position mark.
         let cursor_bg = is_cursor || selected;
         let history_glow_bg = history_glow_active
             && app.history_changed.contains(&idx)
             && !cursor_bg;
-        let changed_bg = (added || modified) && !cursor_bg && !history_glow_bg;
+        let changed_bg = added && !cursor_bg && !history_glow_bg;
         let deleted_fg = deleted_before && !cursor_bg && !history_glow_bg && !changed_bg;
         let gutter_style = if cursor_bg {
             Style::default().bg(app.ui_selected_bg)
@@ -2914,8 +2904,7 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // Selected lines: the number turns the composer's cyan — the
         // pending range reads at a glance and matches the color it will be
         // typed under. Commented lines: yellow (no `#` marker), so the
-        // gutter shows at a glance which lines carry comments. Changed
-        // lines: green `+` marker and green number.
+        // gutter shows at a glance which lines carry comments.
         let mut num_style = if selected {
             Style::default().fg(Color::Cyan).bg(app.ui_selected_bg)
         } else if history_glow_bg {
@@ -2944,17 +2933,11 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         let wrapped = wrap_spans(&app.spans[idx], width);
         // The cursor glyph is bold — it must be findable at a glance
         // (yellow is the comment marker's color), same as view mode. Its
-        // COLOR inherits the mark under it (user request): `+` rows
-        // LightGreen, `~` rows LightYellow, `▀` rows LightRed — the
-        // mark stays readable on the cursor row (the Light+BOLD family
-        // matches the emphasis). Mark-less rows keep the classic
-        // LightCyan. The cursor's hunk's marks emphasize (bold + bright,
-        // diff-scope step ④).
+        // color inherits the review mark under it. Mark-less rows keep the
+        // classic LightCyan.
         let mark_style = if is_cursor {
             let fg = if added {
                 Color::LightGreen
-            } else if modified {
-                Color::LightYellow
             } else if deleted_before {
                 Color::LightRed
             } else {
@@ -2966,15 +2949,10 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             Style::default()
                 .fg(Color::DarkGray)
                 .bg(app.ui_history_glow_bg)
-        } else if modified && !cursor_bg {
-            let s = Style::default().fg(Color::Yellow).bg(app.ui_changed_bg);
-            if emphasized { s.add_modifier(Modifier::BOLD).fg(Color::LightYellow) } else { s }
         } else if changed_bg {
-            let s = Style::default().fg(Color::Green).bg(app.ui_changed_bg);
-            if emphasized { s.add_modifier(Modifier::BOLD).fg(Color::LightGreen) } else { s }
+            Style::default().fg(Color::Green).bg(app.ui_changed_bg)
         } else if deleted_fg {
-            let s = Style::default().fg(Color::Red);
-            if emphasized { s.add_modifier(Modifier::BOLD).fg(Color::LightRed) } else { s }
+            Style::default().fg(Color::Red)
         } else {
             gutter_style
         };
@@ -3073,88 +3051,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         row += line_rows;
     }
     (Text::from(out), composer_cursor)
-}
-
-/// The old-side block (3-2) as source-mode rows: each old line renders
-/// like a normal gutter row — its HEAD line number, a faint `~` mark
-/// (the block's first row shows the `>` cursor marker instead when the
-/// cursor sits on the hunk), and the syntax-highlighted old text. The
-/// cursor/selection background spans the block like any cursor row.
-fn old_block_rows(app: &App, os: &OldSide, width: usize, full_width: usize) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let block_cursor = os
-        .range
-        .map_or(os.owner == app.cursor, |(a, b)| app.cursor >= a && app.cursor <= b);
-    let block_selected = app.selection.is_some_and(|s| {
-        let (sa, sb) = s.range();
-        os.range
-            .map_or(sa <= os.owner && os.owner <= sb, |(a, b)| sa <= b && sb >= a)
-    });
-    let cursor_bg = block_cursor || block_selected;
-    let gutter_style = if cursor_bg {
-        Style::default().bg(app.ui_selected_bg)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    for (i, old_spans) in os.old_spans.iter().enumerate() {
-        let is_cursor_row = block_cursor && i == 0;
-        let mark = if is_cursor_row { ">" } else { "~" };
-        let mark_style = if is_cursor_row {
-            let s = Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD);
-            if cursor_bg {
-                s.bg(app.ui_selected_bg)
-            } else {
-                s
-            }
-        } else {
-            gutter_style
-        };
-        let num = Span::styled(
-            format!("{:>width$} ", os.old_numbers[i], width = app.source.gutter_width),
-            gutter_style,
-        );
-        for (k, frags) in wrap_spans(old_spans, width).iter().enumerate() {
-            let mut spans: Vec<Span> = Vec::new();
-            if k == 0 {
-                spans.push(Span::styled(mark, mark_style));
-                spans.push(num.clone());
-            } else {
-                // Continuation rows indent by the gutter width, matching
-                // the normal wrapped lines.
-                let indent_style = if cursor_bg {
-                    Style::default().bg(app.ui_selected_bg)
-                } else {
-                    Style::default()
-                };
-                spans.push(Span::styled(
-                    " ".repeat(app.gutter_cols as usize),
-                    indent_style,
-                ));
-            }
-            for f in frags {
-                let style = if cursor_bg {
-                    f.style.bg(app.ui_selected_bg)
-                } else {
-                    f.style
-                };
-                spans.push(Span::styled(f.text.clone(), style));
-            }
-            if cursor_bg {
-                let used: usize = spans
-                    .iter()
-                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                    .sum();
-                if used < full_width {
-                    spans.push(Span::styled(
-                        " ".repeat(full_width - used),
-                        Style::default().bg(app.ui_selected_bg),
-                    ));
-                }
-            }
-            out.push(Line::from(spans));
-        }
-    }
-    out
 }
 
 /// Display rows a saved-comment bar occupies under its anchor line
@@ -3315,7 +3211,6 @@ mod bar_tests {
             end: 2,
             text: text.into(),
             lines: text.into(),
-            hunk: false,
             revision: None,
         }
     }
@@ -3516,7 +3411,6 @@ mod mouse_tests {
             end: 5,
             text: "テスト".into(),
             lines: "テスト".into(),
-            hunk: false,
             revision: None,
         });
         app.refresh_line_rows();

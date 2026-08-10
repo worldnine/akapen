@@ -11,12 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, DiffScope, Mode};
+use crate::app::{App, Mode};
 use crate::clip_if_needed;
-use crate::hunknav::{
-    deleted_above_count, hunk_ref, scoped_diffs, scoped_hunk_refs, scoped_mark_sets,
-};
-use crate::git;
 
 /// Smart-truncate a path for the title bar: keep the basename whole, add
 /// directory components from the right while they fit, and collapse the
@@ -131,7 +127,7 @@ pub(crate) enum TitleHit {
 /// always lands exactly on what is drawn.
 #[derive(Debug)]
 pub(crate) struct TitleMetrics {
-    /// The change badge (⚡ / +N/-M) and its width.
+    /// The pending/review/history badge (⚡ / ● N / revision) and its width.
     pub(crate) change: String,
     pub(crate) change_w: u16,
     /// The truncated path text (click → copy full path).
@@ -201,19 +197,21 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
     } else {
         width.saturating_sub(indicator_w + esc_close_w)
     };
-    // While an external edit is pending the title shows ⚡ (it outranks
-    // every scope's count); otherwise the active scope picks the badge
-    // (diff-scope step ①): Last → the reload's +N/-M, Git → the git
-    // snapshot's g+K/-L, Off → nothing.
+    // Historical generations use this space for provenance, position, and
+    // baseline context. At NOW an external edit still outranks everything;
+    // otherwise the baseline gets a compact persistent identity of its own.
     let change = if app.is_historical() {
         app.history()
-            .map(|history| {
-                let chronological = history.revisions.len().saturating_sub(history.position);
-                format!(" PAST {chronological}/{} ", history.revisions.len())
-            })
+            .and_then(|history| history.label())
+            .map(|label| format!(" {label} "))
             .unwrap_or_default()
     } else if app.file_changed {
         " ⚡ ".to_string()
+    } else if app
+        .history()
+        .is_some_and(|history| history.baseline_position() == Some(history.position))
+    {
+        " BASELINE ".to_string()
     } else {
         scoped_change_badge(app)
     };
@@ -284,42 +282,19 @@ pub(crate) fn title_hit_at(app: &App, width: u16, x: u16) -> Option<TitleHit> {
 /// (low priority, vanishes when the path needs the room). The path, the
 /// file counter, and the comment counter are clickable buttons (see
 /// on_mouse).
-/// The title badge's colored spans: under the Git scope the `+K` counts
-/// render green and the `-L` red (the `g` prefix and `/` separator stay
-/// yellow); every other scope renders the whole badge yellow as before.
+/// The title's neutral count badge.
 /// The text is identical to the plain badge, so the width math and the
 /// click areas in [`title_metrics`] are unaffected.
-fn change_badge_spans(change: &str, scope: DiffScope) -> Vec<Span<'static>> {
+fn change_badge_spans(change: &str) -> Vec<Span<'static>> {
     let base = Style::default().fg(Color::Yellow);
-    if scope != DiffScope::Git {
-        return vec![Span::styled(change.to_string(), base)];
-    }
-    let mut spans = Vec::new();
-    let mut rest = change;
-    while let Some(i) = rest.find(['+', '-']) {
-        if i > 0 {
-            spans.push(Span::styled(rest[..i].to_string(), base));
-        }
-        // The sign and its digits: `+K` / `-L`.
-        let num_end = i + 1
-            + rest[i + 1..]
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len() - i - 1);
-        let fg = if rest[i..].starts_with('+') { Color::Green } else { Color::Red };
-        spans.push(Span::styled(rest[i..num_end].to_string(), Style::default().fg(fg)));
-        rest = &rest[num_end..];
-    }
-    if !rest.is_empty() {
-        spans.push(Span::styled(rest.to_string(), base));
-    }
-    spans
+    vec![Span::styled(change.to_string(), base)]
 }
 
 pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     let m = title_metrics(app, area.width);
     if m.change_w > 0 {
         f.render_widget(
-            Paragraph::new(Line::from(change_badge_spans(&m.change, app.scope))),
+            Paragraph::new(Line::from(change_badge_spans(&m.change))),
             Rect {
                 x: area.x,
                 y: area.y,
@@ -399,120 +374,14 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// The title's change badge for the active scope (diff-scope step ①).
-/// Last shows the last reload's `+N/-M`; Git shows the git
-/// snapshot's `g+K/-L` — the sum of every hunk's [`Hunk::counts`] — and
-/// nothing for an untracked file (no ref side) or an empty diff; Off
-/// shows nothing. The pending ⚡ badge takes precedence (caller).
+/// The number of unreviewed blocks or lines. The pending ⚡ badge takes
+/// precedence in the caller.
 fn scoped_change_badge(app: &App) -> String {
-    match app.scope {
-        DiffScope::Last => match app.last_change {
-            Some((a, r)) => format!(" +{a}/-{r} "),
-            None => String::new(),
-        },
-        DiffScope::Git => {
-            let Some(diff) = &app.git_diff else { return String::new() };
-            if diff.untracked || diff.hunks.is_empty() {
-                return String::new();
-            }
-            let (k, l) = diff.hunks.iter().fold((0, 0), |(k, l), h| {
-                let (a, d) = h.counts();
-                (k + a, l + d)
-            });
-            format!(" g+{k}/-{l} ")
-        }
-        DiffScope::Off => String::new(),
-    }
-}
-
-/// The footer's scope badge (diff-scope step ①): `m:last` / `m:git` /
-/// `m:off`, appended to the hints so the scope is always visible
-/// (spec 3-4). Hidden outside a git repository while Last — the
-/// default there, and the non-git session must look exactly as before
-/// (P1) — and in reply mode, where the scope machinery is off.
-fn scope_footer_hint(app: &App) -> Option<&'static str> {
-    if app.config.reply {
-        return None;
-    }
-    match (app.scope, app.git_diff.is_some()) {
-        (DiffScope::Last, false) => None,
-        (DiffScope::Last, true) => Some("m:last"),
-        (DiffScope::Git, _) => Some("m:git"),
-        (DiffScope::Off, _) => Some("m:off"),
-    }
-}
-
-/// The hunk hint leading the footer when the cursor sits on a change:
-/// inside a scoped hunk (context lines included) the hunk's range, scale
-/// and action — `hunk L29-33 +1/-2 · o old side` (zero count sides
-/// omitted; a pure-deletion hunk shows its owner line) — or, outside
-/// every hunk on a deletion mark row (reload-only marks, or a mark the
-/// EOF clamp dropped outside every hunk range), the count-bearing
-/// `-N deleted above · o: old side` / count-less `deleted above · o: old
-/// side`. Deletion marks inside a hunk are covered by the counts' `-N`,
-/// so no separate mention is added. The hunk/rows resolve through the
-/// ACTIVE SCOPE (diff-scope step ④): Off shows no hint. On-demand only
-/// (cursor-anchored): no always-on information (P2).
-fn hunk_hint(app: &App) -> Option<String> {
-    let line = match app.mode {
-        Mode::View => app.view.cursor,
-        Mode::Source => app.cursor,
-        Mode::Input => return None,
-    };
-    let new_len = app.source.len();
-    // Cursor inside a scoped hunk: the hunk display wins over the
-    // deletion hint (the deletion count is visible in the counts).
-    for r in scoped_hunk_refs(app) {
-        let h = hunk_ref(app, r)?;
-        let covers = match h.new_range() {
-            Some((a, b)) => line >= a && line <= b,
-            None => line == h.owner(new_len),
-        };
-        if covers {
-            return Some(hunk_range_hint(h, new_len));
-        }
-    }
-    // A deletion mark row outside every hunk: the mark must be one the
-    // scope actually shows.
-    let (_, _, deleted) = scoped_mark_sets(app);
-    if !deleted.contains(&line) {
-        return None;
-    }
-    // The count sums over the scope's diffs.
-    let count: usize = scoped_diffs(app)
-        .iter()
-        .map(|d| deleted_above_count(d, line, new_len))
-        .sum();
-    Some(if count > 0 {
-        format!("-{count} deleted above · o: old side")
+    let count = app.file_review_count(app.current_file_index);
+    if count == 0 {
+        String::new()
     } else {
-        "deleted above · o: old side".to_string()
-    })
-}
-
-/// `hunk L{a}-{b} +A/-D · o old side`: the hunk's 1-based new range
-/// (the owner line alone for a pure-deletion hunk) and its added/deleted
-/// counts ([`git::Hunk::counts`], zero sides omitted).
-fn hunk_range_hint(hunk: &git::Hunk, new_len: usize) -> String {
-    let range = match hunk.new_range() {
-        Some((a, b)) => format!("L{}-{}", a + 1, b + 1),
-        None => format!("L{}", hunk.owner(new_len) + 1),
-    };
-    let (added, deleted) = hunk.counts();
-    let mut counts = String::new();
-    if added > 0 {
-        counts.push_str(&format!("+{added}"));
-    }
-    if deleted > 0 {
-        if !counts.is_empty() {
-            counts.push('/');
-        }
-        counts.push_str(&format!("-{deleted}"));
-    }
-    if counts.is_empty() {
-        format!("hunk {range} · o old side")
-    } else {
-        format!("hunk {range} {counts} · o old side")
+        format!(" ● {count} ")
     }
 }
 
@@ -521,10 +390,7 @@ fn hunk_range_hint(hunk: &git::Hunk, new_len: usize) -> String {
 /// number is more actionable than a %), a few labeled actions for the
 /// current context, then `? help` for the full key reference. Keys keep
 /// their relative order across modes so a mode switch never rearranges
-/// the hints. A change row under the cursor leads the hints with the
-/// hunk / `deleted above` snippet (see [`hunk_hint`]) — it is prepended,
-/// so the footer's existing right-edge truncation drops the generic hints
-/// first when the terminal is narrow.
+/// the hints.
 pub(crate) fn footer_hints(app: &App) -> String {
     let pos = |line: usize, total: usize| {
         if total == 0 {
@@ -533,9 +399,6 @@ pub(crate) fn footer_hints(app: &App) -> String {
             format!("L{}/{}", line + 1, total)
         }
     };
-    let lead = hunk_hint(app)
-        .map(|d| format!("{d} · "))
-        .unwrap_or_default();
     let hints = match app.mode {
         Mode::Input => "Enter confirm · ^j newline · ←→↑↓ move · Esc cancel".to_string(),
         Mode::View => {
@@ -548,9 +411,9 @@ pub(crate) fn footer_hints(app: &App) -> String {
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
-                    format!("{lead}{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
+                    format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
-                None => format!("{lead}{p} · j/k scroll · v select · c comment · ? help"),
+                None => format!("{p} · j/k scroll · v select · c comment · ? help"),
             }
         }
         Mode::Source => {
@@ -558,26 +421,20 @@ pub(crate) fn footer_hints(app: &App) -> String {
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
-                    format!("{lead}{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
+                    format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
-                None => format!("{lead}{p} · j/k move · v select · c comment · ? help"),
+                None => format!("{p} · j/k move · v select · c comment · ? help"),
             }
         }
     };
-    // In view mode the document timeline is the primary navigation. Git
-    // scope remains available as a fallback at the live working tree.
-    let hints = if app.mode == Mode::View {
+    // The same document timeline is available in rendered and source mode.
+    if matches!(app.mode, Mode::View | Mode::Source) {
         app.history()
-            .filter(|history| history.revisions.len() > 1)
             .and_then(|history| history.label())
             .map(|label| format!("{hints} · ← older · newer → · {label}"))
             .unwrap_or(hints)
     } else {
         hints
-    };
-    match scope_footer_hint(app) {
-        Some(scope) if !app.is_historical() => format!("{hints} · {scope}"),
-        _ => hints,
     }
 }
 
@@ -715,46 +572,17 @@ mod width_tests {
 #[cfg(test)]
 mod title_tests {
     use super::change_badge_spans;
-    use crate::app::DiffScope;
     use crate::truncate_path;
     use ratatui::style::Color;
     use std::path::Path;
     use unicode_width::UnicodeWidthStr;
 
     #[test]
-    fn git_count_badge_colors_the_counts() {
-        // Git スコープ: +K 緑、-L 赤 — `g` と `/` と空白は Yellow の
-        // まま。文字列は不変なので幅計算・クリック領域は影響なし。
-        let spans = change_badge_spans(" g+2/-1 ", DiffScope::Git);
-        let parts: Vec<(String, Option<Color>)> = spans
-            .iter()
-            .map(|s| (s.content.to_string(), s.style.fg))
-            .collect();
-        assert_eq!(
-            parts,
-            vec![
-                (" g".into(), Some(Color::Yellow)),
-                ("+2".into(), Some(Color::Green)),
-                ("/".into(), Some(Color::Yellow)),
-                ("-1".into(), Some(Color::Red)),
-                (" ".into(), Some(Color::Yellow)),
-            ]
-        );
-        // 片側のみ（0 側省略）: ` g+3 `.
-        let spans = change_badge_spans(" g+3 ", DiffScope::Git);
-        assert!(spans
-            .iter()
-            .any(|s| s.content.as_ref() == "+3" && s.style.fg == Some(Color::Green)));
-        // 純削除のみ: ` g-2 `.
-        let spans = change_badge_spans(" g-2 ", DiffScope::Git);
-        assert!(spans
-            .iter()
-            .any(|s| s.content.as_ref() == "-2" && s.style.fg == Some(Color::Red)));
-        // Last スコープは不変: 全体 Yellow の 1 span。
-        let spans = change_badge_spans(" +3/-2 ", DiffScope::Last);
+    fn review_badge_is_one_neutral_span() {
+        let spans = change_badge_spans(" ● 3 ");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].style.fg, Some(Color::Yellow));
-        assert_eq!(spans[0].content.as_ref(), " +3/-2 ");
+        assert_eq!(spans[0].content.as_ref(), " ● 3 ");
     }
 
     #[test]

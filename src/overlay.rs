@@ -1,4 +1,4 @@
-//! The overlay stack: the files picker (Ctrl+p), the comments | changes
+//! The overlay stack: the files picker (Ctrl+p), the comments
 //! list (`l`), and the help reference (`?`) — their key handling, the
 //! shared panel/cursor/scroll math, and their drawers.
 
@@ -12,12 +12,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, DiffScope, Mode, supports_view};
+use crate::app::{App, Mode, supports_view};
 use crate::clip_ellipsis;
 use crate::comment::{Comment, Selection};
-use crate::hunknav::{
-    ChangesEntry, changes_entries, changes_rows, entry_diff, file_len, hunk_label, land_on_hunk,
-};
 use crate::reload::file_externally_changed;
 use crate::replace_view_preserving_cursor;
 
@@ -31,15 +28,6 @@ pub(crate) enum Overlay {
     Comments,
     /// The full key reference (`?`).
     Help,
-}
-
-/// Which tab the all-comments overlay (`l`) shows: the comments list or
-/// the git changes list (hunks across every file). Tab toggles.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum OverlayTab {
-    #[default]
-    Comments,
-    Changes,
 }
 
 /// Open an overlay, resetting the double-click tracker: a click in a
@@ -76,9 +64,6 @@ pub(crate) fn overlay_rows(app: &App) -> Vec<Option<usize>> {
     match app.overlay {
         Some(Overlay::Files) => (0..app.files.len()).map(Some).collect(),
         Some(Overlay::Comments) => {
-            if app.overlay_tab == OverlayTab::Changes {
-                return changes_rows(app);
-            }
             let idx = sorted_comment_indices(app);
             let mut rows = Vec::new();
             let mut last_file: Option<&PathBuf> = None;
@@ -101,13 +86,7 @@ pub(crate) fn overlay_rows(app: &App) -> Vec<Option<usize>> {
 pub(crate) fn overlay_entry_count(app: &App) -> usize {
     match app.overlay {
         Some(Overlay::Files) => app.files.len(),
-        Some(Overlay::Comments) => {
-            if app.overlay_tab == OverlayTab::Changes {
-                changes_entries(app).len()
-            } else {
-                app.comments.len()
-            }
-        }
+        Some(Overlay::Comments) => app.comments.len(),
         Some(Overlay::Help) | None => 0,
     }
 }
@@ -177,7 +156,7 @@ pub(crate) fn on_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyModifier
 /// only when it overflows the panel (content that fits never scrolls).
 /// Esc / q / `?` close it.
 pub(crate) fn on_help_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
-    let max = help_rows(app.esc_quit_enabled(), app.config.reply, app.git_diff.is_some())
+    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false)
         .len()
         .saturating_sub(overlay_visible_rows());
     match key {
@@ -206,41 +185,6 @@ pub(crate) fn activate_overlay_selection(app: &mut App) {
             }
         }
         Some(Overlay::Comments) => {
-            if app.overlay_tab == OverlayTab::Changes {
-                // Changes tab: jump to the selected hunk (switch to its
-                // file first), or to an untracked file's top.
-                let entries = changes_entries(app);
-                let Some(e) = entries.get(app.overlay_cursor).copied() else {
-                    return;
-                };
-                app.overlay = None;
-                match e {
-                    // The entry's hunk index is an index into the scope's
-                    // merged hunk list (scoped_hunk_refs), which is what
-                    // land_on_hunk resolves after the switch.
-                    ChangesEntry::Hunk { file, hunk, .. } => {
-                        if file != app.current_file_index {
-                            app.switch_to_file(file);
-                        }
-                        land_on_hunk(app, hunk);
-                    }
-                    ChangesEntry::Untracked { file } => {
-                        if file != app.current_file_index {
-                            app.switch_to_file(file);
-                        }
-                        app.selection = None;
-                        if app.mode == Mode::View {
-                            app.view.goto_source_line(0);
-                            app.view.keep_cursor_visible(app.view_viewport_rows());
-                        } else {
-                            app.cursor = 0;
-                            app.keep_cursor_visible(app.source_viewport_rows() as u16);
-                        }
-                        app.flash("untracked — all lines are new");
-                    }
-                }
-                return;
-            }
             // Comments tab: jump to the selected comment's file; its
             // whole range becomes the selection (all lines light up),
             // cursor on the extent. The cursor indexes the SORTED list;
@@ -302,15 +246,6 @@ pub(crate) fn on_files_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyMo
 pub(crate) fn on_comments_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
     let total = overlay_entry_count(app);
     match key {
-        // Tab toggles the comments | changes tab.
-        KeyCode::Tab => {
-            app.overlay_tab = match app.overlay_tab {
-                OverlayTab::Comments => OverlayTab::Changes,
-                OverlayTab::Changes => OverlayTab::Comments,
-            };
-            app.overlay_cursor = 0;
-            app.overlay_offset = 0;
-        }
         KeyCode::Char('j') | KeyCode::Down => {
             if total > 0 {
                 app.overlay_cursor = (app.overlay_cursor + 1).min(total - 1);
@@ -323,12 +258,8 @@ pub(crate) fn on_comments_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
         }
         KeyCode::Enter => activate_overlay_selection(app),
         KeyCode::Char('d') => {
-            // Delete the selected comment (comments tab only — the
-            // changes tab has nothing to delete). The cursor indexes the
-            // SORTED list; map through the indices to the raw vec.
-            if app.overlay_tab != OverlayTab::Comments {
-                return;
-            }
+            // The cursor indexes the SORTED list; map through the indices
+            // to the raw vec.
             let idx = sorted_comment_indices(app);
             if let Some(&raw) = idx.get(app.overlay_cursor) {
                 app.comments.remove(raw);
@@ -346,7 +277,7 @@ pub(crate) fn on_comments_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
     }
 }
 
-/// Draw the all-comments overlay (Ctrl+p). Centered panel with sorted comment list.
+/// Draw the all-comments overlay (`l`). Centered panel with sorted comment list.
 pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
     match app.overlay {
         Some(Overlay::Files) => draw_files_overlay(f, app),
@@ -360,13 +291,13 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
 /// scroll clamp, so the list never scrolls past its own end; scrollable
 /// with j/k or the wheel (small screens), closed by Esc / q / `?` or a
 /// click outside the panel. The quit row reflects the active Esc binding.
-pub(crate) fn help_rows(esc_quit: bool, reply: bool, in_git: bool) -> Vec<(&'static str, &'static str)> {
+pub(crate) fn help_rows(esc_quit: bool, reply: bool, _in_git: bool) -> Vec<(&'static str, &'static str)> {
     let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
         ("comment", "v select · Esc cancel · c add · d delete · ^n/^p jump"),
         ("mode", "Tab view⇄source"),
         ("output", "y copy · s send"),
-        ("list", "l comments/changes · Tab tab · ? help"),
+        ("list", "l comments · ? help"),
     ];
     if reply {
         // Reply mode: a single message document — no file navigation, no
@@ -378,16 +309,7 @@ pub(crate) fn help_rows(esc_quit: bool, reply: bool, in_git: bool) -> Vec<(&'sta
         rows.insert(1, ("file", "]/[ · ^o files"));
         rows.insert(2, ("time", "← older · newer → · hold:scrub"));
         rows.push(("reload", "r reload · i ignore · e edit"));
-        rows.push(("git", "n/N next/prev change · F7/]c/Alt+j next · o old side vs HEAD"));
-        // Outside a repository the cycle is Last ↔ Off only (P1).
-        rows.push((
-            "marks",
-            if in_git {
-                "m last/git/off"
-            } else {
-                "m last/off"
-            },
-        ));
+        rows.push(("compare", "n/N next/prev · a acknowledge/set baseline"));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
@@ -407,7 +329,7 @@ pub(crate) fn draw_help_overlay(f: &mut Frame, app: &App) {
         .fg(Color::LightBlue)
         .add_modifier(Modifier::BOLD);
 
-    let rows = help_rows(app.esc_quit_enabled(), app.config.reply, app.git_diff.is_some());
+    let rows = help_rows(app.esc_quit_enabled(), app.config.reply, false);
     let visible = overlay_visible_rows();
     // Scroll only when the reference overflows the panel; a reference
     // that fits stays put (j/k are no-ops there).
@@ -598,18 +520,26 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
         } else {
             ""
         };
+        let review_count = app.file_review_count(i);
+        let review_mark = if review_count > 0 {
+            format!(" ● {review_count}")
+        } else {
+            String::new()
+        };
         // The row: basename when unique, else the shortest unique path
         // suffix; clip only when the panel is too narrow for the right
         // side (⚡ + count + mode tag).
         let suffix = unique_suffix(file, &app.files);
         let reserved = 2
             + UnicodeWidthStr::width(changed_mark)
+            + UnicodeWidthStr::width(review_mark.as_str())
             + UnicodeWidthStr::width(count_str.as_str())
             + mode_tag.len();
         let name = clip_if_needed(&suffix, inner.saturating_sub(reserved));
         lines.push(Line::from(vec![
             Span::styled(format!("{cursor_mark}{name}"), name_style),
             Span::styled(changed_mark, Style::default().fg(Color::Yellow)),
+            Span::styled(review_mark, Style::default().fg(Color::Yellow)),
             Span::styled(count_str, dark_gray),
             Span::styled(mode_tag, dark_gray),
         ]));
@@ -629,30 +559,15 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
 
 /// The all-comments list (`l`): every file's comments sorted by path then
 /// start line, with jump (Enter) and delete (d).
-/// The overlay title's leading spans: the comments | changes tab
-/// indicator with the active tab highlighted, plus the shared directory
-/// suffix. Both tab drawers lead with this, so the tabs read as one
-/// element wherever the list is.
+/// The overlay title's leading spans, plus the shared directory suffix.
 pub(crate) fn overlay_title_spans(
-    app: &App,
+    _app: &App,
     comments: usize,
-    changes: usize,
+    _changes: usize,
     dir: Option<String>,
 ) -> Vec<Span<'static>> {
-    let dark_gray = Style::default().fg(Color::DarkGray);
-    let cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let tab = |label: &str, n: usize, active: bool| {
-        Span::styled(
-            format!(" {label} ({n}) "),
-            if active { cyan } else { dark_gray },
-        )
-    };
-    let mut spans = vec![
-        tab("comments", comments, app.overlay_tab == OverlayTab::Comments),
-        Span::styled("|", dark_gray),
-        tab("changes", changes, app.overlay_tab == OverlayTab::Changes),
-    ];
+    let mut spans = vec![Span::styled(format!(" comments ({comments}) "), yellow)];
     if let Some(dir) = dir {
         spans.push(Span::styled(format!("· {dir} "), yellow));
     }
@@ -660,13 +575,8 @@ pub(crate) fn overlay_title_spans(
 }
 
 /// The all-comments list (`l`): every file's comments sorted by path then
-/// start line, with jump (Enter) and delete (d). Tab switches to the
-/// changes tab (git hunks across every file).
+/// start line, with jump (Enter) and delete (d).
 pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
-    if app.overlay_tab == OverlayTab::Changes {
-        draw_changes_overlay(f, app);
-        return;
-    }
     use ratatui::widgets::Clear;
     let area = f.area();
     let panel = overlay_panel(area);
@@ -689,7 +599,7 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
         }
     }
     let dir = (count > 0).then(|| common_parent(&comment_files).unwrap_or_default());
-    let mut title = overlay_title_spans(app, count, changes_entries(app).len(), dir);
+    let mut title = overlay_title_spans(app, count, 0, dir);
     let used: usize = title
         .iter()
         .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
@@ -705,7 +615,7 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
         lines.push(Line::from(Span::styled(" no comments yet", dark_gray)));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            " Tab:tab  Esc/q:close",
+            " Esc/q:close",
             dark_gray,
         )));
         let block = Block::default()
@@ -785,149 +695,7 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
     // Footer hints.
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " Tab:tab  j/k:move  Enter:jump  d:delete  Esc/q:close",
-        dark_gray,
-    )));
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(dark_gray);
-    f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
-}
-
-/// The changes tab of the `l` overlay: every session file's git hunks
-/// (one row per hunk with its location, +N/-M, and a preview line), plus
-/// untracked files. Enter jumps to the hunk (or the file's top for
-/// untracked).
-pub(crate) fn draw_changes_overlay(f: &mut Frame, app: &App) {
-    use ratatui::widgets::Clear;
-    let area = f.area();
-    let panel = overlay_panel(area);
-    f.render_widget(Clear, panel);
-    let dark_gray = Style::default().fg(Color::DarkGray);
-    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let cyan = Style::default().fg(Color::Cyan);
-
-    let mut lines: Vec<Line> = Vec::new();
-    let entries = changes_entries(app);
-    let count = entries.len();
-    // Distinct files with changes, for the shared-dir title and the
-    // shortest-unique-suffix group headers.
-    let mut change_files: Vec<PathBuf> = Vec::new();
-    for e in &entries {
-        let file = &app.files[e.file()];
-        if !change_files.contains(file) {
-            change_files.push(file.clone());
-        }
-    }
-    let dir = (count > 0).then(|| common_parent(&change_files).unwrap_or_default());
-    let mut title = overlay_title_spans(app, app.comments.len(), count, dir);
-    let used: usize = title
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
-    title.push(Span::styled(
-        "─".repeat(panel.width.saturating_sub(used as u16 + 2) as usize),
-        dark_gray,
-    ));
-    lines.push(Line::from(title));
-
-    if count == 0 {
-        lines.push(Line::from(""));
-        // The empty state explains the scope (diff-scope step ②): Off
-        // points at `m`, Last at the reload that has not happened yet.
-        let empty = match app.scope {
-            DiffScope::Off => " marks off — m: cycle scopes",
-            DiffScope::Last => " no reload changes yet — r reloads",
-            DiffScope::Git => " no changes yet (git diff vs HEAD)",
-        };
-        lines.push(Line::from(Span::styled(empty, dark_gray)));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " Tab:tab  Esc/q:close",
-            dark_gray,
-        )));
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(dark_gray);
-        f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
-        return;
-    }
-
-    let inner = panel.width.saturating_sub(2) as usize;
-    // Scroll only when the list overflows; a list that fits never moves.
-    let rows = changes_rows(app);
-    let visible = overlay_visible_rows();
-    let offset = app.overlay_offset.min(rows.len().saturating_sub(visible));
-    for (p, row) in rows.iter().enumerate().skip(offset).take(visible) {
-        match row {
-            // A group header: the (shortest unique) path and its change
-            // count, once per file.
-            None => {
-                let Some(first_entry) = rows[p..].iter().find_map(|r| *r) else {
-                    continue;
-                };
-                let file = &app.files[entries[first_entry].file()];
-                let suffix = unique_suffix(file, &change_files);
-                let group_count = entries
-                    .iter()
-                    .filter(|e| e.file() == entries[first_entry].file())
-                    .count();
-                lines.push(Line::from(vec![Span::styled(
-                    format!(" {suffix} ({group_count})"),
-                    Style::default()
-                        .fg(Color::LightBlue)
-                        .add_modifier(Modifier::BOLD),
-                )]));
-            }
-            Some(entry_pos) => {
-                let selected = *entry_pos == app.overlay_cursor;
-                let cursor_mark = if selected { "▸ " } else { "  " };
-                let loc_style = if selected {
-                    cyan.add_modifier(Modifier::BOLD)
-                } else {
-                    yellow
-                };
-                match &entries[*entry_pos] {
-                    ChangesEntry::Hunk { file, source, hunk } => {
-                        let diff =
-                            entry_diff(app, *file, *source).expect("entry implies a diff");
-                        let h = &diff.hunks[*hunk];
-                        let (a, d) = h.counts();
-                        let label = hunk_label(h, file_len(app, *file));
-                        let counts = format!("+{a}/-{d}");
-                        let preview = h.preview_line().unwrap_or("");
-                        let used =
-                            2 + UnicodeWidthStr::width(label.as_str()) + 2 + counts.len() + 1;
-                        let budget = inner.saturating_sub(used);
-                        let preview = clip_if_needed(preview, budget);
-                        lines.push(Line::from(vec![
-                            Span::styled(format!("{cursor_mark}{label}"), loc_style),
-                            Span::styled(format!(" {counts}  {preview}"), dark_gray),
-                        ]));
-                    }
-                    ChangesEntry::Untracked { file } => {
-                        let n = file_len(app, *file);
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("{cursor_mark}untracked"),
-                                loc_style,
-                            ),
-                            Span::styled(
-                                format!("  {n} lines — all new"),
-                                dark_gray,
-                            ),
-                        ]));
-                    }
-                }
-            }
-        }
-    }
-
-    // Footer hints.
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " Tab:tab  j/k:move  Enter:jump  Esc/q:close",
+        " j/k:move  Enter:jump  d:delete  Esc/q:close",
         dark_gray,
     )));
 

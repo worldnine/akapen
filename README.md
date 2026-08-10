@@ -4,7 +4,7 @@
 
 A standalone TUI for reviewing documents in the terminal: read markdown beautifully rendered, select lines, attach comments, and send them to your coding agent — like a teacher grading homework with a red pen. Built for the agent review loop: the agent writes, you mark it up, the agent revises, and akapen shows you exactly what changed.
 
-For Markdown, it is also a **document time-machine**: Left/Right moves through committed versions without leaving the rendered document, keeps the nearest heading anchored, briefly lights appearing blocks, and fades disappearing blocks before they collapse. History effects use neutral brightness rather than add/delete colors, and the page frame changes while viewing the past. Arrow input scrubs the lightweight revision label immediately; Markdown renders once after 300ms idle. Comments made in the past carry the exact revision and historical snippet to the agent.
+For Markdown, it is also a **document time-machine**: Left/Right moves through one timeline of Git commits and bounded LOCAL snapshots without leaving the rendered document, keeps the nearest heading anchored, briefly lights appearing blocks, and fades disappearing blocks before they collapse. History effects use neutral brightness rather than add/delete colors, and the page frame changes while viewing the past. Arrow input scrubs the lightweight revision label immediately; Markdown renders once after 300ms idle. Comments made in the past carry the exact revision and historical snippet to the agent.
 
 日本語版 README は [README.ja.md](README.ja.md) にあります。
 
@@ -16,7 +16,7 @@ Based on the line-comment experience of [herdr-reviewr](https://github.com/persi
 - **source mode**: raw source with line numbers and syntect highlighting (100+ languages). Long lines wrap with gutter-aligned indentation; tabs expand to 8-column stops.
 - **Comment anywhere**: line cursor and range selection work identically in both modes — `v` to select, `c` to comment, without leaving the rendered view. Comments appear as inline cards right under the lines they refer to.
 - **Your files are never modified.** akapen is strictly read-only; comments are exported through a separate channel (clipboard, stdout, or a send command).
-- **Built for the agent loop**: when the agent edits a file you have open, akapen detects it (`⚡`), and on reload highlights the changes (green `+` = added, yellow `~` = rewritten, red `▀` = deleted above) so re-review means reviewing the diff.
+- **Built for the agent loop**: when the agent edits a file you have open, akapen detects it (`⚡`), stores the loaded generation, and marks present/changed review locations in green and deletion positions in red until you acknowledge them with `a`.
 - **Session mode, always**: open one file or twenty with the same keybindings. `]` / `[` switch files; cursor, selection, and mode are remembered per file.
 - **Terminal-native colors**: UI chrome uses plain ANSI colors and follows your terminal palette; syntax colors come from two-face themes (32 built-ins) or any `.tmTheme` file. Light/dark is auto-detected via OSC 11.
 - **CJK-correct**: all width math uses `unicode-width`, so Japanese text never misaligns. On macOS, the input source is pinned to ASCII in command mode and restored on exit (`--ime jp` switches to Japanese while composing).
@@ -71,52 +71,46 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `g` / `G`, `PgUp` / `PgDn`, `Ctrl+u` / `Ctrl+d` | jump / half-page moves |
 | `v` | start selecting lines |
 | `c` | comment the selection (or the cursor line); re-selecting an existing comment's exact range edits it |
-| `n` / `N` | jump to the next / previous change hunk — the hunk becomes the visible selection, so `c` then comments the WHOLE hunk (snippet = the hunk's raw diff, deletions included) |
+| `n` / `N` | center the next / previous difference from the review baseline |
 | `]` / `[` | next / previous file in the session |
 | `?` | key reference |
 | `r` / `i` | on external change: reload / ignore |
-| `o` | toggle the hunk under the cursor to its old side — vs HEAD in `git` scope, vs the last reload in `last` scope (`o` again returns; added-only hunks have no old side) |
-| `m` | cycle the diff-mark scope: `last` (changes since the last reload) → `git` (uncommitted vs HEAD) → `off` — the footer badge `m:last` shows the current scope |
-| `F7` / `Shift+F7` | jump to the next / previous change hunk (the `]c` / `[c` chord is the fallback for terminals without F-keys; `Alt+j` / `Alt+k` too) |
+| `a` | acknowledge NOW, or set the displayed historical generation as the review baseline; clears selection |
+| `F7` / `Shift+F7` | alternate next / previous review-mark keys (`]c` / `[c`, `Alt+j` / `Alt+k` also work) |
 | `Ctrl+n` / `Ctrl+p` | jump to the next / previous comment (moved from `n` / `N`) |
 | `Ctrl+o` | file picker (moved from `Ctrl+p`) |
-| `l` | all-comments / changes overlay — `Tab` switches between the two tabs |
-| `e` | edit the file in `$EDITOR` (suspends the TUI, reloads with diff highlight on return) |
+| `l` | all-comments overlay |
+| `e` | edit the file in `$EDITOR` (suspends the TUI, reloads and acknowledges your own edit on return) |
 | `y` | copy all comments to the clipboard (comments are kept) |
 | `s` | send via `--send-cmd` / `--send-agent` (comments are cleared only on success) |
 | `d` | delete the comment under the cursor |
 | `q` | quit (confirms if there are unsent comments) |
 | `Esc` | cancel input / clear selection (never switches modes). With `--esc-quit` enabled it also quits like `q` — but only when nothing is pending (confirmation still guards unsent comments, and the prompt advertises `Esc/q to quit`) |
 
-Mouse: wheel scrolls the view without moving the cursor; click moves the cursor; drag selects a line range; click the title-bar path to copy the full path; click `1/3 files` or the yellow `▌ N` badge to open the overlays.
+Mouse: wheel scrolls the view without moving the cursor; click moves the cursor; drag selects a line range; click the title-bar path to copy the full path; click `1/3 files` or the `● N` badge to open the overlays.
 
-## The agent loop
+## Document time machine and review
 
-akapen assumes a loop of *send comments → the agent edits the file → re-review*:
+akapen treats every version as a complete document. Git commits and bounded LOCAL snapshots share one timeline; Git is optional.
 
-1. Read the document (rendered), mark up lines, press `s`.
-2. The agent edits the file. akapen notices (300 ms debounce) and shows `⚡ file changed — r reload · i ignore`. Nothing is replaced behind your back.
-3. Press `r`: the title badge turns into `+N/-M`, and changed lines are highlighted (source gutter: green `+` = added, yellow `~` = rewritten, red `▀` = a block was deleted above; view mode: green `▌` / red `▀`) until the next reload. In a git repository the mark scope auto-switches to `last`, so the marks show exactly this reload's changes.
-4. Comments on the reloaded file are cleared (their line anchors refer to the old content); comments on other session files are untouched.
+1. Read and comment on the rendered document or its source.
+2. When an agent edits the file, akapen shows `⚡`. Press `r` to load the new complete version.
+3. The title shows `● N`; green `▌` marks present/changed locations and red `▀` marks deletion positions. Use `n` / `N` to visit them.
+4. Repeated reloads accumulate review marks without moving the baseline. Press `a` at NOW to acknowledge them, or press `a` on a historical LOCAL/COMMIT generation to choose that generation as the baseline.
 
-While the comment composer is open, change detection is suspended — a comment being written is never disturbed.
+`Left` / `Right` move through the unified timeline while keeping Markdown rendered. The footer labels each generation as `NOW`, `LOCAL`, or `COMMIT`; holding an arrow scrubs labels immediately and renders once input settles. Git commits whose content matches a LOCAL snapshot are shown once as COMMIT.
 
-## Git integration
+The footer always identifies the baseline as `base N/M`, and labels the baseline generation itself as `BASELINE`. Green/red marks compare that fixed baseline with whichever generation is displayed, in both directions through the timeline; browsing those comparisons never changes the unreviewed state at NOW.
 
-When a file is opened **inside a git repository**, akapen reads `git diff -U0 HEAD -- <file>` once at startup (and again on each `r` reload) and fuses it into the review UI. Outside a repository — or with no `HEAD` yet — nothing changes.
+LOCAL snapshots are content-addressed, gzip-compressed, and stored outside the repository under the user cache directory. The cache keeps at most 32 generations per file and 256 MiB globally while protecting NOW, the review baseline, unreviewed generations, and generations carrying comments. Markdown tables use row-granularity review marks so a one-cell edit does not mark the whole table. Non-Markdown UTF-8 files use the same timeline and review model in source mode, also with line-granularity marks.
 
-- **Diff scope (3-4)**: `m` cycles what the marks show — `last` (changes since the last reload = the agent's latest pass), `git` (everything uncommitted vs HEAD), `off`. Sessions start in `git`; a content-changing reload auto-switches to `last` (pressing `m` during a pending ⚡ pins your choice for that episode; `e` edits of your own never switch). The footer badge (`m:last` …) always shows the scope, and the title count follows it: `+N/-M` for `last`, `g+K/-L` (green `+K`, red `-L`) for `git`.
-- **Changed-line marks (3-1)**: the source gutter distinguishes three cases — green `+` = a purely added line, yellow `~` = a rewritten line (`o` shows what it replaced), red `▀` = a block was deleted **above** this line (position only; the content is shown with `o`). View mode keeps two classes: green `▌` (added ∪ rewritten) and red `▀`. The cursor `>` inherits the mark's color, so a one-line hunk stays readable under the cursor.
-- **Hunk granularity**: with `-U0`, touching changes always share one hunk, so a contiguous run of marks is exactly one hunk — hunk boundaries are the gaps between marks. Moving the cursor into a hunk highlights all of its marks (bold + bright): what lights up is what `o` will flip. The footer shows the hunk under the cursor as `hunk L29-33 +1/-2 · o old side`.
-- **Old-side toggle (3-2)**: `o` swaps the hunk under the cursor to its old content — vs HEAD in `git` scope, vs the pre-reload content in `last` scope. A rewrite hunk is replaced in place, a pure deletion expands the deleted lines at the `▀` position (the surviving line stays), and a pure addition refuses with a flash (there was nothing before). Old rows carry a faint `~` mark; `o` again returns. The loader takes the ref as an argument, so generation movement (`HEAD^`, tags, …) is a one-line change.
-- **Change navigation**: `n` / `N` (same as delta, less, magit) jump to the next / previous hunk of the active scope; `F7` / `Shift+F7`, the `]c` / `[c` chord, and `Alt+j` / `Alt+k` do the same. The cursor lands on the first changed line, the hunk is selected. The `l` overlay has a `changes` tab (Tab toggles) listing every hunk across the session files with its location, `+N/-M`, and a preview; Enter jumps to it.
-- **Comments on deletions**: a bare `c` on a `▀` row attaches the hunk's raw diff as the comment's snippet — the agent receives the deleted lines themselves, not just the surviving line.
-- **Untracked files** have no HEAD side: under the `git` scope they carry no marks (the changes tab still lists the file) and `o` is disabled; the `last` scope works normally after a reload.
-- Snapshot semantics: the diff is taken at startup/reload only — mid-session divergence between the file and HEAD is ignored, and there is no line tracking or persistence (P3/P4).
+Comments stay attached to the exact generation they describe when `r` loads a newer file. Comment export contains the revision (for historical generations), resolved absolute file path, line range, quoted source, and the comment—never a diff or hunk.
+
+While the comment composer is open, change detection is suspended so the document is never replaced while you type.
 
 ## Output format
 
-One comment = location + line-numbered snippet + body, reviewr-compatible. Blocks are sorted by file and start line, separated by a single blank line:
+One comment = optional historical revision + location + line-numbered snippet + body, reviewr-compatible. Blocks are sorted by file and start line, separated by a single blank line:
 
 ```
 path/to/file.md:12-14
@@ -144,6 +138,8 @@ akapen %S --send-cmd 'xargs -0 -I{} herdr agent prompt wY:p1K {}'
 On failure (non-zero exit) the comments are **kept** and can be re-sent; on success they are cleared.
 
 ### hunk integration
+
+This is an external compatibility adapter only. akapen itself does not retain, display, or export hunks.
 
 [hunk](https://github.com/modem-dev/hunk) reviews an agent's change set as diffs. The adapter [`scripts/akapen2hunk`](scripts/akapen2hunk) converts akapen's export into hunk live-session comments, so your line comments appear inline in hunk's diff view:
 

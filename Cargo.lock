@@ -23,9 +23,12 @@ version = "0.1.0"
 dependencies = [
  "akapen-tui-markdown",
  "anyhow",
+ "flate2",
  "libc",
  "ratatui",
+ "serde",
  "serde_json",
+ "sha2",
  "similar",
  "syntect",
  "tempfile",

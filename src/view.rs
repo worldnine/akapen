@@ -9,7 +9,6 @@
 //! handoff between view mode and source mode.
 
 use std::collections::HashMap;
-use std::ops::Range;
 
 use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
@@ -25,10 +24,10 @@ const SELECTED_BG_DARK: Color = Color::Rgb(88, 91, 112);
 /// Selection background for light terminal themes: a pale cool gray.
 const SELECTED_BG_LIGHT: Color = Color::Rgb(210, 210, 220);
 
-/// Changed-line background for dark terminal themes: a muted green.
-const CHANGED_BG_DARK: Color = Color::Rgb(40, 55, 40);
-/// Changed-line background for light terminal themes: a pale mint.
-const CHANGED_BG_LIGHT: Color = Color::Rgb(210, 240, 210);
+/// Persistent baseline → NOW review background. Unlike the history flash,
+/// this direction never reverses, so a restrained green has stable meaning.
+const CHANGED_BG_DARK: Color = Color::Rgb(35, 61, 47);
+const CHANGED_BG_LIGHT: Color = Color::Rgb(218, 238, 224);
 const HISTORY_GLOW_BG_DARK: Color = Color::Rgb(70, 73, 88);
 const HISTORY_GLOW_BG_LIGHT: Color = Color::Rgb(218, 220, 228);
 const HISTORY_BORDER_DARK: Color = Color::Rgb(170, 150, 215);
@@ -176,15 +175,6 @@ pub struct ViewState {
     /// The wrap width the rows were rendered at (ghost text is truncated
     /// to it).
     pub width: usize,
-    /// Display rows that show the toggled old-side block (3-2): raw old
-    /// lines spliced in place of the hunk's new lines. These rows carry a
-    /// faint `~` marker and no comment/change marks.
-    pub old_side_rows: Range<usize>,
-    /// The source-line range the old-side block covers (inclusive; a
-    /// pure-deletion block covers its anchor line only). Rows of every
-    /// member line map to the block's first row — the cursor on any of
-    /// them sits on the block, and its visible extent is the block's.
-    pub old_side_lines: Option<(usize, usize)>,
 }
 
 impl ViewState {
@@ -208,8 +198,6 @@ impl ViewState {
             card_rows,
             ghost,
             width: columns as usize,
-            old_side_rows: 0..0,
-            old_side_lines: None,
         }
     }
 
@@ -266,6 +254,29 @@ impl ViewState {
         }
     }
 
+    /// Center a source-line range in the rendered viewport as far as the
+    /// document edges allow. The range midpoint—not merely its last source
+    /// line—is the visual target for `n`/`N` review navigation.
+    pub fn center_source_range(&mut self, start: usize, end: usize, viewport: usize) {
+        if self.rows.is_empty() || self.source_starts.is_empty() {
+            self.offset = 0;
+            return;
+        }
+        let start = start.min(self.max_cursor());
+        let end = end.max(start).min(self.max_cursor());
+        let first_row = self.source_starts.get(start).copied().unwrap_or(0);
+        let after_last = self
+            .source_starts
+            .get(end + 1)
+            .copied()
+            .unwrap_or(self.rows.len())
+            .max(first_row + 1);
+        let middle = first_row + after_last.saturating_sub(first_row + 1) / 2;
+        let viewport = viewport.max(1);
+        let max_offset = self.rows.len().saturating_sub(viewport);
+        self.offset = middle.saturating_sub(viewport / 2).min(max_offset);
+    }
+
     /// The first rendered row of the cursor's source line.
     pub fn cursor_row(&self) -> usize {
         self.source_starts.get(self.cursor).copied().unwrap_or(0)
@@ -275,24 +286,14 @@ impl ViewState {
     /// merged lines keep their whole extent inside the viewport). Mirrors
     /// `text()`'s extent logic: merged source lines share a row, so the
     /// span is at least one row even when the next line starts on the
-    /// same rendered row (end <= start). A cursor inside the toggled
-    /// old-side block (3-2) spans the whole block instead.
+    /// same rendered row (end <= start).
     pub fn cursor_end_row(&self) -> usize {
         let start = self.cursor_row();
-        let mut end = if let Some((a, b)) = self.old_side_lines
-            && self.cursor >= a
-            && self.cursor <= b
-        {
-            self.source_starts
-                .get(b + 1)
-                .copied()
-                .unwrap_or(self.rows.len())
-        } else {
-            self.source_starts
-                .get(self.cursor + 1)
-                .copied()
-                .unwrap_or(self.rows.len())
-        };
+        let mut end = self
+            .source_starts
+            .get(self.cursor + 1)
+            .copied()
+            .unwrap_or(self.rows.len());
         if end <= start {
             end = (start + 1).min(self.rows.len());
         }
@@ -406,6 +407,7 @@ impl ViewState {
     /// selected lines' text — rows without segments (blanks, unattributed
     /// wraps) fall back to the row span.
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub fn visible_text(
         &self,
         viewport: usize,
@@ -481,11 +483,8 @@ impl ViewState {
         let group_changed = group_or(changed);
         let group_glowing = group_or(glowing);
         let group_deleted = group_or(deleted);
-        // The cursor's hunk's marks render bold + bright (diff-scope
-        // step ④): the `o` toggle's flip range is readable from the
-        // marker column before pressing it. The emphasis only styles a
-        // mark that is already selected — the priority order above it
-        // (cursor / old side / selection / comment) is untouched.
+        // Optional target emphasis only styles a mark that is already
+        // selected; cursor, selection, and comment priority is untouched.
         let group_emphasized = group_or(emphasized);
         let end = (self.offset + viewport).min(self.rows.len());
         let mut start = self.cursor_row();
@@ -618,7 +617,7 @@ impl ViewState {
                 // The cursor glyph keeps its `>` shape but INHERITS the
                 // mark's color (user request): on a changed/deleted row
                 // it reads as the emphasis (Light + BOLD), so a one-line
-                // hunk's mark is not hidden by the cursor. Mark-less
+                // review mark is not hidden by the cursor. Mark-less
                 // rows keep the classic LightCyan.
                 let fg = if changed_row {
                     Color::LightGreen
@@ -628,10 +627,6 @@ impl ViewState {
                     Color::LightCyan
                 };
                 (">", Style::default().fg(fg).add_modifier(Modifier::BOLD))
-            } else if self.old_side_rows.contains(&abs) {
-                // Old-side rows (3-2): a faint `~` — raw HEAD content,
-                // no comment/change marks.
-                ("~", Style::default().fg(Color::DarkGray))
             } else if in_sel_row {
                 // Selected rows carry a cyan bar (the composer's color, the
                 // same width as the yellow comment bar): the pending range
@@ -657,7 +652,8 @@ impl ViewState {
                 // was deleted" — a full-height `▌` would read as a
                 // deleted/changed LINE at a glance, and the upper-half
                 // block keeps the same weight as the green `▌` (both
-                // half-blocks). `o` shows the content.
+                // half-blocks). The previous full generation contains the
+                // deleted text when more context is needed.
                 if group_emphasized[src] {
                     (
                         "▀",
@@ -1094,6 +1090,23 @@ mod tests {
         assert_eq!(view.cursor, view.max_cursor());
         view.move_cursor_display(-100);
         assert_eq!(view.cursor, 0);
+    }
+
+    #[test]
+    fn review_range_can_be_centered_in_the_rendered_viewport() {
+        let mut view = ViewState {
+            rows: vec![vec![]; 20],
+            source_starts: (0..20).collect(),
+            ..Default::default()
+        };
+
+        view.center_source_range(7, 9, 5);
+        assert_eq!(view.offset, 6, "the range midpoint lands on the viewport midpoint");
+
+        view.center_source_range(0, 0, 5);
+        assert_eq!(view.offset, 0, "the document start clamps centering");
+        view.center_source_range(19, 19, 5);
+        assert_eq!(view.offset, 15, "the document end clamps centering");
     }
 
     #[test]
@@ -1598,8 +1611,8 @@ mod tests {
         assert_eq!(gutter[6].glyph, "│", "deleted wrap continuation rows keep the border");
         assert_eq!(gutter[7].glyph, "│", "unflagged line keeps the border");
         assert_eq!(gutter[1].style.fg, Some(Color::Yellow), "marked rows are yellow");
-        assert_eq!(gutter[3].style.fg, Some(Color::Green), "changed rows are green");
-        assert_eq!(gutter[5].style.fg, Some(Color::Red), "deleted rows are red");
+        assert_eq!(gutter[3].style.fg, Some(Color::Green), "changed marks are green");
+        assert_eq!(gutter[5].style.fg, Some(Color::Red), "deleted marks are red");
         assert_eq!(gutter[7].style.fg, None, "border rows carry the border style");
     }
 
@@ -1633,8 +1646,8 @@ mod tests {
         assert_eq!(gutter[2].glyph, "│", "wrap continuation rows carry no deletion mark");
         assert_eq!(gutter[3].glyph, "▀", "the merged block's top edge carries the mark");
         assert_eq!(gutter[4].glyph, "│", "the merged block's later rows stay clean");
-        assert_eq!(gutter[1].style.fg, Some(Color::Red), "deletion marks are red");
-        assert_eq!(gutter[3].style.fg, Some(Color::Red), "deletion marks are red");
+        assert_eq!(gutter[1].style.fg, Some(Color::Red), "deleted marks are red");
+        assert_eq!(gutter[3].style.fg, Some(Color::Red), "deleted marks are red");
     }
 
     #[test]
@@ -1642,7 +1655,7 @@ mod tests {
         // User request: the cursor's `>` keeps its shape but inherits
         // the mark's color — changed rows LightGreen, deleted-mark rows
         // LightRed, mark-less rows the classic LightCyan. A one-line
-        // hunk's mark therefore stays readable under the cursor.
+        // review mark therefore stays readable under the cursor.
         let changed = vec![false, true, false, false];
         let deleted = vec![false, false, true, false];
         // Cursor on a changed row.
@@ -1746,11 +1759,9 @@ mod tests {
 
     #[test]
     fn emphasized_marks_render_bold_and_bright() {
-        // Diff-scope step ④: the cursor's hunk's marks render bold +
-        // bright (LightGreen/LightRed) — the `o` flip range readable in
-        // the marker column. Rows outside the hunk keep their normal
-        // weight; rows above the mark priority (cursor etc.) are
-        // untouched because the emphasis only styles a selected mark.
+        // An emphasized review target renders bold and bright. Rows outside
+        // the target keep their normal weight; cursor and selection retain
+        // their higher-priority styling.
         let view = ViewState {
             rows: vec![vec![]; 4],
             offset: 0,
@@ -1774,19 +1785,19 @@ mod tests {
         assert_eq!(gutter[0].glyph, "▌");
         assert!(
             gutter[0].style.add_modifier.contains(Modifier::BOLD),
-            "the cursor hunk's mark is bold"
+            "the selected review mark is bold"
         );
         assert_eq!(gutter[0].style.fg, Some(Color::LightGreen));
-        assert_eq!(gutter[1].glyph, "▀", "deleted mark outside the hunk");
+        assert_eq!(gutter[1].glyph, "▀", "deleted mark outside the target");
         assert!(
             !gutter[1].style.add_modifier.contains(Modifier::BOLD),
-            "not the cursor's hunk: normal weight"
+            "not the selected target: normal weight"
         );
         assert_eq!(gutter[1].style.fg, Some(Color::Red));
         assert_eq!(gutter[2].glyph, "▌");
         assert!(!gutter[2].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(gutter[2].style.fg, Some(Color::Green));
-        // The emphasized deleted mark renders LightRed + bold.
+        // An emphasized deletion renders bright red + bold.
         let emphasized = vec![false, true, false, false];
         let (_, gutter) = view.visible_text(
             10,

@@ -1,6 +1,7 @@
 # akapen / ashiato git 連携 仕様案 v0.2
 
-ステータス: akapen（3 章）実装済み（2026-08-09）。ashiato（4 章）実装待ち
+ステータス: akapen（3 章）は廃止し
+[`local-snapshot-spec.md`](local-snapshot-spec.md) で置換済み（2026-08-10）。ashiato（4 章）実装待ち
 
 ## 1. 背景と目的
 

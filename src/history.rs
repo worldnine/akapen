@@ -9,16 +9,40 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use similar::TextDiff;
+use similar::{DiffTag, TextDiff};
+
+use crate::snapshot::{CachedFile, SnapshotCache};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RevisionSource {
+    Now,
+    Local,
+    Git,
+}
 
 /// One point on a document's timeline.
 #[derive(Clone, Debug)]
 pub(crate) struct Revision {
-    /// Full commit id. `None` is the live working-tree document.
+    /// Full commit id or stable `local:<content-id>`. `None` is NOW.
     pub(crate) id: Option<String>,
     pub(crate) short_id: String,
     pub(crate) summary: String,
     pub(crate) content: String,
+    pub(crate) source: RevisionSource,
+}
+
+impl Revision {
+    pub(crate) fn context(&self) -> Option<String> {
+        match self.source {
+            RevisionSource::Now => None,
+            RevisionSource::Local => self.id.clone(),
+            RevisionSource::Git => Some(format!(
+                "{} — {}",
+                self.id.as_deref().unwrap_or(&self.short_id),
+                self.summary
+            )),
+        }
+    }
 }
 
 /// Newest-first history. Position zero is always the live working tree.
@@ -30,6 +54,10 @@ pub(crate) struct DocumentHistory {
     /// Revision whose Markdown is actually displayed. During fast scrubbing
     /// this trails `position` until the render debounce settles.
     pub(crate) rendered_position: usize,
+    /// Durable human-review checkpoint, independent of the displayed
+    /// timeline position and of Git availability.
+    pub(crate) reviewed_id: Option<String>,
+    pub(crate) reviewed_content: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,6 +75,8 @@ struct MarkdownBlock {
     start: usize,
     end: usize,
     kind: BlockKind,
+    /// Keeps row matching inside the same table. Zero for non-table blocks.
+    scope: u64,
     id: u64,
     content: String,
 }
@@ -66,8 +96,27 @@ pub(crate) fn block_transition(
     old: &[String],
     new: &[String],
 ) -> (HashSet<usize>, Vec<DeletedBlock>) {
-    let old_blocks = markdown_blocks(old);
-    let new_blocks = markdown_blocks(new);
+    semantic_transition(old, new, false)
+}
+
+/// Review marks use the same semantic matching as history animation, except
+/// that a Markdown table is split into source rows. A one-cell edit should
+/// send the reviewer to its row, while time travel may still animate the
+/// rendered table as one layout block.
+fn review_block_transition(
+    old: &[String],
+    new: &[String],
+) -> (HashSet<usize>, Vec<DeletedBlock>) {
+    semantic_transition(old, new, true)
+}
+
+fn semantic_transition(
+    old: &[String],
+    new: &[String],
+    split_table_rows: bool,
+) -> (HashSet<usize>, Vec<DeletedBlock>) {
+    let old_blocks = markdown_blocks(old, split_table_rows);
+    let new_blocks = markdown_blocks(new, split_table_rows);
     let mut matched_old = vec![None; old_blocks.len()];
     let mut used_new = HashSet::new();
     let mut by_id: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -98,7 +147,9 @@ pub(crate) fn block_transition(
             .iter()
             .enumerate()
             .filter(|(index, block)| {
-                !used_new.contains(index) && block.kind == old_block.kind
+                !used_new.contains(index)
+                    && block.kind == old_block.kind
+                    && block.scope == old_block.scope
             })
             .map(|(index, block)| {
                 let ratio = TextDiff::from_chars(&old_block.content, &block.content).ratio();
@@ -145,7 +196,54 @@ pub(crate) fn block_transition(
     (changed, deleted)
 }
 
-fn markdown_blocks(lines: &[String]) -> Vec<MarkdownBlock> {
+/// Cumulative review marks from an acknowledged full document to NOW.
+/// Markdown uses semantic blocks; every other text file uses source lines.
+pub(crate) fn review_transition(
+    markdown: bool,
+    reviewed: &str,
+    now: &str,
+) -> (HashSet<usize>, HashSet<usize>) {
+    let old: Vec<String> = reviewed.lines().map(str::to_string).collect();
+    let new: Vec<String> = now.lines().map(str::to_string).collect();
+    let (changed, deleted) = if markdown {
+        review_block_transition(&old, &new)
+    } else {
+        line_transition(&old, &new)
+    };
+    let last = new.len().saturating_sub(1);
+    let deleted_before = deleted
+        .into_iter()
+        .map(|block| block.anchor.min(last))
+        .collect();
+    (changed, deleted_before)
+}
+
+fn line_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec<DeletedBlock>) {
+    let old_text = old.join("\n");
+    let new_text = new.join("\n");
+    let diff = TextDiff::from_lines(&old_text, &new_text);
+    let mut changed = HashSet::new();
+    let mut deleted = Vec::new();
+    for op in diff.ops() {
+        let old_range = op.old_range();
+        let new_range = op.new_range();
+        if op.tag() != DiffTag::Equal && !new_range.is_empty() {
+            changed.extend(new_range.clone());
+        }
+        if old_range.len() > new_range.len() {
+            deleted.push(DeletedBlock {
+                anchor: new_range.start,
+                content: old
+                    .get(old_range.clone())
+                    .map(|lines| lines.join("\n"))
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    (changed, deleted)
+}
+
+fn markdown_blocks(lines: &[String], split_table_rows: bool) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
     let mut start = 0usize;
     while start < lines.len() {
@@ -212,18 +310,40 @@ fn markdown_blocks(lines: &[String]) -> Vec<MarkdownBlock> {
                 }
             }
         }
-        let content = lines[start..=end].join("\n");
-        let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mut hasher = DefaultHasher::new();
-        kind.hash(&mut hasher);
-        normalized.hash(&mut hasher);
-        blocks.push(MarkdownBlock {
-            start,
-            end,
-            kind,
-            id: hasher.finish(),
-            content,
-        });
+        let table_scope = if split_table_rows && kind == BlockKind::Table {
+            let structural_end = (start + 1).min(end);
+            let structure = lines[start..=structural_end]
+                .join("\n")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut hasher = DefaultHasher::new();
+            structure.hash(&mut hasher);
+            hasher.finish()
+        } else {
+            0
+        };
+        let ranges: Vec<(usize, usize)> = if split_table_rows && kind == BlockKind::Table {
+            (start..=end).map(|row| (row, row)).collect()
+        } else {
+            vec![(start, end)]
+        };
+        for (block_start, block_end) in ranges {
+            let content = lines[block_start..=block_end].join("\n");
+            let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut hasher = DefaultHasher::new();
+            kind.hash(&mut hasher);
+            table_scope.hash(&mut hasher);
+            normalized.hash(&mut hasher);
+            blocks.push(MarkdownBlock {
+                start: block_start,
+                end: block_end,
+                kind,
+                scope: table_scope,
+                id: hasher.finish(),
+                content,
+            });
+        }
         start = end + 1;
     }
     blocks
@@ -254,73 +374,213 @@ impl DocumentHistory {
     /// Failure is intentionally soft: a non-Git Markdown file still gets a
     /// one-point timeline and behaves like an ordinary viewer.
     pub(crate) fn load(path: &Path, live: &str, limit: usize) -> Self {
+        Self::load_with_local(path, live, limit, CachedFile::default())
+    }
+
+    /// Load Git anchors and the bounded LOCAL cache into one newest-first
+    /// document timeline. Cache failure is returned so the caller can fall
+    /// back to Git-only history without making the file unreadable.
+    pub(crate) fn load_cached(
+        path: &Path,
+        live: &str,
+        limit: usize,
+        cache: &SnapshotCache,
+    ) -> anyhow::Result<Self> {
+        let local = cache.record(path, live)?;
+        Ok(Self::load_with_local(path, live, limit, local))
+    }
+
+    pub(crate) fn open_cached(
+        path: &Path,
+        live: &str,
+        limit: usize,
+        cache: &SnapshotCache,
+    ) -> anyhow::Result<Self> {
+        let local = cache.open(path, live)?;
+        Ok(Self::load_with_local(path, live, limit, local))
+    }
+
+    fn load_with_local(path: &Path, live: &str, limit: usize, local: CachedFile) -> Self {
         let mut revisions = vec![Revision {
             id: None,
             short_id: "now".to_string(),
             summary: "working tree".to_string(),
             content: live.to_string(),
+            source: RevisionSource::Now,
         }];
 
-        let Some(root) = repo_root(path) else {
-            return Self { revisions, position: 0, rendered_position: 0 };
-        };
-        let abs = absolutize(path);
-        let Ok(rel) = abs.strip_prefix(&root) else {
-            return Self { revisions, position: 0, rendered_position: 0 };
-        };
-        let format = "%H%x1f%h%x1f%s";
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["log", "--follow", &format!("--format={format}"), "--"])
-            .arg(rel)
-            .output();
-        let Ok(output) = output else {
-            return Self { revisions, position: 0, rendered_position: 0 };
-        };
-        if !output.status.success() {
-            return Self { revisions, position: 0, rendered_position: 0 };
+        let mut git_revisions = load_git_revisions(path, limit);
+        let mut used_git = HashSet::new();
+        for snapshot in local.snapshots.iter().rev() {
+            if snapshot.content == live
+                || revisions.iter().any(|revision| revision.content == snapshot.content)
+            {
+                continue;
+            }
+            if let Some((index, revision)) = git_revisions
+                .iter()
+                .enumerate()
+                .find(|(index, revision)| {
+                    !used_git.contains(index) && revision.content == snapshot.content
+                })
+            {
+                used_git.insert(index);
+                revisions.push(revision.clone());
+            } else {
+                revisions.push(Revision {
+                    id: Some(format!("local:{}", snapshot.id)),
+                    short_id: snapshot.id.chars().take(7).collect(),
+                    summary: "local snapshot".to_string(),
+                    content: snapshot.content.clone(),
+                    source: RevisionSource::Local,
+                });
+            }
         }
 
-        for line in String::from_utf8_lossy(&output.stdout).lines().take(limit) {
-            let mut fields = line.splitn(3, '\x1f');
-            let (Some(id), Some(short_id), Some(summary)) =
-                (fields.next(), fields.next(), fields.next())
-            else {
-                continue;
-            };
-            let spec = format!("{id}:{}", rel.to_string_lossy());
-            let Ok(shown) = Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(["show", "--no-ext-diff", &spec])
-                .output()
-            else {
-                continue;
-            };
-            if !shown.status.success() {
+        for (index, revision) in git_revisions.drain(..).enumerate() {
+            if used_git.contains(&index)
+                || revisions.iter().any(|existing| existing.content == revision.content)
+            {
                 continue;
             }
-            let Ok(content) = String::from_utf8(shown.stdout) else {
-                continue;
-            };
-            // Do not create a visually empty step when HEAD and the working
-            // tree are identical; the first Left press should visibly move.
-            if revisions.last().is_some_and(|r| r.content == content) {
-                continue;
-            }
-            revisions.push(Revision {
-                id: Some(id.to_string()),
-                short_id: short_id.to_string(),
-                summary: summary.to_string(),
-                content,
-            });
+            revisions.push(revision);
         }
-        Self { revisions, position: 0, rendered_position: 0 }
+
+        Self {
+            revisions,
+            position: 0,
+            rendered_position: 0,
+            reviewed_id: local.reviewed_id,
+            reviewed_content: local.reviewed_content,
+        }
     }
 
+    pub(crate) fn replace_from_cache(
+        &mut self,
+        path: &Path,
+        live: &str,
+        limit: usize,
+        cache: &SnapshotCache,
+    ) -> anyhow::Result<()> {
+        *self = Self::load_cached(path, live, limit, cache)?;
+        Ok(())
+    }
+
+    pub(crate) fn acknowledge(
+        &mut self,
+        path: &Path,
+        live: &str,
+        cache: &SnapshotCache,
+    ) -> anyhow::Result<()> {
+        let local = cache.acknowledge(path, live)?;
+        self.reviewed_id = local.reviewed_id;
+        self.reviewed_content = local.reviewed_content;
+        Ok(())
+    }
+
+    pub(crate) fn acknowledge_in_memory(&mut self, live: &str) {
+        let id = crate::snapshot::content_id(live.as_bytes());
+        self.reviewed_id = Some(id);
+        self.reviewed_content = Some(live.to_string());
+    }
+
+    pub(crate) fn set_baseline(
+        &mut self,
+        path: &Path,
+        content: &str,
+        cache: &SnapshotCache,
+    ) -> anyhow::Result<()> {
+        let local = cache.set_baseline(path, content)?;
+        self.reviewed_id = local.reviewed_id;
+        self.reviewed_content = local.reviewed_content;
+        Ok(())
+    }
+
+    pub(crate) fn pin_current(&self, path: &Path, cache: &SnapshotCache) -> anyhow::Result<()> {
+        let Some(revision) = self.current() else {
+            return Ok(());
+        };
+        if revision.source == RevisionSource::Git {
+            return Ok(());
+        }
+        cache.pin(path, &revision.content)
+    }
+
+    pub(crate) fn at_now(&self) -> bool {
+        self.position == 0
+    }
+}
+
+fn load_git_revisions(path: &Path, limit: usize) -> Vec<Revision> {
+    let mut revisions = Vec::new();
+
+    let Some(root) = repo_root(path) else {
+        return revisions;
+    };
+    let abs = absolutize(path);
+    let Ok(rel) = abs.strip_prefix(&root) else {
+        return revisions;
+    };
+    let format = "%H%x1f%h%x1f%s";
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["log", "--follow", &format!("--format={format}"), "--"])
+        .arg(rel)
+        .output();
+    let Ok(output) = output else {
+        return revisions;
+    };
+    if !output.status.success() {
+        return revisions;
+    }
+
+    for line in String::from_utf8_lossy(&output.stdout).lines().take(limit) {
+        let mut fields = line.splitn(3, '\x1f');
+        let (Some(id), Some(short_id), Some(summary)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let spec = format!("{id}:{}", rel.to_string_lossy());
+        let Ok(shown) = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["show", "--no-ext-diff", &spec])
+            .output()
+        else {
+            continue;
+        };
+        if !shown.status.success() {
+            continue;
+        }
+        let Ok(content) = String::from_utf8(shown.stdout) else {
+            continue;
+        };
+        if revisions.last().is_some_and(|r| r.content == content) {
+            continue;
+        }
+        revisions.push(Revision {
+            id: Some(id.to_string()),
+            short_id: short_id.to_string(),
+            summary: summary.to_string(),
+            content,
+            source: RevisionSource::Git,
+        });
+    }
+    revisions
+}
+
+impl DocumentHistory {
     pub(crate) fn current(&self) -> Option<&Revision> {
         self.revisions.get(self.position)
+    }
+
+    pub(crate) fn context_for_content(&self, content: &str) -> Option<String> {
+        self.revisions
+            .iter()
+            .find(|revision| revision.content == content)
+            .and_then(Revision::context)
     }
 
     pub(crate) fn move_by(&mut self, delta: isize) -> bool {
@@ -339,21 +599,48 @@ impl DocumentHistory {
     pub(crate) fn label(&self) -> Option<String> {
         let revision = self.current()?;
         let chronological = self.revisions.len().saturating_sub(self.position);
-        if self.position == 0 {
-            Some(format!(
+        let provenance = match revision.source {
+            RevisionSource::Now => "NOW",
+            RevisionSource::Local => "LOCAL",
+            RevisionSource::Git => "COMMIT",
+        };
+        let baseline_position = self.baseline_position();
+        let is_baseline = baseline_position == Some(self.position);
+        let mut label = if self.position == 0 {
+            format!(
                 "NOW · {}/{}",
                 chronological,
                 self.revisions.len()
-            ))
+            )
         } else {
-            Some(format!(
-                "PAST · {}/{} · {} · {}",
+            format!(
+                "{provenance} · {}/{} · {} · {}",
                 chronological,
                 self.revisions.len(),
                 revision.short_id,
                 revision.summary
-            ))
+            )
+        };
+        if is_baseline {
+            label = format!("BASELINE · {label}");
+        } else if let Some(position) = baseline_position {
+            let base_chronological = self.revisions.len().saturating_sub(position);
+            label.push_str(&format!(
+                " · base {}/{}",
+                base_chronological,
+                self.revisions.len()
+            ));
+        } else if self.reviewed_content.is_some() {
+            label.push_str(" · base cached");
         }
+        Some(label)
+    }
+
+    pub(crate) fn baseline_position(&self) -> Option<usize> {
+        let reviewed = self.reviewed_content.as_deref()?;
+        self.revisions
+            .iter()
+            .position(|revision| revision.content == reviewed)
     }
 }
 
@@ -428,7 +715,11 @@ fn absolutize(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{DocumentHistory, Revision, anchored_line, block_transition};
+    use super::{
+        DocumentHistory, Revision, RevisionSource, anchored_line, block_transition,
+        review_transition,
+    };
+    use crate::snapshot::SnapshotCache;
     use std::process::Command;
 
     #[test]
@@ -438,11 +729,14 @@ mod tests {
             short_id: name.into(),
             summary: name.into(),
             content: name.into(),
+            source: RevisionSource::Git,
         };
         let mut history = DocumentHistory {
             revisions: vec![revision("now"), revision("old")],
             position: 0,
             rendered_position: 0,
+            reviewed_id: None,
+            reviewed_content: None,
         };
         assert!(!history.move_by(-1));
         assert!(history.move_by(1));
@@ -457,17 +751,42 @@ mod tests {
             short_id: name.into(),
             summary: name.into(),
             content: name.into(),
+            source: RevisionSource::Git,
         };
         let mut history = DocumentHistory {
             revisions: vec![revision("now"), revision("middle"), revision("oldest")],
             position: 0,
             rendered_position: 0,
+            reviewed_id: None,
+            reviewed_content: None,
         };
         assert_eq!(history.label().as_deref(), Some("NOW · 3/3"));
         history.move_by(1);
-        assert!(history.label().unwrap().starts_with("PAST · 2/3"));
+        assert!(history.label().unwrap().starts_with("COMMIT · 2/3"));
         history.move_by(1);
-        assert!(history.label().unwrap().starts_with("PAST · 1/3"));
+        assert!(history.label().unwrap().starts_with("COMMIT · 1/3"));
+    }
+
+    #[test]
+    fn timeline_label_always_identifies_the_baseline_position() {
+        let revision = |name: &str| Revision {
+            id: None,
+            short_id: name.into(),
+            summary: name.into(),
+            content: name.into(),
+            source: RevisionSource::Git,
+        };
+        let mut history = DocumentHistory {
+            revisions: vec![revision("now"), revision("middle"), revision("oldest")],
+            position: 0,
+            rendered_position: 0,
+            reviewed_id: Some("middle".into()),
+            reviewed_content: Some("middle".into()),
+        };
+
+        assert!(history.label().unwrap().ends_with("base 2/3"));
+        history.move_by(1);
+        assert!(history.label().unwrap().starts_with("BASELINE · COMMIT · 2/3"));
     }
 
     #[test]
@@ -512,6 +831,50 @@ mod tests {
     }
 
     #[test]
+    fn table_review_marks_only_the_row_containing_the_changed_cell() {
+        let old = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | two |\n";
+        let new = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | changed |\n";
+
+        let (changed, deleted) = review_transition(true, old, new);
+
+        assert_eq!(changed, [3].into_iter().collect());
+        assert!(deleted.is_empty());
+    }
+
+    #[test]
+    fn table_review_marks_added_and_deleted_rows_individually() {
+        let base = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | two |\n";
+        let added = "| Key | Value |\n| --- | --- |\n| a | one |\n| new | row |\n| b | two |\n";
+        let deleted = "| Key | Value |\n| --- | --- |\n| b | two |\n";
+
+        let (changed, removed) = review_transition(true, base, added);
+        assert_eq!(changed, [3].into_iter().collect());
+        assert!(removed.is_empty());
+
+        let (changed, removed) = review_transition(true, base, deleted);
+        assert!(changed.is_empty());
+        assert_eq!(removed, [2].into_iter().collect());
+    }
+
+    #[test]
+    fn table_time_travel_still_treats_the_rendered_table_as_one_block() {
+        let old = ["| Key | Value |", "| --- | --- |", "| a | one |", "| b | two |"]
+            .map(str::to_string);
+        let new = [
+            "| Key | Value |",
+            "| --- | --- |",
+            "| a | one |",
+            "| b | changed |",
+        ]
+        .map(str::to_string);
+
+        let (changed, deleted) = block_transition(&old, &new);
+
+        assert_eq!(changed, [0, 1, 2, 3].into_iter().collect());
+        assert!(deleted.is_empty());
+    }
+
+    #[test]
     fn loads_complete_markdown_snapshots_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
@@ -540,6 +903,78 @@ mod tests {
         assert_eq!(history.revisions[1].summary, "second");
         assert_eq!(history.revisions[1].content, "# Doc\n\nsecond\n");
         assert_eq!(history.revisions[2].content, "# Doc\n\nfirst\n");
+    }
+
+    #[test]
+    fn loads_previous_observation_as_local_without_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "first\n").unwrap();
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        cache.record(&path, "first\n").unwrap();
+
+        let history = DocumentHistory::load_cached(&path, "second\n", 10, &cache).unwrap();
+
+        assert_eq!(history.revisions.len(), 2);
+        assert_eq!(history.revisions[0].source, RevisionSource::Now);
+        assert_eq!(history.revisions[1].source, RevisionSource::Local);
+        assert_eq!(history.revisions[1].content, "first\n");
+    }
+
+    #[test]
+    fn content_equal_local_and_git_generations_are_shown_once_as_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "akapen@example.invalid"]);
+        git(&["config", "user.name", "akapen test"]);
+        std::fs::write(&path, "committed\n").unwrap();
+        git(&["add", "doc.md"]);
+        git(&["commit", "-qm", "committed"]);
+
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        cache.record(&path, "committed\n").unwrap();
+        let history = DocumentHistory::load_cached(&path, "working\n", 10, &cache).unwrap();
+
+        assert_eq!(history.revisions.len(), 2);
+        assert_eq!(history.revisions[1].source, RevisionSource::Git);
+        assert_eq!(history.revisions[1].summary, "committed");
+        assert_eq!(history.reviewed_content.as_deref(), Some("committed\n"));
+    }
+
+    #[test]
+    fn first_observation_remains_the_baseline_even_when_git_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "akapen@example.invalid"]);
+        git(&["config", "user.name", "akapen test"]);
+        std::fs::write(&path, "committed\n").unwrap();
+        git(&["add", "doc.md"]);
+        git(&["commit", "-qm", "committed"]);
+
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        let history = DocumentHistory::load_cached(&path, "working\n", 10, &cache).unwrap();
+
+        assert_eq!(history.reviewed_content.as_deref(), Some("working\n"));
     }
 
 }

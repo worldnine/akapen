@@ -1,21 +1,18 @@
 //! External-edit handling: file-change polling, the manual (`r`) and
-//! reply-mode auto reload paths, `$EDITOR` launching, the git snapshot
-//! loader, and the external-change check behind the file picker's ⚡.
+//! reply-mode auto reload paths, `$EDITOR` launching, the local snapshot
+//! timeline, and the external-change check behind the file picker's ⚡.
 
-use std::collections::HashSet;
-use std::path::Path;
 use std::process::Command;
 use std::time::{Instant, SystemTime};
 
 use ratatui::crossterm::cursor::Hide;
 
-use crate::app::{App, DiffScope};
-use crate::git;
+use crate::app::App;
 use crate::highlight::syntax_for;
 use crate::source::Source;
 use crate::{
-    draw, replace_view_preserving_cursor, render_view_with_cards, source_content_width,
-    view_render_width,
+    acknowledge_review, draw, refresh_review_marks, render_view_with_cards,
+    source_content_width, view_render_width,
 };
 
 /// Poll the file's mtime+size; a difference from the last loaded stamp
@@ -36,38 +33,24 @@ pub(crate) fn poll_file_change(app: &mut App) {
 /// The debounced notification for an external edit: the persistent ⚡ badge
 /// in the title and the footer prompt (`r reload · i ignore`) are the
 /// notification — no transient toast (the prompt supersedes it anyway).
-/// A new external-change episode also re-arms the scope's automatic
-/// transition (diff-scope step ①): whatever the user pinned with `m`
-/// spoke for the OLD change, not this one.
 pub(crate) fn notify_file_changed(app: &mut App) {
     if app.file_changed {
         return;
     }
     app.file_changed = true;
-    app.scope_manual = false;
 }
 
 /// Manual reload (`r`), Vim's `:e` model: the user decides when the
-/// external edits replace the in-memory content. Unsent comments on THIS
-/// file? Require a second `r` (same pattern as edit/quit); the persistent
-/// prompt banner (prompt_message) carries the message.
+/// external edits replace the in-memory content. Comments remain attached
+/// to the exact generation they were written against.
 pub(crate) fn reload_now(app: &mut App) {
-    // The reload clears this file's comments (stale anchors), so a
-    // confirmation protects them exactly like `e` and `q` protect theirs.
-    let current = app.current_file_path().to_path_buf();
-    let has_comments = app.comments.iter().any(|c| c.file_path == current);
-    if has_comments && !app.confirm_reload {
-        app.confirm_reload = true;
-        return;
-    }
     app.confirm_reload = false;
     finish_reload(app, false);
 }
 
-/// Reply-mode auto-reload (`--reply`): no confirmation — comments on this
-/// file are dropped with the old content. Fires from the change poll when
-/// scripts/akp refreshes the doc. On failure the ⚡ prompt stays up and
-/// `r` retries manually.
+/// Reply-mode auto-reload (`--reply`): no confirmation. Fires from the
+/// change poll when scripts/akp refreshes the doc. On failure the ⚡ prompt
+/// stays up and `r` retries manually.
 pub(crate) fn reload_now_auto(app: &mut App) {
     app.confirm_reload = false;
     if finish_reload(app, false) {
@@ -75,9 +58,8 @@ pub(crate) fn reload_now_auto(app: &mut App) {
     }
 }
 
-/// `from_editor`: the reload came from `e` (an edit of one's own), so
-/// the scope's automatic Git → Last transition is skipped (diff-scope
-/// step ①) — one's own edit is not up for review.
+/// `from_editor`: the reload came from `e` (an edit of one's own), so the
+/// new NOW is acknowledged immediately — one's own edit is not up for review.
 pub(crate) fn finish_reload(app: &mut App, from_editor: bool) -> bool {
     // A reload that actually runs resolves any pending confirmation —
     // including the open_editor path, which calls this directly.
@@ -107,25 +89,14 @@ pub(crate) fn finish_reload(app: &mut App, from_editor: bool) -> bool {
 }
 
 /// Open the file in `$EDITOR` (fallback `nano`), suspend the TUI while the
-/// editor runs, then reload automatically on return. The diff from
-/// [`reload_source`] lights up the changes. Triggers on `e` in both modes.
+/// editor runs, then reload automatically on return. The new generation is
+/// retained but acknowledged as the user's own edit. Triggers on `e` in both
+/// modes.
 pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal) {
-    // Unsent comments on THIS file? Require a second `e` (same pattern as
-    // quit); the persistent prompt banner (prompt_message) carries the
-    // message. Other files' comments are unaffected by editing this one.
-    let current = app.current_file_path().to_path_buf();
-    let has_comments = app.comments.iter().any(|c| c.file_path == current);
-    if has_comments && !app.confirm_edit {
-        app.confirm_edit = true;
-        return;
-    }
+    // Existing comments are preserved on their current generation. When
+    // the editor returns, reload_source promotes live comments to the old
+    // LOCAL/COMMIT generation before loading the edited NOW.
     app.confirm_edit = false;
-
-    // Clear this file's comments now — the user confirmed the edit.
-    if has_comments {
-        app.comments.retain(|c| c.file_path != current);
-        replace_view_preserving_cursor(app);
-    }
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
     // `$EDITOR` may include arguments (e.g. `zed --wait`). Split into the
@@ -157,11 +128,8 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
 
     match status {
         Ok(s) if s.success() => {
-            // Reload with diff highlighting — the user just edited the
-            // file. Skipping the confirmation path (comments were already
-            // cleared) and the scope transition: an edit of one's own is
-            // not up for review, so the automatic Git → Last transition
-            // is disabled (diff-scope step ①).
+            // Reload and acknowledge the user's own editor change. Existing
+            // comments remain pinned to the generation they describe.
             finish_reload(app, true);
         }
         Ok(_) => app.flash_err(format!("{editor} exited with error")),
@@ -184,36 +152,15 @@ pub(crate) fn ignore_change(app: &mut App) {
     app.flash("file change ignored");
 }
 
-/// The git snapshot for one file (3-1): the diff vs `diff_ref` plus the
-/// per-line mark sets, ready to display. `None`/empty outside a git
-/// repository — the non-git behavior is preserved (no marks, `o`
-/// disabled). An untracked file counts as all-new (no HEAD side).
-pub(crate) fn git_snapshot(
-    diff_ref: &str,
-    path: &Path,
-    new_len: usize,
-) -> (Option<git::Diff>, HashSet<usize>, HashSet<usize>) {
-    let Some(diff) = git::Diff::load(diff_ref, path) else {
-        return (None, HashSet::new(), HashSet::new());
-    };
-    let added = if diff.untracked {
-        (0..new_len).collect()
-    } else {
-        diff.added(new_len)
-    };
-    let deleted = diff.deleted_before(new_len);
-    (Some(diff), added, deleted)
-}
-
 /// Re-read the file after an external (agent) edit. Returns `Ok(())` when
 /// the file was handled (read successfully — even if the content is
 /// unchanged); `Err(e)` when the read failed mid-write (e.g. non-UTF-8
 /// bytes), so the caller can surface the reason and the next attempt
 /// retries.
 ///
-/// On content change: the old vs new diff is computed for line-level
-/// highlighting, all comments are cleared (anchors are stale), and the
-/// view re-renders at the same width preserving the cursor fraction.
+/// On content change: comments on the former NOW are attached to that
+/// snapshot, and the view re-renders at the same width preserving the
+/// cursor fraction.
 /// Triggered by `r` only — never while Input is open.
 pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<()> {
     let new_source = Source::load(app.current_file_path().to_path_buf())?;
@@ -222,75 +169,72 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     }
     let old_content = app.source.content.clone();
 
-    // Reply mode: each refresh replaces the whole message, so a diff would
-    // just mark everything as changed — noise. Skip the diff and the
-    // +N/-M badge; the whole message is "new" by definition.
+    // Reply mode: each refresh replaces the whole message, so review marks
+    // would only paint the entire document. The whole message is "new" by
+    // definition and snapshots are intentionally disabled in this mode.
     let reply = app.config.reply;
-    let (added, removed) = if reply {
-        app.last_added.clear();
-        app.last_deleted_before.clear();
-        app.last_diff = None;
-        (0, 0)
-    } else {
-        // The reload diff, normalized into the same git::Diff structure
-        // the git snapshot uses (diff-scope step 1): the marks and the
-        // +N/-M badge derive from it, so they can never disagree (the
-        // +N/-M used to be a prefix/suffix approximation).
-        let diff = git::synthesize_diff(&old_content, &new_source.content);
-        let new_len = new_source.lines.len();
-        let added_set = diff.added(new_len);
-        let deleted_set = diff.deleted_before(new_len);
-        let (added, removed) = diff.hunks.iter().fold((0, 0), |(a, d), h| {
-            let (x, y) = h.counts();
-            (a + x, d + y)
-        });
-        app.last_diff = Some(diff);
-        app.last_added = added_set;
-        app.last_deleted_before = deleted_set;
-        (added, removed)
-    };
-
-    // The content actually changed: under the Git scope an external edit
-    // auto-transitions to Last (diff-scope step ①) — the reload diff is
-    // what the session reviews now. Skipped when the user pinned the
-    // scope with `m` (scope_manual), when the reload came from `e` (an
-    // edit of one's own is not up for review), and in reply mode (the
-    // scope machinery is off). Last/Off stay put.
-    if !reply && !from_editor && app.scope == DiffScope::Git && !app.scope_manual {
-        app.scope = DiffScope::Last;
-    }
-
-    // Comments are anchored to the old content; clear them — but only
-    // THIS file's (other files' anchors are untouched by this reload).
     let current = app.current_file_path().to_path_buf();
-    let before = app.comments.len();
-    app.comments.retain(|c| c.file_path != current);
-    let comment_count = before - app.comments.len();
+    let had_live_comments = app
+        .comments
+        .iter()
+        .any(|comment| comment.file_path == current && comment.revision.is_none());
+    if had_live_comments
+        && let Some(cache) = app.snapshot_cache.as_ref()
+    {
+        cache.pin(&current, &old_content)?;
+    }
 
     let width = source_content_width(app);
     app.source = new_source;
-    if let Some(history) = app.histories.get_mut(app.current_file_index)
+    let history_path = app.current_file_path().to_path_buf();
+    let history_content = app.source.content.clone();
+    if let Some(cache) = app.snapshot_cache.clone() {
+        if let Some(history) = app.histories.get_mut(app.current_file_index) {
+            // Cache failures do not invalidate a successful file reload;
+            // retain a one-point NOW timeline as the graceful fallback.
+            if history
+                .replace_from_cache(&history_path, &history_content, 64, &cache)
+                .is_err()
+            {
+                *history = crate::history::DocumentHistory::load(
+                    &history_path,
+                    &history_content,
+                    64,
+                );
+            }
+        }
+    } else if let Some(history) = app.histories.get_mut(app.current_file_index)
         && let Some(live) = history.revisions.first_mut()
     {
-        live.content = app.source.content.clone();
+        live.content = history_content;
         history.position = 0;
         history.rendered_position = 0;
+    }
+    if had_live_comments {
+        let old_context = app
+            .histories
+            .get(app.current_file_index)
+            .and_then(|history| history.context_for_content(&old_content));
+        for comment in app.comments.iter_mut().filter(|comment| {
+            comment.file_path == current && comment.revision.is_none()
+        }) {
+            comment.revision = old_context.clone();
+        }
+    }
+    if reply {
+        app.review_changed.clear();
+        app.review_deleted_before.clear();
+        app.comparison_changed.clear();
+        app.comparison_deleted_before.clear();
+    } else {
+        refresh_review_marks(app);
+    }
+    if from_editor {
+        acknowledge_review(app, false);
     }
     app.spans = app
         .highlight
         .highlight_with(&app.source.content, syntax_for(app.current_file_path()));
-    // Git snapshot refreshed (論点 5): the marks re-align to the new
-    // content vs the diff base, so the agent's fix leaves the marks
-    // describing the CURRENT working tree. The old-side toggle is reset
-    // — its hunk indices may have moved (snapshot semantics, P4).
-    if !reply {
-        let (diff, added, deleted) =
-            git_snapshot(&app.git_ref, app.current_file_path(), app.source.len());
-        app.git_diff = diff;
-        app.git_added = added;
-        app.git_deleted_before = deleted;
-    }
-    app.old_side = None;
     // View: re-render at the same width, keeping the cursor fraction.
     let fraction = app.view.cursor_fraction();
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -314,18 +258,11 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     app.offset = app.offset.min(app.max_offset(app.source_viewport_rows() as u16));
     app.file_changed = false;
     if reply {
-        // The whole message is new — the +N/-M badge and the diff gutters
-        // would mark everything, so they stay off in reply mode.
-        app.last_change = None;
+        // The whole message is new, so cumulative review marks stay off.
         app.flash("reloaded");
     } else {
-        app.last_change = Some((added, removed));
-        let cleared = if comment_count > 0 {
-            format!(" — {comment_count} comment(s) cleared")
-        } else {
-            String::new()
-        };
-        app.flash(format!("reloaded (+{added}/-{removed}){cleared}"));
+        let count = app.file_review_count(app.current_file_index);
+        app.flash(format!("reloaded · {count} to review"));
     }
     Ok(())
 }
