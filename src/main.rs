@@ -59,8 +59,8 @@ use crate::reload::*;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
 use crate::view::{
-    is_table_delimiter_line, scroll_offset_at, scroll_offset_drag, scroll_thumb, GutterCell,
-    ViewState,
+    is_table_delimiter_line, lerp_color, scroll_offset_at, scroll_offset_drag, scroll_thumb,
+    GutterCell, ViewState,
 };
 
 
@@ -1243,6 +1243,7 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
             &deleted_blocks,
             &app.highlight,
             &path,
+            app.ui_history_glow_bg,
         );
         app.history_ghost_until = Some(Instant::now() + Duration::from_millis(650));
         // The scatter-out effects ride the ghost rows (view-relative);
@@ -1534,6 +1535,7 @@ fn insert_history_ghosts(
     deleted: &[history::DeletedBlock],
     highlighter: &Highlighter,
     path: &Path,
+    ghost_bg: Color,
 ) -> Vec<(usize, usize)> {
     // (insert row, row count) per ghost, in processing order (descending
     // anchors). Blocks inserted LATER sit ABOVE and shift earlier rows
@@ -1561,10 +1563,15 @@ fn insert_history_ghosts(
         }
         for (offset, mut row) in ghost.rows.into_iter().enumerate() {
             for span in &mut row {
-                span.style = span
-                    .style
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::DIM | Modifier::ITALIC);
+                // Ghost styling: the original color melted 55% toward a
+                // neutral band on a gray backdrop — a translucent look
+                // that stays readable. NO DIM/ITALIC: terminals render
+                // them muddy, and synthetic italics smear CJK glyphs.
+                let fg = match span.style.fg {
+                    Some(c @ Color::Rgb(..)) => lerp_color(c, ghost_bg, 0.55),
+                    _ => Color::Gray,
+                };
+                span.style = span.style.fg(fg).bg(ghost_bg);
             }
             view.rows.insert(insert_at + offset, row);
             view.row_segments.insert(insert_at + offset, Vec::new());
@@ -4193,6 +4200,7 @@ mod history_animation_tests {
             }],
             &highlight,
             Path::new("doc.md"),
+            Color::Rgb(70, 73, 88),
         );
         assert!(view.rows.len() > original_rows);
         assert!(view.source_starts[0] > original_start);
@@ -4200,7 +4208,8 @@ mod history_animation_tests {
             view.rows[..view.source_starts[0]]
                 .iter()
                 .flatten()
-                .all(|span| span.style.add_modifier.contains(Modifier::DIM))
+                .all(|span| span.style.bg == Some(Color::Rgb(70, 73, 88))),
+            "ghost rows carry the neutral band"
         );
         // The ghost's view-relative rect: inserted at the anchor's row,
         // exactly as tall as the rows it added (the dissolve target).
