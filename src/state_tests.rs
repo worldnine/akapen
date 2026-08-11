@@ -313,6 +313,34 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn view_viewport_rows_leave_one_row_for_the_message_line() {
+        // The message line is permanent (layout row between body and
+        // footer), so the viewport must shrink by one vs. the old
+        // title+footer-only math — it must match draw_view's inner.height
+        // (title + message line + footer + the frame's two borders), or
+        // keep_cursor_visible would fight the offset.
+        let app = make_app(5, Mode::View);
+        assert_eq!(
+            app.view_viewport_rows() as u16,
+            app.terminal_height() - 5,
+            "frame's two borders + title + message line + footer"
+        );
+    }
+
+    #[test]
+    fn source_viewport_rows_leave_one_row_for_the_message_line() {
+        // Source mode never draws the frame, so only title + message
+        // line + footer are subtracted (must match draw_source's
+        // inner.height).
+        let app = make_app(5, Mode::Source);
+        assert_eq!(
+            app.source_viewport_rows() as u16,
+            app.terminal_height() - 3,
+            "title + message line + footer"
+        );
+    }
+
+    #[test]
     fn help_rows_reflect_the_esc_binding() {
         let rows = help_rows(false, false, false);
         assert!(
@@ -2870,9 +2898,11 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn prompts_float_at_top_not_footer() {
-        // The q-confirmation dialog is a top-center banner (row 1) like
-        // the toast: the footer keeps the badge + hints.
+    fn prompt_lives_on_the_message_line_above_the_footer() {
+        // The q-confirmation dialog renders on the permanent message line
+        // (one row above the footer — vim's message-line position), the
+        // same line as the toast: the footer keeps the badge + hints, and
+        // the title keeps its file-centric identity.
         let mut app = make_app(10, Mode::Source);
         app.comments.push(Comment {
             file_path: app.current_file_path().to_path_buf(),
@@ -2882,29 +2912,73 @@ use crate::comment::Selection;
             revision: None,
             text: "c".into(),
         });
-        request_quit(&mut app); // arms the confirmation + a toast
+        request_quit(&mut app); // arms the confirmation
         assert!(app.confirm_quit);
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
-        let row1: String = buf.content[80..160]
-            .iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
+        // Rows in the 80×24 layout: title 0, body 1..21, message 22, footer 23.
+        let row_text = |row: usize| -> String {
+            buf.content[row * 80..(row + 1) * 80]
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
         assert!(
-            row1.contains("unsent comments — q to quit"),
-            "prompt banner at the top: {row1}"
+            row_text(22).contains("unsent comments — q to quit"),
+            "prompt on the message line, one row above the footer"
         );
-        let last: String = buf.content[23 * 80..24 * 80]
-            .iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
         assert!(
-            !last.contains("unsent comments"),
-            "no dialog left in the footer: {last}"
+            !row_text(0).contains("unsent comments"),
+            "no dialog on the title row"
         );
-        assert!(last.contains("SOURCE"), "footer keeps the badge: {last}");
+        assert!(
+            !row_text(23).contains("unsent comments"),
+            "no dialog left in the footer"
+        );
+        assert!(row_text(23).contains("SOURCE"), "footer keeps the badge");
+    }
+
+    #[test]
+    fn prompt_outranks_the_toast_on_the_message_line() {
+        // A prompt demands an action and must not be missed: while one is
+        // pending, the message line shows it even if a toast is also
+        // live — the toast would expire on its own, the prompt waits for
+        // the user. Once the prompt is answered, the toast shows again.
+        let mut app = make_app(10, Mode::Source);
+        app.confirm_quit = true;
+        app.file_changed = true; // a lower-priority prompt is pending too
+        app.flash("copied 3 comment(s)");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        fn render_message(
+            terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+            app: &mut App,
+        ) -> String {
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let buf = terminal.backend().buffer();
+            buf.content[22 * 80..23 * 80]
+                .iter()
+                .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                .collect()
+        }
+        let shown = render_message(&mut terminal, &mut app);
+        assert!(
+            shown.contains("unsent comments — q to quit"),
+            "prompt wins over the toast: {shown}"
+        );
+        assert!(
+            !shown.contains("copied 3 comment(s)"),
+            "toast suppressed while a prompt is pending: {shown}"
+        );
+        app.confirm_quit = false;
+        app.file_changed = false; // clear the lower-priority prompt too
+        let shown = render_message(&mut terminal, &mut app);
+        assert!(
+            shown.contains("copied 3 comment(s)"),
+            "toast visible once the prompt is answered: {shown}"
+        );
     }
 
     #[test]
