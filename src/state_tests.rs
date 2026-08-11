@@ -1429,6 +1429,49 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn reload_drops_former_now_cards_from_the_new_now_layout() {
+        // The rebase above attaches the comment to the old LOCAL
+        // generation; the reload's own re-render must NOT fold that card
+        // into the new NOW's layout — a stale card lingered until the
+        // next full re-render (regression: render_view_with_cards got
+        // ALL comments instead of the current revision's visible cards).
+        let (mut app, dir) = make_app_keep(3, Mode::Source);
+        let cache = SnapshotCache::at(dir.path().join("snapshot-cache"));
+        app.histories = vec![
+            DocumentHistory::load_cached(
+                app.current_file_path(),
+                &app.source.content,
+                0,
+                &cache,
+            )
+            .unwrap(),
+        ];
+        app.snapshot_cache = Some(cache.clone());
+        add_comment(&mut app, 2, 2, "keep this context");
+
+        std::fs::write(app.current_file_path(), "line1\nchanged\nline3\n").unwrap();
+        reload_source(&mut app, false).unwrap();
+
+        // The card belongs to the old LOCAL generation: invisible at NOW,
+        // and the reloaded view's layout holds no card row.
+        assert!(
+            visible_cards(&app).is_empty(),
+            "the rebased comment is not visible at the new NOW"
+        );
+        assert!(
+            !app.view.card_rows.iter().any(|&card| card),
+            "no card row in the reloaded view layout"
+        );
+        // Browsing to the old generation brings the card back.
+        app.histories[0].position = 1;
+        assert_eq!(
+            visible_cards(&app).len(),
+            1,
+            "the card rides its LOCAL generation"
+        );
+    }
+
+    #[test]
     fn r_on_non_utf8_file_toasts_an_error_and_keeps_content() {
         // A binary write or a mid-write agent edit breaks UTF-8; `r` must
         // not fail silently (the ⚡ prompt staying up forever with a dead

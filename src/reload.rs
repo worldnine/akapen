@@ -8,7 +8,9 @@ use std::time::{Instant, SystemTime};
 use ratatui::crossterm::cursor::Hide;
 
 use crate::app::App;
+use crate::comment::Comment;
 use crate::highlight::syntax_for;
+use crate::overlay::visible_cards;
 use crate::source::Source;
 use crate::{
     acknowledge_review, draw, refresh_review_marks, render_view_with_cards,
@@ -236,13 +238,19 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
         .highlight
         .highlight_with(&app.source.content, syntax_for(app.current_file_path()));
     // View: re-render at the same width, keeping the cursor fraction.
+    // Only the CURRENT revision's cards are folded into the layout:
+    // comments made against the former NOW were rebased onto its LOCAL
+    // snapshot above, so a card must not linger in the new NOW (it
+    // would stay until the next full re-render — the regression where
+    // render_view_with_cards got ALL comments).
     let fraction = app.view.cursor_fraction();
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+    let file_comments: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
     let mut view = render_view_with_cards(
         &app.source,
         view_render_width(w),
         &app.highlight,
-        &app.comments,
+        &file_comments,
     );
     view.goto_fraction(fraction);
     view.keep_cursor_visible(app.view_viewport_rows());
