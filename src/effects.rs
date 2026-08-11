@@ -39,8 +39,11 @@ pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
             let (ox, oy) = (area.x as usize, area.y as usize);
             for (pos, cell) in cells {
                 let (rx, ry) = (pos.x as usize - ox, pos.y as usize - oy);
-                if rx != 0 && ry != 0 && rx != w - 1 && ry != h - 1 {
-                    continue; // content cells stay untouched
+                // The frame is TWO cells thick while browsing the past
+                // (see App::frame_border): both rings join the gradient,
+                // the content inside stays untouched.
+                if rx > 1 && ry > 1 && rx < w - 2 && ry < h - 2 {
+                    continue;
                 }
                 // Only the frame's own glyphs join the animation.
                 if !matches!(cell.symbol(), "│" | "─" | "┌" | "┐" | "└" | "┘") {
@@ -74,13 +77,45 @@ pub(crate) fn toast_effect() -> Effect {
     effect
 }
 
-/// Scatter-in for blocks that appeared in the selected revision: each
-/// cell of the block materializes in a stable random order over ~450 ms
-/// (the reverse of [`dissolve`] — the same random thresholds, mirrored
-/// time), so the text visibly "grows" cell by cell while the block's
-/// glow background stays solid. `stagger_ms` cascades later blocks.
-pub(crate) fn appear_effect(stagger_ms: u32) -> Effect {
-    fx::delay(stagger_ms, fx::coalesce((450, Interpolation::QuadOut)))
+/// Scatter-in for the blocks that appeared in the selected revision,
+/// masked to the characters that are GENUINELY new: `mask[row]` holds the
+/// display-column ranges of inserted characters (diffed against the old
+/// revision's rendered text), and only those cells materialize — the
+/// unchanged text is never hidden. Materialization order within the new
+/// characters is a stable per-cell scatter (same threshold every frame),
+/// over ~450 ms; `stagger_ms` cascades later blocks.
+pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effect {
+    fx::delay(
+        stagger_ms,
+        fx::effect_fn(
+            mask,
+            (450, Interpolation::QuadOut),
+            |mask, ctx, cells| {
+                let alpha = ctx.timer.alpha();
+                for (pos, cell) in cells {
+                    let (r, c) = (
+                        (pos.y - ctx.area.y) as usize,
+                        pos.x - ctx.area.x,
+                    );
+                    let is_new = mask.get(r).is_some_and(|ranges| {
+                        ranges.iter().any(|&(s, e)| c >= s && c < e)
+                    });
+                    if !is_new {
+                        continue; // the unchanged text stays put
+                    }
+                    // A stable scattered reveal: each new cell has a fixed
+                    // threshold; it stays blank until the timer's alpha
+                    // passes it.
+                    let threshold = ((r as u64).wrapping_mul(0x9E37_79B1)
+                        ^ (c as u64).wrapping_mul(0x85EB_CA77))
+                        % 1000;
+                    if (threshold as f32 / 1000.0) > alpha {
+                        cell.set_char(' ');
+                    }
+                }
+            },
+        ),
+    )
 }
 
 /// Scatter-out for the deletion ghosts: the ghost stays whole for 150 ms

@@ -1763,7 +1763,7 @@ use crate::comment::Selection;
             text: "card body".into(),
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let width = view_render_width(w);
+        let width = view_render_width(w, 1);
         let view = render_view_with_cards(&source, width, &highlight, &comments);
         let card_h = view.card_rows.iter().filter(|&&b| b).count();
         assert!(card_h >= 3, "title + body + rule rows");
@@ -1875,7 +1875,7 @@ use crate::comment::Selection;
             text: "card".into(),
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-        let width = view_render_width(w);
+        let width = view_render_width(w, 1);
         let mut view = render_view_with_cards(&source, width, &highlight, &comments);
         let card_h = view.card_rows.iter().filter(|&&b| b).count();
         assert!(card_h >= 3);

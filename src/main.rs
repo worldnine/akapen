@@ -263,7 +263,7 @@ fn run(config: Config) -> Result<()> {
         // shown; rendering it here would be discarded work at startup
         // (a session of many large .rs files pays for it).
         let view = if supports_view(f) {
-            render_view_with_cards(&source, view_render_width(size.width), &highlight, &[])
+            render_view_with_cards(&source, view_render_width(size.width, 1), &highlight, &[])
         } else {
             ViewState::default()
         };
@@ -1002,7 +1002,7 @@ fn insert_cards(view: &mut ViewState, comments: &[Comment], columns: usize) {
 /// Render the current complete document with its inline comment cards.
 pub(crate) fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    let width = view_render_width(w);
+    let width = view_render_width(w, app.frame_border());
     render_view_with_cards(&app.source, width, &app.highlight, comments)
 }
 
@@ -1272,20 +1272,34 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
         app.view = view;
     }
     // Scatter-in effects for the blocks that appeared in this revision
-    // (view mode, `--fx` on): one coalesce per contiguous changed block,
-    // cascading down the document.
+    // (view mode, `--fx` on): each changed block's mask covers only the
+    // characters that are genuinely new (diffed against the old
+    // revision's rendered text), cascading down the document.
     if app.config.fx && !source_mode {
-        app.appear_fx = appear_effects(&app.view, &changed_blocks);
+        app.appear_fx = appear_effects(
+            &app.view,
+            &changed_blocks,
+            &old_lines,
+            &app.highlight,
+            &path,
+        );
     }
     app.history_frame_flash_pending = true;
     true
 }
 
-/// The display-row rects of the changed blocks, as coalesce effects:
-/// contiguous runs of changed source lines become one `(first row,
-/// height)` group (rows from the view's source-line mapping), each with
-/// a scatter-in effect staggered after the previous block.
-fn appear_effects(view: &ViewState, changed: &HashSet<usize>) -> Vec<(usize, usize, tachyonfx::Effect)> {
+/// The changed blocks' scatter-in effects: contiguous runs of changed
+/// source lines become one block; its mask is the display-column ranges
+/// of the characters that are new relative to the old revision's
+/// rendered text (see [`appear_mask`]). Each effect is staggered after
+/// the previous block.
+fn appear_effects(
+    view: &ViewState,
+    changed: &HashSet<usize>,
+    old_lines: &[String],
+    highlighter: &Highlighter,
+    path: &Path,
+) -> Vec<(usize, usize, tachyonfx::Effect)> {
     let mut lines: Vec<usize> = changed.iter().copied().collect();
     lines.sort_unstable();
     let mut out = Vec::new();
@@ -1305,13 +1319,112 @@ fn appear_effects(view: &ViewState, changed: &HashSet<usize>) -> Vec<(usize, usi
             .copied()
             .unwrap_or(view.rows.len());
         let height = row1.saturating_sub(row0).max(1);
+        // The old block's rendered rows: the mask compares rendered text
+        // against rendered text, so markup is stripped on both sides and
+        // the inserted ranges are display columns directly.
+        let old_block: String = old_lines
+            .get(start..=end.min(old_lines.len().saturating_sub(1)))
+            .map(|lines| lines.join("\n"))
+            .unwrap_or_default();
+        let old_rows = if old_block.trim().is_empty() {
+            Vec::new()
+        } else {
+            let old_source = Source::from_content(path.to_path_buf(), old_block);
+            ViewState::render(&old_source, view.width.max(1) as u16, highlighter).rows
+        };
+        let mask = appear_mask(view, row0, height, &old_rows);
         out.push((
             row0,
             height,
-            crate::effects::appear_effect(out.len() as u32 * 60),
+            crate::effects::appear_effect(mask, out.len() as u32 * 60),
         ));
     }
     out
+}
+
+/// The display-column mask of a changed block's new characters: each
+/// aligned display row is char-diffed against its old counterpart — the
+/// inserted ranges are the cells that materialize. Rows with no old
+/// counterpart (the block grew) mask the whole row.
+fn appear_mask(
+    view: &ViewState,
+    row0: usize,
+    height: usize,
+    old_rows: &[Vec<crate::highlight::Span>],
+) -> Vec<Vec<(u16, u16)>> {
+    (0..height)
+        .map(|i| {
+            let new_text: String = view.rows[row0 + i]
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect();
+            match old_rows.get(i) {
+                Some(old_row) => {
+                    let old_text: String =
+                        old_row.iter().map(|s| s.text.as_str()).collect();
+                    inserted_columns(&old_text, &new_text)
+                }
+                None => vec![(0, unicode_width::UnicodeWidthStr::width(new_text.as_str()) as u16)],
+            }
+        })
+        .collect()
+}
+
+/// The display-column ranges of `new`'s characters that have no
+/// counterpart in `old` (an LCS backtrace: matched characters advance
+/// both, old-only characters are deletions to skip, new-only characters
+/// form the inserted runs). Ranges are char indices converted to display
+/// columns, so CJK never misaligns the mask.
+fn inserted_columns(old: &str, new: &str) -> Vec<(u16, u16)> {
+    use unicode_width::UnicodeWidthChar;
+    let o: Vec<char> = old.chars().collect();
+    let n: Vec<char> = new.chars().collect();
+    if o.is_empty() {
+        return vec![(0, unicode_width::UnicodeWidthStr::width(new) as u16)];
+    }
+    // LCS lengths (classic DP, reversed scan for the backtrace).
+    let mut dp = vec![vec![0usize; n.len() + 1]; o.len() + 1];
+    for i in (0..o.len()).rev() {
+        for j in (0..n.len()).rev() {
+            dp[i][j] = if o[i] == n[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < o.len() && j < n.len() {
+        if o[i] == n[j] {
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1; // an old-only char: a deletion, nothing to reveal
+        } else {
+            let start = j;
+            // Consume the run of new-only chars (up to the next match).
+            while j < n.len() && (i >= o.len() || o[i] != n[j]) {
+                j += 1;
+            }
+            ranges.push((start, j));
+        }
+    }
+    if j < n.len() {
+        ranges.push((j, n.len())); // trailing insertions
+    }
+    // Char indices → display columns (CJK is double-width).
+    let col_of = |idx: usize| -> u16 {
+        new.chars()
+            .take(idx)
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(1) as u16)
+            .sum()
+    };
+    ranges
+        .into_iter()
+        .filter(|(s, e)| s < e)
+        .map(|(s, e)| (col_of(s), col_of(e)))
+        .collect()
 }
 
 /// Start the landing pulse only after one complete terminal paint of the
@@ -1973,8 +2086,11 @@ fn mark_view_dirty(app: &mut App) {
 /// render must wrap at exactly the width the pane displays, or the
 /// source-line mapping drifts by a couple of columns. Both call sites
 /// (startup and resize) go through this so they can never disagree.
-pub(crate) fn view_render_width(terminal_width: u16) -> u16 {
-    terminal_width.saturating_sub(2).saturating_sub(1).saturating_sub(2)
+pub(crate) fn view_render_width(terminal_width: u16, border: u16) -> u16 {
+    terminal_width
+        .saturating_sub(2) // text column pads
+        .saturating_sub(1) // the page's left margin
+        .saturating_sub(border * 2) // the frame's two sides (1 or 2 cells thick)
 }
 
 /// Re-render at the current terminal width, preserving the cursor fraction.
@@ -2659,23 +2775,22 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         }
         // The scatter effects live on the text column (view-relative
         // rows mapped through the current scroll offset); finished
-        // effects drop themselves.
-        let text_x = frame.x + 2;
-        let text_w = frame.width.saturating_sub(4);
+        // effects drop themselves. The frame may be two cells thick
+        // while browsing the past — the text column moves in with it.
+        let m = app.frame_border();
+        let text_x = frame.x + m + 1;
+        let text_w = frame.width.saturating_sub(m * 2 + 2);
         let offset = app.view.offset as isize;
-        let viewport = frame.height.saturating_sub(2) as isize;
+        let viewport = frame.height.saturating_sub(m * 2) as isize;
         let rect_for =
             |row: usize, height: usize| -> Option<Rect> {
-                let y = frame.y as isize + 1 + row as isize - offset;
-                if y + height as isize <= frame.y as isize + 1
-                    || y >= frame.y as isize + 1 + viewport
-                {
+                let top = frame.y as isize + m as isize;
+                let y = top + row as isize - offset;
+                if y + height as isize <= top || y >= top + viewport {
                     return None; // entirely off-screen
                 }
-                let y0 = y.max(frame.y as isize + 1) as u16;
-                let y1 = (y + height as isize)
-                    .min(frame.y as isize + 1 + viewport)
-                    .max(y0 as isize + 1) as u16;
+                let y0 = y.max(top) as u16;
+                let y1 = (y + height as isize).min(top + viewport).max(y0 as isize + 1) as u16;
                 Some(Rect {
                     x: text_x,
                     y: y0,
@@ -2738,7 +2853,10 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         width: area.width.saturating_sub(margin),
         height: area.height,
     };
-    let m = 1;
+    // The frame's border thickness: one cell at NOW, two while browsing
+    // the past (the time machine's heavier frame). History switches
+    // always re-render the view, so the width change is absorbed there.
+    let m = app.frame_border();
     let inner = Rect {
         x: frame.x + m,
         y: frame.y + m,
@@ -2883,6 +3001,35 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // visible window.
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, frame);
+    // The time machine's heavier frame draws a SECOND ring inside the
+    // block border (ratatui blocks only render one cell). Painted under
+    // the markers and the scrollbar like the outer ring; the gradient
+    // effect covers both rings.
+    if m == 2 {
+        let buf = f.buffer_mut();
+        let right = frame.x + frame.width - 2;
+        let bottom = frame.y + frame.height - 2;
+        for x in frame.x + 1..=right {
+            if let Some(c) = buf.cell_mut((x, frame.y + 1)) {
+                c.set_symbol(if x == frame.x + 1 { "┌" } else if x == right { "┐" } else { "─" });
+                c.set_style(border_style);
+            }
+            if let Some(c) = buf.cell_mut((x, bottom)) {
+                c.set_symbol(if x == frame.x + 1 { "└" } else if x == right { "┘" } else { "─" });
+                c.set_style(border_style);
+            }
+        }
+        for y in frame.y + 2..bottom {
+            if let Some(c) = buf.cell_mut((frame.x + 1, y)) {
+                c.set_symbol("│");
+                c.set_style(border_style);
+            }
+            if let Some(c) = buf.cell_mut((right, y)) {
+                c.set_symbol("│");
+                c.set_style(border_style);
+            }
+        }
+    }
     // The marker column rides the frame's left border: `>` on the cursor
     // row, `▌` on marked rows, the border's `│` everywhere else. Written
     // over the border cells after the frame, so a marker replaces the
@@ -4017,7 +4164,7 @@ mod history_animation_tests {
     }
 
     #[test]
-    fn changed_blocks_become_staggered_coalesce_effects() {
+    fn changed_blocks_become_staggered_scatter_effects() {
         // Contiguous changed lines merge into one scatter block; isolated
         // lines stand alone. The rects come from the view's source-line
         // mapping, so wrapped/merged rows are covered as one block.
@@ -4025,10 +4172,26 @@ mod history_animation_tests {
         let source = Source::from_content("doc.md".into(), "a\n\nb\n\nc\n\nd\n\ne\n\nf\n".into());
         let view = ViewState::render(&source, 60, &highlight);
         let changed = HashSet::from([0usize, 1, 4]);
-        let fx = appear_effects(&view, &changed);
+        let old_lines: Vec<String> =
+            vec!["x".into(), "".into(), "b".into(), "".into(), "e".into(), "".into()];
+        let fx = appear_effects(&view, &changed, &old_lines, &highlight, Path::new("doc.md"));
         assert_eq!(fx.len(), 2, "lines 0-1 merge into one block");
         assert_eq!((fx[0].0, fx[0].1), (0, 2), "block 1 covers rows 0-1");
         assert_eq!(fx[1].0, view.source_starts[4], "block 2 starts at line 4's row");
         assert_eq!(fx[1].1, 1, "block 2 is one row tall");
+    }
+
+    #[test]
+    fn inserted_columns_mark_only_the_new_characters() {
+        // A mid-line insertion: only "brave " is new.
+        assert_eq!(inserted_columns("hello world", "hello brave world"), vec![(6, 12)]);
+        // Nothing new: no mask at all.
+        assert_eq!(inserted_columns("same", "same"), Vec::<(u16, u16)>::new());
+        // Empty old text: everything is new.
+        assert_eq!(inserted_columns("", "abc"), vec![(0, 3)]);
+        // A deletion alone reveals nothing (the shrink is the ghost's job).
+        assert_eq!(inserted_columns("abc", "ac"), Vec::<(u16, u16)>::new());
+        // CJK: one inserted double-width character spans two columns.
+        assert_eq!(inserted_columns("abc", "a日c"), vec![(1, 3)]);
     }
 }

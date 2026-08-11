@@ -248,7 +248,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     let file_comments: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
     let mut view = render_view_with_cards(
         &app.source,
-        view_render_width(w),
+        view_render_width(w, app.frame_border()),
         &app.highlight,
         &file_comments,
     );
