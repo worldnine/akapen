@@ -130,6 +130,16 @@ pub(crate) struct App {
     /// expires. Rendered on the message row only while the toast is the
     /// top message (a prompt suppresses it).
     pub(crate) toast_fx: Option<tachyonfx::Effect>,
+    /// Scatter-in effects for the blocks that appeared in the selected
+    /// history revision: `(first display row, height, effect)` in
+    /// view-relative coordinates, mapped to the screen at draw time.
+    /// Rebuilt on every history render; cleared when the view is
+    /// re-rendered (the row mapping would be stale).
+    pub(crate) appear_fx: Vec<(usize, usize, tachyonfx::Effect)>,
+    /// Scatter-out effects for the deletion ghosts (same view-relative
+    /// rect shape as [`App::appear_fx`]), timed to complete exactly when
+    /// the ghosts expire.
+    pub(crate) ghost_fx: Vec<(usize, usize, tachyonfx::Effect)>,
     /// When the last frame was drawn: the real per-frame delta that
     /// advances the effects' timers.
     pub(crate) last_draw: Option<Instant>,
@@ -312,6 +322,8 @@ impl App {
             history_frame_flash_until: None,
             time_machine_fx,
             toast_fx: None,
+            appear_fx: Vec::new(),
+            ghost_fx: Vec::new(),
             last_draw: None,
             history_frame_flash_pending: false,
             overlay: None,

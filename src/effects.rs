@@ -73,3 +73,20 @@ pub(crate) fn toast_effect() -> Effect {
     effect.filter(CellFilter::BgColor(Color::Black));
     effect
 }
+
+/// Scatter-in for blocks that appeared in the selected revision: each
+/// cell of the block materializes in a stable random order over ~450 ms
+/// (the reverse of [`dissolve`] — the same random thresholds, mirrored
+/// time), so the text visibly "grows" cell by cell while the block's
+/// glow background stays solid. `stagger_ms` cascades later blocks.
+pub(crate) fn appear_effect(stagger_ms: u32) -> Effect {
+    fx::delay(stagger_ms, fx::coalesce((450, Interpolation::QuadOut)))
+}
+
+/// Scatter-out for the deletion ghosts: the ghost stays whole for 150 ms
+/// (long enough to read), then its cells dissolve to blank in a stable
+/// random order over 500 ms — completing exactly when the 650 ms ghost
+/// lifetime collapses the layout, so the block "shrinks" cell by cell.
+pub(crate) fn ghost_effect() -> Effect {
+    fx::delay(150, fx::dissolve((500, Interpolation::QuadIn)))
+}

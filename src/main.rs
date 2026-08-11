@@ -1044,6 +1044,11 @@ fn expire_pending_chord(app: &mut App) {
 /// keep the cursor line at the same screen row it was on — inserting a card
 /// shifts the rows below, so without this the cursor jumps.
 pub(crate) fn replace_view_preserving_cursor(app: &mut App) {
+    // The view is being rebuilt: the scatter effects' view-relative rows
+    // would map to the wrong cells now, so they drop (their own timers
+    // would have expired within ~650 ms anyway).
+    app.appear_fx.clear();
+    app.ghost_fx.clear();
     let line = app.view.cursor;
     let screen = app.view.cursor_row() as isize - app.view.offset as isize;
     // Current file's cards, minus the one being re-edited (hidden under
@@ -1219,7 +1224,7 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
         history::block_transition(&old_lines, &new_source.lines);
     app.source = new_source;
     refresh_comparison_marks(app);
-    app.history_changed = changed_blocks;
+    app.history_changed = changed_blocks.clone();
     app.history_changed_until = Some(Instant::now() + Duration::from_millis(450));
     app.history_ghost_until = None;
     app.spans = app
@@ -1233,13 +1238,21 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
     let file_comments: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
     let mut view = render_current_view(app, &file_comments);
     if animate && !source_mode && !deleted_blocks.is_empty() {
-        insert_history_ghosts(
+        let ghost_rows = insert_history_ghosts(
             &mut view,
             &deleted_blocks,
             &app.highlight,
             &path,
         );
         app.history_ghost_until = Some(Instant::now() + Duration::from_millis(650));
+        // The scatter-out effects ride the ghost rows (view-relative);
+        // they complete exactly when the ghosts expire above.
+        if app.config.fx {
+            app.ghost_fx = ghost_rows
+                .into_iter()
+                .map(|(row, height)| (row, height, crate::effects::ghost_effect()))
+                .collect();
+        }
     }
     view.goto_source_line(anchor);
     if source_mode {
@@ -1258,8 +1271,47 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
         view.offset = target.clamp(0, max_offset.max(0)) as usize;
         app.view = view;
     }
+    // Scatter-in effects for the blocks that appeared in this revision
+    // (view mode, `--fx` on): one coalesce per contiguous changed block,
+    // cascading down the document.
+    if app.config.fx && !source_mode {
+        app.appear_fx = appear_effects(&app.view, &changed_blocks);
+    }
     app.history_frame_flash_pending = true;
     true
+}
+
+/// The display-row rects of the changed blocks, as coalesce effects:
+/// contiguous runs of changed source lines become one `(first row,
+/// height)` group (rows from the view's source-line mapping), each with
+/// a scatter-in effect staggered after the previous block.
+fn appear_effects(view: &ViewState, changed: &HashSet<usize>) -> Vec<(usize, usize, tachyonfx::Effect)> {
+    let mut lines: Vec<usize> = changed.iter().copied().collect();
+    lines.sort_unstable();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let start = lines[i];
+        let mut end = start;
+        while i + 1 < lines.len() && lines[i + 1] == end + 1 {
+            end += 1;
+            i += 1;
+        }
+        i += 1;
+        let row0 = view.source_starts.get(start).copied().unwrap_or(0);
+        let row1 = view
+            .source_starts
+            .get(end + 1)
+            .copied()
+            .unwrap_or(view.rows.len());
+        let height = row1.saturating_sub(row0).max(1);
+        out.push((
+            row0,
+            height,
+            crate::effects::appear_effect(out.len() as u32 * 60),
+        ));
+    }
+    out
 }
 
 /// Start the landing pulse only after one complete terminal paint of the
@@ -1289,7 +1341,11 @@ fn insert_history_ghosts(
     deleted: &[history::DeletedBlock],
     highlighter: &Highlighter,
     path: &Path,
-) {
+) -> Vec<(usize, usize)> {
+    // (insert row, row count) per ghost, in processing order (descending
+    // anchors). Blocks inserted LATER sit ABOVE and shift earlier rows
+    // down; the caller-facing rects are fixed up at the end.
+    let mut rects: Vec<(usize, usize)> = Vec::new();
     let mut ordered = deleted.to_vec();
     ordered.sort_by_key(|block| std::cmp::Reverse(block.anchor));
     for block in ordered {
@@ -1304,6 +1360,7 @@ fn insert_history_ghosts(
             view.source_starts[block.anchor]
         };
         let count = ghost.rows.len();
+        rects.push((insert_at, count));
         for start in &mut view.source_starts {
             if *start >= insert_at {
                 *start += count;
@@ -1321,6 +1378,14 @@ fn insert_history_ghosts(
             view.card_rows.insert(insert_at + offset, true);
         }
     }
+    // Later (smaller-anchor) ghosts are inserted above and push this
+    // ghost down by their row counts.
+    let mut shift = 0usize;
+    for (row, count) in rects.iter_mut().rev() {
+        *row += shift;
+        shift += *count;
+    }
+    rects
 }
 
 fn expire_history_ghosts(app: &mut App) {
@@ -2572,16 +2637,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     draw_message(f, app);
     // tachyonfx effects repaint after the static UI: the time-machine
     // frame (view mode, browsing the past, `--fx` on, outside the
-    // render-complete flash) and the toast fade on the message row
-    // (only while the toast is the top message).
-    if app.config.fx
-        && app.view_active()
-        && app.is_historical()
-        && app
-            .history_frame_flash_until
-            .is_none_or(|until| Instant::now() >= until)
-        && let Some(effect) = app.time_machine_fx.as_mut()
-    {
+    // render-complete flash), the appear/ghost scatter effects of the
+    // last history render, and the toast fade on the message row (only
+    // while the toast is the top message).
+    if app.config.fx && app.view_active() {
         // Same geometry draw_view builds: one column off the left edge,
         // the body's full height.
         let frame = Rect {
@@ -2590,7 +2649,52 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
             width: body.width.saturating_sub(1),
             height: body.height,
         };
-        f.render_effect(effect, frame, last_tick);
+        if app.is_historical()
+            && app
+                .history_frame_flash_until
+                .is_none_or(|until| Instant::now() >= until)
+            && let Some(effect) = app.time_machine_fx.as_mut()
+        {
+            f.render_effect(effect, frame, last_tick);
+        }
+        // The scatter effects live on the text column (view-relative
+        // rows mapped through the current scroll offset); finished
+        // effects drop themselves.
+        let text_x = frame.x + 2;
+        let text_w = frame.width.saturating_sub(4);
+        let offset = app.view.offset as isize;
+        let viewport = frame.height.saturating_sub(2) as isize;
+        let rect_for =
+            |row: usize, height: usize| -> Option<Rect> {
+                let y = frame.y as isize + 1 + row as isize - offset;
+                if y + height as isize <= frame.y as isize + 1
+                    || y >= frame.y as isize + 1 + viewport
+                {
+                    return None; // entirely off-screen
+                }
+                let y0 = y.max(frame.y as isize + 1) as u16;
+                let y1 = (y + height as isize)
+                    .min(frame.y as isize + 1 + viewport)
+                    .max(y0 as isize + 1) as u16;
+                Some(Rect {
+                    x: text_x,
+                    y: y0,
+                    width: text_w,
+                    height: (y1 - y0).max(1),
+                })
+            };
+        app.appear_fx.retain(|(_, _, fx)| !fx.done());
+        for (row, height, effect) in app.appear_fx.iter_mut() {
+            if let Some(rect) = rect_for(*row, *height) {
+                f.render_effect(effect, rect, last_tick);
+            }
+        }
+        app.ghost_fx.retain(|(_, _, fx)| !fx.done());
+        for (row, height, effect) in app.ghost_fx.iter_mut() {
+            if let Some(rect) = rect_for(*row, *height) {
+                f.render_effect(effect, rect, last_tick);
+            }
+        }
     }
     if app.status.is_some()
         && prompt_message(app).is_none()
@@ -3890,7 +3994,7 @@ mod history_animation_tests {
         let mut view = ViewState::render(&source, 60, &highlight);
         let original_rows = view.rows.len();
         let original_start = view.source_starts[0];
-        insert_history_ghosts(
+        let rects = insert_history_ghosts(
             &mut view,
             &[history::DeletedBlock {
                 anchor: 0,
@@ -3907,5 +4011,24 @@ mod history_animation_tests {
                 .flatten()
                 .all(|span| span.style.add_modifier.contains(Modifier::DIM))
         );
+        // The ghost's view-relative rect: inserted at the anchor's row,
+        // exactly as tall as the rows it added (the dissolve target).
+        assert_eq!(rects, vec![(0, view.rows.len() - original_rows)]);
+    }
+
+    #[test]
+    fn changed_blocks_become_staggered_coalesce_effects() {
+        // Contiguous changed lines merge into one scatter block; isolated
+        // lines stand alone. The rects come from the view's source-line
+        // mapping, so wrapped/merged rows are covered as one block.
+        let highlight = Highlighter::new(None, false);
+        let source = Source::from_content("doc.md".into(), "a\n\nb\n\nc\n\nd\n\ne\n\nf\n".into());
+        let view = ViewState::render(&source, 60, &highlight);
+        let changed = HashSet::from([0usize, 1, 4]);
+        let fx = appear_effects(&view, &changed);
+        assert_eq!(fx.len(), 2, "lines 0-1 merge into one block");
+        assert_eq!((fx[0].0, fx[0].1), (0, 2), "block 1 covers rows 0-1");
+        assert_eq!(fx[1].0, view.source_starts[4], "block 2 starts at line 4's row");
+        assert_eq!(fx[1].1, 1, "block 2 is one row tall");
     }
 }
