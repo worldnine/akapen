@@ -127,7 +127,7 @@ pub(crate) enum TitleHit {
 /// always lands exactly on what is drawn.
 #[derive(Debug)]
 pub(crate) struct TitleMetrics {
-    /// The pending/review/history badge (⚡ / ● N / revision) and its width.
+    /// The pending/review/history badge (⚡ / ! N / revision) and its width.
     pub(crate) change: String,
     pub(crate) change_w: u16,
     /// The truncated path text (click → copy full path).
@@ -375,13 +375,15 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The number of unreviewed blocks or lines. The pending ⚡ badge takes
-/// precedence in the caller.
+/// precedence in the caller. `!` is the classic "needs attention" mark:
+/// a count badge, not a bullet. Same width as the old `●` badge, so the
+/// path budget in [`title_metrics`] is untouched.
 fn scoped_change_badge(app: &App) -> String {
     let count = app.file_review_count(app.current_file_index);
     if count == 0 {
         String::new()
     } else {
-        format!(" ● {count} ")
+        format!(" ! {count} ")
     }
 }
 
@@ -579,10 +581,10 @@ mod title_tests {
 
     #[test]
     fn review_badge_is_one_neutral_span() {
-        let spans = change_badge_spans(" ● 3 ");
+        let spans = change_badge_spans(" ! 3 ");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].style.fg, Some(Color::Yellow));
-        assert_eq!(spans[0].content.as_ref(), " ● 3 ");
+        assert_eq!(spans[0].content.as_ref(), " ! 3 ");
     }
 
     #[test]

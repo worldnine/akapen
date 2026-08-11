@@ -87,7 +87,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `q` | quit (confirms if there are unsent comments) |
 | `Esc` | cancel input / clear selection (never switches modes). With `--esc-quit` enabled it also quits like `q` — but only when nothing is pending (confirmation still guards unsent comments, and the prompt advertises `Esc/q to quit`) |
 
-Mouse: wheel scrolls the view without moving the cursor; click moves the cursor; drag selects a line range; click the title-bar path to copy the full path; click `1/3 files` or the `● N` badge to open the overlays.
+Mouse: wheel scrolls the view without moving the cursor; click moves the cursor; drag selects a line range; click the title-bar path to copy the full path; click `1/3 files` or the `▌ N` counter to open the overlays.
 
 ## Document time machine and review
 
@@ -95,7 +95,7 @@ akapen treats every version as a complete document. Git commits and bounded LOCA
 
 1. Read and comment on the rendered document or its source.
 2. When an agent edits the file, akapen shows `⚡`. Press `r` to load the new complete version.
-3. The title shows `● N`; green `▌` marks present/changed locations and red `▀` marks deletion positions. Use `n` / `N` to visit them.
+3. The title shows `! N`; green `▌` marks present/changed locations and red `▀` marks deletion positions. Use `n` / `N` to visit them.
 4. Repeated reloads accumulate review marks without moving the baseline. Press `a` at NOW to acknowledge them, or press `a` on a historical LOCAL/COMMIT generation to choose that generation as the baseline.
 
 `Left` / `Right` move through the unified timeline while keeping Markdown rendered. The footer labels each generation as `NOW`, `LOCAL`, or `COMMIT`; holding an arrow scrubs labels immediately and renders once input settles. Git commits whose content matches a LOCAL snapshot are shown once as COMMIT.
