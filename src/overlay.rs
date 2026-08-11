@@ -521,8 +521,9 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
             ""
         };
         let review_count = app.file_review_count(i);
+        // Unreviewed spots: the same `! N` the title bar shows.
         let review_mark = if review_count > 0 {
-            format!(" ● {review_count}")
+            format!(" ! {review_count}")
         } else {
             String::new()
         };
