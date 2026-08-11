@@ -2502,6 +2502,9 @@ use crate::comment::Selection;
         // above the footer — the classic message-line position): the
         // footer keeps the badge + hints, and nothing scrolls.
         let (mut app, _dir) = make_session();
+        // The tachyonfx fade (from black) is a separate concern; the
+        // steady-state colors are tested with it off.
+        app.config.fx = false;
         app.flash("hello toast");
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -2536,6 +2539,7 @@ use crate::comment::Selection;
         // Can't-do feedback: a red toast at the bottom (the BEL beep
         // itself is emitted to stdout at flash time).
         let (mut app, _dir) = make_session();
+        app.config.fx = false; // steady-state colors, no fade
         app.flash_err("cannot do that");
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -2550,6 +2554,24 @@ use crate::comment::Selection;
             .iter()
             .any(|c| c.style().fg == Some(Color::Red));
         assert!(red, "error toasts are red");
+    }
+
+    #[test]
+    fn fx_effects_are_created_only_with_the_fx_flag() {
+        // `--fx` (default) arms the time-machine frame at startup and a
+        // fade effect for every toast; `--no-fx` leaves both uncreated.
+        let (app, _dir) = make_session();
+        assert!(
+            app.time_machine_fx.is_some(),
+            "the time-machine frame effect exists with --fx"
+        );
+        // A fresh App built with `--no-fx` from the start has no frame
+        // effect, and its toasts never fade.
+        let (mut app, _dir) = make_session();
+        app.config.fx = false;
+        app.time_machine_fx = None;
+        app.flash("hello");
+        assert!(app.toast_fx.is_none(), "--no-fx: no toast fade either");
     }
 
     #[test]

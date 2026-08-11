@@ -13,6 +13,7 @@ mod app;
 mod chrome;
 mod comment;
 mod config;
+mod effects;
 mod export;
 mod highlight;
 mod history;
@@ -44,6 +45,7 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use tachyonfx::EffectRenderer;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::*;
@@ -57,8 +59,7 @@ use crate::reload::*;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
 use crate::view::{
-    is_table_delimiter_line, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
-    time_machine_color_at, time_machine_palette, time_machine_rotation_fraction, GutterCell,
+    is_table_delimiter_line, scroll_offset_at, scroll_offset_drag, scroll_thumb, GutterCell,
     ViewState,
 };
 
@@ -483,6 +484,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
             .is_some_and(|(_, at, _)| at.elapsed() > STATUS_SECS)
         {
             app.status = None;
+            app.toast_fx = None;
         }
         if !app.running {
             return Ok(());
@@ -2531,6 +2533,13 @@ fn move_cursor(app: &mut App, delta: isize, height: u16) {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn draw(f: &mut Frame, app: &mut App) {
+    // The real per-frame delta advances the tachyonfx effect timers.
+    let now = Instant::now();
+    let last_tick = app
+        .last_draw
+        .map(|t| now.saturating_duration_since(t))
+        .unwrap_or(Duration::from_millis(16));
+    app.last_draw = Some(now);
     let layout = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -2561,6 +2570,40 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     // transient toast: an action that demands the user must not be
     // hidden behind a message that will expire on its own.
     draw_message(f, app);
+    // tachyonfx effects repaint after the static UI: the time-machine
+    // frame (view mode, browsing the past, `--fx` on, outside the
+    // render-complete flash) and the toast fade on the message row
+    // (only while the toast is the top message).
+    if app.config.fx
+        && app.view_active()
+        && app.is_historical()
+        && app
+            .history_frame_flash_until
+            .is_none_or(|until| Instant::now() >= until)
+        && let Some(effect) = app.time_machine_fx.as_mut()
+    {
+        // Same geometry draw_view builds: one column off the left edge,
+        // the body's full height.
+        let frame = Rect {
+            x: body.x + 1,
+            y: body.y,
+            width: body.width.saturating_sub(1),
+            height: body.height,
+        };
+        f.render_effect(effect, frame, last_tick);
+    }
+    if app.status.is_some()
+        && prompt_message(app).is_none()
+        && let Some(effect) = app.toast_fx.as_mut()
+    {
+        let row = Rect {
+            x: 0,
+            y: f.area().height.saturating_sub(2),
+            width: f.area().width,
+            height: 1,
+        };
+        f.render_effect(effect, row, last_tick);
+    }
 }
 
 
@@ -2736,69 +2779,18 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // visible window.
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, frame);
-    // The time-machine frame (`--fx`, the default): while browsing the
-    // past, the border's purple→cyan gradient rotates around the page —
-    // the title's state slot already names the generation, the frame
-    // makes "viewing the past" unmissable. Painted over the block's
-    // border cells but UNDER the marker column, the scrollbar thumb, and
-    // the message row, so those keep priority; the brief render-complete
-    // flash (bold) suspends the animation for its pulse. `--no-fx` falls
-    // back to the static history border color.
-    let spin = app.config.fx && app.is_historical() && !frame_flashing;
-    let fw = frame.width as usize;
-    let fh = frame.height as usize;
-    let (palette, rot) = if spin {
-        (
-            time_machine_palette(app.ui_light),
-            time_machine_rotation_fraction(app.fx_clock),
-        )
-    } else {
-        (&[] as &[Color], 0.0)
-    };
-    let spin_color =
-        |perim: usize| time_machine_color_at(palette, perim, fw * 2 + fh * 2 - 4, rot);
     // The marker column rides the frame's left border: `>` on the cursor
     // row, `▌` on marked rows, the border's `│` everywhere else. Written
     // over the border cells after the frame, so a marker replaces the
     // border glyph in place; the selection background extends over it,
-    // running the cursor/selection band to the page edge.
+    // running the cursor/selection band to the page edge. (The
+    // time-machine gradient is a tachyonfx effect rendered after this
+    // pass — it repaints only border-glyph cells, so markers survive.)
     let buf = f.buffer_mut();
-    if spin {
-        // Top and bottom rows (corners included), then the side columns.
-        for x in 0..fw {
-            if let Some(c) = buf.cell_mut((frame.x + x as u16, frame.y)) {
-                c.set_fg(spin_color(perimeter_index(x, 0, fw, fh)));
-            }
-            if let Some(c) = buf.cell_mut((frame.x + x as u16, frame.y + fh as u16 - 1)) {
-                c.set_fg(spin_color(perimeter_index(x, fh - 1, fw, fh)));
-            }
-        }
-        for y in 1..fh.saturating_sub(1) {
-            if let Some(c) = buf.cell_mut((frame.x + fw as u16 - 1, frame.y + y as u16)) {
-                c.set_fg(spin_color(perimeter_index(fw - 1, y, fw, fh)));
-            }
-            if let Some(c) = buf.cell_mut((frame.x, frame.y + y as u16)) {
-                c.set_fg(spin_color(perimeter_index(0, y, fw, fh)));
-            }
-        }
-    }
     for (i, cell) in gutter.iter().take(inner.height as usize).enumerate() {
         if let Some(c) = buf.cell_mut((frame.x, inner.y + i as u16)) {
             c.set_symbol(cell.glyph);
-            let style = if spin && cell.glyph == "│" {
-                // The left border's plain cells join the rotating
-                // gradient; markers (▌/▀/>) keep their own colors. The
-                // row's background (the selection band) is preserved.
-                let bg = cell.style.bg;
-                let mut s = Style::default().fg(spin_color(perimeter_index(0, i, fw, fh)));
-                if let Some(bg) = bg {
-                    s = s.bg(bg);
-                }
-                s
-            } else {
-                cell.style
-            };
-            c.set_style(style);
+            c.set_style(cell.style);
         }
     }
     // The scrollbar sits one column inside the frame's right border: a

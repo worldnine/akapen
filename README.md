@@ -52,7 +52,7 @@ akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>]
 | `--theme <name>` | two-face theme name (default `Catppuccin Mocha`; `Solarized (light)` when light is detected) or a path to a `.tmTheme` file |
 | `--ime <off\|ascii\|jp>` | macOS input-source control around the comment composer (default `ascii`) |
 | `--light` / `--dark` | force the UI palette (default: auto-detect the terminal background via OSC 11) |
-| `--no-fx` | disable the animated time-machine frame (the rotating purple→cyan gradient border while browsing the past; the static history border color stays) |
+| `--no-fx` | disable the tachyonfx animations: the rotating purple→cyan gradient frame while browsing the past, and the toast fade-in/out (the static history border color and instant toasts stay) |
 | `--callback <cmd>` | shell command spawned on exit (e.g. return to a file picker) |
 | `--esc-quit <auto\|always\|never>` | whether `Esc` may quit (default `auto`: only with `--callback`; `always` = unconditionally, `never` = Esc stays a pure cancel) |
 
