@@ -670,20 +670,18 @@ impl App {
     }
 
     /// View-mode viewport height in rows — must match `draw_view`'s
-    /// `inner.height` (title bar + the permanent message line + footer +
-    /// the frame's two borders take the other rows), or per-frame
-    /// `keep_cursor_visible` re-shoves the offset and wheel scroll
-    /// stalls. View mode always draws the frame.
+    /// `inner.height` (title bar + footer + the frame's two borders take
+    /// the other rows), or per-frame `keep_cursor_visible` re-shoves the
+    /// offset and wheel scroll stalls. View mode always draws the frame.
     pub(crate) fn view_viewport_rows(&self) -> usize {
-        self.terminal_height().saturating_sub(5).max(1) as usize
+        self.terminal_height().saturating_sub(4).max(1) as usize
     }
 
     /// Source-mode viewport height — must match `draw_source`'s
-    /// `inner.height` (title bar + the permanent message line + footer
-    /// only; source mode never draws a frame, keeping every column for
-    /// the source).
+    /// `inner.height` (title bar + footer only; source mode never draws
+    /// a frame, keeping every column for the source).
     pub(crate) fn source_viewport_rows(&self) -> usize {
-        self.terminal_height().saturating_sub(3).max(1) as usize
+        self.terminal_height().saturating_sub(2).max(1) as usize
     }
 
     /// Is the view pane the one on screen (view mode, or the composer

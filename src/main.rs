@@ -2528,18 +2528,12 @@ fn move_cursor(app: &mut App, delta: isize, height: u16) {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn draw(f: &mut Frame, app: &mut App) {
-    // The permanent message line sits between the body and the footer:
-    // prompts and toasts render there, so the body (and the view mode's
-    // frame) always closes cleanly — nothing floats over the border rows
-    // anymore. The line stays even when empty, so the layout never
-    // shifts.
     let layout = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(1),
     ]);
-    let [title, body, message, footer] = layout.areas(f.area());
+    let [title, body, footer] = layout.areas(f.area());
     draw_title(f, title, app);
     match app.mode {
         Mode::Input => {
@@ -2556,11 +2550,14 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     if app.overlay.is_some() {
         draw_overlay(f, app);
     }
-    // The message line floats above everything (overlays included): a
-    // notification never displaces content. The persistent prompt wins
-    // over the transient toast — an action that demands the user must
-    // not be hidden behind a message that will expire on its own.
-    draw_message(f, message, app);
+    // The message row floats above everything (overlays included): a
+    // notification never displaces content. It renders on the row just
+    // above the footer — the frame's bottom border in view mode (the
+    // corners stay), the last content row in source mode — so the
+    // layout never shifts. The persistent prompt wins over the
+    // transient toast: an action that demands the user must not be
+    // hidden behind a message that will expire on its own.
+    draw_message(f, app);
 }
 
 

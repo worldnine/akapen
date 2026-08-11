@@ -1,5 +1,5 @@
 //! The title/footer chrome: path truncation, the title-bar metrics and
-//! drawer, footer hints, and the permanent message line (prompt/toast).
+//! drawer, footer hints, and the message-row rendering (prompt/toast).
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -518,16 +518,15 @@ pub(crate) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     };
     spans.insert(0, Span::styled(badge, badge_style));
     // Prompts (quit/edit confirmations, file-change) and transient toasts
-    // live on the dedicated message line directly above this strip (see
+    // render on the message row directly above this strip (see
     // draw_message) — never inside the footer, so the hints never get
     // displaced.
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// A centered banner inside `area` (the message line): black background,
-/// bold, one row tall. Clear erases only the banner's own rect — the
-/// layout never shifts, nothing scrolls. Errors render red (info stays
-/// yellow).
+/// A centered banner inside `area` at `row`: black background, bold,
+/// one row tall. Clear erases only the banner's own rect — the layout
+/// never shifts, nothing scrolls. Errors render red (info stays yellow).
 pub(crate) fn draw_banner(f: &mut Frame, area: Rect, row: u16, msg: &str, is_error: bool) {
     use ratatui::widgets::Clear;
     let w = UnicodeWidthStr::width(msg) as u16 + 2;
@@ -574,19 +573,23 @@ pub(crate) fn prompt_message(app: &App) -> Option<Cow<'static, str>> {
     }
 }
 
-/// The one permanent message line (the layout row above the footer —
-/// vim's message-line position), shared by the persistent prompt and the
-/// transient toast. The prompt demands an action and must not be missed,
-/// so it outranks the toast: a confirmation stays until answered, while
-/// a toast would expire on its own. Toasts keep their color semantics
-/// (yellow = info, red = an operation that could not be done — flash_err
-/// also beeped). The line renders empty when neither is pending, so the
-/// layout never shifts.
-pub(crate) fn draw_message(f: &mut Frame, area: Rect, app: &App) {
+/// The one message row, at the bottom edge — the row just above the
+/// footer (vim's message-line position), shared by the persistent prompt
+/// and the transient toast. The prompt demands an action and must not be
+/// missed, so it outranks the toast: a confirmation stays until
+/// answered, while a toast would expire on its own. In view mode this
+/// row is the frame's bottom border (the corners stay, so the message
+/// reads as a status strip built into the page edge); in source mode it
+/// floats over the last content row. Either way the row exists in the
+/// layout already — no space is reserved, nothing shifts. Toasts keep
+/// their color semantics (yellow = info, red = an operation that could
+/// not be done — flash_err also beeped).
+pub(crate) fn draw_message(f: &mut Frame, app: &App) {
+    let row = f.area().height.saturating_sub(2);
     if let Some(msg) = prompt_message(app) {
-        draw_banner(f, area, 0, &msg, false);
+        draw_banner(f, f.area(), row, &msg, false);
     } else if let Some((msg, _, is_error)) = &app.status {
-        draw_banner(f, area, 0, msg, *is_error);
+        draw_banner(f, f.area(), row, msg, *is_error);
     }
 }
 

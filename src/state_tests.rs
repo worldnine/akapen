@@ -313,30 +313,29 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn view_viewport_rows_leave_one_row_for_the_message_line() {
-        // The message line is permanent (layout row between body and
-        // footer), so the viewport must shrink by one vs. the old
-        // title+footer-only math — it must match draw_view's inner.height
-        // (title + message line + footer + the frame's two borders), or
-        // keep_cursor_visible would fight the offset.
+    fn view_viewport_rows_match_the_frame_layout() {
+        // The message row reuses the frame's bottom border (view mode)
+        // or the last content row (source mode) — no dedicated row, so
+        // the viewport math stays the plain title+footer subtraction.
+        // It must match draw_view's inner.height, or keep_cursor_visible
+        // would fight the offset.
         let app = make_app(5, Mode::View);
         assert_eq!(
             app.view_viewport_rows() as u16,
-            app.terminal_height() - 5,
-            "frame's two borders + title + message line + footer"
+            app.terminal_height() - 4,
+            "frame's two borders + title + footer"
         );
     }
 
     #[test]
-    fn source_viewport_rows_leave_one_row_for_the_message_line() {
-        // Source mode never draws the frame, so only title + message
-        // line + footer are subtracted (must match draw_source's
-        // inner.height).
+    fn source_viewport_rows_match_the_frame_layout() {
+        // Source mode never draws the frame, so only title + footer are
+        // subtracted (must match draw_source's inner.height).
         let app = make_app(5, Mode::Source);
         assert_eq!(
             app.source_viewport_rows() as u16,
-            app.terminal_height() - 3,
-            "title + message line + footer"
+            app.terminal_height() - 2,
+            "title + footer"
         );
     }
 
@@ -2980,11 +2979,14 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn prompt_lives_on_the_message_line_above_the_footer() {
-        // The q-confirmation dialog renders on the permanent message line
-        // (one row above the footer — vim's message-line position), the
-        // same line as the toast: the footer keeps the badge + hints, and
-        // the title keeps its file-centric identity.
+    fn prompt_lives_on_the_message_row_above_the_footer() {
+        // The q-confirmation dialog renders on the bottom message row
+        // (the row just above the footer — vim's message-line position;
+        // the frame's bottom border in view mode, the last content row
+        // in source mode), the same row as the toast: the footer keeps
+        // the badge + hints, and the title keeps its file-centric
+        // identity. No row is reserved — the message borrows an existing
+        // layout row, so nothing ever shifts.
         let mut app = make_app(10, Mode::Source);
         app.comments.push(Comment {
             file_path: app.current_file_path().to_path_buf(),
@@ -3000,7 +3002,8 @@ use crate::comment::Selection;
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
-        // Rows in the 80×24 layout: title 0, body 1..21, message 22, footer 23.
+        // Rows in the 80×24 layout: title 0, body 1..22, footer 23 — the
+        // message renders on body's last row (22).
         let row_text = |row: usize| -> String {
             buf.content[row * 80..(row + 1) * 80]
                 .iter()
@@ -3009,7 +3012,7 @@ use crate::comment::Selection;
         };
         assert!(
             row_text(22).contains("unsent comments — q to quit"),
-            "prompt on the message line, one row above the footer"
+            "prompt on the message row, one row above the footer"
         );
         assert!(
             !row_text(0).contains("unsent comments"),
@@ -3023,9 +3026,9 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn prompt_outranks_the_toast_on_the_message_line() {
+    fn prompt_outranks_the_toast_on_the_message_row() {
         // A prompt demands an action and must not be missed: while one is
-        // pending, the message line shows it even if a toast is also
+        // pending, the message row shows it even if a toast is also
         // live — the toast would expire on its own, the prompt waits for
         // the user. Once the prompt is answered, the toast shows again.
         let mut app = make_app(10, Mode::Source);
