@@ -1342,45 +1342,100 @@ fn appear_effects(
     out
 }
 
-/// The display-column mask of a changed block's new characters: each
-/// aligned display row is char-diffed against its old counterpart — the
-/// inserted ranges are the cells that materialize. Rows with no old
-/// counterpart (the block grew) mask the whole row.
+/// The display-column mask of a changed block's new characters: the
+/// old and new blocks are diffed as WHOLE texts (newlines join the
+/// rows), so a wrap that shifted because of the edit never misaligns the
+/// comparison — the LCS anchors on the common characters wherever the
+/// line breaks fell. Inserted char ranges map back to display rows and
+/// columns; only those cells materialize.
 fn appear_mask(
     view: &ViewState,
     row0: usize,
     height: usize,
     old_rows: &[Vec<crate::highlight::Span>],
 ) -> Vec<Vec<(u16, u16)>> {
-    (0..height)
+    let new_rows: Vec<String> = (0..height)
         .map(|i| {
-            let new_text: String = view.rows[row0 + i]
+            view.rows[row0 + i]
                 .iter()
                 .map(|s| s.text.as_str())
-                .collect();
-            match old_rows.get(i) {
-                Some(old_row) => {
-                    let old_text: String =
-                        old_row.iter().map(|s| s.text.as_str()).collect();
-                    inserted_columns(&old_text, &new_text)
-                }
-                None => vec![(0, unicode_width::UnicodeWidthStr::width(new_text.as_str()) as u16)],
-            }
+                .collect()
         })
-        .collect()
+        .collect();
+    let new_block = new_rows.join("\n");
+    let old_block: String = old_rows
+        .iter()
+        .map(|row| row.iter().map(|s| s.text.as_str()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if old_block.is_empty() {
+        // Nothing to compare: every row is new, whole-row masks.
+        return new_rows
+            .iter()
+            .map(|t| vec![(0, unicode_width::UnicodeWidthStr::width(t.as_str()) as u16)])
+            .collect();
+    }
+    // Char offsets where each new row starts (the newline is the row
+    // separator; a char position at a boundary belongs to the row ABOVE
+    // and is clamped to that row's width).
+    let mut row_starts: Vec<usize> = Vec::with_capacity(new_rows.len() + 1);
+    let mut off = 0usize;
+    for t in &new_rows {
+        row_starts.push(off);
+        off += t.chars().count() + 1; // +1 for the joining '\n'
+    }
+    row_starts.push(off);
+    let mut mask: Vec<Vec<(u16, u16)>> = vec![Vec::new(); height];
+    for (s, e) in inserted_char_ranges(&old_block, &new_block) {
+        if s >= e {
+            continue;
+        }
+        // The rows the insertion spans: start at the row containing `s`,
+        // end at the row containing the char before `e`.
+        let mut row_s = row_starts.partition_point(|&p| p <= s).saturating_sub(1);
+        let mut row_e = row_starts
+            .partition_point(|&p| p < e)
+            .saturating_sub(1);
+        row_s = row_s.min(height - 1);
+        row_e = row_e.min(height - 1);
+        for r in row_s..=row_e {
+            let text = &new_rows[r];
+            let start = row_starts[r];
+            let end = row_starts[r] + text.chars().count(); // the row's own text
+            let col_of = |idx: usize| -> u16 {
+                text.chars()
+                    .take(idx.saturating_sub(start).min(text.chars().count()))
+                    .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) as u16)
+                    .sum()
+            };
+            let cs = if r == row_s {
+                col_of(s.min(end))
+            } else {
+                0
+            };
+            let ce = if r == row_e {
+                col_of(e.min(end))
+            } else {
+                unicode_width::UnicodeWidthStr::width(text.as_str()) as u16
+            };
+            if cs < ce {
+                mask[r].push((cs, ce));
+            }
+        }
+    }
+    mask
 }
 
-/// The display-column ranges of `new`'s characters that have no
-/// counterpart in `old` (an LCS backtrace: matched characters advance
-/// both, old-only characters are deletions to skip, new-only characters
-/// form the inserted runs). Ranges are char indices converted to display
-/// columns, so CJK never misaligns the mask.
-fn inserted_columns(old: &str, new: &str) -> Vec<(u16, u16)> {
-    use unicode_width::UnicodeWidthChar;
+/// The char-index ranges of `new`'s characters that have no counterpart
+/// in `old` (an LCS backtrace: matched characters advance both, old-only
+/// characters are deletions to skip, new-only characters form the
+/// inserted runs). Operates on whole texts (newlines included), so
+/// re-wrapped text stays aligned.
+fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
     let o: Vec<char> = old.chars().collect();
     let n: Vec<char> = new.chars().collect();
     if o.is_empty() {
-        return vec![(0, unicode_width::UnicodeWidthStr::width(new) as u16)];
+        return vec![(0, n.len())];
     }
     // LCS lengths (classic DP, reversed scan for the backtrace).
     let mut dp = vec![vec![0usize; n.len() + 1]; o.len() + 1];
@@ -1413,16 +1468,23 @@ fn inserted_columns(old: &str, new: &str) -> Vec<(u16, u16)> {
     if j < n.len() {
         ranges.push((j, n.len())); // trailing insertions
     }
-    // Char indices → display columns (CJK is double-width).
+    ranges.into_iter().filter(|(s, e)| s < e).collect()
+}
+
+/// The display-column ranges of `new`'s characters that have no
+/// counterpart in `old` — the per-row view used by the tests (see
+/// [`inserted_char_ranges`] for the whole-text diff underneath).
+#[cfg(test)]
+fn inserted_columns(old: &str, new: &str) -> Vec<(u16, u16)> {
+    use unicode_width::UnicodeWidthChar;
     let col_of = |idx: usize| -> u16 {
         new.chars()
             .take(idx)
             .map(|c| UnicodeWidthChar::width(c).unwrap_or(1) as u16)
             .sum()
     };
-    ranges
+    inserted_char_ranges(old, new)
         .into_iter()
-        .filter(|(s, e)| s < e)
         .map(|(s, e)| (col_of(s), col_of(e)))
         .collect()
 }
@@ -4157,5 +4219,32 @@ mod history_animation_tests {
         assert_eq!(inserted_columns("abc", "ac"), Vec::<(u16, u16)>::new());
         // CJK: one inserted double-width character spans two columns.
         assert_eq!(inserted_columns("abc", "a日c"), vec![(1, 3)]);
+    }
+
+    #[test]
+    fn appear_mask_survives_a_wrap_shift() {
+        // An insertion pushes "foo" onto the next line: the old block
+        // wraps as "hello world foo / bar baz", the new as "hello brave
+        // world / foo bar baz". Row 0 masks only "brave ", and the
+        // re-wrapped "foo" — unchanged text — is NOT masked (regression:
+        // per-row index alignment masked the whole shifted row).
+        let highlight = Highlighter::new(None, false);
+        let old = "hello world foo bar baz";
+        let new = "hello brave world foo bar baz";
+        let old_view = ViewState::render(
+            &Source::from_content("doc.md".into(), format!("{old}\n")),
+            20,
+            &highlight,
+        );
+        let new_view = ViewState::render(
+            &Source::from_content("doc.md".into(), format!("{new}\n")),
+            20,
+            &highlight,
+        );
+        assert_eq!(new_view.rows.len(), 2, "the new block wraps to two rows");
+        let row0 = new_view.source_starts[0];
+        let mask = appear_mask(&new_view, row0, new_view.rows.len(), &old_view.rows);
+        assert_eq!(mask[0], vec![(6, 12)], "only the inserted run masks");
+        assert!(mask[1].is_empty(), "wrapped-around text stays put");
     }
 }
