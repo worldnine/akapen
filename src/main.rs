@@ -1423,6 +1423,24 @@ fn appear_mask(
             }
         }
     }
+    // The old-text lookup is by line INDEX; when the block was inserted
+    // (not rewritten in place) that index lands on unrelated text, and
+    // the diff can "match" stray characters inside the new text (e.g. an
+    // old "end" matching the "e d" of a new paragraph). A block whose
+    // mask covers most of its text has no trustworthy alignment: mask
+    // the whole block, which is the truth anyway (it reads as one
+    // stream).
+    let covered: usize = mask.iter().flatten().map(|&(s, e)| (e - s) as usize).sum();
+    let total_new: usize = new_rows
+        .iter()
+        .map(|t| unicode_width::UnicodeWidthStr::width(t.as_str()))
+        .sum();
+    if total_new > 0 && covered * 4 > total_new * 3 {
+        return new_rows
+            .iter()
+            .map(|t| vec![(0, unicode_width::UnicodeWidthStr::width(t.as_str()) as u16)])
+            .collect();
+    }
     mask
 }
 

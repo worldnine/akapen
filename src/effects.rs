@@ -78,35 +78,55 @@ pub(crate) fn toast_effect() -> Effect {
 /// masked to the characters that are GENUINELY new: `mask[row]` holds the
 /// display-column ranges of inserted characters (diffed against the old
 /// revision's rendered text), and only those cells materialize — the
-/// unchanged text is never hidden. Materialization order within the new
-/// characters is a stable per-cell scatter (same threshold every frame),
-/// over ~450 ms; `stagger_ms` cascades later blocks.
+/// unchanged text is never hidden. The reveal order is READING order
+/// (left→right, top→bottom) across the new characters, like an LLM
+/// streaming its output: the text types in from the front. `stagger_ms`
+/// cascades later blocks.
 pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effect {
     fx::delay(
         stagger_ms,
         fx::effect_fn(
             mask,
-            (450, Interpolation::QuadOut),
+            (450, Interpolation::Linear),
             |mask, ctx, cells| {
                 let alpha = ctx.timer.alpha();
+                // The reading-order index of every new cell: cells before
+                // the stream cursor are revealed, cells after stay blank.
+                let row_counts: Vec<usize> = mask
+                    .iter()
+                    .map(|ranges| {
+                        ranges.iter().map(|&(s, e)| (e - s) as usize).sum()
+                    })
+                    .collect();
+                let total: usize = row_counts.iter().sum();
                 for (pos, cell) in cells {
                     let (r, c) = (
                         (pos.y - ctx.area.y) as usize,
                         pos.x - ctx.area.x,
                     );
-                    let is_new = mask.get(r).is_some_and(|ranges| {
-                        ranges.iter().any(|&(s, e)| c >= s && c < e)
-                    });
-                    if !is_new {
+                    let ranges = match mask.get(r) {
+                        Some(ranges) => ranges,
+                        None => continue,
+                    };
+                    // The cell's order = new cells in earlier rows + new
+                    // cells earlier in this row (masked ranges only, so
+                    // the animation time is spread over the new text).
+                    let mut order = row_counts[..r].iter().sum::<usize>();
+                    let mut covered = false;
+                    for &(s, e) in ranges {
+                        if c >= s && c < e {
+                            covered = true;
+                            order += (c - s) as usize;
+                            break;
+                        }
+                        order += (e - s) as usize;
+                    }
+                    if !covered {
                         continue; // the unchanged text stays put
                     }
-                    // A stable scattered reveal: each new cell has a fixed
-                    // threshold; it stays blank until the timer's alpha
-                    // passes it.
-                    let threshold = ((r as u64).wrapping_mul(0x9E37_79B1)
-                        ^ (c as u64).wrapping_mul(0x85EB_CA77))
-                        % 1000;
-                    if (threshold as f32 / 1000.0) > alpha {
+                    // The stream cursor: cells up to `alpha * total` are
+                    // revealed, the rest stay blank.
+                    if (order as f32) >= alpha * total as f32 {
                         cell.set_char(' ');
                     }
                 }
@@ -115,10 +135,31 @@ pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effe
     )
 }
 
-/// Scatter-out for the deletion ghosts: the ghost stays whole for 150 ms
-/// (long enough to read), then its cells dissolve to blank in a stable
-/// random order over 500 ms — completing exactly when the 650 ms ghost
-/// lifetime collapses the layout, so the block "shrinks" cell by cell.
+/// Scatter-out for the deletion ghosts, BACKSPACE-style: the ghost stays
+/// whole for 150 ms (long enough to read), then its cells clear in
+/// REVERSE reading order — right→left, bottom→top, exactly like
+/// backspacing through the text — completing when the 650 ms ghost
+/// lifetime collapses the layout.
 pub(crate) fn ghost_effect() -> Effect {
-    fx::delay(150, fx::dissolve((500, Interpolation::QuadIn)))
+    fx::delay(
+        150,
+        fx::effect_fn(
+            (), // no mask: every ghost cell is "new"
+            (500, Interpolation::Linear),
+            |(), ctx, cells| {
+                let alpha = ctx.timer.alpha();
+                let w = ctx.area.width as usize;
+                let total = ctx.area.width as usize * ctx.area.height as usize;
+                for (pos, cell) in cells {
+                    let order = (pos.y - ctx.area.y) as usize * w
+                        + (pos.x - ctx.area.x) as usize;
+                    // The backspace cursor: cells AFTER the cursor (in
+                    // reverse reading order) are cleared.
+                    if ((total - 1 - order) as f32) < alpha * total as f32 {
+                        cell.set_char(' ');
+                    }
+                }
+            },
+        ),
+    )
 }
