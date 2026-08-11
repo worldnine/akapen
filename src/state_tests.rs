@@ -2850,6 +2850,45 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn the_generation_label_lives_in_the_title_not_the_footer() {
+        // Browsing history must not duplicate the generation label top
+        // and bottom: the title's state slot carries it (clipped to a
+        // budget), the footer keeps only the short navigation
+        // affordance — the old footer label was the same text twice and
+        // truncated the footer on narrow screens.
+        let mut app = make_app(3, Mode::Source);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: "old first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+
+        // The footer names the direction, never the generation.
+        let hints = footer_hints(&app);
+        assert!(hints.contains("← older · newer →"), "nav affordance stays: {hints}");
+        assert!(
+            !hints.contains("LOCAL") && !hints.contains("local snapshot"),
+            "no generation label in the footer: {hints}"
+        );
+        // The title's state slot carries the label, within its budget.
+        let m = title_metrics(&app, 80);
+        assert!(m.change.contains("LOCAL · 1/2"), "title shows the label: {}", m.change);
+        assert!(
+            m.change.contains("base 2/2"),
+            "the baseline context survives the clip: {}",
+            m.change
+        );
+        assert!(
+            m.path.contains("doc"),
+            "the path survives beside the clipped label: {}",
+            m.path
+        );
+    }
+
+    #[test]
     fn footer_badge_shows_the_state_not_just_the_mode() {
         // The badge leads the footer and flips with the transient states:
         // SELECT while a selection is active (both modes — the selection

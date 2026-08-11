@@ -111,6 +111,47 @@ pub(crate) fn clip_ellipsis(s: &str, max_cols: usize) -> String {
     out
 }
 
+/// The history label's budget in the title bar: half the title (at
+/// least 24 columns), so the summary can never crowd the path out — the
+/// path is the title's file identity and must survive history browsing.
+pub(crate) fn label_budget(width: u16) -> usize {
+    (width as usize / 2).max(24)
+}
+
+/// Clip a history label (`COMMIT · 2/5 · 5b5f349 · subject`) for the
+/// title bar: the summary tail is the most expendable part, so it is cut
+/// first — the provenance/position/id head stays whole, and a trailing
+/// ` · base N/M` (the review baseline context) survives even when the
+/// summary above it must go. Never exceeds `max_cols` display columns.
+pub(crate) fn clip_title_label(label: &str, max_cols: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if UnicodeWidthStr::width(label) <= max_cols {
+        return label.to_string();
+    }
+    // The baseline context rides the tail; keep it when clipping.
+    let (head, base) = match label.rsplit_once(" · base ") {
+        Some((head, base)) => (head, Some(format!(" · base {base}"))),
+        None => (label, None),
+    };
+    let base_w = base.as_ref().map_or(0, |s| UnicodeWidthStr::width(s.as_str()));
+    let budget = max_cols.saturating_sub(base_w + 1); // +1 for the ellipsis
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in head.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    if w < UnicodeWidthStr::width(head) {
+        out.push('…');
+    }
+    out.push_str(base.as_deref().unwrap_or(""));
+    out
+}
+
 /// What clicking a title-bar element does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum TitleHit {
@@ -198,12 +239,14 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         width.saturating_sub(indicator_w + esc_close_w)
     };
     // Historical generations use this space for provenance, position, and
-    // baseline context. At NOW an external edit still outranks everything;
-    // otherwise the baseline gets a compact persistent identity of its own.
+    // baseline context — clipped so the summary tail can never crowd the
+    // path (the title's file identity) out of the bar. At NOW an external
+    // edit still outranks everything; otherwise the baseline gets a
+    // compact persistent identity of its own.
     let change = if app.is_historical() {
         app.history()
             .and_then(|history| history.label())
-            .map(|label| format!(" {label} "))
+            .map(|label| format!(" {} ", clip_title_label(&label, label_budget(width))))
             .unwrap_or_default()
     } else if app.file_changed {
         " ⚡ ".to_string()
@@ -429,12 +472,13 @@ pub(crate) fn footer_hints(app: &App) -> String {
             }
         }
     };
-    // The same document timeline is available in rendered and source mode.
+    // The same document timeline is available in rendered and source mode;
+    // the generation label itself lives in the title bar's state slot
+    // (provenance, position, id, baseline context) — one place, so the
+    // top and bottom never show the same text. The footer keeps the
+    // short navigation affordance only.
     if matches!(app.mode, Mode::View | Mode::Source) {
-        app.history()
-            .and_then(|history| history.label())
-            .map(|label| format!("{hints} · ← older · newer → · {label}"))
-            .unwrap_or(hints)
+        format!("{hints} · ← older · newer →")
     } else {
         hints
     }
@@ -566,7 +610,7 @@ mod width_tests {
 
 #[cfg(test)]
 mod title_tests {
-    use super::change_badge_spans;
+    use super::{change_badge_spans, clip_title_label, label_budget};
     use crate::truncate_path;
     use ratatui::style::Color;
     use std::path::Path;
@@ -578,6 +622,40 @@ mod title_tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].style.fg, Some(Color::Yellow));
         assert_eq!(spans[0].content.as_ref(), " ! 3 ");
+    }
+
+    #[test]
+    fn history_label_is_clipped_to_keep_the_path_visible() {
+        // The full label would crowd the path out of the bar; the summary
+        // tail is cut while the provenance/position/id head survives.
+        let label = "COMMIT · 2/5 · 5b5f349 · akapen 初版: markdown 行コメント TUI";
+        let clipped = clip_title_label(label, 40);
+        assert!(UnicodeWidthStr::width(clipped.as_str()) <= 40);
+        assert!(clipped.starts_with("COMMIT · 2/5 · 5b5f349"));
+        assert!(clipped.ends_with('…'));
+    }
+
+    #[test]
+    fn history_label_clipping_keeps_the_baseline_context() {
+        // ` · base N/M` is the review reference point: it survives the
+        // clip even when the summary above it is cut away.
+        let label = "COMMIT · 2/5 · 5b5f349 · a long subject line that must go · base 1/5";
+        let clipped = clip_title_label(label, 30);
+        assert!(UnicodeWidthStr::width(clipped.as_str()) <= 30);
+        assert!(clipped.contains("base 1/5"));
+        assert!(clipped.starts_with("COMMIT · 2/5"));
+    }
+
+    #[test]
+    fn short_history_labels_pass_through_unclipped() {
+        let label = "COMMIT · 4/5 · 5b5f349";
+        assert_eq!(clip_title_label(label, 40), label);
+    }
+
+    #[test]
+    fn label_budget_scales_with_the_title_width() {
+        assert_eq!(label_budget(80), 40, "half the title");
+        assert_eq!(label_budget(40), 24, "never below 24 columns");
     }
 
     #[test]

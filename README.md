@@ -98,9 +98,9 @@ akapen treats every version as a complete document. Git commits and bounded LOCA
 3. The title shows `! N`; green `▌` marks present/changed locations and red `▀` marks deletion positions. Use `n` / `N` to visit them.
 4. Repeated reloads accumulate review marks without moving the baseline. Press `a` at NOW to acknowledge them, or press `a` on a historical LOCAL/COMMIT generation to choose that generation as the baseline.
 
-`Left` / `Right` move through the unified timeline while keeping Markdown rendered. The footer labels each generation as `NOW`, `LOCAL`, or `COMMIT`; holding an arrow scrubs labels immediately and renders once input settles. Git commits whose content matches a LOCAL snapshot are shown once as COMMIT.
+`Left` / `Right` move through the unified timeline while keeping Markdown rendered. The title bar labels each generation as `NOW`, `LOCAL`, or `COMMIT`; holding an arrow scrubs labels immediately and renders once input settles (the summary tail is clipped so the path never leaves the title). Git commits whose content matches a LOCAL snapshot are shown once as COMMIT.
 
-The footer always identifies the baseline as `base N/M`, and labels the baseline generation itself as `BASELINE`. Green/red marks compare that fixed baseline with whichever generation is displayed, in both directions through the timeline; browsing those comparisons never changes the unreviewed state at NOW.
+The title bar also identifies the baseline as `base N/M` (the footer keeps only the `← older · newer →` navigation), and labels the baseline generation itself as `BASELINE`. Green/red marks compare that fixed baseline with whichever generation is displayed, in both directions through the timeline; browsing those comparisons never changes the unreviewed state at NOW.
 
 LOCAL snapshots are content-addressed, gzip-compressed, and stored outside the repository under the user cache directory. The cache keeps at most 32 generations per file and 256 MiB globally while protecting NOW, the review baseline, unreviewed generations, and generations carrying comments. Markdown tables use row-granularity review marks so a one-cell edit does not mark the whole table. Non-Markdown UTF-8 files use the same timeline and review model in source mode, also with line-granularity marks.
 
