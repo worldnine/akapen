@@ -605,10 +605,10 @@ mod width_tests {
         // rides the left border, reserving no width). The startup render
         // and the resize re-render both go through this, so they can't
         // disagree.
-        assert_eq!(view_render_width(100, 1), 95, "thin frame at NOW");
-        assert_eq!(view_render_width(100, 2), 93, "the time machine thickens the frame");
-        assert_eq!(view_render_width(1, 1), 0, "clamps at zero");
-        assert_eq!(view_render_width(0, 1), 0);
+        assert_eq!(view_render_width(100), 95);
+        
+        assert_eq!(view_render_width(1), 0, "clamps at zero");
+        assert_eq!(view_render_width(0), 0);
     }
 }
 

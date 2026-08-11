@@ -647,7 +647,7 @@ impl App {
         // ensure_row_cache; the view needs an explicit re-render.
         if supports_view(self.current_file_path()) {
             let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-            if self.view.width != view_render_width(w, self.frame_border()) as usize {
+            if self.view.width != view_render_width(w) as usize {
                 replace_view_preserving_cursor(self);
             }
         }
@@ -708,26 +708,10 @@ impl App {
 
     /// View-mode viewport height in rows — must match `draw_view`'s
     /// `inner.height` (title bar + footer + the frame's two borders take
-    /// the other rows; the time machine thickens the frame to two cells
-    /// while browsing the past), or per-frame `keep_cursor_visible`
-    /// re-shoves the offset and wheel scroll stalls. View mode always
-    /// draws the frame.
+    /// the other rows), or per-frame `keep_cursor_visible` re-shoves the
+    /// offset and wheel scroll stalls. View mode always draws the frame.
     pub(crate) fn view_viewport_rows(&self) -> usize {
-        self.terminal_height()
-            .saturating_sub(2 + self.frame_border() * 2)
-            .max(1) as usize
-    }
-
-    /// The frame's border thickness: one cell at NOW, two while browsing
-    /// the past (the time machine's heavier frame). History switches
-    /// always re-render the view, so the width/height change is absorbed
-    /// by that render — the layout stays put otherwise.
-    pub(crate) fn frame_border(&self) -> u16 {
-        if self.is_historical() {
-            2
-        } else {
-            1
-        }
+        self.terminal_height().saturating_sub(4).max(1) as usize
     }
 
     /// Source-mode viewport height — must match `draw_source`'s

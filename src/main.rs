@@ -263,7 +263,7 @@ fn run(config: Config) -> Result<()> {
         // shown; rendering it here would be discarded work at startup
         // (a session of many large .rs files pays for it).
         let view = if supports_view(f) {
-            render_view_with_cards(&source, view_render_width(size.width, 1), &highlight, &[])
+            render_view_with_cards(&source, view_render_width(size.width), &highlight, &[])
         } else {
             ViewState::default()
         };
@@ -1002,7 +1002,7 @@ fn insert_cards(view: &mut ViewState, comments: &[Comment], columns: usize) {
 /// Render the current complete document with its inline comment cards.
 pub(crate) fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    let width = view_render_width(w, app.frame_border());
+    let width = view_render_width(w);
     render_view_with_cards(&app.source, width, &app.highlight, comments)
 }
 
@@ -2086,11 +2086,8 @@ fn mark_view_dirty(app: &mut App) {
 /// render must wrap at exactly the width the pane displays, or the
 /// source-line mapping drifts by a couple of columns. Both call sites
 /// (startup and resize) go through this so they can never disagree.
-pub(crate) fn view_render_width(terminal_width: u16, border: u16) -> u16 {
-    terminal_width
-        .saturating_sub(2) // text column pads
-        .saturating_sub(1) // the page's left margin
-        .saturating_sub(border * 2) // the frame's two sides (1 or 2 cells thick)
+pub(crate) fn view_render_width(terminal_width: u16) -> u16 {
+    terminal_width.saturating_sub(2).saturating_sub(1).saturating_sub(2)
 }
 
 /// Re-render at the current terminal width, preserving the cursor fraction.
@@ -2775,16 +2772,14 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         }
         // The scatter effects live on the text column (view-relative
         // rows mapped through the current scroll offset); finished
-        // effects drop themselves. The frame may be two cells thick
-        // while browsing the past — the text column moves in with it.
-        let m = app.frame_border();
-        let text_x = frame.x + m + 1;
-        let text_w = frame.width.saturating_sub(m * 2 + 2);
+        // effects drop themselves.
+        let text_x = frame.x + 2;
+        let text_w = frame.width.saturating_sub(4);
         let offset = app.view.offset as isize;
-        let viewport = frame.height.saturating_sub(m * 2) as isize;
+        let viewport = frame.height.saturating_sub(2) as isize;
         let rect_for =
             |row: usize, height: usize| -> Option<Rect> {
-                let top = frame.y as isize + m as isize;
+                let top = frame.y as isize + 1;
                 let y = top + row as isize - offset;
                 if y + height as isize <= top || y >= top + viewport {
                     return None; // entirely off-screen
@@ -2853,10 +2848,8 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         width: area.width.saturating_sub(margin),
         height: area.height,
     };
-    // The frame's border thickness: one cell at NOW, two while browsing
-    // the past (the time machine's heavier frame). History switches
-    // always re-render the view, so the width change is absorbed there.
-    let m = app.frame_border();
+    // The frame's border is one cell: the reading pane's calm edge.
+    let m = 1;
     let inner = Rect {
         x: frame.x + m,
         y: frame.y + m,
@@ -3001,35 +2994,6 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // visible window.
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, frame);
-    // The time machine's heavier frame draws a SECOND ring inside the
-    // block border (ratatui blocks only render one cell). Painted under
-    // the markers and the scrollbar like the outer ring; the gradient
-    // effect covers both rings.
-    if m == 2 {
-        let buf = f.buffer_mut();
-        let right = frame.x + frame.width - 2;
-        let bottom = frame.y + frame.height - 2;
-        for x in frame.x + 1..=right {
-            if let Some(c) = buf.cell_mut((x, frame.y + 1)) {
-                c.set_symbol(if x == frame.x + 1 { "┌" } else if x == right { "┐" } else { "─" });
-                c.set_style(border_style);
-            }
-            if let Some(c) = buf.cell_mut((x, bottom)) {
-                c.set_symbol(if x == frame.x + 1 { "└" } else if x == right { "┘" } else { "─" });
-                c.set_style(border_style);
-            }
-        }
-        for y in frame.y + 2..bottom {
-            if let Some(c) = buf.cell_mut((frame.x + 1, y)) {
-                c.set_symbol("│");
-                c.set_style(border_style);
-            }
-            if let Some(c) = buf.cell_mut((right, y)) {
-                c.set_symbol("│");
-                c.set_style(border_style);
-            }
-        }
-    }
     // The marker column rides the frame's left border: `>` on the cursor
     // row, `▌` on marked rows, the border's `│` everywhere else. Written
     // over the border cells after the frame, so a marker replaces the

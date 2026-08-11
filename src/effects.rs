@@ -39,11 +39,8 @@ pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
             let (ox, oy) = (area.x as usize, area.y as usize);
             for (pos, cell) in cells {
                 let (rx, ry) = (pos.x as usize - ox, pos.y as usize - oy);
-                // The frame is TWO cells thick while browsing the past
-                // (see App::frame_border): both rings join the gradient,
-                // the content inside stays untouched.
-                if rx > 1 && ry > 1 && rx < w - 2 && ry < h - 2 {
-                    continue;
+                if rx != 0 && ry != 0 && rx != w - 1 && ry != h - 1 {
+                    continue; // content cells stay untouched
                 }
                 // Only the frame's own glyphs join the animation.
                 if !matches!(cell.symbol(), "│" | "─" | "┌" | "┐" | "└" | "┘") {
