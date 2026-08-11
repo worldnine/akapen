@@ -36,6 +36,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -76,6 +77,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -738,6 +740,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -784,6 +787,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -817,6 +821,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -1745,6 +1750,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -1855,6 +1861,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -2153,6 +2160,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(config.files[0].clone()).unwrap();
         let highlight = Highlighter::new(None, false);
@@ -3064,6 +3072,69 @@ use crate::comment::Selection;
             shown.contains("copied 3 comment(s)"),
             "toast visible once the prompt is answered: {shown}"
         );
+    }
+
+    #[test]
+    fn time_machine_frame_paints_the_rotating_gradient() {
+        // Browsing the past with --fx (the default): the frame's border
+        // cells are repainted into the time-machine gradient (a
+        // purple→cyan family — never the static border colors), and the
+        // gradient varies around the loop. `--no-fx` and the present
+        // (NOW) keep the static borders untouched.
+        let historical = |fx: bool| -> App {
+            let mut app = make_app(3, Mode::View);
+            app.config.fx = fx;
+            app.histories[0].revisions.push(history::Revision {
+                id: Some("local:old".into()),
+                short_id: "old".into(),
+                summary: "local snapshot".into(),
+                content: "old first line\nline2\nline3\n".into(),
+                source: history::RevisionSource::Local,
+            });
+            app.histories[0].position = 1;
+            app
+        };
+        let draw_corner = |app: &mut App| -> Color {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .cell((1, 1)) // the frame's top-left corner (margin + body top)
+                .unwrap()
+                .style()
+                .fg
+                .expect("the border cell has a color")
+        };
+        let mut app = historical(true);
+        let corner = draw_corner(&mut app);
+        assert!(
+            matches!(corner, Color::Rgb(..)),
+            "the animated border is truecolor: {corner:?}"
+        );
+        assert_ne!(corner, app.ui_border, "not the plain border color");
+        assert_ne!(corner, app.ui_history_border, "not the static history color");
+        // The gradient varies around the loop: the right border's middle
+        // cell is a different point of the wave than the corner.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let right = terminal
+            .backend()
+            .buffer()
+            .cell((78, 10))
+            .unwrap()
+            .style()
+            .fg
+            .expect("the right border cell has a color");
+        assert_ne!(right, corner, "the gradient differs around the frame");
+        // --no-fx: the static history border color comes back.
+        let mut app = historical(false);
+        assert_eq!(draw_corner(&mut app), app.ui_history_border);
+        // At NOW the frame stays calm even with fx on.
+        let mut app = make_app(3, Mode::View);
+        assert_eq!(draw_corner(&mut app), app.ui_border);
     }
 
     #[test]

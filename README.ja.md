@@ -19,7 +19,7 @@ viewモードはMarkdownの**タイムマシンビューア**でもあります�
 
 ```
 akapen <file...> [--send-cmd <cmd>] [--send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>]
-                    [--light|--dark] [--callback <cmd>] [--esc-quit <auto|always|never>]
+                    [--light|--dark] [--callback <cmd>] [--esc-quit <auto|always|never>] [--no-fx]
 ```
 
 - 引数に**1つ以上のファイル**を渡します（yazi の `%S` などから複数選択をそのまま渡せます）
@@ -34,6 +34,9 @@ akapen <file...> [--send-cmd <cmd>] [--send-agent] [--reply] [--theme <name>] [-
 - カーソル行は **ANSI グレーの背景**（bright-black。文字色は変えず、view / source 両モードで同じ落ち着いた見た目）。**view / source 両モードで**左端に `>` マーカーが付き、カーソル位置が分かります。選択範囲も同じグレー背景でハイライトされます
 - コメント済み行の **行番号は黄色**（ガターで一目で分かる）。view モードでも左端の黄色 `▌` マーカーで分かります
 - 枠・ガター・フッタは ANSI 色（DarkGray / Yellow / Cyan / LightBlue）のみ
+- **タイムマシン中の枠は truecolor の紫→シアン グラデーションが回転**（`--fx`、既定オン）:
+  過去世代を閲覧している間、枠の一周に滑らかなグラデーションの波が流れます。
+  派手さが不要な場合は `--no-fx` で静止した紫枠（従来どおり）に戻ります
 - シンタックスハイライトは **two-face** のテーマ（`--theme` で切替、既定 `Catppuccin Mocha`。
   light モード時は自動検出・`--light` とも `Solarized (light)`。`--theme` の名前が
   解決できない場合も light/dark に合った既定へフォールバック）。`--theme` には two-face の組み込みテーマ名

@@ -41,7 +41,7 @@ No external binaries required — rendering is built in. On macOS the optional I
 ```
 akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>]
                  [--ime <off|ascii|jp>] [--light|--dark] [--callback <cmd>]
-                 [--esc-quit <auto|always|never>]
+                 [--esc-quit <auto|always|never>] [--no-fx]
 ```
 
 | Flag | Meaning |
@@ -52,6 +52,7 @@ akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>]
 | `--theme <name>` | two-face theme name (default `Catppuccin Mocha`; `Solarized (light)` when light is detected) or a path to a `.tmTheme` file |
 | `--ime <off\|ascii\|jp>` | macOS input-source control around the comment composer (default `ascii`) |
 | `--light` / `--dark` | force the UI palette (default: auto-detect the terminal background via OSC 11) |
+| `--no-fx` | disable the animated time-machine frame (the rotating purple→cyan gradient border while browsing the past; the static history border color stays) |
 | `--callback <cmd>` | shell command spawned on exit (e.g. return to a file picker) |
 | `--esc-quit <auto\|always\|never>` | whether `Esc` may quit (default `auto`: only with `--callback`; `always` = unconditionally, `never` = Esc stays a pure cancel) |
 
@@ -100,7 +101,7 @@ akapen treats every version as a complete document. Git commits and bounded LOCA
 
 `Left` / `Right` move through the unified timeline while keeping Markdown rendered. The title bar labels each generation as `NOW`, `LOCAL`, or `COMMIT`; holding an arrow scrubs labels immediately and renders once input settles (the summary tail is clipped so the path never leaves the title). Git commits whose content matches a LOCAL snapshot are shown once as COMMIT.
 
-The title bar also identifies the baseline as `base N/M` (the footer keeps only the `← older · newer →` navigation), and labels the baseline generation itself as `BASELINE`. Green/red marks compare that fixed baseline with whichever generation is displayed, in both directions through the timeline; browsing those comparisons never changes the unreviewed state at NOW.
+The title bar also identifies the baseline as `base N/M` (the footer keeps only the `← older · newer →` navigation), and labels the baseline generation itself as `BASELINE`. While you are in the past, the frame's border runs a rotating purple→cyan gradient (`--fx`, the default) — the time machine is unmissable; `--no-fx` restores the static history border color. Green/red marks compare that fixed baseline with whichever generation is displayed, in both directions through the timeline; browsing those comparisons never changes the unreviewed state at NOW.
 
 LOCAL snapshots are content-addressed, gzip-compressed, and stored outside the repository under the user cache directory. The cache keeps at most 32 generations per file and 256 MiB globally while protecting NOW, the review baseline, unreviewed generations, and generations carrying comments. Markdown tables use row-granularity review marks so a one-cell edit does not mark the whole table. Non-Markdown UTF-8 files use the same timeline and review model in source mode, also with line-granularity marks.
 

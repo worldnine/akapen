@@ -120,6 +120,10 @@ pub(crate) struct App {
     /// Brief whole-frame pulse confirming that the selected revision has
     /// finished rendering, even when no changed block is in the viewport.
     pub(crate) history_frame_flash_until: Option<Instant>,
+    /// The animation clock for the time-machine frame (`--fx`): the
+    /// rotating border's phase derives from this, so the gradient keeps
+    /// its pace across frames and redraws.
+    pub(crate) fx_clock: Instant,
     /// Set once the new Markdown view is built. The event loop paints that
     /// view once without a pulse, then turns this into `flash_until` so the
     /// completion signal starts on the following frame.
@@ -227,6 +231,7 @@ pub(crate) struct App {
     pub(crate) reload_pending: Option<Instant>,
     pub(crate) running: bool,
     /// Resolved UI colors for the current `--light` / dark mode.
+    pub(crate) ui_light: bool,
     pub(crate) ui_selected_bg: Color,
     pub(crate) ui_changed_bg: Color,
     pub(crate) ui_history_glow_bg: Color,
@@ -294,6 +299,7 @@ impl App {
             history_ghost_until: None,
             history_render_due: None,
             history_frame_flash_until: None,
+            fx_clock: Instant::now(),
             history_frame_flash_pending: false,
             overlay: None,
             pending_chord: None,
@@ -338,6 +344,7 @@ impl App {
             file_changed: false,
             reload_pending: None,
             running: true,
+            ui_light: light,
             ui_selected_bg: selected_bg(light),
             ui_changed_bg: changed_bg(light),
             ui_history_glow_bg: history_glow_bg(light),

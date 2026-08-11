@@ -55,6 +55,90 @@ pub fn history_border_color(light: bool) -> Color {
     if light { HISTORY_BORDER_LIGHT } else { HISTORY_BORDER_DARK }
 }
 
+/// The time-machine frame palette: a closed purple→blue→cyan loop (the
+/// last step eases back toward the first, so the wrap has no seam).
+/// While browsing the past with `--fx` on, the palette is spread across
+/// the frame's whole perimeter (one smooth gradient per lap, see
+/// [`time_machine_color_at`]); the dark palette leads with the static
+/// history border color, so the animated frame reads as that state in
+/// motion. Light palettes stay saturated enough to read on a pale
+/// background.
+pub fn time_machine_palette(light: bool) -> &'static [Color] {
+    if light {
+        &[
+            Color::Rgb(120, 95, 170),  // purple (history border)
+            Color::Rgb(92, 94, 182),   // blue-purple
+            Color::Rgb(62, 112, 192),  // blue
+            Color::Rgb(52, 142, 192),  // cyan-blue
+            Color::Rgb(62, 158, 172),  // cyan
+            Color::Rgb(96, 128, 176),  // back toward purple
+        ]
+    } else {
+        &[
+            Color::Rgb(170, 150, 215), // purple (history border)
+            Color::Rgb(140, 140, 225), // blue-purple
+            Color::Rgb(105, 160, 235), // blue
+            Color::Rgb(90, 190, 235),  // cyan-blue
+            Color::Rgb(105, 205, 220), // cyan
+            Color::Rgb(140, 175, 220), // back toward purple
+        ]
+    }
+}
+
+/// The time it takes the gradient to complete one lap around the frame.
+pub const TIME_MACHINE_ROTATION_MS: u64 = 4000;
+
+/// The rotation fraction of the time-machine frame since `clock`
+/// started: 0.0 → 1.0 over one [`TIME_MACHINE_ROTATION_MS`] lap. Pure in
+/// the clock argument, so tests can pin a phase without real time.
+pub fn time_machine_rotation_fraction(clock: std::time::Instant) -> f32 {
+    let ms = clock.elapsed().as_millis() as u64 % TIME_MACHINE_ROTATION_MS;
+    ms as f32 / TIME_MACHINE_ROTATION_MS as f32
+}
+
+/// The gradient color of the border cell at `perim` (0-based position on
+/// the [`perimeter_index`] loop of `perimeter_len` cells): the palette is
+/// spread across the whole perimeter — one purple→cyan→purple wave per
+/// lap — and `rot` (0.0..1.0) shifts the wave around the frame, so the
+/// gradient visibly rotates while every cell stays within the family.
+pub fn time_machine_color_at(palette: &[Color], perim: usize, perimeter_len: usize, rot: f32) -> Color {
+    let t = (perim as f32 / perimeter_len.max(1) as f32 + rot) % 1.0;
+    let scaled = t * (palette.len() - 1) as f32;
+    let i = (scaled as usize).min(palette.len() - 2);
+    lerp_color(palette[i], palette[i + 1], scaled - i as f32)
+}
+
+/// The index of a frame border cell on the perimeter loop: top row
+/// left→right, right column top→bottom, bottom row right→left, left
+/// column bottom→top — one continuous ring of `2w+2h-4` cells, so a
+/// phase-shifted palette assignment rotates around the page. `w`/`h` are
+/// the frame's outer dimensions; only border cells are valid inputs.
+pub fn perimeter_index(x: usize, y: usize, w: usize, h: usize) -> usize {
+    let right = w - 1;
+    let bottom = h - 1;
+    if y == 0 {
+        x
+    } else if x == right {
+        right + y
+    } else if y == bottom {
+        w + h - 2 + (right - x)
+    } else {
+        2 * w + h - 3 + (bottom - y)
+    }
+}
+
+/// Linearly interpolate two RGB colors; `t` is clamped to 0..=1. Used to
+/// sweep the time-machine palette smoothly between its discrete entries.
+pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let c = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t.clamp(0.0, 1.0)) as u8;
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            Color::Rgb(c(ar, br), c(ag, bg), c(ab, bb))
+        }
+        _ => b,
+    }
+}
+
 /// Brief neutral pulse when a selected history revision finishes rendering.
 pub fn history_frame_flash_color(light: bool) -> Color {
     if light { HISTORY_FRAME_FLASH_LIGHT } else { HISTORY_FRAME_FLASH_DARK }
@@ -856,12 +940,96 @@ pub(crate) fn is_table_delimiter_line(ghost: &[Option<String>], line: usize) -> 
 mod tests {
     use super::{
         Span, ViewState, history_border_color, history_glow_bg, is_table_delimiter_line,
-        scroll_offset_at, scroll_offset_drag, scroll_thumb, selected_bg,
+        lerp_color, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
+        selected_bg, time_machine_color_at, time_machine_palette, time_machine_rotation_fraction,
     };
     use crate::highlight::Highlighter;
     use ratatui::style::{Color, Modifier, Style};
     use crate::source::Source;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn perimeter_index_walks_the_whole_loop_exactly_once() {
+        // A 5×3 frame has 2·5+2·3−4 = 12 border cells; the index must
+        // cover each exactly once — no gaps, no double-assigned cells.
+        let (w, h) = (5usize, 3usize);
+        let mut seen = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let on_border = y == 0 || y == h - 1 || x == 0 || x == w - 1;
+                if on_border {
+                    seen.push(perimeter_index(x, y, w, h));
+                }
+            }
+        }
+        assert_eq!(seen.len(), 2 * w + 2 * h - 4, "loop size");
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..2 * w + 2 * h - 4).collect::<Vec<_>>(), "bijective");
+    }
+
+    #[test]
+    fn perimeter_index_corners_and_direction() {
+        let (w, h) = (10usize, 6usize);
+        // Top row left→right: corner 0 at (0,0), corner 1 at (9,0).
+        assert_eq!(perimeter_index(0, 0, w, h), 0);
+        assert_eq!(perimeter_index(9, 0, w, h), 9);
+        // Right column top→bottom: (9,1) follows the top row.
+        assert_eq!(perimeter_index(9, 1, w, h), 10);
+        assert_eq!(perimeter_index(9, 5, w, h), 14);
+        // Bottom row right→left: (8,5) then (0,5).
+        assert_eq!(perimeter_index(8, 5, w, h), 15);
+        assert_eq!(perimeter_index(0, 5, w, h), 23);
+        // Left column bottom→top: (0,4) then (0,1).
+        assert_eq!(perimeter_index(0, 4, w, h), 24);
+        assert_eq!(perimeter_index(0, 1, w, h), 27);
+        assert_eq!(perimeter_index(0, 1, w, h) + 1, 2 * w + 2 * h - 4, "loop closes");
+    }
+
+    #[test]
+    fn lerp_color_endpoints_and_midpoint() {
+        assert_eq!(lerp_color(Color::Rgb(0, 0, 0), Color::Rgb(10, 20, 30), 0.0), Color::Rgb(0, 0, 0));
+        assert_eq!(lerp_color(Color::Rgb(0, 0, 0), Color::Rgb(10, 20, 30), 1.0), Color::Rgb(10, 20, 30));
+        assert_eq!(lerp_color(Color::Rgb(0, 0, 0), Color::Rgb(10, 20, 30), 0.5), Color::Rgb(5, 10, 15));
+        assert_eq!(lerp_color(Color::Rgb(0, 0, 0), Color::Rgb(10, 20, 30), 1.5), Color::Rgb(10, 20, 30), "clamped");
+    }
+
+    #[test]
+    fn time_machine_colors_stay_in_the_palette_family() {
+        // Every cell of the loop is a lerp of two palette entries — the
+        // color at each endpoint equals that entry, and the wrap (perim
+        // len−1 → 0) is smooth because the palette itself closes.
+        let palette = time_machine_palette(false);
+        let len = 100;
+        for perim in 0..len {
+            let c = time_machine_color_at(palette, perim, len, 0.0);
+            assert!(matches!(c, Color::Rgb(..)), "RGB throughout: {c:?}");
+        }
+        assert_eq!(
+            time_machine_color_at(palette, 0, len, 0.0),
+            palette[0],
+            "perimeter start = palette head"
+        );
+        let rotated = time_machine_color_at(palette, 0, len, 1.0);
+        assert_eq!(
+            rotated,
+            time_machine_color_at(palette, 0, len, 0.0),
+            "rotation wraps at 1.0"
+        );
+        // A half-rotation shifts the wave by half the perimeter: the
+        // color at perim 0 equals the former color at perim len/2.
+        assert_eq!(
+            time_machine_color_at(palette, 0, len, 0.5),
+            time_machine_color_at(palette, len / 2, len, 0.0)
+        );
+    }
+
+    #[test]
+    fn rotation_fraction_stays_in_unit_range() {
+        let clock = std::time::Instant::now();
+        let f = time_machine_rotation_fraction(clock);
+        assert!((0.0..1.0).contains(&f), "fraction in [0,1): {f}");
+    }
 
     #[test]
     fn every_segment_resolves_back_to_its_own_line() {

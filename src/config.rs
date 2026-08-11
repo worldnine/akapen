@@ -85,6 +85,10 @@ pub struct Config {
     pub callback: Option<String>,
     /// `--esc-quit <auto|always|never>`: whether `Esc` may quit the app.
     pub esc_quit: EscQuit,
+    /// `--no-fx`: disable the animated time-machine frame (the rotating
+    /// purple→cyan gradient around the page while browsing the past).
+    /// The static history border color stays either way.
+    pub fx: bool,
 }
 
 impl Config {
@@ -103,6 +107,7 @@ impl Config {
         let mut light: Option<bool> = None;
         let mut callback: Option<String> = None;
         let mut esc_quit = EscQuit::Auto;
+        let mut fx = true;
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -116,6 +121,7 @@ impl Config {
                         esc_quit = EscQuit::parse(&v);
                     }
                 }
+                "--no-fx" => fx = false,
                 "--send-cmd" => send_cmd = it.next(),
                 "--send-agent" => send_agent = true,
                 "--reply" => reply = true,
@@ -149,6 +155,7 @@ impl Config {
             light,
             callback,
             esc_quit,
+            fx,
         }))
     }
 
@@ -262,6 +269,16 @@ mod tests {
             Some(false)
         );
         assert_eq!(cfg(&parse(&["x.md"])).ime, ImeMode::Ascii);
+    }
+
+    #[test]
+    fn fx_defaults_to_on_and_no_fx_disables_it() {
+        assert!(cfg(&parse(&["x.md"])).fx, "--fx is the default");
+        assert!(!cfg(&parse(&["x.md", "--no-fx"])).fx);
+        assert!(
+            cfg(&parse(&["x.md", "--no-fx", "--send-agent"])).send_agent,
+            "--no-fx is independent of other flags"
+        );
     }
 
     #[test]

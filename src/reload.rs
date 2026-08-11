@@ -315,6 +315,7 @@ mod handoff_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path.into()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);

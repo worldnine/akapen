@@ -57,7 +57,8 @@ use crate::reload::*;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
 use crate::view::{
-    is_table_delimiter_line, scroll_offset_at, scroll_offset_drag, scroll_thumb, GutterCell,
+    is_table_delimiter_line, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
+    time_machine_color_at, time_machine_palette, time_machine_rotation_fraction, GutterCell,
     ViewState,
 };
 
@@ -90,6 +91,8 @@ fn main() -> Result<()> {
                  \x20 --light           force light mode (default: auto-detect\n\
                  \x20                   the terminal background via OSC 11)\n\
                  \x20 --dark            force dark mode\n\
+                 \x20 --no-fx           disable the animated time-machine frame\n\
+                 \x20                   (the rotating gradient border while browsing the past)\n\
                  \x20 --callback <cmd>  shell command to spawn on exit\n\
                  \x20                   (e.g. return to a file-picker after quit)\n\
                  \x20 --esc-quit <auto|always|never> whether Esc may quit\n\
@@ -2733,16 +2736,69 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // visible window.
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, frame);
+    // The time-machine frame (`--fx`, the default): while browsing the
+    // past, the border's purple→cyan gradient rotates around the page —
+    // the title's state slot already names the generation, the frame
+    // makes "viewing the past" unmissable. Painted over the block's
+    // border cells but UNDER the marker column, the scrollbar thumb, and
+    // the message row, so those keep priority; the brief render-complete
+    // flash (bold) suspends the animation for its pulse. `--no-fx` falls
+    // back to the static history border color.
+    let spin = app.config.fx && app.is_historical() && !frame_flashing;
+    let fw = frame.width as usize;
+    let fh = frame.height as usize;
+    let (palette, rot) = if spin {
+        (
+            time_machine_palette(app.ui_light),
+            time_machine_rotation_fraction(app.fx_clock),
+        )
+    } else {
+        (&[] as &[Color], 0.0)
+    };
+    let spin_color =
+        |perim: usize| time_machine_color_at(palette, perim, fw * 2 + fh * 2 - 4, rot);
     // The marker column rides the frame's left border: `>` on the cursor
     // row, `▌` on marked rows, the border's `│` everywhere else. Written
     // over the border cells after the frame, so a marker replaces the
     // border glyph in place; the selection background extends over it,
     // running the cursor/selection band to the page edge.
     let buf = f.buffer_mut();
+    if spin {
+        // Top and bottom rows (corners included), then the side columns.
+        for x in 0..fw {
+            if let Some(c) = buf.cell_mut((frame.x + x as u16, frame.y)) {
+                c.set_fg(spin_color(perimeter_index(x, 0, fw, fh)));
+            }
+            if let Some(c) = buf.cell_mut((frame.x + x as u16, frame.y + fh as u16 - 1)) {
+                c.set_fg(spin_color(perimeter_index(x, fh - 1, fw, fh)));
+            }
+        }
+        for y in 1..fh.saturating_sub(1) {
+            if let Some(c) = buf.cell_mut((frame.x + fw as u16 - 1, frame.y + y as u16)) {
+                c.set_fg(spin_color(perimeter_index(fw - 1, y, fw, fh)));
+            }
+            if let Some(c) = buf.cell_mut((frame.x, frame.y + y as u16)) {
+                c.set_fg(spin_color(perimeter_index(0, y, fw, fh)));
+            }
+        }
+    }
     for (i, cell) in gutter.iter().take(inner.height as usize).enumerate() {
         if let Some(c) = buf.cell_mut((frame.x, inner.y + i as u16)) {
             c.set_symbol(cell.glyph);
-            c.set_style(cell.style);
+            let style = if spin && cell.glyph == "│" {
+                // The left border's plain cells join the rotating
+                // gradient; markers (▌/▀/>) keep their own colors. The
+                // row's background (the selection band) is preserved.
+                let bg = cell.style.bg;
+                let mut s = Style::default().fg(spin_color(perimeter_index(0, i, fw, fh)));
+                if let Some(bg) = bg {
+                    s = s.bg(bg);
+                }
+                s
+            } else {
+                cell.style
+            };
+            c.set_style(style);
         }
     }
     // The scrollbar sits one column inside the frame's right border: a
@@ -3432,6 +3488,7 @@ mod mouse_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -3477,6 +3534,7 @@ mod mouse_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -3563,6 +3621,7 @@ mod mouse_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -3600,6 +3659,7 @@ mod mouse_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(config.files[0].clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -3733,6 +3793,7 @@ mod mouse_view_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            fx: true,
         };
         let source = Source::load(path.into()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
