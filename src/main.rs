@@ -408,7 +408,11 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         // document (or through herdr, which can deliver a burst at once)
         // that made scrolling crawl. Batching the burst into a single
         // frame keeps the wheel responsive.
-        if event::poll(Duration::from_millis(TICK_MS))? {
+        // While an effect animates, tick fast enough for smooth frames
+        // (the idle cadence of 10 fps would cut a 450 ms stream into 4-5
+        // jumps); otherwise keep the lazy 100 ms poll.
+        let tick = if app.has_active_fx() { FX_TICK_MS } else { TICK_MS };
+        if event::poll(Duration::from_millis(tick))? {
             for _ in 0..MAX_EVENTS_PER_FRAME {
                 if !event::poll(Duration::ZERO)? {
                     break;

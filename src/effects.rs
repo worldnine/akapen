@@ -147,10 +147,14 @@ pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effe
                         // breaks the row's background).
                         if (order as f32) >= alpha * total as f32 {
                             match cell.style().bg {
-                                Some(bg) => {
+                                // A real background: repaint the glyph with
+                                // it (invisible, width preserved). `Reset`
+                                // is ratatui's "no background" — there is
+                                // nothing to blend into, so blank instead.
+                                Some(bg) if bg != Color::Reset => {
                                     cell.set_fg(bg);
                                 }
-                                None => blank_cell(cell),
+                                _ => blank_cell(cell),
                             }
                         } else if let Some(&fg) = fg_cache.get(&(x, y)) {
                             cell.set_fg(fg);
@@ -171,11 +175,7 @@ pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effe
 /// with a background use the repaint trick instead, which leaves no
 /// visible glyph at all.
 fn blank_cell(cell: &mut ratatui::buffer::Cell) {
-    if unicode_width::UnicodeWidthStr::width(cell.symbol()) > 1 {
-        cell.set_char('　');
-    } else {
-        cell.set_char(' ');
-    }
+    cell.set_char(' ');
 }
 
 /// Scatter-out for the deletion ghosts, BACKSPACE-style: the ghost stays
@@ -196,21 +196,52 @@ pub(crate) fn ghost_effect(band: Color) -> Effect {
             |band, ctx, buf| {
                 let alpha = ctx.timer.alpha();
                 let area = ctx.area;
-                let w = area.width as usize;
-                let total = area.width as usize * area.height as usize;
+                // Pass 1: the text-cell count per row (non-blank symbols).
+                // The backspace cursor is normalized over the TEXT only,
+                // so a ghost whose row is mostly trailing blank space
+                // still erases its words smoothly right→left instead of
+                // chewing through the empty tail first.
+                let mut text_counts = vec![0usize; area.height as usize];
+                let mut total = 0usize;
                 for y in area.y..area.bottom() {
+                    let mut n = 0usize;
                     for x in area.x..area.right() {
-                        let order = (y - area.y) as usize * w + (x - area.x) as usize;
-                        // The backspace cursor: cells AFTER the cursor (in
-                        // reverse reading order) are absorbed into the band.
+                        if !buf[(x, y)].symbol().trim().is_empty() {
+                            n += 1;
+                        }
+                    }
+                    text_counts[(y - area.y) as usize] = n;
+                    total += n;
+                }
+                if total == 0 {
+                    return;
+                }
+                // Pass 2: absorb text cells in REVERSE reading order.
+                for y in area.y..area.bottom() {
+                    let before_rows: usize =
+                        text_counts[..(y - area.y) as usize].iter().sum();
+                    let mut k = 0usize; // text cells before this one in the row
+                    for x in area.x..area.right() {
+                        let cell = &buf[(x, y)];
+                        if cell.symbol().trim().is_empty() {
+                            continue; // the row's blank padding is never absorbed
+                        }
+                        let order = before_rows + k;
                         if ((total - 1 - order) as f32) < alpha * total as f32 {
                             let cell = &mut buf[(x, y)];
+                            // Repaint band-on-band: the glyph stays (its
+                            // width never changes, so ratatui's diff never
+                            // takes the wide→narrow path that broke CJK
+                            // backgrounds), invisible against the band —
+                            // no checkerboard, no visible space glyphs.
                             cell.set_fg(*band);
                             cell.set_bg(*band);
                         }
+                        k += 1;
                     }
                 }
             },
         ),
     )
 }
+

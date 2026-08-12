@@ -2556,6 +2556,7 @@ use crate::comment::Selection;
         assert!(red, "error toasts are red");
     }
 
+
     #[test]
     fn fx_effects_are_created_only_with_the_fx_flag() {
         // `--fx` (default) arms the time-machine frame at startup and a

@@ -39,6 +39,10 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The 100ms event-poll/tick cadence.
 pub(crate) const TICK_MS: u64 = 100;
+/// The event-loop tick while a tachyonfx effect is animating: ~60 fps so
+/// streaming reveals and backspace deletions render smoothly instead of
+/// jumping in 100 ms steps.
+pub(crate) const FX_TICK_MS: u64 = 16;
 /// Transient footer messages live this long.
 pub(crate) const STATUS_SECS: Duration = Duration::from_secs(4);
 /// Debounce for re-rendering the view after a resize.
@@ -686,6 +690,19 @@ impl App {
 
     pub(crate) fn is_historical(&self) -> bool {
         self.history().is_some_and(|history| history.position > 0)
+    }
+
+    /// Whether any tachyonfx effect is currently animating (toast fade,
+    /// appear/ghost scatter, the rotating time-machine frame). The event
+    /// loop raises its tick rate while this is true.
+    pub(crate) fn has_active_fx(&self) -> bool {
+        if !self.config.fx {
+            return false;
+        }
+        self.toast_fx.is_some()
+            || !self.appear_fx.is_empty()
+            || !self.ghost_fx.is_empty()
+            || (self.is_historical() && self.time_machine_fx.is_some())
     }
 
     pub(crate) fn current_revision_context(&self) -> Option<String> {
