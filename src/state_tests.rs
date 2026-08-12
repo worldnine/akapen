@@ -1360,7 +1360,9 @@ use crate::comment::Selection;
         assert_eq!(app.source.lines[0], "old first line");
         assert!(!app.comparison_changed.is_empty());
         assert!(app.review_changed.is_empty(), "NOW review state remains independent");
-        assert_eq!(app.selection.unwrap().range(), (0, 2));
+        // Line-granular review marks: only the changed line (0) is marked,
+        // not the whole merged block (the block-level intent was dropped).
+        assert_eq!(app.selection.unwrap().range(), (0, 0));
     }
 
     #[test]

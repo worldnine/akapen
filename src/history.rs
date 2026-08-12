@@ -4,8 +4,7 @@
 //! snapshots, not hunks: moving through time always produces a complete
 //! Markdown source that can be rendered normally.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -60,27 +59,6 @@ pub(crate) struct DocumentHistory {
     pub(crate) reviewed_content: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum BlockKind {
-    Heading,
-    Paragraph,
-    List,
-    Quote,
-    Code,
-    Table,
-}
-
-#[derive(Clone, Debug)]
-struct MarkdownBlock {
-    start: usize,
-    end: usize,
-    kind: BlockKind,
-    /// Keeps row matching inside the same table. Zero for non-table blocks.
-    scope: u64,
-    id: u64,
-    content: String,
-}
-
 /// A block that existed in the previous revision but not the next one.
 /// It is rendered dimly at `anchor` for a moment before being collapsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,133 +67,20 @@ pub(crate) struct DeletedBlock {
     pub(crate) content: String,
 }
 
-/// Semantic block transition: exact block IDs keep moved/unchanged blocks
-/// stable, fuzzy matches identify rewrites, and unmatched old blocks become
-/// short-lived deletion ghosts.
-/// The block-level transition used by the history tests: which new lines
-/// belong to changed/inserted blocks and which old blocks were removed
-/// wholesale (the animation path now works per-line via
-/// [`super::line_level_transition`]; the review marks use
-/// [`review_block_transition`]).
-#[cfg(test)]
-pub(crate) fn block_transition(
-    old: &[String],
-    new: &[String],
-) -> (HashSet<usize>, Vec<DeletedBlock>) {
-    semantic_transition(old, new, false)
-}
-
-/// Review marks use the same semantic matching as history animation, except
-/// that a Markdown table is split into source rows. A one-cell edit should
-/// send the reviewer to its row, while time travel may still animate the
-/// rendered table as one layout block.
-fn review_block_transition(
-    old: &[String],
-    new: &[String],
-) -> (HashSet<usize>, Vec<DeletedBlock>) {
-    semantic_transition(old, new, true)
-}
-
-fn semantic_transition(
-    old: &[String],
-    new: &[String],
-    split_table_rows: bool,
-) -> (HashSet<usize>, Vec<DeletedBlock>) {
-    let old_blocks = markdown_blocks(old, split_table_rows);
-    let new_blocks = markdown_blocks(new, split_table_rows);
-    let mut matched_old = vec![None; old_blocks.len()];
-    let mut used_new = HashSet::new();
-    let mut by_id: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (index, block) in new_blocks.iter().enumerate() {
-        by_id.entry(block.id).or_default().push(index);
-    }
-
-    // Stable IDs first: an unchanged block remains the same object even if
-    // another block was inserted above it or it moved within the document.
-    for (old_index, block) in old_blocks.iter().enumerate() {
-        if let Some(candidates) = by_id.get(&block.id)
-            && let Some(&new_index) = candidates.iter().find(|index| !used_new.contains(*index))
-        {
-            matched_old[old_index] = Some(new_index);
-            used_new.insert(new_index);
-        }
-    }
-
-    let mut changed = HashSet::new();
-    // Rewritten blocks keep their identity when kind and text remain
-    // recognizably similar. The whole rendered block lights, not just the
-    // individual source lines selected by a line diff.
-    for (old_index, old_block) in old_blocks.iter().enumerate() {
-        if matched_old[old_index].is_some() {
-            continue;
-        }
-        let best = new_blocks
-            .iter()
-            .enumerate()
-            .filter(|(index, block)| {
-                !used_new.contains(index)
-                    && block.kind == old_block.kind
-                    && block.scope == old_block.scope
-            })
-            .map(|(index, block)| {
-                let ratio = TextDiff::from_chars(&old_block.content, &block.content).ratio();
-                (index, ratio)
-            })
-            .max_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((new_index, ratio)) = best
-            && ratio >= 0.55
-        {
-            matched_old[old_index] = Some(new_index);
-            used_new.insert(new_index);
-            changed.extend(new_blocks[new_index].start..=new_blocks[new_index].end);
-        }
-    }
-
-    for (index, block) in new_blocks.iter().enumerate() {
-        if !used_new.contains(&index) {
-            changed.extend(block.start..=block.end);
-        }
-    }
-
-    let mut deleted = Vec::new();
-    for (old_index, block) in old_blocks.iter().enumerate() {
-        if matched_old[old_index].is_some() {
-            continue;
-        }
-        let next = matched_old
-            .iter()
-            .enumerate()
-            .skip(old_index + 1)
-            .find_map(|(_, mapped)| *mapped)
-            .map(|index| new_blocks[index].start);
-        let previous = matched_old[..old_index]
-            .iter()
-            .rev()
-            .find_map(|mapped| *mapped)
-            .map(|index| new_blocks[index].end.saturating_add(1));
-        let anchor = next.or(previous).unwrap_or(0).min(new.len());
-        deleted.push(DeletedBlock {
-            anchor,
-            content: block.content.clone(),
-        });
-    }
-    (changed, deleted)
-}
-
 /// Cumulative review marks from an acknowledged full document to NOW.
 /// Markdown uses semantic blocks; every other text file uses source lines.
 pub(crate) fn review_transition(
-    markdown: bool,
+    _markdown: bool,
     reviewed: &str,
     now: &str,
 ) -> (HashSet<usize>, HashSet<usize>) {
+    // Line-granular review marks: a one-cell edit marks one line, never
+    // the whole block. The block-level "whole rendered block lights"
+    // intent was dropped from the spec — the animation path and the
+    // review marks now agree on per-line granularity.
     let old: Vec<String> = reviewed.lines().map(str::to_string).collect();
     let new: Vec<String> = now.lines().map(str::to_string).collect();
-    let (changed, deleted) = if markdown {
-        review_block_transition(&old, &new)
-    } else {
-        line_transition(&old, &new)
-    };
+    let (changed, deleted) = line_transition(&old, &new);
     let last = new.len().saturating_sub(1);
     let deleted_before = deleted
         .into_iter()
@@ -247,132 +112,6 @@ fn line_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec<Delet
         }
     }
     (changed, deleted)
-}
-
-fn markdown_blocks(lines: &[String], split_table_rows: bool) -> Vec<MarkdownBlock> {
-    let mut blocks = Vec::new();
-    let mut start = 0usize;
-    while start < lines.len() {
-        if lines[start].trim().is_empty() {
-            start += 1;
-            continue;
-        }
-        let trimmed = lines[start].trim_start();
-        let kind = if heading_text(&lines[start]).is_some() {
-            BlockKind::Heading
-        } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            BlockKind::Code
-        } else if is_list_line(trimmed) {
-            BlockKind::List
-        } else if trimmed.starts_with('>') {
-            BlockKind::Quote
-        } else if looks_like_table(lines, start) {
-            BlockKind::Table
-        } else {
-            BlockKind::Paragraph
-        };
-        let mut end = start;
-        match kind {
-            BlockKind::Heading => {}
-            BlockKind::Code => {
-                let fence = if trimmed.starts_with("~~~") { "~~~" } else { "```" };
-                while end + 1 < lines.len() {
-                    end += 1;
-                    if lines[end].trim_start().starts_with(fence) {
-                        break;
-                    }
-                }
-            }
-            BlockKind::Table => {
-                while end + 1 < lines.len()
-                    && !lines[end + 1].trim().is_empty()
-                    && lines[end + 1].contains('|')
-                {
-                    end += 1;
-                }
-            }
-            BlockKind::List => {
-                while end + 1 < lines.len()
-                    && !lines[end + 1].trim().is_empty()
-                    && (is_list_line(lines[end + 1].trim_start())
-                        || lines[end + 1].starts_with(' '))
-                {
-                    end += 1;
-                }
-            }
-            BlockKind::Quote => {
-                while end + 1 < lines.len() && lines[end + 1].trim_start().starts_with('>') {
-                    end += 1;
-                }
-            }
-            BlockKind::Paragraph => {
-                while end + 1 < lines.len()
-                    && !lines[end + 1].trim().is_empty()
-                    && heading_text(&lines[end + 1]).is_none()
-                    && !lines[end + 1].trim_start().starts_with("```")
-                    && !lines[end + 1].trim_start().starts_with("~~~")
-                {
-                    end += 1;
-                }
-            }
-        }
-        let table_scope = if split_table_rows && kind == BlockKind::Table {
-            let structural_end = (start + 1).min(end);
-            let structure = lines[start..=structural_end]
-                .join("\n")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut hasher = DefaultHasher::new();
-            structure.hash(&mut hasher);
-            hasher.finish()
-        } else {
-            0
-        };
-        let ranges: Vec<(usize, usize)> = if split_table_rows && kind == BlockKind::Table {
-            (start..=end).map(|row| (row, row)).collect()
-        } else {
-            vec![(start, end)]
-        };
-        for (block_start, block_end) in ranges {
-            let content = lines[block_start..=block_end].join("\n");
-            let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
-            let mut hasher = DefaultHasher::new();
-            kind.hash(&mut hasher);
-            table_scope.hash(&mut hasher);
-            normalized.hash(&mut hasher);
-            blocks.push(MarkdownBlock {
-                start: block_start,
-                end: block_end,
-                kind,
-                scope: table_scope,
-                id: hasher.finish(),
-                content,
-            });
-        }
-        start = end + 1;
-    }
-    blocks
-}
-
-fn is_list_line(line: &str) -> bool {
-    line.starts_with("- ")
-        || line.starts_with("* ")
-        || line.starts_with("+ ")
-        || line
-            .split_once(". ")
-            .is_some_and(|(number, _)| number.chars().all(|c| c.is_ascii_digit()))
-}
-
-fn looks_like_table(lines: &[String], start: usize) -> bool {
-    lines[start].contains('|')
-        && lines.get(start + 1).is_some_and(|line| {
-            let cells = line.trim().trim_matches('|').split('|');
-            cells.into_iter().all(|cell| {
-                let cell = cell.trim().trim_matches(':');
-                cell.len() >= 3 && cell.chars().all(|c| c == '-')
-            })
-        })
 }
 
 impl DocumentHistory {
@@ -722,7 +461,7 @@ fn absolutize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        DocumentHistory, Revision, RevisionSource, anchored_line, block_transition,
+        DocumentHistory, Revision, RevisionSource, anchored_line,
         review_transition,
     };
     use crate::snapshot::SnapshotCache;
@@ -805,37 +544,8 @@ mod tests {
     }
 
     #[test]
-    fn block_identity_ignores_unchanged_blocks_moved_by_an_insertion() {
-        let old = ["# Doc", "", "stable paragraph"].map(str::to_string);
-        let new = ["# Doc", "", "new paragraph", "", "stable paragraph"]
-            .map(str::to_string);
-        let (changed, deleted) = block_transition(&old, &new);
-        assert_eq!(changed, [2].into_iter().collect());
-        assert!(deleted.is_empty());
-    }
-
     #[test]
-    fn rewritten_paragraph_lights_the_whole_block() {
-        let old = ["# Doc", "", "This is the old", "paragraph text."]
-            .map(str::to_string);
-        let new = ["# Doc", "", "This is the newer", "paragraph text."]
-            .map(str::to_string);
-        let (changed, deleted) = block_transition(&old, &new);
-        assert_eq!(changed, [2, 3].into_iter().collect());
-        assert!(deleted.is_empty());
-    }
-
     #[test]
-    fn deleted_block_becomes_a_ghost_at_the_following_block() {
-        let old = ["# Doc", "", "remove me", "", "## Next", "text"]
-            .map(str::to_string);
-        let new = ["# Doc", "", "## Next", "text"].map(str::to_string);
-        let (_, deleted) = block_transition(&old, &new);
-        assert_eq!(deleted.len(), 1);
-        assert_eq!(deleted[0].anchor, 2);
-        assert_eq!(deleted[0].content, "remove me");
-    }
-
     #[test]
     fn table_review_marks_only_the_row_containing_the_changed_cell() {
         let old = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | two |\n";
@@ -863,23 +573,6 @@ mod tests {
     }
 
     #[test]
-    fn table_time_travel_still_treats_the_rendered_table_as_one_block() {
-        let old = ["| Key | Value |", "| --- | --- |", "| a | one |", "| b | two |"]
-            .map(str::to_string);
-        let new = [
-            "| Key | Value |",
-            "| --- | --- |",
-            "| a | one |",
-            "| b | changed |",
-        ]
-        .map(str::to_string);
-
-        let (changed, deleted) = block_transition(&old, &new);
-
-        assert_eq!(changed, [0, 1, 2, 3].into_iter().collect());
-        assert!(deleted.is_empty());
-    }
-
     #[test]
     fn loads_complete_markdown_snapshots_newest_first() {
         let dir = tempfile::tempdir().unwrap();
