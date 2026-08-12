@@ -121,6 +121,16 @@ pub(crate) struct App {
     /// past in view mode; `None` with `--no-fx`. Its rotation clock
     /// lives inside the effect itself.
     pub(crate) time_machine_fx: Option<tachyonfx::Effect>,
+    /// The timeline bar's slide-in/out effect (tachyonfx), created when
+    /// the bar appears or disappears and rendered over its rows until
+    /// it completes.
+    pub(crate) timeline_fx: Option<tachyonfx::Effect>,
+    /// While Some the timeline bar lingers to play its slide-out (the
+    /// history cursor has already returned to NOW).
+    pub(crate) timeline_exit_until: Option<Instant>,
+    /// The history position to restore when the timeline overlay closes
+    /// with Esc (the fzf-style cancel contract).
+    pub(crate) timeline_restore: Option<usize>,
     /// The active toast's fade-in/hold/fade-out effect (tachyonfx),
     /// created by `flash`/`flash_err` and dropped when the status
     /// expires. Rendered on the message row only while the toast is the
@@ -315,6 +325,9 @@ impl App {
             history_render_due: None,
             history_frame_flash_until: None,
             time_machine_fx,
+            timeline_fx: None,
+            timeline_exit_until: None,
+            timeline_restore: None,
             toast_fx: None,
             appear_fx: Vec::new(),
             ghost_fx: Vec::new(),
@@ -626,6 +639,9 @@ impl App {
         self.history_render_due = None;
         self.history_frame_flash_until = None;
         self.history_frame_flash_pending = false;
+        self.timeline_fx = None;
+        self.timeline_exit_until = None;
+        self.timeline_restore = None;
         self.confirm_quit = false;
         self.confirm_edit = false;
         self.confirm_reload = false;

@@ -24,6 +24,7 @@ mod render;
 mod snapshot;
 mod source;
 mod theme;
+mod timeline;
 mod view;
 
 
@@ -58,6 +59,7 @@ use crate::overlay::*;
 use crate::reload::*;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
+use similar::{DiffTag, TextDiffConfig};
 use crate::view::{
     is_table_delimiter_line, lerp_color, scroll_offset_at, scroll_offset_drag, scroll_thumb,
     GutterCell, ViewState,
@@ -591,6 +593,12 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
                     app.last_overlay_click = Some((Instant::now(), idx));
                     app.overlay_cursor = idx;
                     keep_overlay_cursor_visible(app);
+                    // The timeline list is a live scrubber: a click
+                    // seeks the history cursor immediately (Enter only
+                    // confirms the position).
+                    if app.overlay == Some(Overlay::Timeline) {
+                        timeline_overlay_seek(app, idx);
+                    }
                     if is_double {
                         activate_overlay_selection(app);
                     }
@@ -606,6 +614,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = (app.overlay_cursor + 1).min(max);
                 }
+                Some(Overlay::Timeline) => timeline_overlay_move(app, 1),
                 Some(Overlay::Files) => {
                     if !app.files.is_empty() {
                         app.overlay_cursor = (app.overlay_cursor + 1).min(app.files.len() - 1);
@@ -628,6 +637,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = app.overlay_cursor.saturating_sub(1).min(max);
                 }
+                Some(Overlay::Timeline) => timeline_overlay_move(app, -1),
                 _ => {
                     app.overlay_cursor = app.overlay_cursor.saturating_sub(1);
                     keep_overlay_cursor_visible(app);
@@ -1131,12 +1141,16 @@ fn refresh_comparison_marks(app: &mut App) {
 /// Move only the lightweight history cursor. The rendered Markdown remains
 /// untouched until input settles, so holding an arrow can scan dozens of
 /// revisions without paying the renderer cost for intermediate choices.
-fn select_history(app: &mut App, delta: isize) -> bool {
+pub(crate) fn select_history(app: &mut App, delta: isize) -> bool {
     if app.config.reply {
         app.flash_err("history unavailable in reply mode");
         return false;
     }
     let index = app.current_file_index;
+    let was_browsing = app
+        .histories
+        .get(index)
+        .is_some_and(|history| history.position > 0);
     let moved = app
         .histories
         .get_mut(index)
@@ -1164,6 +1178,24 @@ fn select_history(app: &mut App, delta: isize) -> bool {
         return false;
     }
 
+    // The timeline bar slides in on the first step into the past and
+    // slides out when the cursor returns to NOW (fx only; without fx
+    // the bar simply appears and disappears).
+    let browsing = app.histories[index].position > 0;
+    if browsing && !was_browsing && app.config.fx {
+        app.timeline_exit_until = None;
+        app.timeline_fx = Some(crate::effects::timeline_slide_in());
+    }
+    if !browsing && was_browsing && app.config.fx {
+        app.timeline_exit_until = Some(
+            Instant::now() + std::time::Duration::from_millis(crate::effects::TIMELINE_SLIDE_MS as u64),
+        );
+        app.timeline_fx = Some(crate::effects::timeline_slide_out());
+    }
+    // While the bar covers the bottom rows, keep the cursor above them
+    // (a cursor parked on the last line would hide under the times row).
+    keep_cursor_out_of_timeline(app);
+
     let label = {
         let history = &app.histories[index];
         history.label().unwrap_or_default()
@@ -1177,9 +1209,46 @@ fn select_history(app: &mut App, delta: isize) -> bool {
     true
 }
 
+/// While the timeline bar is on screen, nudge the scroll so the cursor
+/// does not sit under the covered rows: the times row takes the last
+/// content row on wide terminals, and source mode's frameless body
+/// loses one more row to the axis. No-op at NOW or on narrow terminals
+/// (no bar).
+fn keep_cursor_out_of_timeline(app: &mut App) {
+    if !app.is_historical() {
+        return;
+    }
+    let width = ratatui::crossterm::terminal::size()
+        .map(|s| s.0 as usize)
+        .unwrap_or(80);
+    // The bar is always two rows: the words row replaces the footer,
+    // and the axis replaces the view frame's bottom border — so view
+    // mode loses no content row. Source mode has no frame, so the axis
+    // covers the last content row.
+    let covered = if width >= 60 && app.mode == Mode::Source {
+        1
+    } else {
+        0
+    };
+    if covered == 0 {
+        return;
+    }
+    let viewport = app.source_viewport_rows().saturating_sub(covered);
+    app.keep_cursor_visible(viewport as u16);
+}
+
 /// Render the final revision selected by [`select_history`]. This is the
 /// only expensive half of time travel and runs once after the arrow stops.
 fn render_pending_history(app: &mut App, animate: bool) -> bool {
+    // While an overlay owns the screen, the document behind it must not
+    // re-render: the timeline overlay's list IS the timeline, and a
+    // render here would stall every keypress inside it (a full render
+    // pipeline on a 50 KB document costs ~100 ms in a debug build). The
+    // due flag stays set, so the render runs once when the overlay
+    // closes.
+    if app.overlay.is_some() {
+        return false;
+    }
     if app.history_render_due.take().is_none() {
         return false;
     }
@@ -1283,6 +1352,10 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
             &path,
         );
     }
+    // The anchor preserved the cursor's place, but the new document's
+    // rows may land it under the timeline bar again; nudge the scroll
+    // back above the covered rows (no-op at NOW).
+    keep_cursor_out_of_timeline(app);
     app.history_frame_flash_pending = true;
     true
 }
@@ -1444,46 +1517,39 @@ fn appear_mask(
 }
 
 /// The char-index ranges of `new`'s characters that have no counterpart
-/// in `old` (an LCS backtrace: matched characters advance both, old-only
+/// in `old` (a diff backtrace: matched characters advance both, old-only
 /// characters are deletions to skip, new-only characters form the
 /// inserted runs). Operates on whole texts (newlines included), so
 /// re-wrapped text stays aligned.
+///
+/// The alignment runs under [`crate::history::DIFF_DEADLINE`]: the old
+/// hand-rolled LCS DP was quadratic in BOTH memory and time, and a
+/// multi-KB table renders to ~15K chars per side — 225M cells, a
+/// gigabyte of matrix, minutes in a debug build. On expiry similar
+/// hands back its best alignment so far, so a deadline-truncated mask
+/// simply animates a few extra or missing cells instead of stalling the
+/// render.
 fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
-    let o: Vec<char> = old.chars().collect();
-    let n: Vec<char> = new.chars().collect();
-    if o.is_empty() {
-        return vec![(0, n.len())];
+    if old.is_empty() {
+        return vec![(0, new.chars().count())];
     }
-    // LCS lengths (classic DP, reversed scan for the backtrace).
-    let mut dp = vec![vec![0usize; n.len() + 1]; o.len() + 1];
-    for i in (0..o.len()).rev() {
-        for j in (0..n.len()).rev() {
-            dp[i][j] = if o[i] == n[j] {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
+    let diff = TextDiffConfig::default()
+        .timeout(crate::history::DIFF_DEADLINE)
+        .diff_chars(old, new);
     let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < o.len() && j < n.len() {
-        if o[i] == n[j] {
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            i += 1; // an old-only char: a deletion, nothing to reveal
-        } else {
-            let start = j;
-            // Consume the run of new-only chars (up to the next match).
-            while j < n.len() && (i >= o.len() || o[i] != n[j]) {
-                j += 1;
+    for op in diff.ops() {
+        match op.tag() {
+            // Equal advances both, Delete advances only the old text;
+            // Insert (and the new side of a Replace) is what the
+            // appear effect must reveal.
+            DiffTag::Insert | DiffTag::Replace => {
+                let range = op.new_range();
+                if !range.is_empty() {
+                    ranges.push((range.start, range.end));
+                }
             }
-            ranges.push((start, j));
+            DiffTag::Equal | DiffTag::Delete => {}
         }
-    }
-    if j < n.len() {
-        ranges.push((j, n.len())); // trailing insertions
     }
     ranges.into_iter().filter(|(s, e)| s < e).collect()
 }
@@ -1885,10 +1951,20 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         KeyCode::F(7) => jump_review_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
-        // `l` opens the all-comments list; Ctrl+p opens the file picker;
-        // `?` opens the full key reference.
+        // `l` opens the all-comments list; `t` the document timeline;
+        // Ctrl+p opens the file picker; `?` opens the full key reference.
         KeyCode::Char('l') => {
             open_overlay(app, Overlay::Comments, 0);
+        }
+        KeyCode::Char('t') => {
+            if app.config.reply {
+                app.flash_err("reply mode — history unavailable");
+            } else if app.history().is_some_and(|history| history.revisions.len() > 1) {
+                let position = app.history().map_or(0, |h| h.position);
+                app.timeline_restore = Some(position);
+                open_overlay(app, Overlay::Timeline, position);
+                keep_overlay_cursor_visible(app);
+            }
         }
         KeyCode::Char('?') => {
             open_overlay(app, Overlay::Help, 0);
@@ -2375,10 +2451,20 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         KeyCode::F(7) => jump_review_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
-        // `l` opens the all-comments list; Ctrl+p opens the file picker;
-        // `?` opens the full key reference.
+        // `l` opens the all-comments list; `t` the document timeline;
+        // Ctrl+p opens the file picker; `?` opens the full key reference.
         KeyCode::Char('l') => {
             open_overlay(app, Overlay::Comments, 0);
+        }
+        KeyCode::Char('t') => {
+            if app.config.reply {
+                app.flash_err("reply mode — history unavailable");
+            } else if app.history().is_some_and(|history| history.revisions.len() > 1) {
+                let position = app.history().map_or(0, |h| h.position);
+                app.timeline_restore = Some(position);
+                open_overlay(app, Overlay::Timeline, position);
+                keep_overlay_cursor_visible(app);
+            }
         }
         KeyCode::Char('?') => {
             open_overlay(app, Overlay::Help, 0);
@@ -2825,6 +2911,15 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     if app.overlay.is_some() {
         draw_overlay(f, app);
     }
+    // The browsing timeline bar: drawn after the footer so its state
+    // words own the bottom row. It covers the footer, the frame's
+    // bottom border (the axis row replaces it), and — on wide terminals
+    // — the last content row (the times row). The message row floats
+    // one row above it, and the border effect skips the covered row.
+    let timeline_on = crate::timeline::timeline_active(app);
+    if timeline_on {
+        draw_timeline_bar(f, app);
+    }
     // The message row floats above everything (overlays included): a
     // notification never displaces content. It renders on the row just
     // above the footer — the frame's bottom border in view mode (the
@@ -2839,6 +2934,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     // last history render, and the toast fade on the message row (only
     // while the toast is the top message).
     if app.config.fx && app.view_active() {
+        crate::effects::set_timeline_bar_visible(timeline_on);
         // Same geometry draw_view builds: one column off the left edge,
         // the body's full height.
         let frame = Rect {
@@ -2891,13 +2987,25 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
             }
         }
     }
+    // The timeline bar's own slide-in/out, rendered over its rows (the
+    // static bar is drawn above, the shader wipes and reveals it).
+    if app.config.fx && timeline_on
+        && let Some(effect) = app.timeline_fx.as_mut()
+        && !effect.done()
+    {
+        let rect = timeline_bar_rect(f.area());
+        f.render_effect(effect, rect, last_tick);
+    }
+    if app.timeline_fx.as_ref().is_some_and(|fx| fx.done()) || !timeline_on {
+        app.timeline_fx = None;
+    }
     if app.status.is_some()
         && prompt_message(app).is_none()
         && let Some(effect) = app.toast_fx.as_mut()
     {
         let row = Rect {
             x: 0,
-            y: f.area().height.saturating_sub(2),
+            y: f.area().height.saturating_sub(if timeline_on { 3 } else { 2 }),
             width: f.area().width,
             height: 1,
         };
@@ -2912,14 +3020,181 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
 
 
 
-/// View mode: the native render with a row cursor. No per-frame
-/// keep_cursor_visible here — like source mode, the wheel scrolls the
-/// viewport only and the cursor is an absolute position that may sit off
+/// The rect of the browsing timeline bar: the bottom two rows, full
+/// width — the same rows [`draw_timeline_bar`] paints.
+fn timeline_bar_rect(area: Rect) -> Rect {
+    let rows = crate::timeline::TIMELINE_BAR_ROWS.min(area.height);
+    Rect {
+        x: 0,
+        y: area.height.saturating_sub(rows),
+        width: area.width,
+        height: rows,
+    }
+}
+
+/// The browsing timeline bar: two rows, bottom-anchored — the state
+/// words on the footer row (`viewing` at the current revision, `base`
+/// at the baseline, `NOW` at the right edge, `t: detail` right-aligned)
+/// and the axis on the row above (`●` LOCAL / `▲` COMMIT / `◆` viewing
+/// / `▮` baseline, dim left of the review baseline). Drawn over the
+/// static UI before the effects; the slide effect animates it.
+fn draw_timeline_bar(f: &mut Frame, app: &App) {
+    let width = f.area().width as usize;
+    let height = f.area().height;
+    if width < 60 || height < 4 {
+        return;
+    }
+    let Some(history) = app.history() else {
+        return;
+    };
+    let Some(layout) = crate::timeline::layout_timeline(history, width) else {
+        return;
+    };
+    let words_row = height.saturating_sub(1);
+    let axis_row = height.saturating_sub(2);
+
+    // Row 2: the axis — markers over the line. The line is dim left of
+    // the review baseline (reviewed history is behind you) and normal
+    // from the baseline to NOW (the unreviewed stretch); before the
+    // first acknowledgement the whole axis reads normally.
+    {
+        let by_col: std::collections::HashMap<usize, &crate::timeline::TimelinePoint> =
+            layout.points.iter().map(|p| (p.col, p)).collect();
+        let past = Style::default().fg(Color::DarkGray);
+        let future = Style::default().fg(Color::Gray);
+        let mut cells: Vec<(char, Style)> = Vec::with_capacity(width);
+        for x in 0..width {
+            let cell = match by_col.get(&x) {
+                Some(p) if p.current => (
+                    '◆',
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Some(p) => match p.kind {
+                    // NOW always marks the right edge; the baseline
+                    // state there is already in the title label.
+                    crate::timeline::PointKind::Now => (
+                        '●',
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    crate::timeline::PointKind::Local if p.baseline => (
+                        '▮',
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ),
+                    crate::timeline::PointKind::Commit if p.baseline => (
+                        '▮',
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ),
+                    crate::timeline::PointKind::Local => {
+                        ('●', Style::default().fg(Color::Cyan))
+                    }
+                    crate::timeline::PointKind::Commit => {
+                        ('▲', Style::default().fg(Color::LightBlue))
+                    }
+                },
+                None => (
+                    '─',
+                    match layout.baseline_col {
+                        Some(base_col) if x < base_col => past,
+                        _ => future,
+                    },
+                ),
+            };
+            cells.push(cell);
+        }
+        // Merge consecutive identical cells into spans.
+        let mut spans: Vec<Span> = Vec::new();
+        let mut i = 0;
+        while i < cells.len() {
+            let (ch, style) = cells[i];
+            let mut j = i + 1;
+            while j < cells.len() && cells[j] == (ch, style) {
+                j += 1;
+            }
+            spans.push(Span::styled(ch.to_string().repeat(j - i), style));
+            i = j;
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x: 0,
+                y: axis_row,
+                width: f.area().width,
+                height: 1,
+            },
+        );
+    }
+
+    // Row 3: the state words and the detail hint. The layout guarantees
+    // the words never overlap; the hint yields when a word already sits
+    // in its slot (rare: words hug the right edge only when the viewing
+    // point or baseline does).
+    {
+        let mut items: Vec<(usize, String, Style)> = layout
+            .words
+            .iter()
+            .map(|(start, text)| {
+                let style = match text.as_str() {
+                    "viewing" => Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                    "base" => Style::default().fg(Color::Yellow),
+                    _ => Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD), // NOW
+                };
+                (*start, text.clone(), style)
+            })
+            .collect();
+        let hint_start = width.saturating_sub(13); // "t: detail" ends before NOW
+        let hint_blocked = items
+            .iter()
+            .any(|(start, text, _)| *start < hint_start + 9 && hint_start < start + text.len());
+        if !hint_blocked {
+            items.push((
+                hint_start,
+                "t: detail".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        items.sort_by_key(|(start, _, _)| *start);
+        let mut spans: Vec<Span> = Vec::new();
+        let mut pos = 0usize;
+        for (start, text, style) in items {
+            let start = start.min(width);
+            if start > pos {
+                spans.push(Span::raw(" ".repeat(start - pos)));
+            }
+            let len = text.len();
+            spans.push(Span::styled(text, style));
+            pos = start + len;
+        }
+        if pos < width {
+            spans.push(Span::raw(" ".repeat(width - pos)));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x: 0,
+                y: words_row,
+                width: f.area().width,
+                height: 1,
+            },
+        );
+    }
+}
 /// screen; keyboard navigation, clicks, and the mode handoffs reveal it.
 fn review_flags(marks: &HashSet<usize>, line_count: usize) -> Vec<bool> {
     (0..line_count).map(|line| marks.contains(&line)).collect()
 }
 
+/// View mode: the native render with a row cursor. No per-frame
+/// keep_cursor_visible here — like source mode, the wheel scrolls the
+/// viewport only and the cursor is an absolute position that may sit off
+/// screen until the next j/k.
 fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // View mode always draws the frame: the bordered "page" is the reading
     // mode's visual signature (source mode is the frameless raw editor).

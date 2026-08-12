@@ -6,17 +6,55 @@
 //! effect's own state, so skipped frames (the render-complete flash, a
 //! prompt covering the message row) never disturb the wave.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use ratatui::style::Color;
 use tachyonfx::fx::ShaderFnContext;
-use tachyonfx::{fx, CellFilter, CellIterator, Effect, EffectTimer, Interpolation};
+use tachyonfx::{fx, CellFilter, CellIterator, Effect, EffectTimer, Interpolation, Motion};
 
 use crate::app::STATUS_SECS;
 use crate::view::{
     perimeter_index, time_machine_color_at, time_machine_palette, time_machine_rotation_fraction,
     TIME_MACHINE_ROTATION_MS,
 };
+
+/// How long the timeline bar's slide-in/out takes (milliseconds).
+pub(crate) const TIMELINE_SLIDE_MS: u32 = 200;
+
+/// Set by `draw` while the timeline bar covers the frame's bottom
+/// border row; the time-machine rotation then leaves that row alone so
+/// the axis line stays calm instead of joining the wave.
+static TIMELINE_BAR_VISIBLE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_timeline_bar_visible(visible: bool) {
+    TIMELINE_BAR_VISIBLE.store(visible, Ordering::Relaxed);
+}
+
+/// The timeline bar's drawer opening: the bottom-anchored rows rise
+/// from the bottom edge over [`TIMELINE_SLIDE_MS`]. The static bar is
+/// drawn every frame under the effect; the shader wipes it blank and
+/// lets the rows back in bottom-first (see `fx::slide_in`).
+pub(crate) fn timeline_slide_in() -> Effect {
+    fx::slide_in(
+        Motion::DownToUp,
+        2,
+        0,
+        Color::Reset,
+        (TIMELINE_SLIDE_MS, Interpolation::Linear),
+    )
+}
+
+/// The timeline bar's drawer closing: the rows sink downward and out.
+pub(crate) fn timeline_slide_out() -> Effect {
+    fx::slide_out(
+        Motion::UpToDown,
+        2,
+        0,
+        Color::Reset,
+        (TIMELINE_SLIDE_MS, Interpolation::Linear),
+    )
+}
 
 /// The animated frame while browsing the past (`--fx`, the default): a
 /// custom shader repaints every border-glyph cell of the frame with the
@@ -35,15 +73,30 @@ pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
             let rot = time_machine_rotation_fraction(*clock);
             let area = ctx.area;
             let (w, h) = (area.width as usize, area.height as usize);
-            let perimeter = w * 2 + h * 2 - 4;
+            // A degenerate frame (a terminal that briefly reports 0×0,
+            // or a window shrunk to nothing) must not crash the
+            // rotation: saturating math turns it into a no-op — the
+            // iterator over an empty area yields no cells anyway.
+            let perimeter = w
+                .saturating_mul(2)
+                .saturating_add(h.saturating_mul(2))
+                .saturating_sub(4);
             let (ox, oy) = (area.x as usize, area.y as usize);
+            let last_col = w.saturating_sub(1);
+            let last_row = h.saturating_sub(1);
             for (pos, cell) in cells {
                 let (rx, ry) = (pos.x as usize - ox, pos.y as usize - oy);
-                if rx != 0 && ry != 0 && rx != w - 1 && ry != h - 1 {
+                if rx != 0 && ry != 0 && rx != last_col && ry != last_row {
                     continue; // content cells stay untouched
                 }
                 // Only the frame's own glyphs join the animation.
                 if !matches!(cell.symbol(), "│" | "─" | "┌" | "┐" | "└" | "┘") {
+                    continue;
+                }
+                // The browsing timeline bar owns the frame's bottom
+                // border row while it is on screen; the rotation must
+                // not repaint the axis line under it.
+                if TIMELINE_BAR_VISIBLE.load(Ordering::Relaxed) && ry == h - 1 {
                     continue;
                 }
                 let perim = perimeter_index(rx, ry, w, h);

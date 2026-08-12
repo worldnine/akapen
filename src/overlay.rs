@@ -19,13 +19,16 @@ use crate::reload::file_externally_changed;
 use crate::replace_view_preserving_cursor;
 
 /// The kind of overlay currently open (Ctrl+p = files, `l` = comments,
-/// `?` = help).
+/// `t` = timeline, `?` = help).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Overlay {
     /// File picker: switch to another file in the session.
     Files,
     /// All-comments list across every file.
     Comments,
+    /// The document timeline (`t`): every revision with provenance and
+    /// detail; j/k scrub the document behind it.
+    Timeline,
     /// The full key reference (`?`).
     Help,
 }
@@ -77,6 +80,9 @@ pub(crate) fn overlay_rows(app: &App) -> Vec<Option<usize>> {
             }
             rows
         }
+        Some(Overlay::Timeline) => (0..app.history().map_or(0, |h| h.revisions.len()))
+            .map(Some)
+            .collect(),
         Some(Overlay::Help) | None => Vec::new(),
     }
 }
@@ -87,6 +93,7 @@ pub(crate) fn overlay_entry_count(app: &App) -> usize {
     match app.overlay {
         Some(Overlay::Files) => app.files.len(),
         Some(Overlay::Comments) => app.comments.len(),
+        Some(Overlay::Timeline) => app.history().map_or(0, |h| h.revisions.len()),
         Some(Overlay::Help) | None => 0,
     }
 }
@@ -147,8 +154,68 @@ pub(crate) fn on_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyModifier
     match app.overlay {
         Some(Overlay::Files) => on_files_overlay_key(app, key, modifiers),
         Some(Overlay::Comments) => on_comments_overlay_key(app, key, modifiers),
+        Some(Overlay::Timeline) => on_timeline_overlay_key(app, key, modifiers),
         Some(Overlay::Help) => on_help_overlay_key(app, key, modifiers),
         None => {}
+    }
+}
+
+/// Move the history cursor while the timeline overlay is open: the
+/// document behind updates through the normal debounced render path
+/// (same as `←`/`→`), and the overlay cursor follows the position.
+pub(crate) fn timeline_overlay_move(app: &mut App, delta: isize) {
+    if crate::select_history(app, delta) {
+        app.overlay_cursor = app.history().map_or(0, |h| h.position);
+        keep_overlay_cursor_visible(app);
+    }
+}
+
+/// Snap the history cursor directly to a revision index (mouse click /
+/// wheel on the timeline overlay). No toast: the row is already on
+/// screen, the document renders behind the panel.
+pub(crate) fn timeline_overlay_seek(app: &mut App, position: usize) {
+    let moved = app
+        .histories
+        .get_mut(app.current_file_index)
+        .is_some_and(|history| {
+            let next = position.min(history.revisions.len().saturating_sub(1));
+            let moved = next != history.position;
+            history.position = next;
+            moved
+        });
+    app.overlay_cursor = position;
+    keep_overlay_cursor_visible(app);
+    if moved {
+        app.history_render_due = Some(std::time::Instant::now());
+    }
+}
+
+/// The timeline overlay (`t`): every revision, newest first — NOW on
+/// top. j/k (or the arrows, app-wide direction: Left = older) scrub the
+/// document behind the panel; Enter / q / `t` close at the selected
+/// revision, Esc restores the position the overlay opened at (the fzf
+/// cancel contract).
+pub(crate) fn on_timeline_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
+    match key {
+        KeyCode::Char('j') | KeyCode::Down | KeyCode::Left => timeline_overlay_move(app, 1),
+        KeyCode::Char('k') | KeyCode::Up | KeyCode::Right => timeline_overlay_move(app, -1),
+        KeyCode::Enter => app.overlay = None,
+        // q or t closes at the selected revision; t also toggles the
+        // list closed again, like l for the comments list.
+        KeyCode::Char('q') | KeyCode::Char('t') => app.overlay = None,
+        KeyCode::Esc => {
+            let restore = app.timeline_restore.take();
+            app.overlay = None;
+            if let Some(position) = restore {
+                let index = app.current_file_index;
+                if let Some(history) = app.histories.get_mut(index) {
+                    history.position =
+                        position.min(history.revisions.len().saturating_sub(1));
+                }
+                app.history_render_due = Some(std::time::Instant::now());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -215,6 +282,9 @@ pub(crate) fn activate_overlay_selection(app: &mut App) {
                 }
             }
         }
+        // Timeline: the position is already live-scrubbed; Enter just
+        // confirms it.
+        Some(Overlay::Timeline) => app.overlay = None,
         Some(Overlay::Help) | None => {}
     }
 }
@@ -282,6 +352,7 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
     match app.overlay {
         Some(Overlay::Files) => draw_files_overlay(f, app),
         Some(Overlay::Comments) => draw_comments_overlay(f, app),
+        Some(Overlay::Timeline) => draw_timeline_overlay(f, app),
         Some(Overlay::Help) => draw_help_overlay(f, app),
         None => {}
     }
@@ -307,7 +378,7 @@ pub(crate) fn help_rows(esc_quit: bool, reply: bool, _in_git: bool) -> Vec<(&'st
         rows.push(("reload", "auto-reload on change · r manual"));
     } else {
         rows.insert(1, ("file", "]/[ · ^o files"));
-        rows.insert(2, ("time", "← older · newer → · hold:scrub"));
+        rows.insert(2, ("time", "← older · newer → · hold:scrub · t detail"));
         rows.push(("reload", "r reload · i ignore · e edit"));
         rows.push(("compare", "n/N next/prev · a acknowledge/set baseline"));
     }
@@ -460,6 +531,9 @@ pub(crate) fn overlay_entry_at(app: &App, row: u16) -> Option<usize> {
     match overlay {
         Overlay::Files => (rel < app.files.len()).then_some(rel),
         // Help has no selectable entries (the wheel/j-k scroll it).
+        Overlay::Timeline => {
+            (rel < app.history().map_or(0, |h| h.revisions.len())).then_some(rel)
+        }
         Overlay::Help => None,
         Overlay::Comments => {
             // Same grouped layout as draw_comments_overlay: per file a
@@ -549,6 +623,106 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " j/k:move  Enter:switch  Esc/q:close",
+        dark_gray,
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(dark_gray);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
+}
+
+/// The document timeline (`t`): every revision, newest first — NOW on
+/// top, then LOCAL snapshots by observation time, then COMMITs. The
+/// current row carries the `◆` marker, the review baseline `▮` with a
+/// `· base` tag; j/k (or ←/→) scrub the document behind the panel, Enter
+/// confirms, Esc restores the position the list opened at.
+pub(crate) fn draw_timeline_overlay(f: &mut Frame, app: &App) {
+    use ratatui::widgets::Clear;
+    let area = f.area();
+    let panel = overlay_panel(area);
+    f.render_widget(Clear, panel);
+    let dark_gray = Style::default().fg(Color::DarkGray);
+    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let cyan = Style::default().fg(Color::Cyan);
+
+    let Some(history) = app.history() else {
+        return;
+    };
+    let n = history.revisions.len();
+    let baseline = history.baseline_position();
+    let title_text = format!(" timeline ({n}) ");
+    let title_fill =
+        "─".repeat(panel.width.saturating_sub(title_text.width() as u16 + 2) as usize);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(title_text, yellow),
+        Span::styled(title_fill, dark_gray),
+    ])];
+
+    let inner = panel.width.saturating_sub(2) as usize;
+    let visible = overlay_visible_rows();
+    let offset = app.overlay_offset.min(n.saturating_sub(visible));
+    for (i, rev) in history.revisions.iter().enumerate().skip(offset).take(visible) {
+        let chron = n - i; // 1..n; n = NOW
+        let current = i == history.position;
+        let is_baseline = baseline == Some(i);
+        // The same marker vocabulary as the browsing bar: ◆ viewing,
+        // ▮ baseline, ● local / ▲ commit.
+        let (marker, marker_style) = if current {
+            ("◆", cyan.add_modifier(Modifier::BOLD))
+        } else if rev.source == crate::history::RevisionSource::Now {
+            // NOW keeps its anchor glyph even when it is also the
+            // baseline (the `· base` tag still shows).
+            ("●", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+        } else if is_baseline {
+            ("▮", yellow)
+        } else {
+            match rev.source {
+                crate::history::RevisionSource::Now => unreachable!(),
+                crate::history::RevisionSource::Local => ("●", cyan),
+                crate::history::RevisionSource::Git => {
+                    ("▲", Style::default().fg(Color::LightBlue))
+                }
+            }
+        };
+        let provenance = match rev.source {
+            crate::history::RevisionSource::Now => "NOW",
+            crate::history::RevisionSource::Local => "LOCAL",
+            crate::history::RevisionSource::Git => "COMMIT",
+        };
+        let detail = match rev.source {
+            // The working tree, exactly as the title label says.
+            crate::history::RevisionSource::Now => rev.summary.clone(),
+            // A LOCAL generation has no subject and no identity worth
+            // showing: it is simply the observed document.
+            crate::history::RevisionSource::Local => String::new(),
+            crate::history::RevisionSource::Git => {
+                format!("{} · {}", rev.short_id, rev.summary)
+            }
+        };
+        let base_tag = if is_baseline { " · base" } else { "" };
+        let row_text = if detail.is_empty() {
+            format!("{chron:>2}/{n} · {provenance}{base_tag}")
+        } else {
+            format!("{chron:>2}/{n} · {provenance} · {detail}{base_tag}")
+        };
+        let row_style = if current {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let budget = inner.saturating_sub(3);
+        let text = clip_if_needed(&row_text, budget);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {marker} "), marker_style),
+            Span::styled(text, row_style),
+        ]));
+    }
+
+    // Footer hints.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " j/k:scrub  Enter/q/t:keep·close  Esc:restore&close",
         dark_gray,
     )));
 

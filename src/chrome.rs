@@ -476,9 +476,14 @@ pub(crate) fn footer_hints(app: &App) -> String {
     // the generation label itself lives in the title bar's state slot
     // (provenance, position, id, baseline context) — one place, so the
     // top and bottom never show the same text. The footer keeps the
-    // short navigation affordance only.
+    // short navigation affordance only. `t` opens the full revision list
+    // whenever a timeline actually exists (more than one point).
     if matches!(app.mode, Mode::View | Mode::Source) {
-        format!("{hints} · ← older · newer →")
+        if app.history().is_some_and(|history| history.revisions.len() > 1) {
+            format!("{hints} · t detail · ← older · newer →")
+        } else {
+            format!("{hints} · ← older · newer →")
+        }
     } else {
         hints
     }
@@ -585,7 +590,15 @@ pub(crate) fn prompt_message(app: &App) -> Option<Cow<'static, str>> {
 /// their color semantics (yellow = info, red = an operation that could
 /// not be done — flash_err also beeped).
 pub(crate) fn draw_message(f: &mut Frame, app: &App) {
-    let row = f.area().height.saturating_sub(2);
+    // The browsing timeline bar owns the bottom two rows (footer and
+    // frame border); the message row floats directly above it so
+    // prompts and toasts read as part of the bar instead of hovering
+    // over the document.
+    let row = if crate::timeline::timeline_active(app) {
+        f.area().height.saturating_sub(3)
+    } else {
+        f.area().height.saturating_sub(2)
+    };
     if let Some(msg) = prompt_message(app) {
         draw_banner(f, f.area(), row, &msg, false);
     } else if let Some((msg, _, is_error)) = &app.status {

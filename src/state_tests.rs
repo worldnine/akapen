@@ -2918,6 +2918,208 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn timeline_bar_appears_while_browsing_and_slides_out_at_now() {
+        let mut app = make_app(3, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: "old first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        // At NOW the bar is hidden.
+        assert!(!crate::timeline::timeline_visible(&app));
+        assert!(app.timeline_fx.is_none());
+        // First step into the past: the bar appears and slides in.
+        assert!(select_history(&mut app, 1));
+        assert!(crate::timeline::timeline_visible(&app));
+        assert!(app.timeline_fx.is_some(), "slide-in effect created");
+        assert!(app.timeline_exit_until.is_none());
+        // Returning to NOW: the bar lingers for the slide-out, then dies.
+        assert!(select_history(&mut app, -1));
+        assert!(!crate::timeline::timeline_visible(&app));
+        assert!(
+            app.timeline_exit_until.is_some(),
+            "slide-out window armed"
+        );
+        assert!(
+            crate::timeline::timeline_active(&app),
+            "lingering while the slide-out plays"
+        );
+        assert!(app.timeline_fx.is_some(), "slide-out effect created");
+    }
+
+    #[test]
+    fn timeline_bar_has_no_effects_without_fx() {
+        let mut app = make_app(3, Mode::View);
+        app.config.fx = false;
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: "old first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        assert!(select_history(&mut app, 1));
+        assert!(crate::timeline::timeline_visible(&app));
+        assert!(app.timeline_fx.is_none(), "no effects with --no-fx");
+        assert!(select_history(&mut app, -1));
+        assert!(app.timeline_exit_until.is_none(), "no linger without fx");
+        assert!(!crate::timeline::timeline_active(&app));
+    }
+
+    #[test]
+    fn timeline_overlay_scrubs_and_restores_on_esc() {
+        let mut app = make_app(3, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: "old first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("cafe".into()),
+            short_id: "cafe".into(),
+            summary: "oldest".into(),
+            content: "oldest first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Git,
+        });
+        app.histories[0].position = 1;
+        // Open via `t`.
+        on_view_key(&mut app, KeyCode::Char('t'), KeyModifiers::empty(), None);
+        assert_eq!(app.overlay, Some(Overlay::Timeline));
+        assert_eq!(app.overlay_cursor, 1);
+        assert_eq!(app.timeline_restore, Some(1));
+        // j scrubs older; the document render is scheduled behind it.
+        on_overlay_key(&mut app, KeyCode::Char('j'), KeyModifiers::empty());
+        assert_eq!(app.histories[0].position, 2);
+        assert_eq!(app.overlay_cursor, 2);
+        // k back toward NOW.
+        on_overlay_key(&mut app, KeyCode::Char('k'), KeyModifiers::empty());
+        assert_eq!(app.histories[0].position, 1);
+        // Esc restores the position the list opened at, and closes.
+        on_overlay_key(&mut app, KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.histories[0].position, 1);
+        assert!(
+            app.history_render_due.is_some(),
+            "the restored position re-renders"
+        );
+    }
+
+    #[test]
+    fn timeline_overlay_enter_keeps_the_selected_position() {
+        let mut app = make_app(3, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: "old first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("cafe".into()),
+            short_id: "cafe".into(),
+            summary: "oldest".into(),
+            content: "oldest first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Git,
+        });
+        app.histories[0].position = 1;
+        on_view_key(&mut app, KeyCode::Char('t'), KeyModifiers::empty(), None);
+        on_overlay_key(&mut app, KeyCode::Char('j'), KeyModifiers::empty());
+        assert_eq!(app.histories[0].position, 2);
+        // Enter confirms the scrubbed position.
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.histories[0].position, 2);
+    }
+
+    #[test]
+    fn timeline_overlay_t_is_gated_and_toggles() {
+        // A one-point timeline has no list: `t` is a no-op.
+        let mut app = make_app(3, Mode::View);
+        on_view_key(&mut app, KeyCode::Char('t'), KeyModifiers::empty(), None);
+        assert_eq!(app.overlay, None);
+        // With history, `t` opens and closes again (keeping the position).
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: "old first line\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        on_view_key(&mut app, KeyCode::Char('t'), KeyModifiers::empty(), None);
+        assert_eq!(app.overlay, Some(Overlay::Timeline));
+        on_overlay_key(&mut app, KeyCode::Char('t'), KeyModifiers::empty());
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.histories[0].position, 1, "t close keeps the position");
+    }
+
+    #[test]
+    fn timeline_bar_renders_the_axis_over_the_bottom_rows() {
+        // Golden-ish frame check: while browsing, the timeline bar owns
+        // the bottom three rows (2-row mode at 80 columns: words + axis;
+        // the times row joins at 100+). The NOW anchor sits at the right
+        // edge, the viewing point is marked.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "local snapshot".into(),
+            content: "old first line\nline2\nline3\nline4\nline5\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("cafe".into()),
+            short_id: "cafe".into(),
+            summary: "oldest".into(),
+            content: "oldest first line\nline2\nline3\nline4\nline5\n".into(),
+            source: history::RevisionSource::Git,
+        });
+        app.histories[0].position = 1;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        // Owned snapshot: the buffer borrow must not outlive the redraw.
+        let frame_text =
+            |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| -> Vec<String> {
+                let buf = terminal.backend().buffer();
+                buf.content
+                    .chunks(80)
+                    .map(|row| {
+                        row.iter()
+                            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                            .collect()
+                    })
+                    .collect()
+            };
+        let frame = frame_text(&terminal);
+        let axis = &frame[22];
+        assert!(axis.ends_with('●'), "NOW at the right edge: {axis}");
+        assert!(axis.contains('◆'), "viewing marker on the axis: {axis}");
+        assert!(axis.contains('▲'), "commit marker on the axis: {axis}");
+        assert!(
+            axis.find('◆').unwrap_or(0) < axis.rfind('●').unwrap_or(0),
+            "viewing sits left of NOW: {axis}"
+        );
+        let words = &frame[23];
+        assert!(words.contains("viewing"), "words row: {words}");
+        assert!(words.trim_end().ends_with("NOW"), "NOW at the right edge: {words}");
+        // The footer hints are gone while the bar owns the row.
+        assert!(!words.contains("VIEW"), "no mode badge under the bar: {words}");
+        // At NOW the same frame has no bar: the footer hints return.
+        app.histories[0].position = 0;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let frame = frame_text(&terminal);
+        let footer = &frame[23];
+        assert!(footer.contains("VIEW"), "footer badge returns: {footer}");
+        let footer = &frame[23];
+        assert!(footer.contains("VIEW"), "footer badge returns: {footer}");
+    }
+
+    #[test]
     fn footer_badge_shows_the_state_not_just_the_mode() {
         // The badge leads the footer and flips with the transient states:
         // SELECT while a selection is active (both modes — the selection
