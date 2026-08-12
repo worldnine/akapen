@@ -1295,7 +1295,7 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
         if app.config.fx {
             app.ghost_fx = ghost_rows
                 .into_iter()
-                .map(|(row, height)| (row, height, crate::effects::ghost_effect(app.ui_history_glow_bg)))
+                .map(|(row, height)| (row, height, crate::effects::ghost_effect()))
                 .collect();
         }
     }
@@ -1720,15 +1720,16 @@ fn insert_history_ghosts(
         }
         for (offset, mut row) in ghost.rows.into_iter().enumerate() {
             for span in &mut row {
-                // Ghost styling: the original color melted 55% toward a
-                // neutral band on a gray backdrop — a translucent look
-                // that stays readable. NO DIM/ITALIC: terminals render
-                // them muddy, and synthetic italics smear CJK glyphs.
+                // Ghost styling: the original color dimmed 55% toward the
+                // neutral ghost gray — readable, but clearly "not there
+                // anymore". NO BACKGROUND (the deletion band was dropped
+                // from the spec) and NO DIM/ITALIC: terminals render them
+                // muddy, and synthetic italics smear CJK glyphs.
                 let fg = match span.style.fg {
                     Some(c @ Color::Rgb(..)) => lerp_color(c, ghost_bg, 0.55),
                     _ => Color::Gray,
                 };
-                span.style = span.style.fg(fg).bg(ghost_bg);
+                span.style = span.style.fg(fg);
             }
             view.rows.insert(insert_at + offset, row);
             view.row_segments.insert(insert_at + offset, Vec::new());
@@ -4338,8 +4339,8 @@ mod history_animation_tests {
             view.rows[..view.source_starts[0]]
                 .iter()
                 .flatten()
-                .all(|span| span.style.bg == Some(Color::Rgb(70, 73, 88))),
-            "ghost rows carry the neutral band"
+                .all(|span| span.style.bg.is_none()),
+            "ghost rows carry no background (the deletion band was dropped)"
         );
         // The ghost's view-relative rect: inserted at the anchor's row,
         // exactly as tall as the rows it added (the dissolve target).

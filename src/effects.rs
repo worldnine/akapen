@@ -179,47 +179,54 @@ fn blank_cell(cell: &mut ratatui::buffer::Cell) {
 }
 
 /// Scatter-out for the deletion ghosts, BACKSPACE-style: the ghost stays
-/// whole for 150 ms (long enough to read), then its cells fade into the
-/// band in REVERSE reading order — right→left, bottom→top, exactly like
+/// whole for 150 ms (long enough to read), then its cells blank out in
+/// REVERSE reading order — right→left, bottom→top, exactly like
 /// backspacing through the text — completing when the 650 ms ghost
-/// lifetime collapses the layout. Cells are REPAINTED band-on-band
-/// rather than blanked: the glyphs stay (their width never changes, so
-/// ratatui's diff never takes the wide→narrow path that broke CJK
-/// backgrounds), and painting them the band color makes them invisible
-/// against it — no checkerboard, no visible space glyphs.
-pub(crate) fn ghost_effect(band: Color) -> Effect {
+/// lifetime collapses the layout. The ghost rows carry NO background
+/// (the deletion band was dropped from the spec), so the cells are
+/// BLANKED rather than repainted — wide glyphs go through
+/// [`blank_cell`], which keeps the trailing column intact.
+pub(crate) fn ghost_effect() -> Effect {
     fx::delay(
         150,
         fx::effect_fn_buf(
-            band,
+            (None::<Vec<usize>>, 0usize),
             (500, Interpolation::Linear),
-            |band, ctx, buf| {
+            |(text_counts, total), ctx, buf| {
                 let alpha = ctx.timer.alpha();
                 let area = ctx.area;
-                // Pass 1: the text-cell count per row (non-blank symbols).
-                // The backspace cursor is normalized over the TEXT only,
-                // so a ghost whose row is mostly trailing blank space
-                // still erases its words smoothly right→left instead of
-                // chewing through the empty tail first.
-                let mut text_counts = vec![0usize; area.height as usize];
-                let mut total = 0usize;
-                for y in area.y..area.bottom() {
+                // Pass 1 (first frame only): the text-cell count per row
+                // (non-blank symbols). The backspace cursor is normalized
+                // over the TEXT only, so a ghost whose row is mostly
+                // trailing blank space still erases its words smoothly
+                // right→left instead of chewing through the empty tail
+                // first. Captured once: blanked cells keep their width in
+                // the pacing, so the fade never accelerates.
+                if text_counts.is_none() {
+                    let mut counts = vec![0usize; area.height as usize];
                     let mut n = 0usize;
-                    for x in area.x..area.right() {
-                        if !buf[(x, y)].symbol().trim().is_empty() {
-                            n += 1;
+                    for y in area.y..area.bottom() {
+                        let mut row_n = 0usize;
+                        for x in area.x..area.right() {
+                            if !buf[(x, y)].symbol().trim().is_empty() {
+                                row_n += 1;
+                            }
                         }
+                        counts[(y - area.y) as usize] = row_n;
+                        n += row_n;
                     }
-                    text_counts[(y - area.y) as usize] = n;
-                    total += n;
+                    *text_counts = Some(counts);
+                    *total = n;
                 }
+                let counts = text_counts.as_ref().expect("set above");
+                let total = *total;
                 if total == 0 {
                     return;
                 }
-                // Pass 2: absorb text cells in REVERSE reading order.
+                // Pass 2: blank text cells in REVERSE reading order.
                 for y in area.y..area.bottom() {
                     let before_rows: usize =
-                        text_counts[..(y - area.y) as usize].iter().sum();
+                        counts[..(y - area.y) as usize].iter().sum();
                     let mut k = 0usize; // text cells before this one in the row
                     for x in area.x..area.right() {
                         let cell = &buf[(x, y)];
@@ -228,14 +235,11 @@ pub(crate) fn ghost_effect(band: Color) -> Effect {
                         }
                         let order = before_rows + k;
                         if ((total - 1 - order) as f32) < alpha * total as f32 {
-                            let cell = &mut buf[(x, y)];
-                            // Repaint band-on-band: the glyph stays (its
-                            // width never changes, so ratatui's diff never
-                            // takes the wide→narrow path that broke CJK
-                            // backgrounds), invisible against the band —
-                            // no checkerboard, no visible space glyphs.
-                            cell.set_fg(*band);
-                            cell.set_bg(*band);
+                            // The ghost has no band to blend into: blank
+                            // the cell (full-width glyphs keep their
+                            // trailing column, so the diff never breaks
+                            // the row).
+                            blank_cell(&mut buf[(x, y)]);
                         }
                         k += 1;
                     }
