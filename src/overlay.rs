@@ -667,7 +667,7 @@ pub(crate) fn draw_timeline_overlay(f: &mut Frame, app: &App) {
         let current = i == history.position;
         let is_baseline = baseline == Some(i);
         // The same marker vocabulary as the browsing bar: ◆ viewing,
-        // ▮ baseline, ● local / ▲ commit.
+        // ▮ baseline, ● local / ■ commit.
         let (marker, marker_style) = if current {
             ("◆", cyan.add_modifier(Modifier::BOLD))
         } else if rev.source == crate::history::RevisionSource::Now {
@@ -681,7 +681,7 @@ pub(crate) fn draw_timeline_overlay(f: &mut Frame, app: &App) {
                 crate::history::RevisionSource::Now => unreachable!(),
                 crate::history::RevisionSource::Local => ("●", cyan),
                 crate::history::RevisionSource::Git => {
-                    ("▲", Style::default().fg(Color::LightBlue))
+                    ("■", Style::default().fg(Color::LightBlue))
                 }
             }
         };
