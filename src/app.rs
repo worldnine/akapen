@@ -106,10 +106,6 @@ pub(crate) struct App {
     /// describe the displayed generation rather than the working tree.
     pub(crate) comparison_changed: HashSet<usize>,
     pub(crate) comparison_deleted_before: HashSet<usize>,
-    /// Lines replaced by the most recent time jump. The existing rendered
-    /// change color provides a short "block just arrived" afterglow.
-    pub(crate) history_changed: HashSet<usize>,
-    pub(crate) history_changed_until: Option<Instant>,
     /// Until this instant the rendered view contains dim old blocks that
     /// are about to collapse out of the document.
     pub(crate) history_ghost_until: Option<Instant>,
@@ -315,8 +311,6 @@ impl App {
             review_deleted_before: HashSet::new(),
             comparison_changed: HashSet::new(),
             comparison_deleted_before: HashSet::new(),
-            history_changed: HashSet::new(),
-            history_changed_until: None,
             history_ghost_until: None,
             history_render_due: None,
             history_frame_flash_until: None,
@@ -628,8 +622,6 @@ impl App {
             std::mem::take(&mut new.comparison_deleted_before);
 
         self.current_file_index = new_index;
-        self.history_changed.clear();
-        self.history_changed_until = None;
         self.history_ghost_until = None;
         self.history_render_due = None;
         self.history_frame_flash_until = None;

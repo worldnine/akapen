@@ -1224,8 +1224,6 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
         history::block_transition(&old_lines, &new_source.lines);
     app.source = new_source;
     refresh_comparison_marks(app);
-    app.history_changed = changed_blocks.clone();
-    app.history_changed_until = Some(Instant::now() + Duration::from_millis(450));
     app.history_ghost_until = None;
     app.spans = app
         .highlight
@@ -2970,14 +2968,6 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // View and source read the same baseline → displayed-generation marks.
     let (changed_set, deleted_set) = active_review_mark_sets(app);
     let n = app.source.len();
-    let glowing = if app
-        .history_changed_until
-        .is_some_and(|until| Instant::now() < until)
-    {
-        review_flags(&app.history_changed, n)
-    } else {
-        vec![false; n]
-    };
     let changed = review_flags(&changed_set, n);
     let deleted = review_flags(&deleted_set, n);
     let emphasized = vec![false; n];
@@ -3013,7 +3003,8 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         inner.height as usize,
         &marked,
         &changed,
-        &glowing,
+        &[], // the transient glow was retired: the streaming reveal and
+             // the frame flash already mark what changed
         &deleted,
         &emphasized,
         sel,
@@ -3230,9 +3221,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     // Compute baseline → displayed-generation marks once for this frame.
     // Green means present/changed; red means deleted before a line.
     let (scoped_added, scoped_deleted) = active_review_mark_sets(app);
-    let history_glow_active = app
-        .history_changed_until
-        .is_some_and(|until| Instant::now() < until);
     let history_landing_pulse = app
         .history_frame_flash_until
         .is_some_and(|until| Instant::now() < until);
@@ -3277,15 +3265,10 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // selection edge. Present/changed review lines get a restrained
         // green background; pure deletions use only their red position mark.
         let cursor_bg = is_cursor || selected;
-        let history_glow_bg = history_glow_active
-            && app.history_changed.contains(&idx)
-            && !cursor_bg;
-        let changed_bg = added && !cursor_bg && !history_glow_bg;
-        let deleted_fg = deleted_before && !cursor_bg && !history_glow_bg && !changed_bg;
+        let changed_bg = added && !cursor_bg;
+        let deleted_fg = deleted_before && !cursor_bg && !changed_bg;
         let gutter_style = if cursor_bg {
             Style::default().bg(app.ui_selected_bg)
-        } else if history_glow_bg {
-            Style::default().bg(app.ui_history_glow_bg)
         } else if changed_bg {
             Style::default().bg(app.ui_changed_bg)
         } else {
@@ -3297,8 +3280,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // gutter shows at a glance which lines carry comments.
         let mut num_style = if selected {
             Style::default().fg(Color::Cyan).bg(app.ui_selected_bg)
-        } else if history_glow_bg {
-            Style::default().fg(Color::DarkGray).bg(app.ui_history_glow_bg)
         } else if commented && !is_cursor {
             Style::default().fg(Color::Yellow)
         } else if changed_bg {
@@ -3335,10 +3316,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             };
             let s = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
-        } else if history_glow_bg {
-            Style::default()
-                .fg(Color::DarkGray)
-                .bg(app.ui_history_glow_bg)
         } else if changed_bg {
             Style::default().fg(Color::Green).bg(app.ui_changed_bg)
         } else if deleted_fg {
@@ -3360,8 +3337,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 // block.
                 let indent_style = if cursor_bg {
                     Style::default().bg(app.ui_selected_bg)
-                } else if history_glow_bg {
-                    Style::default().bg(app.ui_history_glow_bg)
                 } else if changed_bg {
                     Style::default().bg(app.ui_changed_bg)
                 } else {
@@ -3375,8 +3350,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             for f in frags {
                 let style = if cursor_bg {
                     f.style.bg(app.ui_selected_bg)
-                } else if history_glow_bg {
-                    f.style.bg(app.ui_history_glow_bg)
                 } else if changed_bg {
                     f.style.bg(app.ui_changed_bg)
                 } else {
@@ -3389,15 +3362,13 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             // — the text extent alone made the selection ragged and easy
             // to misread. This also covers blank lines (no fragments)
             // with no extra glyph.
-            if cursor_bg || history_glow_bg || changed_bg {
+            if cursor_bg || changed_bg {
                 let used: usize = spans
                     .iter()
                     .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                     .sum();
                 let bg = if cursor_bg {
                     app.ui_selected_bg
-                } else if history_glow_bg {
-                    app.ui_history_glow_bg
                 } else {
                     app.ui_changed_bg
                 };

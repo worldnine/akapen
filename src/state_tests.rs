@@ -3738,28 +3738,27 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn source_history_uses_neutral_line_glow_and_gutter_landing_pulse() {
+    fn source_history_uses_the_gutter_landing_pulse() {
         let mut app = make_app(3, Mode::Source);
         app.cursor = 0;
-        app.history_changed.insert(2);
-        app.history_changed_until = Some(std::time::Instant::now() + Duration::from_secs(1));
         app.history_frame_flash_until = Some(std::time::Instant::now() + Duration::from_secs(1));
         app.gutter_cols = 4;
         app.ensure_row_cache(60);
         app.refresh_line_rows();
 
         let (text, _) = build_rows(&app, 10, 60);
-        assert!(
-            text.lines[2]
-                .spans
-                .iter()
-                .any(|span| span.style.bg == Some(app.ui_history_glow_bg)),
-            "a history-changed source line uses the neutral glow"
-        );
         assert_eq!(
             text.lines[2].spans[1].style.fg,
             Some(app.ui_history_frame_flash),
             "the line-number rail pulses after landing"
+        );
+        assert!(
+            !text.lines[2]
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(app.ui_history_glow_bg)),
+            "the neutral glow was retired: the streaming reveal and the\
+             frame flash already mark what changed"
         );
     }
 
