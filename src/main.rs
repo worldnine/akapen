@@ -1518,6 +1518,12 @@ fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
     if o.is_empty() {
         return vec![(0, n.len())];
     }
+    if o.len().saturating_mul(n.len()) > LCS_CELL_BUDGET {
+        // Too large to diff precisely: the whole block counts as new (the
+        // appear mask's coverage guard then masks the whole block, which
+        // streams in as one piece instead of hanging the render).
+        return vec![(0, n.len())];
+    }
     // LCS lengths (classic DP, reversed scan for the backtrace).
     let mut dp = vec![vec![0usize; n.len() + 1]; o.len() + 1];
     for i in (0..o.len()).rev() {
@@ -1559,6 +1565,12 @@ fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
 /// replacement usually means the line-index alignment misfired (an
 /// inserted block), not a real removal; the caller guards on the
 /// fraction.
+/// The LCS work budget for the diff helpers: beyond this many DP cells
+/// the block is too large to diff precisely (a whole-document change
+/// would otherwise hang the render). Callers get the safe degraded
+/// answer: everything removed / everything new.
+const LCS_CELL_BUDGET: usize = 2_000_000;
+
 fn removed_text(old: &str, new: &str) -> (String, f32) {
     let o: Vec<char> = old.chars().collect();
     let n: Vec<char> = new.chars().collect();
@@ -1566,6 +1578,12 @@ fn removed_text(old: &str, new: &str) -> (String, f32) {
         return (String::new(), 0.0);
     }
     if n.is_empty() {
+        return (old.to_string(), 1.0);
+    }
+    if o.len().saturating_mul(n.len()) > LCS_CELL_BUDGET {
+        // Too large to diff: report everything removed. The rewrite-ghost
+        // guard (frac < 0.75) then skips the ghost, so huge blocks fall
+        // back to the instant transition instead of hanging the app.
         return (old.to_string(), 1.0);
     }
     let mut dp = vec![vec![0usize; n.len() + 1]; o.len() + 1];
