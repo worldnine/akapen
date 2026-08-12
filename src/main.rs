@@ -410,7 +410,11 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         // document (or through herdr, which can deliver a burst at once)
         // that made scrolling crawl. Batching the burst into a single
         // frame keeps the wheel responsive.
-        if event::poll(Duration::from_millis(TICK_MS))? {
+        // While an effect animates, tick fast enough for smooth frames
+        // (the idle cadence of 10 fps would cut a 450 ms stream into 4-5
+        // jumps); otherwise keep the lazy 100 ms poll.
+        let tick = if app.has_active_fx() { FX_TICK_MS } else { TICK_MS };
+        if event::poll(Duration::from_millis(tick))? {
             for _ in 0..MAX_EVENTS_PER_FRAME {
                 if !event::poll(Duration::ZERO)? {
                     break;
@@ -1289,8 +1293,50 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
     let path = app.current_file_path().to_path_buf();
     let new_source = Source::from_content(path.clone(), content);
     let anchor = history::anchored_line(&old_lines, &new_source.lines, old_cursor);
-    let (changed_blocks, deleted_blocks) =
-        history::block_transition(&old_lines, &new_source.lines);
+    let (changed_lines, removed_lines) =
+        line_level_transition(&old_lines, &new_source.lines);
+    // The ghosts: contiguous runs of removed lines, each ghosting out
+    // (backspace) and collapsing to the new layout. A run whose
+    // same-position new line differs is a rewrite IN PLACE — only the
+    // removed characters ghost, so the unchanged prefix never flickers.
+    // The removal fraction guard (<75%) keeps misaligned indexes from
+    // ghosting; fully removed lines ghost whole.
+    let mut deleted_blocks = Vec::new();
+    let removed_sorted = {
+        let mut v = removed_lines;
+        v.sort_unstable();
+        v
+    };
+    let mut i = 0usize;
+    while i < removed_sorted.len() {
+        let a = removed_sorted[i];
+        let mut b = a;
+        while i + 1 < removed_sorted.len() && removed_sorted[i + 1] == b + 1 {
+            b += 1;
+            i += 1;
+        }
+        i += 1;
+        let old_line = &old_lines[a];
+        let content = match new_source.lines.get(a) {
+            // A rewrite IN PLACE (the same-position new line is itself a
+            // changed line): ghost only the removed characters. A removed
+            // line whose position now holds an unrelated line (e.g. a
+            // blank where the line used to be) ghosts whole — pairing it
+            // would trip the fraction guard and skip the backspace.
+            Some(new_line) if b == a && changed_lines.contains(&a) => {
+                let (removed, frac) = removed_text(old_line, new_line);
+                if removed.trim().is_empty() || frac >= 0.75 {
+                    continue;
+                }
+                removed
+            }
+            _ => old_lines[a..=b].join("\n"),
+        };
+        deleted_blocks.push(history::DeletedBlock {
+            anchor: (b + 1).min(new_source.lines.len()),
+            content,
+        });
+    }
     app.source = new_source;
     refresh_comparison_marks(app);
     app.history_ghost_until = None;
@@ -1346,7 +1392,7 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
     if app.config.fx && !source_mode {
         app.appear_fx = appear_effects(
             &app.view,
-            &changed_blocks,
+            &changed_lines,
             &old_lines,
             &app.highlight,
             &path,
@@ -1554,6 +1600,113 @@ fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
     ranges.into_iter().filter(|(s, e)| s < e).collect()
 }
 
+/// The characters of `old` that have no counterpart in `new` (in
+/// reading order) plus the removed fraction (0.0 = nothing removed,
+/// 1.0 = everything). The LCS backtrace collects old-only characters —
+/// the deletions a rewrite's ghost should backspace away. A near-total
+/// replacement usually means the line-index alignment misfired (an
+/// inserted block), not a real removal; the caller guards on the
+/// fraction.
+/// The per-line transition for the ANIMATIONS: the new lines with no
+/// equal-content match (they stream in) and the old lines with no match
+/// (their text ghosts out). The review marks keep the block-level
+/// semantic marking (a whole rendered block lights), but the animations
+/// must work at line granularity — a one-cell edit in a large table
+/// would otherwise mark the whole table as one block, ballooning the
+/// char diffs and hitting the LCS budget. The DP is over LINES (content
+/// equality), so it stays cheap; pathological documents fall back to no
+/// animation rather than a hang.
+fn line_level_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec<usize>) {
+    let o = old.len();
+    let n = new.len();
+    if o.saturating_mul(n) > LCS_CELL_BUDGET {
+        return (HashSet::new(), Vec::new());
+    }
+    let mut dp = vec![vec![0usize; n + 1]; o + 1];
+    for i in (0..o).rev() {
+        for j in (0..n).rev() {
+            dp[i][j] = if old[i] == new[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut changed = HashSet::new();
+    let mut removed: Vec<usize> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < o && j < n {
+        if old[i] == new[j] {
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            removed.push(i);
+            i += 1;
+        } else {
+            changed.insert(j);
+            j += 1;
+        }
+    }
+    while i < o {
+        removed.push(i);
+        i += 1;
+    }
+    while j < n {
+        changed.insert(j);
+        j += 1;
+    }
+    (changed, removed)
+}
+
+/// The LCS work budget for the diff helpers: beyond this many DP cells
+/// the block is too large to diff precisely (a whole-document change
+/// would otherwise hang the render). Callers get the safe degraded
+/// answer: everything removed / everything new.
+const LCS_CELL_BUDGET: usize = 2_000_000;
+
+fn removed_text(old: &str, new: &str) -> (String, f32) {
+    let o: Vec<char> = old.chars().collect();
+    let n: Vec<char> = new.chars().collect();
+    if o.is_empty() {
+        return (String::new(), 0.0);
+    }
+    if n.is_empty() {
+        return (old.to_string(), 1.0);
+    }
+    if o.len().saturating_mul(n.len()) > LCS_CELL_BUDGET {
+        // Too large to diff: report everything removed. The rewrite-ghost
+        // guard (frac < 0.75) then skips the ghost, so huge blocks fall
+        // back to the instant transition instead of hanging the app.
+        return (old.to_string(), 1.0);
+    }
+    let mut dp = vec![vec![0usize; n.len() + 1]; o.len() + 1];
+    for i in (0..o.len()).rev() {
+        for j in (0..n.len()).rev() {
+            dp[i][j] = if o[i] == n[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut removed: Vec<char> = Vec::new();
+    while i < o.len() && j < n.len() {
+        if o[i] == n[j] {
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            removed.push(o[i]); // an old-only char: removed
+            i += 1;
+        } else {
+            j += 1; // a new-only char: insertion, not a removal
+        }
+    }
+    removed.extend_from_slice(&o[i..]); // trailing old-only chars
+    let frac = removed.len() as f32 / o.len() as f32;
+    (removed.into_iter().collect(), frac)
+}
+
 /// The display-column ranges of `new`'s characters that have no
 /// counterpart in `old` — the per-row view used by the tests (see
 /// [`inserted_char_ranges`] for the whole-text diff underneath).
@@ -1627,15 +1780,16 @@ fn insert_history_ghosts(
         }
         for (offset, mut row) in ghost.rows.into_iter().enumerate() {
             for span in &mut row {
-                // Ghost styling: the original color melted 55% toward a
-                // neutral band on a gray backdrop — a translucent look
-                // that stays readable. NO DIM/ITALIC: terminals render
-                // them muddy, and synthetic italics smear CJK glyphs.
+                // Ghost styling: the original color dimmed 55% toward the
+                // neutral ghost gray — readable, but clearly "not there
+                // anymore". NO BACKGROUND (the deletion band was dropped
+                // from the spec) and NO DIM/ITALIC: terminals render them
+                // muddy, and synthetic italics smear CJK glyphs.
                 let fg = match span.style.fg {
                     Some(c @ Color::Rgb(..)) => lerp_color(c, ghost_bg, 0.55),
                     _ => Color::Gray,
                 };
-                span.style = span.style.fg(fg).bg(ghost_bg);
+                span.style = span.style.fg(fg);
             }
             view.rows.insert(insert_at + offset, row);
             view.row_segments.insert(insert_at + offset, Vec::new());
@@ -4454,8 +4608,8 @@ mod history_animation_tests {
             view.rows[..view.source_starts[0]]
                 .iter()
                 .flatten()
-                .all(|span| span.style.bg == Some(Color::Rgb(70, 73, 88))),
-            "ghost rows carry the neutral band"
+                .all(|span| span.style.bg.is_none()),
+            "ghost rows carry no background (the deletion band was dropped)"
         );
         // The ghost's view-relative rect: inserted at the anchor's row,
         // exactly as tall as the rows it added (the dissolve target).

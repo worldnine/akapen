@@ -4,14 +4,21 @@
 //! snapshots, not hunks: moving through time always produces a complete
 //! Markdown source that can be rendered normally.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use similar::{DiffTag, TextDiff, TextDiffConfig};
+use similar::{DiffTag, TextDiff};
 
 use crate::snapshot::{CachedFile, SnapshotCache};
+
+/// How long one bounded diff may run before similar hands back its best
+/// alignment so far: the appear-mask alignment in
+/// [`crate::inserted_char_ranges`]. 8 ms completes typical paragraph
+/// diffs (1 KB pairs cost 2–4 ms) and only truncates the genuinely huge
+/// ones — the mask then animates a few extra or missing cells instead
+/// of stalling the render.
+pub(crate) const DIFF_DEADLINE: std::time::Duration = std::time::Duration::from_millis(8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RevisionSource {
@@ -60,27 +67,6 @@ pub(crate) struct DocumentHistory {
     pub(crate) reviewed_content: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum BlockKind {
-    Heading,
-    Paragraph,
-    List,
-    Quote,
-    Code,
-    Table,
-}
-
-#[derive(Clone, Debug)]
-struct MarkdownBlock {
-    start: usize,
-    end: usize,
-    kind: BlockKind,
-    /// Keeps row matching inside the same table. Zero for non-table blocks.
-    scope: u64,
-    id: u64,
-    content: String,
-}
-
 /// A block that existed in the previous revision but not the next one.
 /// It is rendered dimly at `anchor` for a moment before being collapsed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,215 +75,20 @@ pub(crate) struct DeletedBlock {
     pub(crate) content: String,
 }
 
-/// Semantic block transition: exact block IDs keep moved/unchanged blocks
-/// stable, fuzzy matches identify rewrites, and unmatched old blocks become
-/// short-lived deletion ghosts.
-pub(crate) fn block_transition(
-    old: &[String],
-    new: &[String],
-) -> (HashSet<usize>, Vec<DeletedBlock>) {
-    semantic_transition(old, new, false)
-}
-
-/// Review marks use the same semantic matching as history animation, except
-/// that a Markdown table is split into source rows. A one-cell edit should
-/// send the reviewer to its row, while time travel may still animate the
-/// rendered table as one layout block.
-fn review_block_transition(
-    old: &[String],
-    new: &[String],
-) -> (HashSet<usize>, Vec<DeletedBlock>) {
-    semantic_transition(old, new, true)
-}
-
-fn semantic_transition(
-    old: &[String],
-    new: &[String],
-    split_table_rows: bool,
-) -> (HashSet<usize>, Vec<DeletedBlock>) {
-    let old_blocks = markdown_blocks(old, split_table_rows);
-    let new_blocks = markdown_blocks(new, split_table_rows);
-    let mut matched_old = vec![None; old_blocks.len()];
-    let mut used_new = HashSet::new();
-    let mut by_id: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (index, block) in new_blocks.iter().enumerate() {
-        by_id.entry(block.id).or_default().push(index);
-    }
-
-    // Stable IDs first: an unchanged block remains the same object even if
-    // another block was inserted above it or it moved within the document.
-    for (old_index, block) in old_blocks.iter().enumerate() {
-        if let Some(candidates) = by_id.get(&block.id)
-            && let Some(&new_index) = candidates.iter().find(|index| !used_new.contains(*index))
-        {
-            matched_old[old_index] = Some(new_index);
-            used_new.insert(new_index);
-        }
-    }
-
-    let mut changed = HashSet::new();
-    // Rewritten blocks keep their identity when kind and text remain
-    // recognizably similar. The whole rendered block lights, not just the
-    // individual source lines selected by a line diff.
-    //
-    // The fuzzy pass is the expensive part of a transition: each
-    // candidate pair runs a full Myers diff, which is quadratic in the
-    // block lengths. Two exact pre-filters keep the pass linear-ish on
-    // documents where a rewrite reshuffles long blocks (a 1 KB pair
-    // costs milliseconds; thousands of pairs stall the render).
-    //
-    // The similarity ratio is at most 2·min(a,b)/(a+b), so a pair that
-    // cannot reach the 0.55 threshold on that bound is skipped. Tighter
-    // still: the longest common subsequence can use each character at
-    // most as often as either text contains it, so
-    //   LCS ≤ Σ_c min(freq_a(c), freq_b(c)) =: inter,
-    // giving the bound ratio ≤ 2·inter/(a+b). The character
-    // histograms are computed once per block (not per pair), so the
-    // filter costs a few map lookups per candidate — and it is exact:
-    // a pair that passes both bounds is diffed in full and judged on
-    // its true ratio. Lengths are CHARACTER counts, matching similar's
-    // ratio denominator (byte counts would underestimate the bound on
-    // CJK text and wrongly reject real rewrites).
-    let old_hist: Vec<(usize, HashMap<char, u32>)> = old_blocks
-        .iter()
-        .map(|b| char_histogram(&b.content))
-        .collect();
-    let new_hist: Vec<(usize, HashMap<char, u32>)> = new_blocks
-        .iter()
-        .map(|b| char_histogram(&b.content))
-        .collect();
-    let fuzzy_start = std::time::Instant::now();
-    for (old_index, old_block) in old_blocks.iter().enumerate() {
-        if matched_old[old_index].is_some() {
-            continue;
-        }
-        let candidates: Vec<usize> = new_blocks
-            .iter()
-            .enumerate()
-            .filter(|(index, block)| {
-                // The budget is checked PER CANDIDATE, not just per
-                // block: on CJK documents every paragraph shares the
-                // same character distribution, the histogram bound lets
-                // most candidates through, and a single block's
-                // candidate list could otherwise burn the whole budget
-                // (and then some — the loop below breaks only between
-                // blocks).
-                if fuzzy_start.elapsed() > FUZZY_TOTAL_BUDGET {
-                    return false;
-                }
-                if used_new.contains(index)
-                    || block.kind != old_block.kind
-                    || block.scope != old_block.scope
-                {
-                    return false;
-                }
-                let (a_len, a_hist) = &old_hist[old_index];
-                let (b_len, b_hist) = &new_hist[*index];
-                let bound = histogram_ratio_bound(a_hist, b_hist, *a_len, *b_len);
-                bound >= 0.55
-            })
-            .map(|(index, _)| index)
-            .collect();
-        // Length-proximity order: closest-size candidates first, so the
-        // genuine rewrite (if any) is evaluated before the budget runs
-        // out. On CJK documents the histogram bound admits most
-        // same-kind candidates (every paragraph shares the
-        // kana/kanji distribution), so the order — not the filter — is
-        // what keeps the pass within budget there. The full candidate
-        // list is still scanned for the best match while the budget
-        // allows — ordering never changes which match wins, only which
-        // candidates get a chance at all.
-        let mut candidates: Vec<usize> = candidates;
-        candidates.sort_by_key(|&index| {
-            let (a_chars, _) = &old_hist[old_index];
-            let (b_chars, _) = &new_hist[index];
-            a_chars.abs_diff(*b_chars)
-        });
-        let mut best: Option<(usize, f32)> = None;
-        for index in candidates {
-            if fuzzy_start.elapsed() > FUZZY_TOTAL_BUDGET {
-                break;
-            }
-            // A full Myers diff is quadratic in the block lengths, and
-            // the surviving pairs can be multi-KB tables whose
-            // character histograms overlap heavily. The deadline
-            // bounds the per-pair cost: similar returns its best
-            // alignment found so far, which for genuinely similar
-            // blocks is already representative. Genuinely different
-            // blocks rarely outrun it, so the rewrite decision
-            // barely moves — and a missed rewrite degrades to a
-            // brief deletion ghost, never to a stall.
-            let block = &new_blocks[index];
-            let ratio = TextDiffConfig::default()
-                .timeout(DIFF_DEADLINE)
-                .diff_chars(&old_block.content, &block.content)
-                .ratio();
-            if ratio >= 0.55 {
-                // The candidates run in length-proximity order, so the
-                // first pass is effectively the best pass: taking it
-                // immediately (instead of scanning the whole list for
-                // the max) keeps the budget for the remaining blocks.
-                // A slightly weaker match may win in rare reshuffled
-                // documents; the alternative — full scans — starves
-                // later blocks entirely on CJK texts.
-                best = Some((index, ratio));
-                break;
-            }
-        }
-        if let Some((new_index, ratio)) = best
-            && ratio >= 0.55
-        {
-            matched_old[old_index] = Some(new_index);
-            used_new.insert(new_index);
-            changed.extend(new_blocks[new_index].start..=new_blocks[new_index].end);
-        }
-    }
-
-    for (index, block) in new_blocks.iter().enumerate() {
-        if !used_new.contains(&index) {
-            changed.extend(block.start..=block.end);
-        }
-    }
-
-    let mut deleted = Vec::new();
-    for (old_index, block) in old_blocks.iter().enumerate() {
-        if matched_old[old_index].is_some() {
-            continue;
-        }
-        let next = matched_old
-            .iter()
-            .enumerate()
-            .skip(old_index + 1)
-            .find_map(|(_, mapped)| *mapped)
-            .map(|index| new_blocks[index].start);
-        let previous = matched_old[..old_index]
-            .iter()
-            .rev()
-            .find_map(|mapped| *mapped)
-            .map(|index| new_blocks[index].end.saturating_add(1));
-        let anchor = next.or(previous).unwrap_or(0).min(new.len());
-        deleted.push(DeletedBlock {
-            anchor,
-            content: block.content.clone(),
-        });
-    }
-    (changed, deleted)
-}
-
 /// Cumulative review marks from an acknowledged full document to NOW.
 /// Markdown uses semantic blocks; every other text file uses source lines.
 pub(crate) fn review_transition(
-    markdown: bool,
+    _markdown: bool,
     reviewed: &str,
     now: &str,
 ) -> (HashSet<usize>, HashSet<usize>) {
+    // Line-granular review marks: a one-cell edit marks one line, never
+    // the whole block. The block-level "whole rendered block lights"
+    // intent was dropped from the spec — the animation path and the
+    // review marks now agree on per-line granularity.
     let old: Vec<String> = reviewed.lines().map(str::to_string).collect();
     let new: Vec<String> = now.lines().map(str::to_string).collect();
-    let (changed, deleted) = if markdown {
-        review_block_transition(&old, &new)
-    } else {
-        line_transition(&old, &new)
-    };
+    let (changed, deleted) = line_transition(&old, &new);
     let last = new.len().saturating_sub(1);
     let deleted_before = deleted
         .into_iter()
@@ -329,132 +120,6 @@ fn line_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec<Delet
         }
     }
     (changed, deleted)
-}
-
-fn markdown_blocks(lines: &[String], split_table_rows: bool) -> Vec<MarkdownBlock> {
-    let mut blocks = Vec::new();
-    let mut start = 0usize;
-    while start < lines.len() {
-        if lines[start].trim().is_empty() {
-            start += 1;
-            continue;
-        }
-        let trimmed = lines[start].trim_start();
-        let kind = if heading_text(&lines[start]).is_some() {
-            BlockKind::Heading
-        } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            BlockKind::Code
-        } else if is_list_line(trimmed) {
-            BlockKind::List
-        } else if trimmed.starts_with('>') {
-            BlockKind::Quote
-        } else if looks_like_table(lines, start) {
-            BlockKind::Table
-        } else {
-            BlockKind::Paragraph
-        };
-        let mut end = start;
-        match kind {
-            BlockKind::Heading => {}
-            BlockKind::Code => {
-                let fence = if trimmed.starts_with("~~~") { "~~~" } else { "```" };
-                while end + 1 < lines.len() {
-                    end += 1;
-                    if lines[end].trim_start().starts_with(fence) {
-                        break;
-                    }
-                }
-            }
-            BlockKind::Table => {
-                while end + 1 < lines.len()
-                    && !lines[end + 1].trim().is_empty()
-                    && lines[end + 1].contains('|')
-                {
-                    end += 1;
-                }
-            }
-            BlockKind::List => {
-                while end + 1 < lines.len()
-                    && !lines[end + 1].trim().is_empty()
-                    && (is_list_line(lines[end + 1].trim_start())
-                        || lines[end + 1].starts_with(' '))
-                {
-                    end += 1;
-                }
-            }
-            BlockKind::Quote => {
-                while end + 1 < lines.len() && lines[end + 1].trim_start().starts_with('>') {
-                    end += 1;
-                }
-            }
-            BlockKind::Paragraph => {
-                while end + 1 < lines.len()
-                    && !lines[end + 1].trim().is_empty()
-                    && heading_text(&lines[end + 1]).is_none()
-                    && !lines[end + 1].trim_start().starts_with("```")
-                    && !lines[end + 1].trim_start().starts_with("~~~")
-                {
-                    end += 1;
-                }
-            }
-        }
-        let table_scope = if split_table_rows && kind == BlockKind::Table {
-            let structural_end = (start + 1).min(end);
-            let structure = lines[start..=structural_end]
-                .join("\n")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut hasher = DefaultHasher::new();
-            structure.hash(&mut hasher);
-            hasher.finish()
-        } else {
-            0
-        };
-        let ranges: Vec<(usize, usize)> = if split_table_rows && kind == BlockKind::Table {
-            (start..=end).map(|row| (row, row)).collect()
-        } else {
-            vec![(start, end)]
-        };
-        for (block_start, block_end) in ranges {
-            let content = lines[block_start..=block_end].join("\n");
-            let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
-            let mut hasher = DefaultHasher::new();
-            kind.hash(&mut hasher);
-            table_scope.hash(&mut hasher);
-            normalized.hash(&mut hasher);
-            blocks.push(MarkdownBlock {
-                start: block_start,
-                end: block_end,
-                kind,
-                scope: table_scope,
-                id: hasher.finish(),
-                content,
-            });
-        }
-        start = end + 1;
-    }
-    blocks
-}
-
-fn is_list_line(line: &str) -> bool {
-    line.starts_with("- ")
-        || line.starts_with("* ")
-        || line.starts_with("+ ")
-        || line
-            .split_once(". ")
-            .is_some_and(|(number, _)| number.chars().all(|c| c.is_ascii_digit()))
-}
-
-fn looks_like_table(lines: &[String], start: usize) -> bool {
-    lines[start].contains('|')
-        && lines.get(start + 1).is_some_and(|line| {
-            let cells = line.trim().trim_matches('|').split('|');
-            cells.into_iter().all(|cell| {
-                let cell = cell.trim().trim_matches(':');
-                cell.len() >= 3 && cell.chars().all(|c| c == '-')
-            })
-        })
 }
 
 impl DocumentHistory {
@@ -765,54 +430,6 @@ pub(crate) fn anchored_line(old: &[String], new: &[String], line: usize) -> usiz
     (new_heading + old_line.saturating_sub(old_heading)).min(section_end.saturating_sub(1))
 }
 
-/// (character count, per-character frequencies) of `text`. The count is
-/// the histogram's value sum — the same length similar's ratio divides
-/// by, so the bound below is exact for CJK text too.
-/// How long one bounded diff may run before similar hands back its best
-/// alignment so far: the fuzzy rewrite match in [`semantic_transition`]
-/// and the appear-mask alignment in [`crate::inserted_char_ranges`].
-/// See those call sites for the trade-off.
-/// How long one bounded diff may run before similar hands back its best
-/// alignment so far: the fuzzy rewrite match in [`semantic_transition`]
-/// and the appear-mask alignment in [`crate::inserted_char_ranges`].
-/// See those call sites for the trade-off. 15 ms completes typical
-/// paragraph diffs (1 KB pairs cost 2–4 ms) and only truncates the
-/// genuinely huge ones.
-pub(crate) const DIFF_DEADLINE: std::time::Duration = std::time::Duration::from_millis(8);
-/// The whole fuzzy pass stops after this much work, so a pathological
-/// document (thousands of similar-length, similar-alphabet blocks, e.g.
-/// reordered task lists) can delay a render by seconds at most. Blocks
-/// the budget leaves unmatched degrade to deletion ghosts — visible but
-/// transient — never to a stall.
-const FUZZY_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_millis(60);
-
-fn char_histogram(text: &str) -> (usize, HashMap<char, u32>) {
-    let mut hist: HashMap<char, u32> = HashMap::new();
-    for ch in text.chars() {
-        *hist.entry(ch).or_insert(0) += 1;
-    }
-    let count = hist.values().sum::<u32>() as usize;
-    (count, hist)
-}
-
-/// The tightest cheap upper bound on the similarity ratio of two texts:
-/// 2·Σ_c min(freq_a(c), freq_b(c)) / (a+b), where a and b are character
-/// counts. The intersection sums the smaller histogram, so a candidate
-/// pair costs a handful of lookups.
-fn histogram_ratio_bound<K: Eq + std::hash::Hash>(
-    a: &HashMap<K, u32>,
-    b: &HashMap<K, u32>,
-    a_len: usize,
-    b_len: usize,
-) -> f64 {
-    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    let intersection: u32 = small
-        .iter()
-        .map(|(c, n)| (*n).min(large.get(c).copied().unwrap_or(0)))
-        .sum();
-    2.0 * intersection as f64 / (a_len + b_len) as f64
-}
-
 fn heading_text(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     let hashes = trimmed.chars().take_while(|&c| c == '#').count();
@@ -852,7 +469,7 @@ fn absolutize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        DocumentHistory, Revision, RevisionSource, anchored_line, block_transition,
+        DocumentHistory, Revision, RevisionSource, anchored_line,
         review_transition,
     };
     use crate::snapshot::SnapshotCache;
@@ -935,77 +552,8 @@ mod tests {
     }
 
     #[test]
-    fn block_identity_ignores_unchanged_blocks_moved_by_an_insertion() {
-        let old = ["# Doc", "", "stable paragraph"].map(str::to_string);
-        let new = ["# Doc", "", "new paragraph", "", "stable paragraph"]
-            .map(str::to_string);
-        let (changed, deleted) = block_transition(&old, &new);
-        assert_eq!(changed, [2].into_iter().collect());
-        assert!(deleted.is_empty());
-    }
-
     #[test]
-    fn rewritten_paragraph_lights_the_whole_block() {
-        let old = ["# Doc", "", "This is the old", "paragraph text."]
-            .map(str::to_string);
-        let new = ["# Doc", "", "This is the newer", "paragraph text."]
-            .map(str::to_string);
-        let (changed, deleted) = block_transition(&old, &new);
-        assert_eq!(changed, [2, 3].into_iter().collect());
-        assert!(deleted.is_empty());
-    }
-
     #[test]
-    fn deleted_block_becomes_a_ghost_at_the_following_block() {
-        let old = ["# Doc", "", "remove me", "", "## Next", "text"]
-            .map(str::to_string);
-        let new = ["# Doc", "", "## Next", "text"].map(str::to_string);
-        let (_, deleted) = block_transition(&old, &new);
-        assert_eq!(deleted.len(), 1);
-        assert_eq!(deleted[0].anchor, 2);
-        assert_eq!(deleted[0].content, "remove me");
-    }
-
-    #[test]
-    fn cjk_rewritten_paragraph_matches_through_the_histogram_bound() {
-        // The pre-filter's denominator must count CHARACTERS, not bytes:
-        // a CJK paragraph is ~3 bytes per char, and a byte-based bound
-        // would wrongly reject a genuine rewrite (the fuzzy match would
-        // degrade to a deletion ghost).
-        let old = [
-            "# Doc",
-            "",
-            "これはとても長い日本語の段落です。内容はほぼ同じですが、",
-            "一部の文字だけが変更されています。",
-        ]
-        .map(str::to_string);
-        let new = [
-            "# Doc",
-            "",
-            "これはとても長い日本語の段落です。内容はほぼ同じですが、",
-            "ごく一部の文字だけが変更されています。",
-        ]
-        .map(str::to_string);
-        let (changed, deleted) = block_transition(&old, &new);
-        assert!(deleted.is_empty(), "the rewrite keeps its identity");
-        assert!(
-            changed.contains(&3),
-            "the edited line lights: {changed:?}"
-        );
-    }
-
-    #[test]
-    fn dissimilar_blocks_are_filtered_before_the_full_diff() {
-        // Same-kind blocks with disjoint character multisets cannot
-        // reach the 0.55 ratio; the histogram bound skips the expensive
-        // diff and the block is treated as deleted + added.
-        let old = ["# Doc", "", "aaaa aaaa aaaa aaaa"].map(str::to_string);
-        let new = ["# Doc", "", "bbbb bbbb bbbb bbbb"].map(str::to_string);
-        let (changed, deleted) = block_transition(&old, &new);
-        assert_eq!(deleted.len(), 1, "the old block ghosts: {deleted:?}");
-        assert_eq!(changed, [2].into_iter().collect());
-    }
-
     #[test]
     fn table_review_marks_only_the_row_containing_the_changed_cell() {
         let old = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | two |\n";
@@ -1033,23 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn table_time_travel_still_treats_the_rendered_table_as_one_block() {
-        let old = ["| Key | Value |", "| --- | --- |", "| a | one |", "| b | two |"]
-            .map(str::to_string);
-        let new = [
-            "| Key | Value |",
-            "| --- | --- |",
-            "| a | one |",
-            "| b | changed |",
-        ]
-        .map(str::to_string);
-
-        let (changed, deleted) = block_transition(&old, &new);
-
-        assert_eq!(changed, [0, 1, 2, 3].into_iter().collect());
-        assert!(deleted.is_empty());
-    }
-
     #[test]
     fn loads_complete_markdown_snapshots_newest_first() {
         let dir = tempfile::tempdir().unwrap();
