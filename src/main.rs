@@ -1245,10 +1245,26 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
             i += 1;
         }
         i += 1;
-        let old_block: String = old_lines
-            .get(start..=end.min(old_lines.len().saturating_sub(1)))
-            .map(|lines| lines.join("\n"))
-            .unwrap_or_default();
+        // The old counterpart may span MORE lines than the new block (a
+        // merged paragraph that shrank when a line was deleted): extend
+        // the old window over the paragraph's consecutive non-blank
+        // lines, or the removed line would sit outside the cut and the
+        // backspace would never fire.
+        if start >= old_lines.len() {
+            continue; // the block is entirely new — nothing old to remove
+        }
+        let mut old_start = start;
+        let mut old_end = end.min(old_lines.len().saturating_sub(1));
+        if old_start > old_end {
+            continue;
+        }
+        while old_start > 0 && !old_lines[old_start - 1].trim().is_empty() {
+            old_start -= 1;
+        }
+        while old_end + 1 < old_lines.len() && !old_lines[old_end + 1].trim().is_empty() {
+            old_end += 1;
+        }
+        let old_block: String = old_lines[old_start..=old_end].join("\n");
         if old_block.trim().is_empty() {
             continue;
         }
@@ -1257,11 +1273,16 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
             .get(start..=end.min(new_source.lines.len().saturating_sub(1)))
             .map(|lines| lines.join("\n"))
             .unwrap_or_default();
-        let frac = removed_fraction(&old_block, &new_block);
-        if frac > 0.0 && frac < 0.75 {
+        let (removed, frac) = removed_text(&old_block, &new_block);
+        // Ghost ONLY the removed characters, anchored right AFTER the
+        // block: the unchanged prefix of a rewritten line never flickers
+        // — the removed text appears as a ghost row below the line and
+        // backspaces away, then the layout collapses. The fraction guard
+        // (small removals only) keeps misaligned indexes from ghosting.
+        if !removed.trim().is_empty() && frac > 0.0 && frac < 0.75 {
             deleted_blocks.push(history::DeletedBlock {
-                anchor: start,
-                content: old_block,
+                anchor: end + 1,
+                content: removed,
             });
         }
     }
@@ -1531,20 +1552,21 @@ fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
     ranges.into_iter().filter(|(s, e)| s < e).collect()
 }
 
-/// The fraction of `old`'s characters that have no counterpart in
-/// `new` (0.0 = nothing removed, 1.0 = everything): the backtrace counts
-/// old-only characters (deletions). Used to decide whether a rewritten
-/// block's old text should ghost — a small removal fraction means the
-/// line-index alignment is trustworthy; a near-total replacement is
-/// usually a misaligned index (an inserted block), not a real removal.
-fn removed_fraction(old: &str, new: &str) -> f32 {
+/// The characters of `old` that have no counterpart in `new` (in
+/// reading order) plus the removed fraction (0.0 = nothing removed,
+/// 1.0 = everything). The LCS backtrace collects old-only characters —
+/// the deletions a rewrite's ghost should backspace away. A near-total
+/// replacement usually means the line-index alignment misfired (an
+/// inserted block), not a real removal; the caller guards on the
+/// fraction.
+fn removed_text(old: &str, new: &str) -> (String, f32) {
     let o: Vec<char> = old.chars().collect();
     let n: Vec<char> = new.chars().collect();
     if o.is_empty() {
-        return 0.0;
+        return (String::new(), 0.0);
     }
     if n.is_empty() {
-        return 1.0;
+        return (old.to_string(), 1.0);
     }
     let mut dp = vec![vec![0usize; n.len() + 1]; o.len() + 1];
     for i in (0..o.len()).rev() {
@@ -1557,20 +1579,21 @@ fn removed_fraction(old: &str, new: &str) -> f32 {
         }
     }
     let (mut i, mut j) = (0usize, 0usize);
-    let mut removed = 0usize;
+    let mut removed: Vec<char> = Vec::new();
     while i < o.len() && j < n.len() {
         if o[i] == n[j] {
             i += 1;
             j += 1;
         } else if dp[i + 1][j] >= dp[i][j + 1] {
-            i += 1; // an old-only char: removed
-            removed += 1;
+            removed.push(o[i]); // an old-only char: removed
+            i += 1;
         } else {
             j += 1; // a new-only char: insertion, not a removal
         }
     }
-    removed += o.len() - i; // trailing old-only chars
-    removed as f32 / o.len() as f32
+    removed.extend_from_slice(&o[i..]); // trailing old-only chars
+    let frac = removed.len() as f32 / o.len() as f32;
+    (removed.into_iter().collect(), frac)
 }
 
 /// The display-column ranges of `new`'s characters that have no
