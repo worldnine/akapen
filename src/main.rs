@@ -3197,7 +3197,7 @@ fn timeline_bar_rect(area: Rect) -> Rect {
 /// The browsing timeline bar: two rows, bottom-anchored — the state
 /// words on the footer row (`viewing` at the current revision, `base`
 /// at the baseline, `NOW` at the right edge, `t: detail` right-aligned)
-/// and the axis on the row above (`●` LOCAL / `■` COMMIT / `◆` viewing
+/// and the axis on the row above (`●` LOCAL / `◼` COMMIT / `◆` viewing
 /// / `▮` baseline, dim left of the review baseline). Drawn over the
 /// static UI before the effects; the slide effect animates it.
 fn draw_timeline_bar(f: &mut Frame, app: &App) {
@@ -3254,7 +3254,7 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
                         ('●', Style::default().fg(Color::Cyan))
                     }
                     crate::timeline::PointKind::Commit => {
-                        ('■', Style::default().fg(Color::LightBlue))
+                        ('◼', Style::default().fg(Color::LightBlue))
                     }
                 },
                 None => (

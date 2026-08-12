@@ -4,7 +4,7 @@
 
 A standalone TUI for reviewing documents in the terminal: read markdown beautifully rendered, select lines, attach comments, and send them to your coding agent — like a teacher grading homework with a red pen. Built for the agent review loop: the agent writes, you mark it up, the agent revises, and akapen shows you exactly what changed.
 
-For Markdown, it is also a **document time-machine**: Left/Right moves through one timeline of Git commits and bounded LOCAL snapshots without leaving the rendered document, keeps the nearest heading anchored, streams changed lines in left→right like an LLM, and backspaces removed lines away right→left (dim ghosts without a background) before the layout collapses. History effects use neutral brightness rather than add/delete colors, and the page frame changes while viewing the past. Arrow input scrubs a bottom timeline bar (◆ current / ▮ baseline / ● LOCAL / ■ COMMIT) and the revision label immediately; Markdown renders once after 300ms idle, and `t` opens the full generation list. Comments made in the past carry the exact revision and historical snippet to the agent.
+For Markdown, it is also a **document time-machine**: Left/Right moves through one timeline of Git commits and bounded LOCAL snapshots without leaving the rendered document, keeps the nearest heading anchored, streams changed lines in left→right like an LLM, and backspaces removed lines away right→left (dim ghosts without a background) before the layout collapses. History effects use neutral brightness rather than add/delete colors, and the page frame changes while viewing the past. Arrow input scrubs a bottom timeline bar (◆ current / ▮ baseline / ● LOCAL / ◼ COMMIT) and the revision label immediately; Markdown renders once after 300ms idle, and `t` opens the full generation list. Comments made in the past carry the exact revision and historical snippet to the agent.
 
 日本語版 README は [README.ja.md](README.ja.md) にあります。
 
@@ -67,7 +67,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | Key | Action |
 |---|---|
 | `Left` / `Right` (view / source) | select an older / newer document from oldest `1/N` to present `NOW N/N`; input scrubs labels and the bottom timeline bar, then the final Markdown renders after 300ms idle |
-| `t` | open the timeline generation list (browsing also shows a bottom timeline bar: ◆ current / ▮ baseline / ● LOCAL / ■ COMMIT) |
+| `t` | open the timeline generation list (browsing also shows a bottom timeline bar: ◆ current / ▮ baseline / ● LOCAL / ◼ COMMIT) |
 | `Tab` | toggle view ⇄ source (selection carries over; non-markdown files are source-only) |
 | `j` / `k` | move cursor (extends the range while selecting) |
 | `g` / `G`, `PgUp` / `PgDn`, `Ctrl+u` / `Ctrl+d` | jump / half-page moves |
@@ -100,7 +100,7 @@ akapen treats every version as a complete document. Git commits and bounded LOCA
 3. The title shows `! N`; green `▌` marks present/changed locations and red `▀` marks deletion positions. Use `n` / `N` to visit them.
 4. Repeated reloads accumulate review marks without moving the baseline. Press `a` at NOW to acknowledge them, or press `a` on a historical LOCAL/COMMIT generation to choose that generation as the baseline.
 
-`Left` / `Right` move through the unified timeline while keeping Markdown rendered. The title bar labels each generation as `NOW`, `LOCAL`, or `COMMIT`; holding an arrow scrubs the labels and a bottom timeline bar immediately and renders once input settles — the axis marks ◆ the displayed generation, ▮ the review baseline, ● LOCAL snapshots and ■ COMMITs, with NOW always at the right edge; it is dim left of the baseline (reviewed history) and normal from the baseline to NOW (the unreviewed stretch), and in view mode it replaces the frame's bottom border so no content rows are lost. `t` opens the full generation list. (The summary tail is clipped so the path never leaves the title.) Git commits whose content matches a LOCAL snapshot are shown once as COMMIT.
+`Left` / `Right` move through the unified timeline while keeping Markdown rendered. The title bar labels each generation as `NOW`, `LOCAL`, or `COMMIT`; holding an arrow scrubs the labels and a bottom timeline bar immediately and renders once input settles — the axis marks ◆ the displayed generation, ▮ the review baseline, ● LOCAL snapshots and ◼ COMMITs, with NOW always at the right edge; it is dim left of the baseline (reviewed history) and normal from the baseline to NOW (the unreviewed stretch), and in view mode it replaces the frame's bottom border so no content rows are lost. `t` opens the full generation list. (The summary tail is clipped so the path never leaves the title.) Git commits whose content matches a LOCAL snapshot are shown once as COMMIT.
 
 The title bar also identifies the baseline as `base N/M` (the footer keeps only the `← older · newer →` navigation), and labels the baseline generation itself as `BASELINE`. While you are in the past, the frame's border runs a rotating purple→cyan gradient (`--fx`, the default) — the time machine is unmissable; `--no-fx` restores the static history border color. Green/red marks compare that fixed baseline with whichever generation is displayed, in both directions through the timeline; browsing those comparisons never changes the unreviewed state at NOW.
 

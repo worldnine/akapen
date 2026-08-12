@@ -3102,7 +3102,7 @@ use crate::comment::Selection;
         let axis = &frame[22];
         assert!(axis.ends_with('●'), "NOW at the right edge: {axis}");
         assert!(axis.contains('◆'), "viewing marker on the axis: {axis}");
-        assert!(axis.contains('■'), "commit marker on the axis: {axis}");
+        assert!(axis.contains('◼'), "commit marker on the axis: {axis}");
         assert!(
             axis.find('◆').unwrap_or(0) < axis.rfind('●').unwrap_or(0),
             "viewing sits left of NOW: {axis}"

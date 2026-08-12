@@ -7,7 +7,7 @@
 //! the state words replace the footer hints, the axis replaces the view
 //! frame's bottom border (so view mode loses no content rows at all).
 //! The current revision is `◆`, the review baseline `▮`, LOCAL
-//! snapshots `●` and COMMITs `■`, with NOW always at the right edge.
+//! snapshots `●` and COMMITs `◼`, with NOW always at the right edge.
 //! The axis is dim left of the review baseline — reviewed history — and
 //! normal from the baseline to NOW — the unreviewed stretch.
 
