@@ -3123,6 +3123,45 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn ghost_effects_drop_when_the_next_revision_has_no_deletions() {
+        // A revision without deletions leaves the previous ghost list
+        // stale: its row numbers refer to the OLD view, and rendering
+        // it against the new view used to underflow the backspace
+        // pacing (total - 1 - order) in ghost_effect. The render must
+        // drop the stale effects.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:del".into()),
+            short_id: "del".into(),
+            summary: "deleted a line".into(),
+            content: "line1\nline3\nline4\nline5\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:add".into()),
+            short_id: "add".into(),
+            summary: "added a line".into(),
+            content: "line1\nline3\nline4\nline5\nline6\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        // Render the deletion revision: ghosts appear.
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(!app.ghost_fx.is_empty(), "deletions ghost out");
+        assert!(app.history_ghost_until.is_some());
+        // Move to a revision that only adds lines: no ghosts, and the
+        // stale ones must be gone (their rows belong to the old view).
+        app.histories[0].position = 2;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(
+            app.ghost_fx.is_empty(),
+            "no deletions in the new revision, no stale ghosts"
+        );
+    }
+
+    #[test]
     fn footer_badge_shows_the_state_not_just_the_mode() {
         // The badge leads the footer and flips with the transient states:
         // SELECT while a selection is active (both modes — the selection

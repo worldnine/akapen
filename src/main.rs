@@ -1243,7 +1243,7 @@ fn keep_cursor_out_of_timeline(app: &mut App) {
 
 /// Render the final revision selected by [`select_history`]. This is the
 /// only expensive half of time travel and runs once after the arrow stops.
-fn render_pending_history(app: &mut App, animate: bool) -> bool {
+pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
     // While an overlay owns the screen, the document behind it must not
     // re-render: the timeline overlay's list IS the timeline, and a
     // render here would stall every keypress inside it (a full render
@@ -1338,6 +1338,14 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
         });
     }
     app.source = new_source;
+    // The view is about to be rebuilt: scatter effects captured against
+    // the old view's rows would map to the wrong cells now (a revision
+    // without deletions leaves the previous ghost list stale — its
+    // backspace pacing was captured against the old rect, and mapping
+    // it onto the new view underflows), so they drop here and are
+    // rebuilt below when the new view actually has ghosts.
+    app.appear_fx.clear();
+    app.ghost_fx.clear();
     refresh_comparison_marks(app);
     app.history_ghost_until = None;
     app.spans = app

@@ -278,8 +278,16 @@ pub(crate) fn ghost_effect() -> Effect {
                 }
                 // Pass 2: blank text cells in REVERSE reading order.
                 for y in area.y..area.bottom() {
-                    let before_rows: usize =
-                        counts[..(y - area.y) as usize].iter().sum();
+                    // The captured row counts were taken against the
+                    // rect this effect first rendered into; a rect that
+                    // shifted since (stale ghost rows after a history
+                    // move) must not index past them or underflow the
+                    // backspace cursor — skip the row instead.
+                    let row = (y - area.y) as usize;
+                    if row >= counts.len() {
+                        continue;
+                    }
+                    let before_rows: usize = counts[..row].iter().sum();
                     let mut k = 0usize; // text cells before this one in the row
                     for x in area.x..area.right() {
                         let cell = &buf[(x, y)];
@@ -287,6 +295,9 @@ pub(crate) fn ghost_effect() -> Effect {
                             continue; // the row's blank padding is never absorbed
                         }
                         let order = before_rows + k;
+                        if order >= total {
+                            continue; // pacing captured against a smaller rect
+                        }
                         if ((total - 1 - order) as f32) < alpha * total as f32 {
                             // The ghost has no band to blend into: blank
                             // the cell (full-width glyphs keep their
