@@ -1249,7 +1249,7 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
         if app.config.fx {
             app.ghost_fx = ghost_rows
                 .into_iter()
-                .map(|(row, height)| (row, height, crate::effects::ghost_effect()))
+                .map(|(row, height)| (row, height, crate::effects::ghost_effect(app.ui_history_glow_bg)))
                 .collect();
         }
     }
