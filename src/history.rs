@@ -92,6 +92,12 @@ pub(crate) struct DeletedBlock {
 /// Semantic block transition: exact block IDs keep moved/unchanged blocks
 /// stable, fuzzy matches identify rewrites, and unmatched old blocks become
 /// short-lived deletion ghosts.
+/// The block-level transition used by the history tests: which new lines
+/// belong to changed/inserted blocks and which old blocks were removed
+/// wholesale (the animation path now works per-line via
+/// [`super::line_level_transition`]; the review marks use
+/// [`review_block_transition`]).
+#[cfg(test)]
 pub(crate) fn block_transition(
     old: &[String],
     new: &[String],

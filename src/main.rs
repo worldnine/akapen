@@ -1224,67 +1224,49 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
     let path = app.current_file_path().to_path_buf();
     let new_source = Source::from_content(path.clone(), content);
     let anchor = history::anchored_line(&old_lines, &new_source.lines, old_cursor);
-    let (changed_blocks, deleted_blocks) =
-        history::block_transition(&old_lines, &new_source.lines);
-    let mut deleted_blocks = deleted_blocks;
-    // Rewrites rarely ghost: the semantic matcher treats a replaced block
-    // as "changed", so the backspace only showed for blocks removed
-    // wholesale. A rewritten block whose old text actually LOST
-    // characters ghosts too — the old text backspaces away, then the
-    // layout collapses to the new version. The removal fraction must be
-    // small (<75%): a near-total replacement usually means the
-    // line-index alignment misfired (an inserted block), not a removal.
-    let mut changed_lines: Vec<usize> = changed_blocks.iter().copied().collect();
-    changed_lines.sort_unstable();
+    let (changed_lines, removed_lines) =
+        line_level_transition(&old_lines, &new_source.lines);
+    // The ghosts: contiguous runs of removed lines, each ghosting out
+    // (backspace) and collapsing to the new layout. A run whose
+    // same-position new line differs is a rewrite IN PLACE — only the
+    // removed characters ghost, so the unchanged prefix never flickers.
+    // The removal fraction guard (<75%) keeps misaligned indexes from
+    // ghosting; fully removed lines ghost whole.
+    let mut deleted_blocks = Vec::new();
+    let removed_sorted = {
+        let mut v = removed_lines;
+        v.sort_unstable();
+        v
+    };
     let mut i = 0usize;
-    while i < changed_lines.len() {
-        let start = changed_lines[i];
-        let mut end = start;
-        while i + 1 < changed_lines.len() && changed_lines[i + 1] == end + 1 {
-            end += 1;
+    while i < removed_sorted.len() {
+        let a = removed_sorted[i];
+        let mut b = a;
+        while i + 1 < removed_sorted.len() && removed_sorted[i + 1] == b + 1 {
+            b += 1;
             i += 1;
         }
         i += 1;
-        // The old counterpart may span MORE lines than the new block (a
-        // merged paragraph that shrank when a line was deleted): extend
-        // the old window over the paragraph's consecutive non-blank
-        // lines, or the removed line would sit outside the cut and the
-        // backspace would never fire.
-        if start >= old_lines.len() {
-            continue; // the block is entirely new — nothing old to remove
-        }
-        let mut old_start = start;
-        let mut old_end = end.min(old_lines.len().saturating_sub(1));
-        if old_start > old_end {
-            continue;
-        }
-        while old_start > 0 && !old_lines[old_start - 1].trim().is_empty() {
-            old_start -= 1;
-        }
-        while old_end + 1 < old_lines.len() && !old_lines[old_end + 1].trim().is_empty() {
-            old_end += 1;
-        }
-        let old_block: String = old_lines[old_start..=old_end].join("\n");
-        if old_block.trim().is_empty() {
-            continue;
-        }
-        let new_block: String = new_source
-            .lines
-            .get(start..=end.min(new_source.lines.len().saturating_sub(1)))
-            .map(|lines| lines.join("\n"))
-            .unwrap_or_default();
-        let (removed, frac) = removed_text(&old_block, &new_block);
-        // Ghost ONLY the removed characters, anchored right AFTER the
-        // block: the unchanged prefix of a rewritten line never flickers
-        // — the removed text appears as a ghost row below the line and
-        // backspaces away, then the layout collapses. The fraction guard
-        // (small removals only) keeps misaligned indexes from ghosting.
-        if !removed.trim().is_empty() && frac > 0.0 && frac < 0.75 {
-            deleted_blocks.push(history::DeletedBlock {
-                anchor: end + 1,
-                content: removed,
-            });
-        }
+        let old_line = &old_lines[a];
+        let content = match new_source.lines.get(a) {
+            // A rewrite IN PLACE (the same-position new line is itself a
+            // changed line): ghost only the removed characters. A removed
+            // line whose position now holds an unrelated line (e.g. a
+            // blank where the line used to be) ghosts whole — pairing it
+            // would trip the fraction guard and skip the backspace.
+            Some(new_line) if b == a && changed_lines.contains(&a) => {
+                let (removed, frac) = removed_text(old_line, new_line);
+                if removed.trim().is_empty() || frac >= 0.75 {
+                    continue;
+                }
+                removed
+            }
+            _ => old_lines[a..=b].join("\n"),
+        };
+        deleted_blocks.push(history::DeletedBlock {
+            anchor: (b + 1).min(new_source.lines.len()),
+            content,
+        });
     }
     app.source = new_source;
     refresh_comparison_marks(app);
@@ -1341,7 +1323,7 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
     if app.config.fx && !source_mode {
         app.appear_fx = appear_effects(
             &app.view,
-            &changed_blocks,
+            &changed_lines,
             &old_lines,
             &app.highlight,
             &path,
@@ -1565,6 +1547,57 @@ fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
 /// replacement usually means the line-index alignment misfired (an
 /// inserted block), not a real removal; the caller guards on the
 /// fraction.
+/// The per-line transition for the ANIMATIONS: the new lines with no
+/// equal-content match (they stream in) and the old lines with no match
+/// (their text ghosts out). The review marks keep the block-level
+/// semantic marking (a whole rendered block lights), but the animations
+/// must work at line granularity — a one-cell edit in a large table
+/// would otherwise mark the whole table as one block, ballooning the
+/// char diffs and hitting the LCS budget. The DP is over LINES (content
+/// equality), so it stays cheap; pathological documents fall back to no
+/// animation rather than a hang.
+fn line_level_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec<usize>) {
+    let o = old.len();
+    let n = new.len();
+    if o.saturating_mul(n) > LCS_CELL_BUDGET {
+        return (HashSet::new(), Vec::new());
+    }
+    let mut dp = vec![vec![0usize; n + 1]; o + 1];
+    for i in (0..o).rev() {
+        for j in (0..n).rev() {
+            dp[i][j] = if old[i] == new[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut changed = HashSet::new();
+    let mut removed: Vec<usize> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < o && j < n {
+        if old[i] == new[j] {
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            removed.push(i);
+            i += 1;
+        } else {
+            changed.insert(j);
+            j += 1;
+        }
+    }
+    while i < o {
+        removed.push(i);
+        i += 1;
+    }
+    while j < n {
+        changed.insert(j);
+        j += 1;
+    }
+    (changed, removed)
+}
+
 /// The LCS work budget for the diff helpers: beyond this many DP cells
 /// the block is too large to diff precisely (a whole-document change
 /// would otherwise hang the render). Callers get the safe degraded
