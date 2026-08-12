@@ -85,11 +85,12 @@ pub(crate) fn toast_effect() -> Effect {
 pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effect {
     fx::delay(
         stagger_ms,
-        fx::effect_fn(
+        fx::effect_fn_buf(
             mask,
             (450, Interpolation::Linear),
-            |mask, ctx, cells| {
+            |mask, ctx, buf| {
                 let alpha = ctx.timer.alpha();
+                let area = ctx.area;
                 // The reading-order index of every new cell: cells before
                 // the stream cursor are revealed, cells after stay blank.
                 let row_counts: Vec<usize> = mask
@@ -99,40 +100,56 @@ pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effe
                     })
                     .collect();
                 let total: usize = row_counts.iter().sum();
-                for (pos, cell) in cells {
-                    let (r, c) = (
-                        (pos.y - ctx.area.y) as usize,
-                        pos.x - ctx.area.x,
-                    );
-                    let ranges = match mask.get(r) {
-                        Some(ranges) => ranges,
-                        None => continue,
-                    };
-                    // The cell's order = new cells in earlier rows + new
-                    // cells earlier in this row (masked ranges only, so
-                    // the animation time is spread over the new text).
-                    let mut order = row_counts[..r].iter().sum::<usize>();
-                    let mut covered = false;
-                    for &(s, e) in ranges {
-                        if c >= s && c < e {
-                            covered = true;
-                            order += (c - s) as usize;
-                            break;
+                for y in area.y..area.bottom() {
+                    for x in area.x..area.right() {
+                        let (r, c) = ((y - area.y) as usize, x - area.x);
+                        let ranges = match mask.get(r) {
+                            Some(ranges) => ranges,
+                            None => continue,
+                        };
+                        // The cell's order = new cells in earlier rows +
+                        // new cells earlier in this row (masked ranges
+                        // only, so the animation time is spread over the
+                        // new text).
+                        let mut order = row_counts[..r].iter().sum::<usize>();
+                        let mut covered = false;
+                        for &(s, e) in ranges {
+                            if c >= s && c < e {
+                                covered = true;
+                                order += (c - s) as usize;
+                                break;
+                            }
+                            order += (e - s) as usize;
                         }
-                        order += (e - s) as usize;
-                    }
-                    if !covered {
-                        continue; // the unchanged text stays put
-                    }
-                    // The stream cursor: cells up to `alpha * total` are
-                    // revealed, the rest stay blank.
-                    if (order as f32) >= alpha * total as f32 {
-                        cell.set_char(' ');
+                        if !covered {
+                            continue; // the unchanged text stays put
+                        }
+                        // The stream cursor: cells up to `alpha * total`
+                        // are revealed, the rest stay blank.
+                        if (order as f32) >= alpha * total as f32 {
+                            blank_cell(buf, x, y);
+                        }
                     }
                 }
             },
         ),
     )
+}
+
+/// Blank a cell for the reveal/backspace shaders. A WIDE character is
+/// overwritten with a FULL-WIDTH space (U+3000) rather than a regular
+/// space: the cell stays two columns wide, so ratatui's diff never takes
+/// the wide→narrow transition path (which force-clears the trailing
+/// column and can drop the cell's background — the source of the
+/// checkerboard behind CJK text). The band then covers both columns of
+/// the glyph uniformly.
+fn blank_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16) {
+    let cell = &mut buf[(x, y)];
+    if unicode_width::UnicodeWidthStr::width(cell.symbol()) > 1 {
+        cell.set_char('　');
+    } else {
+        cell.set_char(' ');
+    }
 }
 
 /// Scatter-out for the deletion ghosts, BACKSPACE-style: the ghost stays
@@ -143,20 +160,22 @@ pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effe
 pub(crate) fn ghost_effect() -> Effect {
     fx::delay(
         150,
-        fx::effect_fn(
+        fx::effect_fn_buf(
             (), // no mask: every ghost cell is "new"
             (500, Interpolation::Linear),
-            |(), ctx, cells| {
+            |(), ctx, buf| {
                 let alpha = ctx.timer.alpha();
-                let w = ctx.area.width as usize;
-                let total = ctx.area.width as usize * ctx.area.height as usize;
-                for (pos, cell) in cells {
-                    let order = (pos.y - ctx.area.y) as usize * w
-                        + (pos.x - ctx.area.x) as usize;
-                    // The backspace cursor: cells AFTER the cursor (in
-                    // reverse reading order) are cleared.
-                    if ((total - 1 - order) as f32) < alpha * total as f32 {
-                        cell.set_char(' ');
+                let area = ctx.area;
+                let w = area.width as usize;
+                let total = area.width as usize * area.height as usize;
+                for y in area.y..area.bottom() {
+                    for x in area.x..area.right() {
+                        let order = (y - area.y) as usize * w + (x - area.x) as usize;
+                        // The backspace cursor: cells AFTER the cursor (in
+                        // reverse reading order) are cleared.
+                        if ((total - 1 - order) as f32) < alpha * total as f32 {
+                            blank_cell(buf, x, y);
+                        }
                     }
                 }
             },
