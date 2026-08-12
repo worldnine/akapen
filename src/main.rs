@@ -1226,6 +1226,45 @@ fn render_pending_history(app: &mut App, animate: bool) -> bool {
     let anchor = history::anchored_line(&old_lines, &new_source.lines, old_cursor);
     let (changed_blocks, deleted_blocks) =
         history::block_transition(&old_lines, &new_source.lines);
+    let mut deleted_blocks = deleted_blocks;
+    // Rewrites rarely ghost: the semantic matcher treats a replaced block
+    // as "changed", so the backspace only showed for blocks removed
+    // wholesale. A rewritten block whose old text actually LOST
+    // characters ghosts too — the old text backspaces away, then the
+    // layout collapses to the new version. The removal fraction must be
+    // small (<75%): a near-total replacement usually means the
+    // line-index alignment misfired (an inserted block), not a removal.
+    let mut changed_lines: Vec<usize> = changed_blocks.iter().copied().collect();
+    changed_lines.sort_unstable();
+    let mut i = 0usize;
+    while i < changed_lines.len() {
+        let start = changed_lines[i];
+        let mut end = start;
+        while i + 1 < changed_lines.len() && changed_lines[i + 1] == end + 1 {
+            end += 1;
+            i += 1;
+        }
+        i += 1;
+        let old_block: String = old_lines
+            .get(start..=end.min(old_lines.len().saturating_sub(1)))
+            .map(|lines| lines.join("\n"))
+            .unwrap_or_default();
+        if old_block.trim().is_empty() {
+            continue;
+        }
+        let new_block: String = new_source
+            .lines
+            .get(start..=end.min(new_source.lines.len().saturating_sub(1)))
+            .map(|lines| lines.join("\n"))
+            .unwrap_or_default();
+        let frac = removed_fraction(&old_block, &new_block);
+        if frac > 0.0 && frac < 0.75 {
+            deleted_blocks.push(history::DeletedBlock {
+                anchor: start,
+                content: old_block,
+            });
+        }
+    }
     app.source = new_source;
     refresh_comparison_marks(app);
     app.history_ghost_until = None;
@@ -1490,6 +1529,48 @@ fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
         ranges.push((j, n.len())); // trailing insertions
     }
     ranges.into_iter().filter(|(s, e)| s < e).collect()
+}
+
+/// The fraction of `old`'s characters that have no counterpart in
+/// `new` (0.0 = nothing removed, 1.0 = everything): the backtrace counts
+/// old-only characters (deletions). Used to decide whether a rewritten
+/// block's old text should ghost — a small removal fraction means the
+/// line-index alignment is trustworthy; a near-total replacement is
+/// usually a misaligned index (an inserted block), not a real removal.
+fn removed_fraction(old: &str, new: &str) -> f32 {
+    let o: Vec<char> = old.chars().collect();
+    let n: Vec<char> = new.chars().collect();
+    if o.is_empty() {
+        return 0.0;
+    }
+    if n.is_empty() {
+        return 1.0;
+    }
+    let mut dp = vec![vec![0usize; n.len() + 1]; o.len() + 1];
+    for i in (0..o.len()).rev() {
+        for j in (0..n.len()).rev() {
+            dp[i][j] = if o[i] == n[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut removed = 0usize;
+    while i < o.len() && j < n.len() {
+        if o[i] == n[j] {
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1; // an old-only char: removed
+            removed += 1;
+        } else {
+            j += 1; // a new-only char: insertion, not a removal
+        }
+    }
+    removed += o.len() - i; // trailing old-only chars
+    removed as f32 / o.len() as f32
 }
 
 /// The display-column ranges of `new`'s characters that have no
