@@ -2,24 +2,44 @@
 
 **akapen**（赤ペン, "red pen") — mark up your agent's homework.
 
-A standalone TUI for reviewing documents in the terminal: read markdown beautifully rendered, select lines, attach comments, and send them to your coding agent — like a teacher grading homework with a red pen. Built for the agent review loop: the agent writes, you mark it up, the agent revises, and akapen shows you exactly what changed.
-
-For Markdown, it is also a **document time-machine**: Left/Right moves through one timeline of Git commits and bounded LOCAL snapshots without leaving the rendered document, keeps the nearest heading anchored, streams changed lines in left→right like an LLM, and backspaces removed lines away right→left (dim ghosts without a background) before the layout collapses. History effects use neutral brightness rather than add/delete colors, and the page frame changes while viewing the past. Arrow input scrubs a bottom timeline bar (◆ current / ▮ baseline / ● LOCAL / ◼ COMMIT) and the revision label immediately; Markdown renders once after 300ms idle, and `t` opens the full generation list. Comments made in the past carry the exact revision and historical snippet to the agent.
-
 日本語版 README は [README.ja.md](README.ja.md) にあります。
 
+Your agent just wrote you a 2,000-line design document. Three sections are wrong, one example is misleading, and chapter 5's tone is off. Your options: write a long prompt explaining all of it (the agent will get the gist), or annotate the file by hand in an editor (the line numbers travel, but the editor wasn't built for this).
+
+Teachers don't rewrite the student's essay — they mark it up with a red pen and hand it back. akapen is the red pen for your agent's homework, right in the terminal where the agent lives.
+
+## The loop
+
+```
+agent writes → you read → you mark → s sends → agent revises → ⚡ → r loads → you check
+```
+
+Read markdown beautifully rendered, select lines, attach comments, and send them to your coding agent — without leaving the document. When the agent edits the file, akapen notices (`⚡`); the new draft arrives with green marks where things changed and red marks where things were deleted. Walk the differences with `n`/`N`, and comment anything still wrong. Your files are never modified: comments leave through the clipboard, stdout, or your send command.
+
+## The gradebook — the document time machine
+
+A red pen is only fair if you can check the student actually fixed what you marked. akapen keeps **every draft the agent ever produced** — Git commits and bounded LOCAL snapshots share one timeline — and you can browse them, still rendered, with `Left`/`Right`. The review baseline pins *the version you graded*; green/red marks compare that baseline with whichever draft you're looking at. Comments are pinned to the exact draft they describe, and carry the revision with them. Git is optional.
+
+Prefer an older version of a section? Walk back, comment — *"this draft was better"* — and the revision plus the historical text arrive with the comment, so the agent can restore precisely that version.
+
+## The red pen
+
+- **Two modes, one cursor**: view mode renders Markdown natively — width-adaptive tables that shrink instead of truncating, headings, code blocks, links, footnotes, math, task lists — while source mode shows line-numbered raw source with syntax highlighting (100+ languages), wrapping with gutter-aligned indentation. Selection and comments work identically in both.
+- **Comment anywhere**: `v` to select, `c` to comment; comments appear as inline cards right under the lines they refer to.
+- **Reply mode**: `--reply` turns akapen into a red pen for the agent's *chat output* — the code examples and markdown it pasted into the conversation, which never touched a file.
+- **Session mode, always**: one file or twenty, `]`/`[` to switch; cursor, selection, and mode are remembered per file.
+- **Terminal-native**: plain ANSI chrome that follows your palette, two-face syntax themes (32 built-ins or any `.tmTheme`), light/dark auto-detect via OSC 11, CJK-correct width math.
+
+## Try it
+
+```sh
+cargo install akapen
+ashiato . --open-cmd "akapen {} --send-agent"   # picker → open → send comments back
+```
+
+`herdr plugin link <this repo>` registers the `akp.open` actions — open akapen on the agent's latest chat messages straight from the command palette.
+
 Based on the line-comment experience of [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr), reworked for markdown-first reading in a single-pane, two-mode design.
-
-## Highlights
-
-- **view mode** (default for `.md`): native markdown rendering (tui-markdown / pulldown-cmark) — tables, headings, code blocks, links, footnotes, math, task lists, front matter, in full color. No external renderer process. Tables are **width-adaptive**: when they exceed the pane width, columns shrink (down to their longest unbreakable token) and cells wrap — never truncated, no information loss.
-- **source mode**: raw source with line numbers and syntect highlighting (100+ languages). Long lines wrap with gutter-aligned indentation; tabs expand to 8-column stops.
-- **Comment anywhere**: line cursor and range selection work identically in both modes — `v` to select, `c` to comment, without leaving the rendered view. Comments appear as inline cards right under the lines they refer to.
-- **Your files are never modified.** akapen is strictly read-only; comments are exported through a separate channel (clipboard, stdout, or a send command).
-- **Built for the agent loop**: when the agent edits a file you have open, akapen detects it (`⚡`), stores the loaded generation, and marks present/changed review locations in green and deletion positions in red until you acknowledge them with `a`.
-- **Session mode, always**: open one file or twenty with the same keybindings. `]` / `[` switch files; cursor, selection, and mode are remembered per file.
-- **Terminal-native colors**: UI chrome uses plain ANSI colors and follows your terminal palette; syntax colors come from two-face themes (32 built-ins) or any `.tmTheme` file. Light/dark is auto-detected via OSC 11.
-- **CJK-correct**: all width math uses `unicode-width`, so Japanese text never misaligns. On macOS, the input source is pinned to ASCII in command mode and restored on exit (`--ime jp` switches to Japanese while composing).
 
 ## Install
 
@@ -91,9 +111,9 @@ ashiato . --open-cmd "akapen {} --send-agent"
 
 Mouse: wheel scrolls the view without moving the cursor; click moves the cursor; drag selects a line range; click the title-bar path to copy the full path; click `1/3 files` or the `▌ N` counter to open the overlays.
 
-## Document time machine and review
+## The gradebook, in detail
 
-akapen treats every version as a complete document. Git commits and bounded LOCAL snapshots share one timeline; Git is optional.
+akapen treats every version as a complete document. Git commits and bounded LOCAL snapshots share one timeline; Git is optional. Browsing feels like the draft is alive: as you hold `Left`/`Right`, changed lines stream in left→right like an LLM, removed lines backspace away right→left as dim ghosts, and the layout collapses only after — history effects use neutral brightness, never add/delete colors, and the page frame changes while you are in the past.
 
 1. Read and comment on the rendered document or its source.
 2. When an agent edits the file, akapen shows `⚡`. Press `r` to load the new complete version.
