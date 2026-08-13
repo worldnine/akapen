@@ -10,9 +10,9 @@
 //! Export is non-destructive: comments stay in the list after a copy so the
 //! user can re-output or send them again (delete is explicit, `d`).
 
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::io::{ErrorKind, Write};
+use std::os::fd::AsRawFd;
+use std::process::{ChildStdin, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -248,14 +248,16 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
 const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Pipe `text` into a child's stdin and wait for its exit — but never
-/// longer than `timeout`. The write runs on a worker thread: a child
-/// that never reads fills the pipe buffer, and a write in the caller's
-/// thread would block forever. `try_wait` polling enforces the
-/// deadline; past it the child is killed and an error is returned, so
-/// the existing caller paths (the toast in `export_all`) show it
-/// unchanged. The worker's result comes back over a channel; the
-/// child's death closes the pipe, so the thread always finishes
-/// promptly.
+/// longer than `timeout`. The write stays on the caller's thread and is
+/// non-blocking: stdin is `O_NONBLOCK` and every attempt is gated by a
+/// 10ms `poll`, so a child that never reads (filling the pipe buffer)
+/// cannot freeze the TUI, whose event loop is this same thread.
+/// `try_wait` polling enforces the deadline; past it the child is
+/// killed and an error is returned, so the existing caller paths (the
+/// toast in `export_all`) show it unchanged. The child's exit ends the
+/// write: stdin is dropped without waiting for the pipe to drain,
+/// since a grandchild inheriting the read end could hold it open
+/// forever.
 fn pipe_and_wait(
     label: &str,
     cmd: &str,
@@ -268,25 +270,31 @@ fn pipe_and_wait(
         .stdin(Stdio::piped())
         .spawn()
         .with_context(|| format!("spawning {label}"))?;
-    let mut stdin = child
+    let stdin = child
         .stdin
         .take()
         .with_context(|| format!("{label} stdin unavailable"))?;
-    let (tx, rx) = mpsc::channel();
-    let text = text.to_string();
-    thread::spawn(move || {
-        let _ = tx.send(stdin.write_all(text.as_bytes()));
-    });
+    // The pipe fd must be non-blocking: a blocking write on a full
+    // pipe would freeze the TUI's only thread. SAFETY: `stdin` is a
+    // valid open fd; F_SETFL/O_NONBLOCK is the standard flag write.
+    unsafe {
+        libc::fcntl(stdin.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    let mut stdin = Some(stdin);
+    let mut bytes = text.as_bytes();
     let deadline = Instant::now() + timeout;
     loop {
-        match child.try_wait().with_context(|| format!("waiting for {label}"))? {
+        match child
+            .try_wait()
+            .with_context(|| format!("waiting for {label}"))?
+        {
             Some(status) => {
-                // The child is gone, so its own stdin pipe is closed and
-                // the writer is finishing right now — collect its result
-                // (bounded, in case a grandchild inherited the pipe).
-                rx.recv_timeout(Duration::from_secs(1))
-                    .context("stdin writer did not finish")?
-                    .with_context(|| format!("writing to {label}"))?;
+                // The child is gone: abandon the rest of the write and
+                // close our write end without waiting for the pipe to
+                // drain — a grandchild inheriting the read end could
+                // hold it open indefinitely. There is no writer thread
+                // to leak; dropping the handle is the whole cleanup.
+                drop(stdin.take());
                 if !status.success() {
                     bail!("{label} exited non-zero");
                 }
@@ -296,12 +304,72 @@ fn pipe_and_wait(
                 // The child outlived its budget (e.g. a send command
                 // that never reads stdin) — kill it instead of blocking
                 // the UI forever, then reap it so it cannot linger.
+                drop(stdin.take());
                 let _ = child.kill();
                 let _ = child.wait();
                 bail!("{label} timed out after {}s", timeout.as_secs_f64());
             }
-            None => thread::sleep(Duration::from_millis(10)),
+            None => {}
         }
+        if bytes.is_empty() {
+            // Everything is written: close our write end so the child
+            // sees EOF and can exit, then just keep reaping it.
+            drop(stdin.take());
+            thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        match stdin.as_mut().map(|stdin| write_pipe(stdin, bytes)) {
+            Some(WriteOutcome::Wrote(n)) => bytes = &bytes[n..],
+            // The pipe's reader is gone: stop writing and let try_wait
+            // surface the child's exit (or the deadline kill it).
+            Some(WriteOutcome::Closed) => {
+                drop(stdin.take());
+                thread::sleep(Duration::from_millis(10));
+            }
+            // Not writable yet, or stdin is already closed: the poll's
+            // own pause paces the loop until the next try_wait check.
+            Some(WriteOutcome::Retry) | None => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+/// The outcome of one non-blocking write attempt into the child's stdin
+/// pipe.
+enum WriteOutcome {
+    /// The pipe accepted `n` bytes.
+    Wrote(usize),
+    /// The pipe broke (its reader went away): stop writing and let
+    /// `try_wait` report the child's exit.
+    Closed,
+    /// Nothing written this round (buffer still full, or a transient
+    /// error) — try again after the next `try_wait` check.
+    Retry,
+}
+
+/// Wait up to 10ms for the pipe to accept more (`poll` — the loop's
+/// pacemaker), then write as much as fits. The fd is `O_NONBLOCK`, so
+/// a full buffer surfaces as WouldBlock instead of freezing the TUI's
+/// only thread; EPIPE / POLLERR / POLLHUP mean the reader is gone.
+fn write_pipe(stdin: &mut ChildStdin, bytes: &[u8]) -> WriteOutcome {
+    let mut pollfd = libc::pollfd {
+        fd: stdin.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: pollfd points at a valid fd, revents is ours to fill.
+    if unsafe { libc::poll(&mut pollfd, 1, 10) } <= 0 {
+        // Timeout (still full) or a transient error such as EINTR.
+        return WriteOutcome::Retry;
+    }
+    if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return WriteOutcome::Closed;
+    }
+    match stdin.write(bytes) {
+        Ok(n) if n > 0 => WriteOutcome::Wrote(n),
+        Ok(_) => WriteOutcome::Retry,
+        Err(e) if e.kind() == ErrorKind::WouldBlock => WriteOutcome::Retry,
+        // EPIPE and anything else: the reader is gone.
+        Err(_) => WriteOutcome::Closed,
     }
 }
 
@@ -577,6 +645,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("exited non-zero"));
+    }
+
+    #[test]
+    fn pipe_and_wait_succeeds_when_a_grandchild_keeps_stdin_open() {
+        // `sh -c "sleep 2 &"` exits 0 right after forking the sleep,
+        // which inherits the pipe's read end and never reads it: the
+        // write stalls on a full buffer while the child is already
+        // gone. The old writer-thread design misreported this as
+        // "stdin writer did not finish" and leaked the blocked thread;
+        // the non-blocking loop must instead notice the child's exit
+        // and succeed right away. The sleep is short so the reparented
+        // grandchild dies on its own instead of lingering past the
+        // test.
+        let start = Instant::now();
+        super::pipe_and_wait(
+            "send command",
+            "sh",
+            &["-c", "sleep 2 &"],
+            &"x".repeat(1 << 20),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the child exits immediately, so the result must not wait on the write"
+        );
     }
 
     #[test]
