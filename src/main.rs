@@ -3862,7 +3862,11 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 // text instead of starting at column 0 under the line
                 // number. The reversed/selected background spans the whole
                 // continuation row so the cursor/selection reads as one
-                // block.
+                // block. A changed line's `▌` repeats on every wrapped row
+                // (same color family as the first-row mark), so the
+                // left-edge mark runs unbroken — a wrapped changed line or
+                // a run of adjacent changed lines reads as one solid band,
+                // not a scattered strip of first-row marks.
                 let indent_style = if cursor_bg {
                     Style::default().bg(app.ui_selected_bg)
                 } else if changed_bg {
@@ -3870,8 +3874,30 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 } else {
                     Style::default()
                 };
+                // `added` implies one of the bands above, so the mark cell
+                // always sits on a painted background. The color mirrors
+                // the first-row mark: LightGreen under the cursor glyph,
+                // Green on the changed band, and the selection band's
+                // plain style when the line is only selected.
+                let (mark, mark_style) = if added {
+                    if is_cursor {
+                        (
+                            "▌",
+                            Style::default()
+                                .fg(Color::LightGreen)
+                                .bg(app.ui_selected_bg),
+                        )
+                    } else if changed_bg {
+                        ("▌", Style::default().fg(Color::Green).bg(app.ui_changed_bg))
+                    } else {
+                        ("▌", Style::default().bg(app.ui_selected_bg))
+                    }
+                } else {
+                    (" ", Style::default())
+                };
+                spans.push(Span::styled(mark, mark_style));
                 spans.push(Span::styled(
-                    " ".repeat(app.gutter_cols as usize),
+                    " ".repeat(app.gutter_cols as usize - 1),
                     indent_style,
                 ));
             }
@@ -3955,14 +3981,15 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
 /// The rows one deleted block paints: per baseline line, a red `▌` mark
 /// and a blank number column on the first wrapped row (the line has no
 /// number in the displayed document), a gutter-width indent on
-/// continuation rows, and the text in DIM red. Display-only rows: no
-/// selection or comment treatment applies. While `n`'s deletion focus is
-/// on the block (`focused`), the rows take the cursor's own visual
-/// language — bright red text on the DarkGray cursor band running the
-/// full pane width, with the `>` glyph on the first row when this block
-/// leads the focused set (`cursor_glyph`). The row count must match
-/// [`crate::app::deleted_block_rows`] — same per-line [`wrap_spans`] at
-/// the same width.
+/// continuation rows, and the text in red on the full-row red band —
+/// the diff-pair partner of the green `▌` changed band. Display-only
+/// rows: no selection or comment treatment applies. While `n`'s deletion
+/// focus is on the block (`focused`), the rows take the cursor's own
+/// visual language — bright red text on the DarkGray cursor band running
+/// the full pane width, with the `>` glyph on the first row when this
+/// block leads the focused set (`cursor_glyph`). The row count must
+/// match [`crate::app::deleted_block_rows`] — same per-line [`wrap_spans`]
+/// at the same width.
 fn deleted_block_lines(
     app: &App,
     content: &str,
@@ -3971,12 +3998,16 @@ fn deleted_block_lines(
     focused: bool,
     cursor_glyph: bool,
 ) -> Vec<Line<'static>> {
+    // Deleted rows are the diff pair of the green `▌` changed band: the
+    // static state is a full-row red band (same restraint, same extent).
+    // While lit, the gray cursor band replaces the red band across the
+    // whole row and the text brightens.
     let text_style = if focused {
         Style::default()
             .fg(Color::LightRed)
             .bg(app.ui_selected_bg)
     } else {
-        Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
+        Style::default().fg(Color::Red).bg(app.ui_deleted_bg)
     };
     let mark_style = if focused {
         Style::default()
@@ -3984,12 +4015,12 @@ fn deleted_block_lines(
             .add_modifier(Modifier::BOLD)
             .bg(app.ui_selected_bg)
     } else {
-        Style::default().fg(Color::Red)
+        Style::default().fg(Color::Red).bg(app.ui_deleted_bg)
     };
     let fill_style = if focused {
         Style::default().bg(app.ui_selected_bg)
     } else {
-        Style::default()
+        Style::default().bg(app.ui_deleted_bg)
     };
     let mut out = Vec::new();
     let mut first_row = true;
@@ -4011,27 +4042,33 @@ fn deleted_block_lines(
                     fill_style,
                 ));
             } else {
+                // The red `▌` repeats on every wrapped row, exactly like a
+                // green changed line's continuation rows: the left-edge
+                // mark runs unbroken down the whole block.
+                spans.push(Span::styled("▌", mark_style));
                 spans.push(Span::styled(
-                    " ".repeat(app.gutter_cols as usize),
+                    " ".repeat(app.gutter_cols as usize - 1),
                     fill_style,
                 ));
             }
             for f in frags {
                 spans.push(Span::styled(f.text.clone(), f.style));
             }
-            // The focused band runs to the pane's right edge, exactly like
-            // the cursor/selection band on ordinary rows.
-            if focused {
-                let used: usize = spans
-                    .iter()
-                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                    .sum();
-                if used < full_width {
-                    spans.push(Span::styled(
-                        " ".repeat(full_width - used),
-                        fill_style,
-                    ));
-                }
+            // The band runs to the pane's right edge, exactly like the
+            // cursor/selection band on ordinary rows — and the green `▌`
+            // band on changed rows: the red band is its diff-pair
+            // partner, so a rewrite reads as one matched block. The
+            // focused state keeps the same extent (the gray cursor band
+            // replaces the red one).
+            let used: usize = spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            if used < full_width {
+                spans.push(Span::styled(
+                    " ".repeat(full_width - used),
+                    fill_style,
+                ));
             }
             out.push(Line::from(spans));
             first_row = false;

@@ -4070,10 +4070,12 @@ use crate::comment::Selection;
         assert!(row_text(&text.lines[2]).contains("GONE B"));
         assert!(row_text(&text.lines[3]).contains("line2"));
 
-        // A deleted row: red `▌` mark, blank number column, DIM red text.
+        // A deleted row: red `▌` mark, blank number column, red text on
+        // the red band — the diff-pair partner of the green changed band.
         let deleted = &text.lines[1];
         assert_eq!(deleted.spans[0].content.as_ref(), "▌");
         assert_eq!(deleted.spans[0].style.fg, Some(Color::Red));
+        assert_eq!(deleted.spans[0].style.bg, Some(app.ui_deleted_bg));
         assert!(
             deleted.spans[1].content.chars().all(|c| c == ' '),
             "deleted rows have no line number: {:?}",
@@ -4081,12 +4083,91 @@ use crate::comment::Selection;
         );
         let body = &deleted.spans[2];
         assert_eq!(body.style.fg, Some(Color::Red));
-        assert!(body.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(body.style.bg, Some(app.ui_deleted_bg));
+        assert!(!body.style.add_modifier.contains(Modifier::DIM));
+        // The red band runs to the pane's right edge, exactly like the
+        // green `▌` changed band (gutter + content width).
+        let total: usize = deleted
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        assert_eq!(total, 78, "deleted rows band the full pane width");
+        assert_eq!(
+            deleted.spans.last().unwrap().style.bg,
+            Some(app.ui_deleted_bg),
+            "the right-edge fill carries the red band"
+        );
         // No `▀` position mark remains in source mode.
         assert!(
             text.lines.iter().all(|l| row_text(l).chars().all(|c| c != '▀')),
             "the deletion position mark is view-only now"
         );
+    }
+
+    #[test]
+    fn wrapped_changed_and_deleted_rows_carry_the_mark_on_every_row() {
+        let mut app = make_app(2, Mode::Source);
+        // Both the current line 2 (changed, green) and its deleted
+        // baseline text (red) are long enough to wrap to three rows at
+        // the 75-column content width.
+        let now = format!("line1\n{}\n", "Y".repeat(160));
+        app.source.content = now.clone();
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        app.comparison_changed = [1usize].into_iter().collect();
+        app.comparison_deleted_blocks = vec![history::DeletedBlock {
+            anchor: 1,
+            content: "X".repeat(160),
+        }];
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+
+        let (text, _) = build_rows(&app, 30, 75);
+        // Rows: line1 (cursor row) | deleted block (3 rows) | line2 (3 rows).
+        assert_eq!(text.lines.len(), 7);
+        assert_eq!(text.lines[0].spans[0].content.as_ref(), ">");
+        // Every deleted row — including wrap continuations — carries the
+        // red `▌` on the red band, so the left-edge mark runs unbroken.
+        for row in &text.lines[1..4] {
+            assert_eq!(row.spans[0].content.as_ref(), "▌", "deleted continuation rows keep the red mark");
+            assert_eq!(row.spans[0].style.bg, Some(app.ui_deleted_bg));
+        }
+        // Every changed row — continuations included — carries the green
+        // `▌` on the green band.
+        for row in &text.lines[4..7] {
+            assert_eq!(row.spans[0].content.as_ref(), "▌", "changed continuation rows keep the green mark");
+            assert_eq!(row.spans[0].style.bg, Some(app.ui_changed_bg));
+        }
+        // The gutter stays aligned on continuation rows: mark + indent
+        // equals the first row's mark + line number.
+        let first_gutter: usize = text.lines[4]
+            .spans
+            .iter()
+            .take(2)
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let cont_gutter: usize = text.lines[5]
+            .spans
+            .iter()
+            .take(2)
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        assert_eq!(cont_gutter, first_gutter, "continuation rows keep the gutter width");
+
+        // Focused: the whole block lights on the cursor band and the
+        // continuation rows keep the `▌` glyph (`>` stays on the first
+        // row only). A pure deletion — the anchor line is ordinary.
+        app.cursor = 1;
+        app.focused_deletion = Some(1);
+        app.comparison_changed.clear();
+        let (text, _) = build_rows(&app, 30, 75);
+        assert_eq!(text.lines[1].spans[0].content.as_ref(), ">");
+        for row in &text.lines[2..4] {
+            assert_eq!(row.spans[0].content.as_ref(), "▌");
+            assert_eq!(row.spans[0].style.bg, Some(app.ui_selected_bg));
+        }
     }
 
     #[test]
@@ -4174,13 +4255,14 @@ use crate::comment::Selection;
             "no second cursor band on the anchor line"
         );
 
-        // Leaving the anchor line dissolves the focus back to DIM rows,
-        // and the cursor glyph returns to the cursor line.
+        // Leaving the anchor line dissolves the focus back to the static
+        // red band, and the cursor glyph returns to the cursor line.
         on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
         assert_eq!(app.deletion_focus(), None);
         let (text, _) = build_rows(&app, 30, 75);
         let body = &text.lines[1].spans[2];
-        assert!(body.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(body.style.bg, Some(app.ui_deleted_bg));
+        assert!(!body.style.add_modifier.contains(Modifier::DIM));
         assert_eq!(text.lines[1].spans[0].content.as_ref(), "▌");
     }
 

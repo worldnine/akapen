@@ -16,7 +16,7 @@ use crate::overlay::Overlay;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
 use crate::view::{
-    ViewState, border_color, changed_bg, history_border_color, history_frame_flash_color,
+    ViewState, border_color, changed_bg, deleted_bg, history_border_color, history_frame_flash_color,
     history_glow_bg, scrollbar_thumb, selected_bg,
 };
 use crate::{
@@ -282,6 +282,7 @@ pub(crate) struct App {
     /// Resolved UI colors for the current `--light` / dark mode.
     pub(crate) ui_selected_bg: Color,
     pub(crate) ui_changed_bg: Color,
+    pub(crate) ui_deleted_bg: Color,
     pub(crate) ui_history_glow_bg: Color,
     pub(crate) ui_border: Color,
     pub(crate) ui_history_border: Color,
@@ -405,6 +406,7 @@ impl App {
             running: true,
             ui_selected_bg: selected_bg(light),
             ui_changed_bg: changed_bg(light),
+            ui_deleted_bg: deleted_bg(light),
             ui_history_glow_bg: history_glow_bg(light),
             ui_border: border_color(light),
             ui_history_border: history_border_color(light),

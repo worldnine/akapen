@@ -28,6 +28,11 @@ const SELECTED_BG_LIGHT: Color = Color::Rgb(210, 210, 220);
 /// this direction never reverses, so a restrained green has stable meaning.
 const CHANGED_BG_DARK: Color = Color::Rgb(35, 61, 47);
 const CHANGED_BG_LIGHT: Color = Color::Rgb(218, 238, 224);
+/// The diff-pair counterpart of the changed green band: the red background
+/// of source-mode deleted rows. Same restraint, same full-row band, so
+/// old and new content of a rewrite read as one matched pair.
+const DELETED_BG_DARK: Color = Color::Rgb(61, 35, 35);
+const DELETED_BG_LIGHT: Color = Color::Rgb(238, 218, 218);
 const HISTORY_GLOW_BG_DARK: Color = Color::Rgb(70, 73, 88);
 const HISTORY_GLOW_BG_LIGHT: Color = Color::Rgb(218, 220, 228);
 const HISTORY_BORDER_DARK: Color = Color::Rgb(170, 150, 215);
@@ -41,6 +46,13 @@ pub fn selected_bg(light: bool) -> Color {
 
 pub fn changed_bg(light: bool) -> Color {
     if light { CHANGED_BG_LIGHT } else { CHANGED_BG_DARK }
+}
+
+/// The red background of source-mode deleted rows — the diff-pair partner
+/// of [`changed_bg`]: a rewrite's old content (red band) and new content
+/// (green band) are the same kind of mark in opposing colors.
+pub fn deleted_bg(light: bool) -> Color {
+    if light { DELETED_BG_LIGHT } else { DELETED_BG_DARK }
 }
 
 /// A deliberately visible neutral flash, separate from diff's semantic
