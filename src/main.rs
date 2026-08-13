@@ -3734,12 +3734,22 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // The baseline text deleted at this position renders first: red
         // `▌` rows above their anchor line. Blocks that fell past the
         // last line (an EOF deletion) render below its text instead.
-        // While `n`'s deletion focus is on this line, the rows render
-        // bright instead of DIM — they ARE the current difference.
+        // While `n`'s deletion focus is on this line, the CURSOR's visual
+        // language moves onto these rows — bright red text, the DarkGray
+        // cursor band, and the `>` glyph on the first row — because they
+        // are the current difference; the anchor line below renders as an
+        // ordinary line meanwhile (two cursor bands would fight the eye).
         let deletion_focused = app.deletion_focus() == Some(idx);
         let (deleted_above, deleted_below) = app.deleted_blocks_at(idx);
-        for block in &deleted_above {
-            out.extend(deleted_block_lines(app, &block.content, width, deletion_focused));
+        for (i, block) in deleted_above.iter().enumerate() {
+            out.extend(deleted_block_lines(
+                app,
+                &block.content,
+                width,
+                full_width,
+                deletion_focused,
+                deletion_focused && i == 0,
+            ));
         }
         let selected = app.selection.is_some_and(|s| s.contains(idx));
         let revision = app.current_revision_context();
@@ -3749,7 +3759,7 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 && c.revision == revision
         });
         let added = scoped_added.contains(&idx);
-        let is_cursor = idx == app.cursor;
+        let is_cursor = idx == app.cursor && !deletion_focused;
         // `▌` marks a current changed line; deletions are their own rows.
         let cursor_mark = if is_cursor {
             ">"
@@ -3870,8 +3880,15 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             }
             out.push(Line::from(spans));
         }
-        for block in &deleted_below {
-            out.extend(deleted_block_lines(app, &block.content, width, deletion_focused));
+        for (i, block) in deleted_below.iter().enumerate() {
+            out.extend(deleted_block_lines(
+                app,
+                &block.content,
+                width,
+                full_width,
+                deletion_focused,
+                deletion_focused && deleted_above.is_empty() && i == 0,
+            ));
         }
         // Inline comment bars: one per comment ending on this line, stacked
         // (current file only; the one being re-edited is hidden under the
@@ -3910,19 +3927,25 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
 /// and a blank number column on the first wrapped row (the line has no
 /// number in the displayed document), a gutter-width indent on
 /// continuation rows, and the text in DIM red. Display-only rows: no
-/// cursor, selection, or comment treatment applies. While `n`'s deletion
-/// focus is on the block (`focused`), the DIM lifts and the mark
-/// brightens — the block is the current difference. The row count must
-/// match [`crate::app::deleted_block_rows`] — same per-line
-/// [`wrap_spans`] at the same width.
+/// selection or comment treatment applies. While `n`'s deletion focus is
+/// on the block (`focused`), the rows take the cursor's own visual
+/// language — bright red text on the DarkGray cursor band running the
+/// full pane width, with the `>` glyph on the first row when this block
+/// leads the focused set (`cursor_glyph`). The row count must match
+/// [`crate::app::deleted_block_rows`] — same per-line [`wrap_spans`] at
+/// the same width.
 fn deleted_block_lines(
     app: &App,
     content: &str,
     width: usize,
+    full_width: usize,
     focused: bool,
+    cursor_glyph: bool,
 ) -> Vec<Line<'static>> {
     let text_style = if focused {
-        Style::default().fg(Color::LightRed)
+        Style::default()
+            .fg(Color::LightRed)
+            .bg(app.ui_selected_bg)
     } else {
         Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
     };
@@ -3930,10 +3953,17 @@ fn deleted_block_lines(
         Style::default()
             .fg(Color::LightRed)
             .add_modifier(Modifier::BOLD)
+            .bg(app.ui_selected_bg)
     } else {
         Style::default().fg(Color::Red)
     };
+    let fill_style = if focused {
+        Style::default().bg(app.ui_selected_bg)
+    } else {
+        Style::default()
+    };
     let mut out = Vec::new();
+    let mut first_row = true;
     for line in content.split('\n') {
         let wrapped = wrap_spans(
             &[HiSpan {
@@ -3945,15 +3975,37 @@ fn deleted_block_lines(
         for (k, frags) in wrapped.iter().enumerate() {
             let mut spans: Vec<Span> = Vec::new();
             if k == 0 {
-                spans.push(Span::styled("▌", mark_style));
-                spans.push(Span::raw(" ".repeat(app.source.gutter_width + 1)));
+                let mark = if cursor_glyph && first_row { ">" } else { "▌" };
+                spans.push(Span::styled(mark, mark_style));
+                spans.push(Span::styled(
+                    " ".repeat(app.source.gutter_width + 1),
+                    fill_style,
+                ));
             } else {
-                spans.push(Span::raw(" ".repeat(app.gutter_cols as usize)));
+                spans.push(Span::styled(
+                    " ".repeat(app.gutter_cols as usize),
+                    fill_style,
+                ));
             }
             for f in frags {
                 spans.push(Span::styled(f.text.clone(), f.style));
             }
+            // The focused band runs to the pane's right edge, exactly like
+            // the cursor/selection band on ordinary rows.
+            if focused {
+                let used: usize = spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                if used < full_width {
+                    spans.push(Span::styled(
+                        " ".repeat(full_width - used),
+                        fill_style,
+                    ));
+                }
+            }
             out.push(Line::from(spans));
+            first_row = false;
         }
     }
     out
