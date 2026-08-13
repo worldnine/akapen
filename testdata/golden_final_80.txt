@@ -287,12 +287,12 @@
 
 "番号なしリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
 
-"● "|Style::new();;"りんご"|Style::new()
-"● "|Style::new();;"バナナ"|Style::new()
-"● "|Style::new();;"みかん"|Style::new()
-"    ● "|Style::new();;"ネスト レベル1"|Style::new()
-"        ● "|Style::new();;"ネスト レベル2"|Style::new()
-"● "|Style::new();;"最後の項目"|Style::new()
+"- "|Style::new();;"りんご"|Style::new()
+"- "|Style::new();;"バナナ"|Style::new()
+"- "|Style::new();;"みかん"|Style::new()
+"    - "|Style::new();;"ネスト レベル1"|Style::new()
+"        - "|Style::new();;"ネスト レベル2"|Style::new()
+"- "|Style::new();;"最後の項目"|Style::new()
 
 "番号付きリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
 
@@ -307,29 +307,29 @@
 
 "タスクリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
 
-"● [x] "|Style::new();;"完了したタスク"|Style::new()
-"● [ ] "|Style::new();;"未完了のタスク"|Style::new()
-"● [ ] "|Style::new();;"未完了のタスクその2"|Style::new()
-"    ● [x] "|Style::new();;"ネスト済みタスク"|Style::new()
+"- [x] "|Style::new();;"完了したタスク"|Style::new()
+"- [ ] "|Style::new();;"未完了のタスク"|Style::new()
+"- [ ] "|Style::new();;"未完了のタスクその2"|Style::new()
+"    - [x] "|Style::new();;"ネスト済みタスク"|Style::new()
 
 "リスト内のコードと複数段落"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
 
-"● "|Style::new();;"項目1。リスト内の "|Style::new();;"インラインコード"|Style::new().white().on_black()
+"- "|Style::new();;"項目1。リスト内の "|Style::new();;"インラインコード"|Style::new().white().on_black()
 
 "リスト内のフェンスドコードブロック"|Style::new();;"インデントされるはず"|Style::new()
-"● "|Style::new();;"項目2"|Style::new()
+"- "|Style::new();;"項目2"|Style::new()
 
 "リスト内の複数段落（インデント付き）。"|Style::new()
 ""|Style::new()
-"● "|Style::new();;"項目3 複数行"|Style::new();;" "|Style::new();;"にまたがるテキスト。"|Style::new();;" "|Style::new();;"これも続き。"|Style::new()
+"- "|Style::new();;"項目3 複数行"|Style::new();;" "|Style::new();;"にまたがるテキスト。"|Style::new();;" "|Style::new();;"これも続き。"|Style::new()
 
 "空行入りリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
 
-"● "|Style::new();;"a"|Style::new()
+"- "|Style::new();;"a"|Style::new()
 ""|Style::new()
-"● "|Style::new();;"b"|Style::new()
+"- "|Style::new();;"b"|Style::new()
 ""|Style::new()
-"● "|Style::new();;"c"|Style::new()
+"- "|Style::new();;"c"|Style::new()
 
 "表"|Style::new().fg(Color::Rgb(250, 179, 135)).bold()
 
@@ -383,8 +383,8 @@
 
 ">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"引用内のリスト:"|Style::new().fg(Color::Rgb(245, 194, 231))
 ">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231))
-">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"● "|Style::new().fg(Color::Rgb(245, 194, 231));;"item1"|Style::new().fg(Color::Rgb(245, 194, 231))
-">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"● "|Style::new().fg(Color::Rgb(245, 194, 231));;"item2"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"- "|Style::new().fg(Color::Rgb(245, 194, 231));;"item1"|Style::new().fg(Color::Rgb(245, 194, 231))
+">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"- "|Style::new().fg(Color::Rgb(245, 194, 231));;"item2"|Style::new().fg(Color::Rgb(245, 194, 231))
 ">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231))
 ">"|Style::new().fg(Color::Rgb(245, 194, 231));;" "|Style::new().fg(Color::Rgb(245, 194, 231));;"引用内の "|Style::new().fg(Color::Rgb(245, 194, 231));;"太字"|Style::new().fg(Color::Rgb(245, 194, 231)).bold();;" と "|Style::new().fg(Color::Rgb(245, 194, 231));;"コード"|Style::new().white().on_black();;"。"|Style::new().fg(Color::Rgb(245, 194, 231))
 

@@ -50,17 +50,35 @@ where
         let marker_line = self.text.lines.len();
         self.push_line(Line::default(), vec![]);
         let width = self.list_indices.len() * 4 - 3;
+        // The marker is copied verbatim from the source, never invented:
+        // a `Start(Item)` event's byte range begins at the marker itself,
+        // so `-`/`*`/`+` and ordered markers like `7.` or `3)` render as
+        // written. Only the indentation (4 columns per nesting level) is
+        // the renderer's own layout.
+        let src = self.source.get(self.current_range.start..).unwrap_or("");
         if let Some(last_index) = self.list_indices.last_mut() {
             let span = match last_index {
-                // The bullet marker is emitted here (not rewritten by the
-                // consumer): a post-pass that replaced "-" spans also
-                // destroyed fenced-code lines like "-" or "- [x]". The
-                // bullet keeps the same display width as "- " (1 column +
-                // space), so continuation indents stay aligned.
-                None => Span::from(" ".repeat(width - 1) + "● "),
+                None => {
+                    let marker = src
+                        .chars()
+                        .next()
+                        .filter(|c| matches!(c, '-' | '*' | '+'))
+                        .unwrap_or('-');
+                    Span::from(format!("{}{marker} ", " ".repeat(width - 1)))
+                }
                 Some(index) => {
                     *index += 1;
-                    format!("{:width$}. ", *index - 1).light_blue()
+                    let digits = src.bytes().take_while(|b| b.is_ascii_digit()).count();
+                    let marker = if digits > 0
+                        && matches!(src.as_bytes().get(digits), Some(b'.' | b')'))
+                    {
+                        src[..=digits].to_string()
+                    } else {
+                        // Defensive fallback when the range is unusable:
+                        // the sequential number the parser implies.
+                        format!("{}.", *index - 1)
+                    };
+                    format!("{marker:>pad$} ", pad = width + 1).light_blue()
                 }
             };
             let continuation_width = span.width();
@@ -82,16 +100,17 @@ where
     pub fn task_list_marker(&mut self, checked: bool) {
         let marker = if checked { 'x' } else { ' ' };
         let marker_span = Span::from(format!("[{marker}] "));
+        // An unordered item's marker span ("  - " when nested) is still
+        // the only span on its line when the task marker arrives: append
+        // the checkbox there so marker and checkbox stay one
+        // source-attributed span, whatever the source marker was.
+        let unordered_marker_open = matches!(self.list_indices.last(), Some(None))
+            && self.text.lines.last().is_some_and(|line| line.spans.len() == 1);
         if let Some(line) = self.text.lines.last_mut() {
-            if let Some(first_span) = line.spans.first_mut() {
-                let content = first_span.content.to_mut();
-                // The bullet marker span ("  ● " when nested) ends with
-                // the 4-byte "● " (● is 3 UTF-8 bytes): drop those bytes
-                // and re-add the bullet before the checkbox.
-                if content.ends_with("● ") {
-                    let len = content.len();
-                    content.truncate(len - 4);
-                    content.push_str("● [");
+            if unordered_marker_open {
+                if let Some(first_span) = line.spans.first_mut() {
+                    let content = first_span.content.to_mut();
+                    content.push('[');
                     content.push(marker);
                     content.push_str("] ");
                     return;
@@ -127,7 +146,7 @@ mod tests {
             from_str(indoc! {"
                 - List item 1
             "}),
-            Text::from_iter([Line::from_iter(["● ", "List item 1"])])
+            Text::from_iter([Line::from_iter(["- ", "List item 1"])])
         );
     }
 
@@ -139,8 +158,8 @@ mod tests {
                 - List item 2
             "}),
             Text::from_iter([
-                Line::from_iter(["● ", "List item 1"]),
-                Line::from_iter(["● ", "List item 2"]),
+                Line::from_iter(["- ", "List item 1"]),
+                Line::from_iter(["- ", "List item 2"]),
             ])
         );
     }
@@ -173,13 +192,13 @@ mod tests {
             from_str(markdown),
             Text::from_iter([
                 Line::from_iter([
-                    Span::raw("● "),
+                    Span::raw("- "),
                     Span::raw("Emphasis").italic(),
                     Span::raw(" and "),
                     Span::raw("strong").bold(),
                 ]),
                 Line::from_iter([
-                    Span::raw("● "),
+                    Span::raw("- "),
                     Span::raw("Before "),
                     Span::raw("strong ").bold(),
                     Span::raw("emphasis").bold().italic(),
@@ -214,10 +233,10 @@ mod tests {
             from_str(markdown),
             Text::from_iter([
                 Line::from_iter([
-                    Span::raw("● "),
+                    Span::raw("- "),
                     Span::raw("Emphasized first item.").italic(),
                 ]),
-                Line::from_iter([Span::raw("● "), Span::raw("Strong second item.").bold(),]),
+                Line::from_iter([Span::raw("- "), Span::raw("Strong second item.").bold(),]),
                 Line::default(),
                 Line::from_iter([
                     Span::raw("1. ").light_blue(),
@@ -242,7 +261,7 @@ mod tests {
         assert_eq!(
             from_str(markdown),
             Text::from_iter([
-                Line::from_iter([Span::raw("● "), Span::raw("First paragraph.").bold(),]),
+                Line::from_iter([Span::raw("- "), Span::raw("First paragraph.").bold(),]),
                 Line::default(),
                 Line::from(Span::raw("Second paragraph.").italic()),
             ])
@@ -273,8 +292,8 @@ mod tests {
                   - Nested list item 1
             "}),
             Text::from_iter([
-                Line::from_iter(["● ", "List item 1"]),
-                Line::from_iter(["    ● ", "Nested list item 1"]),
+                Line::from_iter(["- ", "List item 1"]),
+                Line::from_iter(["    - ", "Nested list item 1"]),
             ])
         );
     }
@@ -287,8 +306,8 @@ mod tests {
                 - [x] Complete
             "}),
             Text::from_iter([
-                Line::from_iter(["● [ ] ", "Incomplete"]),
-                Line::from_iter(["● [x] ", "Complete"]),
+                Line::from_iter(["- [ ] ", "Incomplete"]),
+                Line::from_iter(["- [x] ", "Complete"]),
             ])
         );
     }
@@ -308,6 +327,81 @@ mod tests {
     }
 
     #[rstest]
+    fn unordered_markers_render_as_written(_with_tracing: DefaultGuard) {
+        assert_eq!(
+            from_str(indoc! {"
+                * Star item
+            "}),
+            Text::from_iter([Line::from_iter(["* ", "Star item"])])
+        );
+        assert_eq!(
+            from_str(indoc! {"
+                + Plus item
+            "}),
+            Text::from_iter([Line::from_iter(["+ ", "Plus item"])])
+        );
+    }
+
+    #[rstest]
+    fn ordered_numbers_render_as_written_not_renumbered(_with_tracing: DefaultGuard) {
+        // The all-ones style stays all ones (an HTML renderer would
+        // normalize to 1. 2. 3. — this is a source-faithful preview).
+        assert_eq!(
+            from_str(indoc! {"
+                1. First
+                1. Second
+                1. Third
+            "}),
+            Text::from_iter([
+                Line::from_iter(["1. ".light_blue(), "First".into()]),
+                Line::from_iter(["1. ".light_blue(), "Second".into()]),
+                Line::from_iter(["1. ".light_blue(), "Third".into()]),
+            ])
+        );
+        // Out-of-order numbers stay exactly as the author wrote them.
+        assert_eq!(
+            from_str(indoc! {"
+                3. Third
+                7. Seventh
+                2. Second
+            "}),
+            Text::from_iter([
+                Line::from_iter(["3. ".light_blue(), "Third".into()]),
+                Line::from_iter(["7. ".light_blue(), "Seventh".into()]),
+                Line::from_iter(["2. ".light_blue(), "Second".into()]),
+            ])
+        );
+    }
+
+    #[rstest]
+    fn ordered_paren_delimiter_renders_as_written(_with_tracing: DefaultGuard) {
+        assert_eq!(
+            from_str(indoc! {"
+                1) First
+                2) Second
+            "}),
+            Text::from_iter([
+                Line::from_iter(["1) ".light_blue(), "First".into()]),
+                Line::from_iter(["2) ".light_blue(), "Second".into()]),
+            ])
+        );
+    }
+
+    #[rstest]
+    fn task_items_keep_source_marker(_with_tracing: DefaultGuard) {
+        assert_eq!(
+            from_str(indoc! {"
+                * [ ] Incomplete
+                * [x] Complete
+            "}),
+            Text::from_iter([
+                Line::from_iter(["* [ ] ", "Incomplete"]),
+                Line::from_iter(["* [x] ", "Complete"]),
+            ])
+        );
+    }
+
+    #[rstest]
     fn list_does_not_indent_following_paragraph(_with_tracing: DefaultGuard) {
         let markdown = indoc! {"
             - Item
@@ -318,7 +412,7 @@ mod tests {
         assert_eq!(
             from_str(markdown),
             Text::from_iter([
-                Line::from_iter(["● ", "Item"]),
+                Line::from_iter(["- ", "Item"]),
                 Line::default(),
                 Line::from("After"),
             ])

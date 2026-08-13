@@ -110,6 +110,7 @@ where
 
     let writer = TextWriter::new(
         parser.into_offset_iter(),
+        input,
         options.styles.clone(),
         options.image_fallback,
         options.max_width,
@@ -143,6 +144,9 @@ struct TextWriter<'a, 'theme, I, S: StyleSheet> {
     // Core output state.
     /// Iterator supplying (Markdown event, source byte range).
     iter: I,
+    /// The Markdown source, so handlers can reproduce source text verbatim
+    /// (list markers) instead of synthesizing a replacement.
+    source: &'a str,
     /// Rendered terminal text.
     text: Text<'a>,
     /// Byte offset of each source line's start (for event → line mapping).
@@ -154,6 +158,10 @@ struct TextWriter<'a, 'theme, I, S: StyleSheet> {
     /// from an End event (the metadata block's closing `---`) must anchor
     /// on the range end, not the start.
     current_end_line: Option<usize>,
+    /// Byte range of the event currently being handled. A `Start(Item)`
+    /// range begins at the list marker itself, which is how the item
+    /// handler reads the marker character verbatim from [`Self::source`].
+    current_range: std::ops::Range<usize>,
     /// Per-span source-line attribution, parallel to [`TextWriter::text`].
     out_lines: Vec<Vec<Option<usize>>>,
     /// Styles for nested inline constructs, with the active style at the top.
@@ -223,6 +231,7 @@ where
 {
     fn new(
         iter: I,
+        source: &'a str,
         styles: S,
         image_fallback: ImageFallback,
         max_width: Option<usize>,
@@ -230,10 +239,12 @@ where
     ) -> Self {
         Self {
             iter,
+            source,
             text: Text::default(),
             line_starts,
             current_line: None,
             current_end_line: None,
+            current_range: 0..0,
             out_lines: Vec::new(),
             inline_styles: vec![],
             line_styles: vec![],
@@ -268,6 +279,7 @@ where
                 &self.line_starts,
                 range.end.saturating_sub(1).max(range.start),
             ));
+            self.current_range = range;
             self.handle_event(event);
         }
         debug_assert_eq!(self.text.lines.len(), self.out_lines.len());

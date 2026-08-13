@@ -268,12 +268,12 @@ Style::new().fg(Color::Rgb(250, 179, 135)).bold()|"リスト"|Style::new()
 Style::new()|
 Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()|"番号なしリスト"|Style::new()
 Style::new()|
-Style::new()|"● "|Style::new();;"りんご"|Style::new()
-Style::new()|"● "|Style::new();;"バナナ"|Style::new()
-Style::new()|"● "|Style::new();;"みかん"|Style::new()
-Style::new()|"    ● "|Style::new();;"ネスト レベル1"|Style::new()
-Style::new()|"        ● "|Style::new();;"ネスト レベル2"|Style::new()
-Style::new()|"● "|Style::new();;"最後の項目"|Style::new()
+Style::new()|"- "|Style::new();;"りんご"|Style::new()
+Style::new()|"- "|Style::new();;"バナナ"|Style::new()
+Style::new()|"- "|Style::new();;"みかん"|Style::new()
+Style::new()|"    - "|Style::new();;"ネスト レベル1"|Style::new()
+Style::new()|"        - "|Style::new();;"ネスト レベル2"|Style::new()
+Style::new()|"- "|Style::new();;"最後の項目"|Style::new()
 Style::new()|
 Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()|"番号付きリスト"|Style::new()
 Style::new()|
@@ -287,26 +287,26 @@ Style::new()|"5. "|Style::new().light_blue();;"五番目の項目"|Style::new()
 Style::new()|
 Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()|"タスクリスト"|Style::new()
 Style::new()|
-Style::new()|"● [x] "|Style::new();;"完了したタスク"|Style::new()
-Style::new()|"● [ ] "|Style::new();;"未完了のタスク"|Style::new()
-Style::new()|"● [ ] "|Style::new();;"未完了のタスクその2"|Style::new()
-Style::new()|"    ● [x] "|Style::new();;"ネスト済みタスク"|Style::new()
+Style::new()|"- [x] "|Style::new();;"完了したタスク"|Style::new()
+Style::new()|"- [ ] "|Style::new();;"未完了のタスク"|Style::new()
+Style::new()|"- [ ] "|Style::new();;"未完了のタスクその2"|Style::new()
+Style::new()|"    - [x] "|Style::new();;"ネスト済みタスク"|Style::new()
 Style::new()|
 Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()|"リスト内のコードと複数段落"|Style::new()
 Style::new()|
-Style::new()|"● "|Style::new();;"項目1。リスト内の "|Style::new();;"インラインコード"|Style::new().white().on_black()
+Style::new()|"- "|Style::new();;"項目1。リスト内の "|Style::new();;"インラインコード"|Style::new().white().on_black()
 Style::new()|
 Style::new()|"リスト内のフェンスドコードブロック"|Style::new();;"インデントされるはず"|Style::new()
-Style::new()|"● "|Style::new();;"項目2"|Style::new()
+Style::new()|"- "|Style::new();;"項目2"|Style::new()
 Style::new()|
 Style::new()|"リスト内の複数段落（インデント付き）。"|Style::new()
-Style::new()|"● "|Style::new();;"項目3 複数行"|Style::new();;" "|Style::new();;"にまたがるテキスト。"|Style::new();;" "|Style::new();;"これも続き。"|Style::new()
+Style::new()|"- "|Style::new();;"項目3 複数行"|Style::new();;" "|Style::new();;"にまたがるテキスト。"|Style::new();;" "|Style::new();;"これも続き。"|Style::new()
 Style::new()|
 Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()|"空行入りリスト"|Style::new()
 Style::new()|
-Style::new()|"● "|Style::new();;"a"|Style::new()
-Style::new()|"● "|Style::new();;"b"|Style::new()
-Style::new()|"● "|Style::new();;"c"|Style::new()
+Style::new()|"- "|Style::new();;"a"|Style::new()
+Style::new()|"- "|Style::new();;"b"|Style::new()
+Style::new()|"- "|Style::new();;"c"|Style::new()
 Style::new()|
 Style::new().fg(Color::Rgb(250, 179, 135)).bold()|"表"|Style::new()
 Style::new()|
@@ -356,8 +356,8 @@ Style::new()|"fn"|Style::new().fg(Color::Rgb(203, 166, 247));;" "|Style::new().f
 Style::new()|
 Style::new().fg(Color::Rgb(245, 194, 231))|">"|Style::new();;" "|Style::new();;"引用内のリスト:"|Style::new()
 Style::new().fg(Color::Rgb(245, 194, 231))|">"|Style::new();;" "|Style::new()
-Style::new().fg(Color::Rgb(245, 194, 231))|">"|Style::new();;" "|Style::new();;"● "|Style::new();;"item1"|Style::new()
-Style::new().fg(Color::Rgb(245, 194, 231))|">"|Style::new();;" "|Style::new();;"● "|Style::new();;"item2"|Style::new()
+Style::new().fg(Color::Rgb(245, 194, 231))|">"|Style::new();;" "|Style::new();;"- "|Style::new();;"item1"|Style::new()
+Style::new().fg(Color::Rgb(245, 194, 231))|">"|Style::new();;" "|Style::new();;"- "|Style::new();;"item2"|Style::new()
 Style::new().fg(Color::Rgb(245, 194, 231))|">"|Style::new();;" "|Style::new()
 Style::new().fg(Color::Rgb(245, 194, 231))|">"|Style::new();;" "|Style::new();;"引用内の "|Style::new();;"太字"|Style::new().bold();;" と "|Style::new();;"コード"|Style::new().white().on_black();;"。"|Style::new()
 Style::new()|
