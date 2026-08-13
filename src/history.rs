@@ -139,7 +139,7 @@ impl DocumentHistory {
         limit: usize,
         cache: &SnapshotCache,
     ) -> anyhow::Result<Self> {
-        let local = cache.record(path, live)?;
+        let local = cache.record_with_parent(path, live, head_oid(path))?;
         Ok(Self::load_with_local(path, live, limit, local))
     }
 
@@ -149,12 +149,20 @@ impl DocumentHistory {
         limit: usize,
         cache: &SnapshotCache,
     ) -> anyhow::Result<Self> {
-        let local = cache.open(path, live)?;
+        let local = cache.open_with_parent(path, live, head_oid(path))?;
         Ok(Self::load_with_local(path, live, limit, local))
     }
 
     fn load_with_local(path: &Path, live: &str, limit: usize, local: CachedFile) -> Self {
-        let mut revisions = vec![Revision {
+        let gits = load_git_revisions(path, limit);
+        Self::assemble_timeline(live, gits, local)
+    }
+
+    /// gits（newest-first）と LOCAL スナップショットを一つの血統順タイムラインに
+    /// 組み立てる純粋な配置。`load_with_local` の実体で、fixture テストは実 git を
+    /// 立てずに fixture の gits / snapshots を直接渡して検証する。
+    fn assemble_timeline(live: &str, git_revisions: Vec<Revision>, local: CachedFile) -> Self {
+        let mut working = vec![Revision {
             id: None,
             short_id: "now".to_string(),
             summary: "working tree".to_string(),
@@ -162,45 +170,60 @@ impl DocumentHistory {
             source: RevisionSource::Now,
         }];
 
-        let mut git_revisions = load_git_revisions(path, limit);
-        let mut used_git = HashSet::new();
-        for snapshot in local.snapshots.iter().rev() {
+        // Git アンカーは newest-first。live と同内容のコミットは NOW に統合され、
+        // 同じ content のコミットは newest だけ残す（重複除去は従来と同じ方針）。
+        let mut seen = HashSet::new();
+        let mut gits: Vec<Revision> = Vec::new();
+        for revision in git_revisions {
+            if revision.content == live || !seen.insert(revision.content.clone()) {
+                continue;
+            }
+            gits.push(revision);
+        }
+        working.extend(gits.iter().cloned());
+
+        // スナップショットは oldest-first で処理する。live または working 内の
+        // いずれかと同内容なら LOCAL を生成しない（内容一致の LOCAL は COMMIT に
+        // 統合され、そのコミットは自分の自然な位置に留まる — 古いコミットへ
+        // 巻き戻した内容が「最新」に見える誤順序も同時に直る）。
+        let mut orphans: Vec<Revision> = Vec::new();
+        for snapshot in &local.snapshots {
             if snapshot.content == live
-                || revisions.iter().any(|revision| revision.content == snapshot.content)
+                || working.iter().any(|revision| revision.content == snapshot.content)
             {
                 continue;
             }
-            if let Some((index, revision)) = git_revisions
-                .iter()
-                .enumerate()
-                .find(|(index, revision)| {
-                    !used_git.contains(index) && revision.content == snapshot.content
-                })
-            {
-                used_git.insert(index);
-                revisions.push(revision.clone());
-            } else {
-                revisions.push(Revision {
-                    id: Some(format!("local:{}", snapshot.id)),
-                    short_id: snapshot.id.chars().take(7).collect(),
-                    summary: "local snapshot".to_string(),
-                    content: snapshot.content.clone(),
-                    source: RevisionSource::Local,
-                });
+            let local_revision = Revision {
+                id: Some(format!("local:{}", snapshot.id)),
+                short_id: snapshot.id.chars().take(7).collect(),
+                summary: "local snapshot".to_string(),
+                content: snapshot.content.clone(),
+                source: RevisionSource::Local,
+            };
+            // parent（観測時点の HEAD oid）が gits に一致すれば、そのコミットの
+            // 直前（newer 側）に挿入する。挿入位置は parent の gits 上の index に
+            // 固定されるため、同じ parent を共有する複数スナップショットは
+            // oldest-first 処理の結果 newest が前（NOW 寄り）で並ぶ。
+            let anchor = snapshot.parent.as_deref().and_then(|parent| {
+                gits.iter()
+                    .position(|revision| revision.id.as_deref() == Some(parent))
+            });
+            match anchor {
+                Some(git_index) => working.insert(git_index + 1, local_revision),
+                // 非 git・rebase・別 ancestry の orphan は後回しにする。
+                None => orphans.push(local_revision),
             }
         }
 
-        for (index, revision) in git_revisions.drain(..).enumerate() {
-            if used_git.contains(&index)
-                || revisions.iter().any(|existing| existing.content == revision.content)
-            {
-                continue;
-            }
-            revisions.push(revision);
+        // orphan は NOW 直後へ観測順（newest が前）で挿入し、従来の「LOCAL は
+        // Git より新しい側・観測順」の劣化動作を維持する。
+        if !orphans.is_empty() {
+            orphans.reverse(); // oldest-first で集めたので newest-first に直す
+            working.splice(1..1, orphans);
         }
 
         Self {
-            revisions,
+            revisions: working,
             position: 0,
             rendered_position: 0,
             reviewed_id: local.reviewed_id,
@@ -455,6 +478,38 @@ fn repo_root(path: &Path) -> Option<PathBuf> {
     })
 }
 
+/// 観測時点の HEAD commit oid。git 環境でなければ None（= 非 git は従来の観測順のまま）。
+/// 失敗（非 git・git エラー・untracked）はすべて None に落とす（soft failure が既存の方針）。
+fn head_oid(path: &Path) -> Option<String> {
+    let root = repo_root(path)?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // untracked なファイルは git の血統に載っていない。gits 側に一致する
+    // コミットが無い以上 parent を付けても orphan 扱いになるだけなので、
+    // 「観測時点の血統」という意味でも None が正直。
+    let absolute = absolutize(path);
+    let rel = absolute.strip_prefix(&root).ok()?;
+    let tracked = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(rel)
+        .output()
+        .ok()?;
+    if !tracked.status.success() {
+        return None;
+    }
+    (!oid.is_empty()).then_some(oid)
+}
+
 fn absolutize(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -469,10 +524,11 @@ fn absolutize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        DocumentHistory, Revision, RevisionSource, anchored_line,
+        DocumentHistory, Revision, RevisionSource, anchored_line, head_oid,
         review_transition,
     };
-    use crate::snapshot::SnapshotCache;
+    use crate::snapshot::{CachedFile, CachedSnapshot, SnapshotCache};
+    use serde::Deserialize;
     use std::process::Command;
 
     #[test]
@@ -678,6 +734,137 @@ mod tests {
         let history = DocumentHistory::load_cached(&path, "working\n", 10, &cache).unwrap();
 
         assert_eq!(history.reviewed_content.as_deref(), Some("working\n"));
+    }
+
+    #[derive(Deserialize)]
+    struct FixtureGit {
+        id: String,
+        short_id: String,
+        summary: String,
+        content: String,
+    }
+
+    #[derive(Deserialize)]
+    struct FixtureSnapshot {
+        id: String,
+        captured_ms: u64,
+        pinned: bool,
+        parent: Option<String>,
+        content: String,
+    }
+
+    #[derive(Deserialize)]
+    struct FixtureScenario {
+        name: String,
+        live: String,
+        gits_newest_first: Vec<FixtureGit>,
+        snapshots_oldest_first: Vec<FixtureSnapshot>,
+        expected_newest_first_ids: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct TimelineOrderFixtures {
+        scenarios: Vec<FixtureScenario>,
+    }
+
+    #[test]
+    fn timeline_order_fixtures_follow_the_parent_contract() {
+        // fixture（正典）は実 git を立てずに配置ロジックを検証する。gits の id が
+        // 擬似 oid（"A" / "B" / "R"）なので、git を呼ばない純粋な assemble_timeline
+        // （load_with_local の実体）へ fixture の入力を直接渡す。
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::Path::new(root).join("testdata/timeline-order-fixtures.json");
+        let fixtures: TimelineOrderFixtures =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            fixtures.scenarios.len(),
+            6,
+            "fixture のシナリオ数が変わったら契約の見直しが必要"
+        );
+
+        for scenario in fixtures.scenarios {
+            let gits: Vec<Revision> = scenario
+                .gits_newest_first
+                .iter()
+                .map(|git| Revision {
+                    id: Some(git.id.clone()),
+                    short_id: git.short_id.clone(),
+                    summary: git.summary.clone(),
+                    content: git.content.clone(),
+                    source: RevisionSource::Git,
+                })
+                .collect();
+            let snapshots: Vec<CachedSnapshot> = scenario
+                .snapshots_oldest_first
+                .iter()
+                .map(|snapshot| CachedSnapshot {
+                    id: snapshot.id.clone(),
+                    captured_ms: snapshot.captured_ms,
+                    content: snapshot.content.clone(),
+                    pinned: snapshot.pinned,
+                    parent: snapshot.parent.clone(),
+                })
+                .collect();
+            let local = CachedFile {
+                snapshots,
+                reviewed_id: None,
+                reviewed_content: None,
+            };
+            let history = DocumentHistory::assemble_timeline(&scenario.live, gits, local);
+            let ids: Vec<String> = history
+                .revisions
+                .iter()
+                .map(|revision| revision.id.as_deref().unwrap_or("now").to_string())
+                .collect();
+            assert_eq!(
+                ids, scenario.expected_newest_first_ids,
+                "scenario: {}",
+                scenario.name
+            );
+        }
+    }
+
+    #[test]
+    fn head_oid_needs_a_tracked_file_with_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "one\n").unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+
+        // 非 git 環境 → None（従来の観測順のまま）。
+        assert_eq!(head_oid(&path), None);
+
+        // git 環境でもコミットが無ければ HEAD が存在しない → None。
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "akapen@example.invalid"]);
+        git(&["config", "user.name", "akapen test"]);
+        git(&["add", "doc.md"]);
+        assert_eq!(head_oid(&path), None);
+
+        // untracked なファイルには血統アンカーが無い → None。
+        let untracked = dir.path().join("untracked.md");
+        std::fs::write(&untracked, "u\n").unwrap();
+        assert_eq!(head_oid(&untracked), None);
+
+        // tracked かつコミット済み → rev-parse HEAD のフル oid（%H と一致）。
+        git(&["commit", "-qm", "first"]);
+        assert_eq!(head_oid(&untracked), None, "コミット後も untracked は None");
+        let head = head_oid(&path).expect("tracked file in a repo with commits");
+        let expected = Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(head, String::from_utf8(expected.stdout).unwrap().trim());
     }
 
 }
