@@ -1303,48 +1303,7 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
     let anchor = history::anchored_line(&old_lines, &new_source.lines, old_cursor);
     let (changed_lines, removed_lines) =
         line_level_transition(&old_lines, &new_source.lines);
-    // The ghosts: contiguous runs of removed lines, each ghosting out
-    // (backspace) and collapsing to the new layout. A run whose
-    // same-position new line differs is a rewrite IN PLACE — only the
-    // removed characters ghost, so the unchanged prefix never flickers.
-    // The removal fraction guard (<75%) keeps misaligned indexes from
-    // ghosting; fully removed lines ghost whole.
-    let mut deleted_blocks = Vec::new();
-    let removed_sorted = {
-        let mut v = removed_lines;
-        v.sort_unstable();
-        v
-    };
-    let mut i = 0usize;
-    while i < removed_sorted.len() {
-        let a = removed_sorted[i];
-        let mut b = a;
-        while i + 1 < removed_sorted.len() && removed_sorted[i + 1] == b + 1 {
-            b += 1;
-            i += 1;
-        }
-        i += 1;
-        let old_line = &old_lines[a];
-        let content = match new_source.lines.get(a) {
-            // A rewrite IN PLACE (the same-position new line is itself a
-            // changed line): ghost only the removed characters. A removed
-            // line whose position now holds an unrelated line (e.g. a
-            // blank where the line used to be) ghosts whole — pairing it
-            // would trip the fraction guard and skip the backspace.
-            Some(new_line) if b == a && changed_lines.contains(&a) => {
-                let (removed, frac) = removed_text(old_line, new_line);
-                if removed.trim().is_empty() || frac >= 0.75 {
-                    continue;
-                }
-                removed
-            }
-            _ => old_lines[a..=b].join("\n"),
-        };
-        deleted_blocks.push(history::DeletedBlock {
-            anchor: (b + 1).min(new_source.lines.len()),
-            content,
-        });
-    }
+    let deleted_blocks = ghost_blocks(&old_lines, &new_source.lines, &changed_lines, removed_lines);
     app.source = new_source;
     // The view is about to be rebuilt: scatter effects captured against
     // the old view's rows would map to the wrong cells now (a revision
@@ -1632,7 +1591,17 @@ fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
 /// char diffs and hitting the LCS budget. The DP is over LINES (content
 /// equality), so it stays cheap; pathological documents fall back to no
 /// animation rather than a hang.
-fn line_level_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec<usize>) {
+///
+/// Each removed line carries its backtrace anchor — the new-document
+/// index the removal collapsed to (the `j` at the moment the removal is
+/// taken). The ghost must render at that position, not at the same
+/// numeric index: insertions and earlier deletions shift the new
+/// document, and `b + 1` in OLD-line arithmetic was landing
+/// mid-document ghosts at the bottom of the new render.
+fn line_level_transition(
+    old: &[String],
+    new: &[String],
+) -> (HashSet<usize>, Vec<(usize, usize)>) {
     let o = old.len();
     let n = new.len();
     if o.saturating_mul(n) > LCS_CELL_BUDGET {
@@ -1649,14 +1618,14 @@ fn line_level_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec
         }
     }
     let mut changed = HashSet::new();
-    let mut removed: Vec<usize> = Vec::new();
+    let mut removed: Vec<(usize, usize)> = Vec::new();
     let (mut i, mut j) = (0usize, 0usize);
     while i < o && j < n {
         if old[i] == new[j] {
             i += 1;
             j += 1;
         } else if dp[i + 1][j] >= dp[i][j + 1] {
-            removed.push(i);
+            removed.push((i, j));
             i += 1;
         } else {
             changed.insert(j);
@@ -1664,7 +1633,7 @@ fn line_level_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec
         }
     }
     while i < o {
-        removed.push(i);
+        removed.push((i, j));
         i += 1;
     }
     while j < n {
@@ -1758,6 +1727,64 @@ fn render_history_when_settled(app: &mut App) {
     {
         render_pending_history(app, true);
     }
+}
+
+/// The ghost blocks for a history transition: contiguous runs of removed
+/// lines become one [`history::DeletedBlock`] whose anchor is the
+/// backtrace position the removal collapsed to in the NEW document. A
+/// single removed line whose anchor holds a changed line is a rewrite
+/// IN PLACE — only the removed characters ghost, BELOW the rewritten
+/// line (the unchanged prefix never flickers, and the layout collapses
+/// back by exactly the ghost row). The removal fraction guard (<75%)
+/// keeps misaligned indexes from ghosting; fully removed lines ghost
+/// whole. A full deletion ghosts AT the anchor — the position where the
+/// lines used to be — so the collapse pulls the following text up to
+/// where the ghost is dissolving.
+fn ghost_blocks(
+    old_lines: &[String],
+    new_lines: &[String],
+    changed_lines: &HashSet<usize>,
+    removed_lines: Vec<(usize, usize)>,
+) -> Vec<history::DeletedBlock> {
+    let mut removed_sorted = removed_lines;
+    removed_sorted.sort_unstable();
+    let mut blocks = Vec::new();
+    let mut i = 0usize;
+    while i < removed_sorted.len() {
+        let (a, anchor) = removed_sorted[i];
+        let mut b = a;
+        while i + 1 < removed_sorted.len() && removed_sorted[i + 1].0 == b + 1 {
+            b += 1;
+            i += 1;
+        }
+        i += 1;
+        let old_line = &old_lines[a];
+        // A rewrite IN PLACE (the removed line's anchor holds a changed
+        // line): ghost only the removed characters. A removed line whose
+        // anchor now holds an unrelated line (e.g. a blank where the
+        // line used to be) ghosts whole — pairing it would trip the
+        // fraction guard and skip the backspace.
+        let rewrite = b == a && changed_lines.contains(&anchor);
+        let content = match new_lines.get(anchor) {
+            Some(new_line) if rewrite => {
+                let (removed, frac) = removed_text(old_line, new_line);
+                if removed.trim().is_empty() || frac >= 0.75 {
+                    continue;
+                }
+                removed
+            }
+            _ => old_lines[a..=b].join("\n"),
+        };
+        blocks.push(history::DeletedBlock {
+            anchor: if rewrite {
+                (anchor + 1).min(new_lines.len())
+            } else {
+                anchor.min(new_lines.len())
+            },
+            content,
+        });
+    }
+    blocks
 }
 
 /// Insert deleted Markdown blocks into the new render as dim, non-interactive
@@ -4818,6 +4845,62 @@ mod mouse_view_tests {
 #[cfg(test)]
 mod history_animation_tests {
     use super::*;
+
+    #[test]
+    fn ghost_blocks_anchor_at_the_collapsed_position_not_below() {
+        // Deleting B and C from [A,B,C,D]: the ghost must sit where the
+        // lines were — between A and D — not below D or at the bottom
+        // of the document (old `(b + 1)` arithmetic was out of bounds
+        // and clamped to the last row).
+        let old = vec!["A".into(), "B".into(), "C".into(), "D".into()];
+        let new = vec!["A".into(), "D".into()];
+        let (changed, removed) = line_level_transition(&old, &new);
+        let blocks = ghost_blocks(&old, &new, &changed, removed);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "B\nC");
+        assert_eq!(blocks[0].anchor, 1, "the run collapses to new index 1");
+    }
+
+    #[test]
+    fn ghost_blocks_anchor_survives_an_insertion_above() {
+        // [A,B,C,D] → [A,X,B,D]: C is deleted while X is inserted at
+        // index 1. The ghost belongs between B and D (new index 3) —
+        // NOT at the same numeric index (2), which old-index arithmetic
+        // would land between X and B.
+        let old = vec!["A".into(), "B".into(), "C".into(), "D".into()];
+        let new = vec!["A".into(), "X".into(), "B".into(), "D".into()];
+        let (changed, removed) = line_level_transition(&old, &new);
+        let blocks = ghost_blocks(&old, &new, &changed, removed);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "C");
+        assert_eq!(blocks[0].anchor, 3, "after B, before D");
+    }
+
+    #[test]
+    fn ghost_blocks_at_eof_stay_at_the_bottom() {
+        let old = vec!["A".into(), "B".into(), "C".into()];
+        let new = vec!["A".into()];
+        let (changed, removed) = line_level_transition(&old, &new);
+        let blocks = ghost_blocks(&old, &new, &changed, removed);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "B\nC");
+        assert_eq!(blocks[0].anchor, 1, "clamped to the new line count");
+    }
+
+    #[test]
+    fn ghost_blocks_rewrite_ghosts_below_the_rewritten_line() {
+        // "brave world" → "world": only the removed characters ghost,
+        // anchored BELOW the rewritten line (the original design: the
+        // removed text backspaces away, then the layout collapses).
+        let old = vec!["A".into(), "brave world".into(), "C".into()];
+        let new = vec!["A".into(), "world".into(), "C".into()];
+        let (changed, removed) = line_level_transition(&old, &new);
+        assert!(changed.contains(&1), "the rewritten line streams in");
+        let blocks = ghost_blocks(&old, &new, &changed, removed);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content, "brave ");
+        assert_eq!(blocks[0].anchor, 2, "below the rewritten line");
+    }
 
     #[test]
     fn deleted_block_is_inserted_dimly_then_can_be_rebuilt_away() {
