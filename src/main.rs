@@ -1191,9 +1191,9 @@ pub(crate) fn select_history(app: &mut App, delta: isize) -> bool {
         app.timeline_fx = Some(crate::effects::timeline_slide_in());
     }
     if !browsing && was_browsing && app.config.fx {
-        app.timeline_exit_until = Some(
-            Instant::now() + std::time::Duration::from_millis(crate::effects::TIMELINE_SLIDE_MS as u64),
-        );
+        // The linger window is injectable: the default is the slide
+        // duration, tests widen it to remove the wall-clock race.
+        app.timeline_exit_until = Some(Instant::now() + app.timeline_exit_ms);
         app.timeline_fx = Some(crate::effects::timeline_slide_out());
     }
     // While the bar covers the bottom rows, keep the cursor above them

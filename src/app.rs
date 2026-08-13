@@ -132,6 +132,12 @@ pub(crate) struct App {
     /// While Some the timeline bar lingers to play its slide-out (the
     /// history cursor has already returned to NOW).
     pub(crate) timeline_exit_until: Option<Instant>,
+    /// How long the slide-out linger lasts. A field (not a const) so
+    /// tests can widen it and make the linger assertions deterministic:
+    /// the wall-clock default (200 ms) raced under parallel test load,
+    /// when the thread could stall between arming the window and
+    /// asserting it.
+    pub(crate) timeline_exit_ms: Duration,
     /// The history position to restore when the timeline overlay closes
     /// with Esc (the fzf-style cancel contract).
     pub(crate) timeline_restore: Option<usize>,
@@ -331,6 +337,7 @@ impl App {
             time_machine_fx,
             timeline_fx: None,
             timeline_exit_until: None,
+            timeline_exit_ms: Duration::from_millis(crate::effects::TIMELINE_SLIDE_MS as u64),
             timeline_restore: None,
             toast_fx: None,
             appear_fx: Vec::new(),

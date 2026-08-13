@@ -2939,6 +2939,10 @@ use crate::comment::Selection;
         assert!(app.timeline_fx.is_some(), "slide-in effect created");
         assert!(app.timeline_exit_until.is_none());
         // Returning to NOW: the bar lingers for the slide-out, then dies.
+        // The linger window is injectable — the 200 ms default raced
+        // under parallel test load (the thread could stall between
+        // arming and asserting), so widen it to make this deterministic.
+        app.timeline_exit_ms = Duration::from_secs(5);
         assert!(select_history(&mut app, -1));
         assert!(!crate::timeline::timeline_visible(&app));
         assert!(
