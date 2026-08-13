@@ -55,10 +55,11 @@ pub fn history_border_color(light: bool) -> Color {
     if light { HISTORY_BORDER_LIGHT } else { HISTORY_BORDER_DARK }
 }
 
-/// The time-machine frame palette: a closed purple→blue→cyan loop (the
-/// last step eases back toward the first, so the wrap has no seam).
-/// While browsing the past with `--fx` on, the palette is spread across
-/// the frame's whole perimeter (one smooth gradient per lap, see
+/// The time-machine frame palette: a closed purple→magenta→pink loop
+/// (the last step eases back toward the first, so the wrap has no seam)
+/// — a nebula family, so browsing the past reads as drifting through
+/// space. While browsing the past with `--fx` on, the palette is spread
+/// across the frame's whole perimeter (one smooth gradient per lap, see
 /// [`time_machine_color_at`]); the dark palette leads with the static
 /// history border color, so the animated frame reads as that state in
 /// motion. Light palettes stay saturated enough to read on a pale
@@ -67,23 +68,34 @@ pub fn time_machine_palette(light: bool) -> &'static [Color] {
     if light {
         &[
             Color::Rgb(120, 95, 170),  // purple (history border)
-            Color::Rgb(92, 94, 182),   // blue-purple
-            Color::Rgb(62, 112, 192),  // blue
-            Color::Rgb(52, 142, 192),  // cyan-blue
-            Color::Rgb(62, 158, 172),  // cyan
-            Color::Rgb(96, 128, 176),  // back toward purple
+            Color::Rgb(155, 85, 185),  // violet-magenta
+            Color::Rgb(190, 70, 170),  // magenta
+            Color::Rgb(215, 85, 150),  // pink
+            Color::Rgb(225, 115, 170), // soft pink
+            Color::Rgb(172, 105, 170), // back toward purple
         ]
     } else {
         &[
             Color::Rgb(170, 150, 215), // purple (history border)
-            Color::Rgb(140, 140, 225), // blue-purple
-            Color::Rgb(105, 160, 235), // blue
-            Color::Rgb(90, 190, 235),  // cyan-blue
-            Color::Rgb(105, 205, 220), // cyan
-            Color::Rgb(140, 175, 220), // back toward purple
+            Color::Rgb(200, 130, 220), // violet-magenta
+            Color::Rgb(230, 110, 210), // magenta
+            Color::Rgb(250, 120, 190), // hot pink
+            Color::Rgb(255, 150, 205), // pink
+            Color::Rgb(212, 150, 210), // back toward purple
         ]
     }
 }
+
+/// The timeline's LOCAL-snapshot marker color: the cosmic pink of the
+/// time-machine frame family, so the scrubber reads as part of the same
+/// universe (dark and light backgrounds both — the existing marker
+/// colors were theme-independent).
+pub const TIMELINE_LOCAL_COLOR: Color = Color::Rgb(235, 110, 185);
+
+/// The timeline's COMMIT marker color: a soft periwinkle from the same
+/// purple→pink family — a step toward the frame's lead purple, so
+/// commits stay distinguishable from LOCAL's pink.
+pub const TIMELINE_COMMIT_COLOR: Color = Color::Rgb(185, 165, 235);
 
 /// The time it takes the gradient to complete one lap around the frame.
 pub const TIME_MACHINE_ROTATION_MS: u64 = 4000;
@@ -98,7 +110,7 @@ pub fn time_machine_rotation_fraction(clock: std::time::Instant) -> f32 {
 
 /// The gradient color of the border cell at `perim` (0-based position on
 /// the [`perimeter_index`] loop of `perimeter_len` cells): the palette is
-/// spread across the whole perimeter — one purple→cyan→purple wave per
+/// spread across the whole perimeter — one purple→pink→purple wave per
 /// lap — and `rot` (0.0..1.0) shifts the wave around the frame, so the
 /// gradient visibly rotates while every cell stays within the family.
 pub fn time_machine_color_at(palette: &[Color], perim: usize, perimeter_len: usize, rot: f32) -> Color {

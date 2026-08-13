@@ -3380,7 +3380,7 @@ use crate::comment::Selection;
     fn time_machine_frame_paints_the_rotating_gradient() {
         // Browsing the past with --fx (the default): the frame's border
         // cells are repainted into the time-machine gradient (a
-        // purple→cyan family — never the static border colors), and the
+        // purple→pink family — never the static border colors), and the
         // gradient varies around the loop. `--no-fx` and the present
         // (NOW) keep the static borders untouched.
         let historical = |fx: bool| -> App {

@@ -86,7 +86,7 @@ pub struct Config {
     /// `--esc-quit <auto|always|never>`: whether `Esc` may quit the app.
     pub esc_quit: EscQuit,
     /// `--no-fx`: disable the animated time-machine frame (the rotating
-    /// purple→cyan gradient around the page while browsing the past).
+    /// purple→pink gradient around the page while browsing the past).
     /// The static history border color stays either way.
     pub fx: bool,
 }

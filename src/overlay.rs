@@ -644,7 +644,7 @@ pub(crate) fn draw_timeline_overlay(f: &mut Frame, app: &App) {
     f.render_widget(Clear, panel);
     let dark_gray = Style::default().fg(Color::DarkGray);
     let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let cyan = Style::default().fg(Color::Cyan);
+    let pink = Style::default().fg(crate::view::TIMELINE_LOCAL_COLOR);
 
     let Some(history) = app.history() else {
         return;
@@ -669,7 +669,7 @@ pub(crate) fn draw_timeline_overlay(f: &mut Frame, app: &App) {
         // The same marker vocabulary as the browsing bar: ◆ viewing,
         // ▮ baseline, ● local / ◼ commit.
         let (marker, marker_style) = if current {
-            ("◆", cyan.add_modifier(Modifier::BOLD))
+            ("◆", pink.add_modifier(Modifier::BOLD))
         } else if rev.source == crate::history::RevisionSource::Now {
             // NOW keeps its anchor glyph even when it is also the
             // baseline (the `· base` tag still shows).
@@ -679,9 +679,9 @@ pub(crate) fn draw_timeline_overlay(f: &mut Frame, app: &App) {
         } else {
             match rev.source {
                 crate::history::RevisionSource::Now => unreachable!(),
-                crate::history::RevisionSource::Local => ("●", cyan),
+                crate::history::RevisionSource::Local => ("●", pink),
                 crate::history::RevisionSource::Git => {
-                    ("◼", Style::default().fg(Color::LightBlue))
+                    ("◼", Style::default().fg(crate::view::TIMELINE_COMMIT_COLOR))
                 }
             }
         };
