@@ -52,7 +52,12 @@ where
         let width = self.list_indices.len() * 4 - 3;
         if let Some(last_index) = self.list_indices.last_mut() {
             let span = match last_index {
-                None => Span::from(" ".repeat(width - 1) + "- "),
+                // The bullet marker is emitted here (not rewritten by the
+                // consumer): a post-pass that replaced "-" spans also
+                // destroyed fenced-code lines like "-" or "- [x]". The
+                // bullet keeps the same display width as "- " (1 column +
+                // space), so continuation indents stay aligned.
+                None => Span::from(" ".repeat(width - 1) + "● "),
                 Some(index) => {
                     *index += 1;
                     format!("{:width$}. ", *index - 1).light_blue()
@@ -80,10 +85,13 @@ where
         if let Some(line) = self.text.lines.last_mut() {
             if let Some(first_span) = line.spans.first_mut() {
                 let content = first_span.content.to_mut();
-                if content.ends_with("- ") {
+                // The bullet marker span ("  ● " when nested) ends with
+                // the 4-byte "● " (● is 3 UTF-8 bytes): drop those bytes
+                // and re-add the bullet before the checkbox.
+                if content.ends_with("● ") {
                     let len = content.len();
-                    content.truncate(len - 2);
-                    content.push_str("- [");
+                    content.truncate(len - 4);
+                    content.push_str("● [");
                     content.push(marker);
                     content.push_str("] ");
                     return;
@@ -119,7 +127,7 @@ mod tests {
             from_str(indoc! {"
                 - List item 1
             "}),
-            Text::from_iter([Line::from_iter(["- ", "List item 1"])])
+            Text::from_iter([Line::from_iter(["● ", "List item 1"])])
         );
     }
 
@@ -131,8 +139,8 @@ mod tests {
                 - List item 2
             "}),
             Text::from_iter([
-                Line::from_iter(["- ", "List item 1"]),
-                Line::from_iter(["- ", "List item 2"]),
+                Line::from_iter(["● ", "List item 1"]),
+                Line::from_iter(["● ", "List item 2"]),
             ])
         );
     }
@@ -165,13 +173,13 @@ mod tests {
             from_str(markdown),
             Text::from_iter([
                 Line::from_iter([
-                    Span::raw("- "),
+                    Span::raw("● "),
                     Span::raw("Emphasis").italic(),
                     Span::raw(" and "),
                     Span::raw("strong").bold(),
                 ]),
                 Line::from_iter([
-                    Span::raw("- "),
+                    Span::raw("● "),
                     Span::raw("Before "),
                     Span::raw("strong ").bold(),
                     Span::raw("emphasis").bold().italic(),
@@ -206,10 +214,10 @@ mod tests {
             from_str(markdown),
             Text::from_iter([
                 Line::from_iter([
-                    Span::raw("- "),
+                    Span::raw("● "),
                     Span::raw("Emphasized first item.").italic(),
                 ]),
-                Line::from_iter([Span::raw("- "), Span::raw("Strong second item.").bold(),]),
+                Line::from_iter([Span::raw("● "), Span::raw("Strong second item.").bold(),]),
                 Line::default(),
                 Line::from_iter([
                     Span::raw("1. ").light_blue(),
@@ -234,7 +242,7 @@ mod tests {
         assert_eq!(
             from_str(markdown),
             Text::from_iter([
-                Line::from_iter([Span::raw("- "), Span::raw("First paragraph.").bold(),]),
+                Line::from_iter([Span::raw("● "), Span::raw("First paragraph.").bold(),]),
                 Line::default(),
                 Line::from(Span::raw("Second paragraph.").italic()),
             ])
@@ -265,8 +273,8 @@ mod tests {
                   - Nested list item 1
             "}),
             Text::from_iter([
-                Line::from_iter(["- ", "List item 1"]),
-                Line::from_iter(["    - ", "Nested list item 1"]),
+                Line::from_iter(["● ", "List item 1"]),
+                Line::from_iter(["    ● ", "Nested list item 1"]),
             ])
         );
     }
@@ -279,8 +287,8 @@ mod tests {
                 - [x] Complete
             "}),
             Text::from_iter([
-                Line::from_iter(["- [ ] ", "Incomplete"]),
-                Line::from_iter(["- [x] ", "Complete"]),
+                Line::from_iter(["● [ ] ", "Incomplete"]),
+                Line::from_iter(["● [x] ", "Complete"]),
             ])
         );
     }
@@ -310,7 +318,7 @@ mod tests {
         assert_eq!(
             from_str(markdown),
             Text::from_iter([
-                Line::from_iter(["- ", "Item"]),
+                Line::from_iter(["● ", "Item"]),
                 Line::default(),
                 Line::from("After"),
             ])
