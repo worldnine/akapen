@@ -552,9 +552,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
-    #[test]
-    #[test]
     fn table_review_marks_only_the_row_containing_the_changed_cell() {
         let old = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | two |\n";
         let new = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | changed |\n";
@@ -580,7 +577,6 @@ mod tests {
         assert_eq!(removed, [2].into_iter().collect());
     }
 
-    #[test]
     #[test]
     fn loads_complete_markdown_snapshots_newest_first() {
         let dir = tempfile::tempdir().unwrap();

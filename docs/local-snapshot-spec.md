@@ -198,9 +198,13 @@ baselineにはあるが表示中の文書にはない位置を赤で区別する
 
 | ファイル | 表示 | review 粒度 | 履歴の供給源 |
 |---|---|---|---|
-| Markdown | Rendered / Source | Markdown ブロック（テーブル内は行） | Git（あれば）＋ LOCAL |
+| Markdown | Rendered / Source | 行 | Git（あれば）＋ LOCAL |
 | その他の UTF-8 テキスト | Source | 行 | Git（あれば）＋ LOCAL |
 | バイナリ | 対象外 | なし | なし |
+
+review marks はすべて**行単位**（実装時の決定変更、v0.1 実装・README に反映済み）。
+当初の「Markdown はブロック単位」案は、テーブルの 1 セル編集や段落の 1 行編集が
+ブロック全体を照らしてしまうため廃止した。
 
 Rendered / Source はモードの異なる履歴ではなく、同じファイル・同じ世代を表す二つの
 表示形式である。Markdown 以外は Source のみだが、コメント、Timeline、Review の
@@ -291,7 +295,7 @@ Lines: 24-29
 1. 現在の完全文書タイムラインを provenance 付きの共通モデルへ変更
 2. LOCAL キャッシュと review baseline を追加
 3. reload を LOCAL 世代作成と累積 review marks へ接続
-4. Markdown はブロック単位、その他のテキストは行単位で marks を表示
+4. Markdown はブロック単位、その他のテキストは行単位で marks を表示（実装では全ファイル行単位に変更 — §7 参照）
 5. `a` と未確認ナビゲーションを追加
 6. コメント出力から hunk を削除
 7. Git diff scope、old side、hunk UI、changes タブを削除
