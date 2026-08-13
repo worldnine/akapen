@@ -4153,17 +4153,35 @@ use crate::comment::Selection;
             app.status
         );
 
-        // Focused rows render bright (no DIM), and dissolve back to DIM
-        // when the cursor leaves the anchor line.
+        // The cursor's visual language moves onto the deleted rows: `>`
+        // on the first row, bright red text on the cursor band, and the
+        // anchor line below renders as an ordinary line meanwhile.
         let (text, _) = build_rows(&app, 30, 75);
+        assert_eq!(text.lines[1].spans[0].content.as_ref(), ">");
+        assert_eq!(text.lines[2].spans[0].content.as_ref(), "▌");
         let body = &text.lines[1].spans[2];
         assert_eq!(body.style.fg, Some(Color::LightRed));
+        assert_eq!(body.style.bg, Some(app.ui_selected_bg));
         assert!(!body.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(
+            text.lines[3].spans[0].content.as_ref(),
+            " ",
+            "the anchor line carries no cursor glyph while the focus is live"
+        );
+        assert_ne!(
+            text.lines[3].spans[0].style.bg,
+            Some(app.ui_selected_bg),
+            "no second cursor band on the anchor line"
+        );
+
+        // Leaving the anchor line dissolves the focus back to DIM rows,
+        // and the cursor glyph returns to the cursor line.
         on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
         assert_eq!(app.deletion_focus(), None);
         let (text, _) = build_rows(&app, 30, 75);
         let body = &text.lines[1].spans[2];
         assert!(body.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(text.lines[1].spans[0].content.as_ref(), "▌");
     }
 
     #[test]
