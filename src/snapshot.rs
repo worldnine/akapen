@@ -103,7 +103,23 @@ impl SnapshotCache {
     /// Observe `content`, creating a LOCAL generation only when its content
     /// differs from the latest cached generation. The first observation is
     /// also the initial review baseline.
+    ///
+    /// 互換ラッパ。parent を知らない既存の観測は None として記録する。
     pub(crate) fn record(&self, path: &Path, content: &str) -> Result<CachedFile> {
+        self.record_with_parent(path, content, None)
+    }
+
+    /// 既存 `record` と同一だが、新規スナップショットの parent に引数の値を記録する。
+    /// parent は観測時点の HEAD commit oid（git 環境）。非 git 環境・不明なら None。
+    /// 再観測（既知 content を最新位置へ移動する既存ロジック）の場合も、captured_ms
+    /// と同様に parent を新しい引数値で更新する（観測のたびに「その観測時点の
+    /// HEAD」が正しい）。
+    pub(crate) fn record_with_parent(
+        &self,
+        path: &Path,
+        content: &str,
+        parent: Option<String>,
+    ) -> Result<CachedFile> {
         self.ensure_dirs()?;
         let canonical = canonical_path(path);
         let mut index = self.load_index(&canonical)?.unwrap_or_else(|| FileIndex {
@@ -130,6 +146,10 @@ impl SnapshotCache {
             // Re-observing known content does not create a duplicate
             // generation, but it does make that content the newest LOCAL.
             snapshot.captured_ms = now_ms();
+            // 観測のたびに「その観測時点の HEAD」を親アンカーとして更新する。
+            // 再観測で古い parent を持ち越すと、あとから commit された HEAD との
+            // 血統順が嘘になるため、captured_ms と同様に上書きする。
+            snapshot.parent = parent;
             index.snapshots.push(snapshot);
         }
         if index.reviewed.is_none() {
@@ -144,8 +164,22 @@ impl SnapshotCache {
     /// Start a new UI session for a file. Comment pins belong to the
     /// process that created them (comments themselves are not persisted),
     /// so stale pins from an earlier or crashed session are released here.
+    ///
+    /// 互換ラッパ。parent を知らない既存の open は None として記録する。
     pub(crate) fn open(&self, path: &Path, content: &str) -> Result<CachedFile> {
-        let _ = self.record(path, content)?;
+        self.open_with_parent(path, content, None)
+    }
+
+    /// 既存 `open` と同一だが、内部の record 呼び出しに parent を渡す。
+    /// open は「新しいセッションを開く」= 観測でもあるので parent を記録する。
+    /// 既存処理（古いセッションの pin 解放）は `open` と変わらない。
+    pub(crate) fn open_with_parent(
+        &self,
+        path: &Path,
+        content: &str,
+        parent: Option<String>,
+    ) -> Result<CachedFile> {
+        let _ = self.record_with_parent(path, content, parent)?;
         let canonical = canonical_path(path);
         let mut index = self
             .load_index(&canonical)?
@@ -677,5 +711,150 @@ mod tests {
         assert_eq!(content_id(b"abc"), content_id(b"abc"));
         assert_ne!(content_id(b"abc"), content_id(b"abd"));
         assert_ne!(content_id(b"abc"), content_id(b"abc\n"));
+    }
+
+    #[test]
+    fn record_with_parent_stores_the_parent_anchor_across_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        fs::write(&file, "one\n").unwrap();
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        let parent = Some("deadbeef".to_string());
+
+        let recorded = cache
+            .record_with_parent(&file, "one\n", parent.clone())
+            .unwrap();
+        assert_eq!(recorded.snapshots.len(), 1);
+        assert_eq!(recorded.snapshots[0].parent, parent);
+
+        // ディスク往復（index JSON の parent 経由）でも復元される。
+        let loaded = cache.load(&file).unwrap();
+        assert_eq!(loaded, recorded);
+    }
+
+    #[test]
+    fn reobserving_known_content_updates_the_parent_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        fs::write(&file, "one").unwrap();
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        cache
+            .record_with_parent(&file, "one", Some("A".to_string()))
+            .unwrap();
+        cache
+            .record_with_parent(&file, "two", Some("B".to_string()))
+            .unwrap();
+
+        // 既知 content の再観測は複製せず最新位置へ移動し、parent も新しい値に更新される。
+        let reobserved = cache
+            .record_with_parent(&file, "one", Some("C".to_string()))
+            .unwrap();
+        assert_eq!(reobserved.snapshots.len(), 2);
+        assert_eq!(reobserved.snapshots[0].content, "two");
+        assert_eq!(reobserved.snapshots[0].parent.as_deref(), Some("B"));
+        assert_eq!(reobserved.snapshots[1].content, "one");
+        assert_eq!(reobserved.snapshots[1].parent.as_deref(), Some("C"));
+
+        // 非 git 環境での観測（None）は古い parent を持ち越さずクリアする。
+        cache.record(&file, "three").unwrap();
+        let cleared = cache.record_with_parent(&file, "one", None).unwrap();
+        assert_eq!(cleared.snapshots.len(), 3);
+        assert_eq!(cleared.snapshots[2].content, "one");
+        assert_eq!(cleared.snapshots[2].parent, None);
+    }
+
+    #[test]
+    fn open_with_parent_records_the_parent_and_releases_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        fs::write(&file, "one").unwrap();
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        cache
+            .record_with_parent(&file, "one", Some("A".to_string()))
+            .unwrap();
+        cache.pin(&file, "one").unwrap();
+        assert!(cache.load(&file).unwrap().snapshots[0].pinned);
+
+        // open は新しいセッションの観測: 新規スナップショットに parent が付き、
+        // 古いセッションの pin は解放される。
+        let reopened = cache
+            .open_with_parent(&file, "two", Some("B".to_string()))
+            .unwrap();
+        assert_eq!(reopened.snapshots.len(), 2);
+        assert!(!reopened.snapshots[0].pinned);
+        assert_eq!(reopened.snapshots[0].content, "one");
+        assert_eq!(reopened.snapshots[0].parent.as_deref(), Some("A"));
+        assert_eq!(reopened.snapshots[1].content, "two");
+        assert_eq!(reopened.snapshots[1].parent.as_deref(), Some("B"));
+        assert_eq!(cache.load(&file).unwrap(), reopened);
+    }
+
+    #[test]
+    fn pin_never_sets_a_parent_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        fs::write(&file, "one").unwrap();
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+
+        // pin による新規追加は観測ではないので parent は付かない。
+        cache.pin(&file, "one").unwrap();
+        let loaded = cache.load(&file).unwrap();
+        assert_eq!(loaded.snapshots.len(), 1);
+        assert!(loaded.snapshots[0].pinned);
+        assert_eq!(loaded.snapshots[0].parent, None);
+
+        // 既存スナップショットへの pin も parent を変えない。
+        cache
+            .record_with_parent(&file, "two", Some("A".to_string()))
+            .unwrap();
+        cache.pin(&file, "two").unwrap();
+        let loaded = cache.load(&file).unwrap();
+        assert_eq!(loaded.snapshots[1].content, "two");
+        assert!(loaded.snapshots[1].pinned);
+        assert_eq!(loaded.snapshots[1].parent.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn old_index_without_parent_field_loads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        fs::write(&file, "legacy\n").unwrap();
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        let canonical = canonical_path(&file);
+        let id = content_id(b"legacy\n");
+        cache.ensure_dirs().unwrap();
+        cache.write_blob(&id, "legacy\n").unwrap();
+        // 契約フィールド導入前の index 形式（parent が無い JSON）を手書きで再現する。
+        let legacy = format!(
+            r#"{{
+  "version": 1,
+  "path": "{}",
+  "reviewed": "{id}",
+  "snapshots": [
+    {{ "id": "{id}", "captured_ms": 1000, "pinned": false }}
+  ]
+}}"#,
+            canonical.to_string_lossy()
+        );
+        fs::write(cache.index_path(&canonical), legacy).unwrap();
+
+        let loaded = cache.load(&file).unwrap();
+        assert_eq!(loaded.snapshots.len(), 1);
+        assert_eq!(loaded.snapshots[0].content, "legacy\n");
+        assert_eq!(loaded.snapshots[0].parent, None);
+    }
+
+    #[test]
+    fn record_and_open_wrappers_observe_without_a_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        fs::write(&file, "one").unwrap();
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        let recorded = cache.record(&file, "one").unwrap();
+        assert_eq!(recorded.snapshots.len(), 1);
+        assert_eq!(recorded.snapshots[0].parent, None);
+        let opened = cache.open(&file, "two").unwrap();
+        assert_eq!(opened.snapshots.len(), 2);
+        assert!(opened.snapshots.iter().all(|snapshot| snapshot.parent.is_none()));
     }
 }
