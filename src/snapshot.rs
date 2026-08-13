@@ -165,14 +165,7 @@ impl SnapshotCache {
     /// process that created them (comments themselves are not persisted),
     /// so stale pins from an earlier or crashed session are released here.
     ///
-    /// 互換ラッパ。parent を知らない既存の open は None として記録する。
-    pub(crate) fn open(&self, path: &Path, content: &str) -> Result<CachedFile> {
-        self.open_with_parent(path, content, None)
-    }
-
-    /// 既存 `open` と同一だが、内部の record 呼び出しに parent を渡す。
-    /// open は「新しいセッションを開く」= 観測でもあるので parent を記録する。
-    /// 既存処理（古いセッションの pin 解放）は `open` と変わらない。
+    /// 互換ラッパ。parent を知らない既存の観測は None として記録する。
     pub(crate) fn open_with_parent(
         &self,
         path: &Path,
@@ -665,7 +658,7 @@ mod tests {
         cache.pin(&file, "zero").unwrap();
         assert!(cache.load(&file).unwrap().snapshots[0].pinned);
 
-        let reopened = cache.open(&file, "zero").unwrap();
+        let reopened = cache.open_with_parent(&file, "zero", None).unwrap();
         assert!(!reopened.snapshots[0].pinned);
     }
 
@@ -845,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn record_and_open_wrappers_observe_without_a_parent() {
+    fn record_wrapper_observes_without_a_parent() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("doc.md");
         fs::write(&file, "one").unwrap();
@@ -853,8 +846,8 @@ mod tests {
         let recorded = cache.record(&file, "one").unwrap();
         assert_eq!(recorded.snapshots.len(), 1);
         assert_eq!(recorded.snapshots[0].parent, None);
-        let opened = cache.open(&file, "two").unwrap();
-        assert_eq!(opened.snapshots.len(), 2);
-        assert!(opened.snapshots.iter().all(|snapshot| snapshot.parent.is_none()));
+        let reopened = cache.open_with_parent(&file, "two", None).unwrap();
+        assert_eq!(reopened.snapshots.len(), 2);
+        assert!(reopened.snapshots.iter().all(|snapshot| snapshot.parent.is_none()));
     }
 }
