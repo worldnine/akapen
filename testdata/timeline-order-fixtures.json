@@ -1,0 +1,75 @@
+{
+  "note": "統合タイムライン並び順の契約 fixture（正典）。snapshots の parent は「観測時点の HEAD commit oid」（git 環境のみ。非 git・不明は null）。expected_newest_first_ids は DocumentHistory::load_with_local が返す revisions[0..] の id 列。NOW は id: null なので \"now\" と表記する。LOCAL の id は \"local:<content id>\"。",
+  "scenarios": [
+    {
+      "name": "commit_interleaves_between_two_local_observations",
+      "live": "# Doc\n\nfinal\n",
+      "gits_newest_first": [
+        { "id": "B", "short_id": "bbbbbbb", "summary": "second commit", "content": "# Doc\n\ncommitted middle\n" },
+        { "id": "A", "short_id": "aaaaaaa", "summary": "first commit", "content": "# Doc\n\nfirst\n" }
+      ],
+      "snapshots_oldest_first": [
+        { "id": "3dbaf2b7fab3b558328a01171baab0c44d34e044fef0de26fedbcd539486c1b8", "captured_ms": 1000, "pinned": false, "parent": "A", "content": "# Doc\n\nfirst edited\n" },
+        { "id": "4b54499d745d550ceffcd5953846c5aa3023b33adb5b003257915b1bb64af67a", "captured_ms": 2000, "pinned": false, "parent": "B", "content": "# Doc\n\nsecond edited\n" }
+      ],
+      "expected_newest_first_ids": ["now", "local:4b54499d745d550ceffcd5953846c5aa3023b33adb5b003257915b1bb64af67a", "B", "local:3dbaf2b7fab3b558328a01171baab0c44d34e044fef0de26fedbcd539486c1b8", "A"]
+    },
+    {
+      "name": "uncommitted_chain_sharing_one_head_stays_in_observation_order",
+      "live": "# Doc\n\nfinal\n",
+      "gits_newest_first": [
+        { "id": "A", "short_id": "aaaaaaa", "summary": "first commit", "content": "# Doc\n\nfirst\n" }
+      ],
+      "snapshots_oldest_first": [
+        { "id": "3dbaf2b7fab3b558328a01171baab0c44d34e044fef0de26fedbcd539486c1b8", "captured_ms": 1000, "pinned": false, "parent": "A", "content": "# Doc\n\nfirst edited\n" },
+        { "id": "c208faecaf1d7cd1c5633382c03244920e00174a186bbef209d4d7baef860d92", "captured_ms": 2000, "pinned": false, "parent": "A", "content": "# Doc\n\nthird edit\n" }
+      ],
+      "expected_newest_first_ids": ["now", "local:c208faecaf1d7cd1c5633382c03244920e00174a186bbef209d4d7baef860d92", "local:3dbaf2b7fab3b558328a01171baab0c44d34e044fef0de26fedbcd539486c1b8", "A"]
+    },
+    {
+      "name": "orphan_parents_fall_back_to_observation_order_above_git",
+      "live": "# Doc\n\nfinal\n",
+      "gits_newest_first": [
+        { "id": "R", "short_id": "rrrrrrr", "summary": "rebased commit", "content": "# Doc\n\nrebased\n" }
+      ],
+      "snapshots_oldest_first": [
+        { "id": "3dbaf2b7fab3b558328a01171baab0c44d34e044fef0de26fedbcd539486c1b8", "captured_ms": 1000, "pinned": false, "parent": "gone-oid-1", "content": "# Doc\n\nfirst edited\n" },
+        { "id": "4b54499d745d550ceffcd5953846c5aa3023b33adb5b003257915b1bb64af67a", "captured_ms": 2000, "pinned": false, "parent": "gone-oid-2", "content": "# Doc\n\nsecond edited\n" }
+      ],
+      "expected_newest_first_ids": ["now", "local:4b54499d745d550ceffcd5953846c5aa3023b33adb5b003257915b1bb64af67a", "local:3dbaf2b7fab3b558328a01171baab0c44d34e044fef0de26fedbcd539486c1b8", "R"]
+    },
+    {
+      "name": "no_git_observations_stay_in_observation_order",
+      "live": "# Doc\n\nfinal\n",
+      "gits_newest_first": [],
+      "snapshots_oldest_first": [
+        { "id": "3dbaf2b7fab3b558328a01171baab0c44d34e044fef0de26fedbcd539486c1b8", "captured_ms": 1000, "pinned": false, "parent": null, "content": "# Doc\n\nfirst edited\n" },
+        { "id": "4b54499d745d550ceffcd5953846c5aa3023b33adb5b003257915b1bb64af67a", "captured_ms": 2000, "pinned": false, "parent": null, "content": "# Doc\n\nsecond edited\n" }
+      ],
+      "expected_newest_first_ids": ["now", "local:4b54499d745d550ceffcd5953846c5aa3023b33adb5b003257915b1bb64af67a", "local:3dbaf2b7fab3b558328a01171baab0c44d34e044fef0de26fedbcd539486c1b8"]
+    },
+    {
+      "name": "content_equal_local_merges_into_the_commit_at_its_natural_position",
+      "live": "# Doc\n\nfinal\n",
+      "gits_newest_first": [
+        { "id": "B", "short_id": "bbbbbbb", "summary": "second commit", "content": "# Doc\n\ncommitted middle\n" },
+        { "id": "A", "short_id": "aaaaaaa", "summary": "first commit", "content": "# Doc\n\nfirst\n" }
+      ],
+      "snapshots_oldest_first": [
+        { "id": "7ac55c3b5457b6b7b15700bdc195a9262ee00750c15458f29b95d4b5069d2e6c", "captured_ms": 1000, "pinned": false, "parent": "A", "content": "# Doc\n\ncommitted middle\n" }
+      ],
+      "expected_newest_first_ids": ["now", "B", "A"]
+    },
+    {
+      "name": "snapshot_equal_to_live_is_not_a_generation",
+      "live": "# Doc\n\nsecond edited\n",
+      "gits_newest_first": [
+        { "id": "A", "short_id": "aaaaaaa", "summary": "first commit", "content": "# Doc\n\nfirst\n" }
+      ],
+      "snapshots_oldest_first": [
+        { "id": "4b54499d745d550ceffcd5953846c5aa3023b33adb5b003257915b1bb64af67a", "captured_ms": 1000, "pinned": false, "parent": "A", "content": "# Doc\n\nsecond edited\n" }
+      ],
+      "expected_newest_first_ids": ["now", "A"]
+    }
+  ]
+}

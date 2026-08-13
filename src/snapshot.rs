@@ -35,6 +35,9 @@ pub(crate) struct CachedSnapshot {
     pub(crate) captured_ms: u64,
     pub(crate) content: String,
     pub(crate) pinned: bool,
+    /// 観測時点の HEAD commit oid（git 環境）。タイムラインを血統順に並べる
+    /// ための親アンカー。非 git 環境・不明・pin 由来の追加では None。
+    pub(crate) parent: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -59,6 +62,10 @@ struct SnapshotMeta {
     captured_ms: u64,
     #[serde(default)]
     pinned: bool,
+    /// 観測時点の HEAD commit oid（git 環境）。旧キャッシュでは無いので
+    /// `#[serde(default)]` で None として読む。
+    #[serde(default)]
+    parent: Option<String>,
 }
 
 impl SnapshotCache {
@@ -118,6 +125,7 @@ impl SnapshotCache {
                     id: id.clone(),
                     captured_ms: now_ms(),
                     pinned: false,
+                    parent: None,
                 });
             // Re-observing known content does not create a duplicate
             // generation, but it does make that content the newest LOCAL.
@@ -216,6 +224,7 @@ impl SnapshotCache {
                 id: id.clone(),
                 captured_ms: now_ms(),
                 pinned: true,
+                parent: None,
             });
         }
         if index.reviewed.is_none() {
@@ -316,6 +325,7 @@ impl SnapshotCache {
                 captured_ms: snapshot.captured_ms,
                 content,
                 pinned: snapshot.pinned,
+                parent: snapshot.parent.clone(),
             });
         }
         let reviewed_content = index
