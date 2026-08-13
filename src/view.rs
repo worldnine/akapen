@@ -237,17 +237,19 @@ pub fn warp_ring_rect(area: ratatui::layout::Rect, scale: f32) -> ratatui::layou
 }
 
 /// The warp ring's color at `scale`: apparent distance maps to
-/// brightness — a far ring is barely there, a near ring wears the
-/// history border's full purple — so the window visibly approaches out
-/// of (or recedes into) the depth. Scale runs 0.2..1.0 in flight; the
-/// lerp clamp absorbs the ends.
+/// brightness — a far ring is a readable mid-purple, a near ring blazes
+/// the nebula's hot pink — so the window visibly approaches out of (or
+/// recedes into) the depth. The square root front-loads the ramp: a
+/// window crossing a 450 ms flight must look bright early, not only in
+/// its last frames. Scale runs 0.2..1.0 in flight; the clamps absorb
+/// the ends.
 pub fn warp_ring_color(light: bool, scale: f32) -> Color {
-    let far = if light {
-        Color::Rgb(225, 220, 238)
+    let (far, near) = if light {
+        (Color::Rgb(185, 165, 215), Color::Rgb(190, 70, 170))
     } else {
-        Color::Rgb(70, 62, 105)
+        (Color::Rgb(120, 105, 175), Color::Rgb(250, 120, 190))
     };
-    lerp_color(far, history_border_color(light), (scale - 0.2) / 0.8)
+    lerp_color(far, near, ((scale - 0.2) / 0.8).clamp(0.0, 1.0).sqrt())
 }
 
 /// Brief neutral pulse when a selected history revision finishes rendering.
@@ -1172,10 +1174,15 @@ mod tests {
                 let c = warp_ring_color(light, 0.2 + 0.8 * i as f32 / 10.0);
                 assert!(matches!(c, Color::Rgb(..)), "{c:?}");
             }
+            let near = if light {
+                Color::Rgb(190, 70, 170)
+            } else {
+                Color::Rgb(250, 120, 190)
+            };
             assert_eq!(
                 warp_ring_color(light, 1.0),
-                history_border_color(light),
-                "a landed ring wears the frame's own purple"
+                near,
+                "a landed ring blazes the nebula's hot pink"
             );
             assert_ne!(
                 warp_ring_color(light, 0.2),
@@ -1183,6 +1190,16 @@ mod tests {
                 "distance is visible"
             );
         }
+        // The ramp is front-loaded: by mid-flight the dark theme's red
+        // channel (120 far → 250 near) is already closer to the near
+        // pole than to the far one.
+        let Color::Rgb(mid_r, ..) = warp_ring_color(false, 0.6) else {
+            panic!("rgb")
+        };
+        assert!(
+            mid_r.abs_diff(250) < mid_r.abs_diff(120),
+            "brightness arrives early: mid r = {mid_r}"
+        );
     }
 
     #[test]

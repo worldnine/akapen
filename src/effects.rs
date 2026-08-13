@@ -174,11 +174,11 @@ pub(crate) fn starfield_effect(light: bool) -> Effect {
 }
 
 /// How long the generation-warp zoom takes (milliseconds).
-pub(crate) const WARP_MS: u32 = 280;
+pub(crate) const WARP_MS: u32 = 450;
 /// How many window outlines fly during a warp.
-const WARP_RINGS: usize = 3;
+const WARP_RINGS: usize = 4;
 /// Each ring launches this fraction of the flight after the previous.
-const WARP_STAGGER: f32 = 0.22;
+const WARP_STAGGER: f32 = 0.18;
 
 /// The generation warp: Mac Time Machine's flying windows, translated.
 /// When the selected revision finishes rendering, a few window outlines
@@ -263,8 +263,13 @@ fn set_ring_cell(
         buf[(x - 1, y)].set_char(' '); // unshadow: the wide glyph would hide the ring cell
     }
     let wide = buf[(x, y)].symbol().width() == 2;
-    buf[(x, y)].set_char(ch);
-    buf[(x, y)].set_fg(color);
+    let cell = &mut buf[(x, y)];
+    cell.set_char(ch);
+    cell.set_style(
+        ratatui::style::Style::new()
+            .fg(color)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    );
     if wide && x + 1 < bounds.right() {
         buf[(x + 1, y)].set_char(' '); // the lead cell shrank: free its continuation
     }

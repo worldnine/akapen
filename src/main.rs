@@ -1394,6 +1394,12 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
     // back above the covered rows (no-op at NOW).
     keep_cursor_out_of_timeline(app);
     app.history_frame_flash_pending = true;
+    // The render above is the expensive half of time travel (~100 ms on
+    // a large document in a debug build). The effects created in it
+    // (warp, appear, ghosts) are advanced by the wall-clock delta since
+    // the LAST draw — without this reset their first frame would be
+    // charged for the render itself and skip most of the flight.
+    app.last_draw = Some(Instant::now());
     true
 }
 
@@ -3218,18 +3224,18 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
             width: body.width.saturating_sub(1),
             height: body.height,
         };
-        if app.is_historical()
-            && app
-                .history_frame_flash_until
-                .is_none_or(|until| Instant::now() >= until)
-        {
-            // The sky first, the frame over it: each repaints only its
-            // own cells (interior blanks vs border glyphs), the order
-            // just keeps the border unmistakably the frame's.
+        if app.is_historical() {
+            // The sky is interior-only and must not blink off during
+            // the render-complete flash — only the border rotation
+            // yields to it (the flash IS the border for that moment).
             if let Some(effect) = app.starfield_fx.as_mut() {
                 f.render_effect(effect, frame, last_tick);
             }
-            if let Some(effect) = app.time_machine_fx.as_mut() {
+            if app
+                .history_frame_flash_until
+                .is_none_or(|until| Instant::now() >= until)
+                && let Some(effect) = app.time_machine_fx.as_mut()
+            {
                 f.render_effect(effect, frame, last_tick);
             }
         }
