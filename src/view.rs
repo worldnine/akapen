@@ -213,6 +213,43 @@ pub fn starfield_color(light: bool, phase: f32, rot: f32) -> Color {
     lerp_color(dim, bright, t)
 }
 
+/// Cubic ease-out: fast start, soft landing. The warp rings ride this so
+/// an approaching window decelerates into place instead of slamming.
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// The warp ring's rectangle at `scale` (0.0..=1.0 of the frame), centered
+/// in `area`: the outline of a Time Machine window mid-flight. Never
+/// thinner than 2×2 (a ring needs corners) and never larger than the
+/// frame itself.
+pub fn warp_ring_rect(area: ratatui::layout::Rect, scale: f32) -> ratatui::layout::Rect {
+    let s = scale.clamp(0.0, 1.0);
+    let w = ((area.width as f32 * s).round() as u16).clamp(2, area.width);
+    let h = ((area.height as f32 * s).round() as u16).clamp(2, area.height);
+    ratatui::layout::Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// The warp ring's color at `scale`: apparent distance maps to
+/// brightness — a far ring is barely there, a near ring wears the
+/// history border's full purple — so the window visibly approaches out
+/// of (or recedes into) the depth. Scale runs 0.2..1.0 in flight; the
+/// lerp clamp absorbs the ends.
+pub fn warp_ring_color(light: bool, scale: f32) -> Color {
+    let far = if light {
+        Color::Rgb(225, 220, 238)
+    } else {
+        Color::Rgb(70, 62, 105)
+    };
+    lerp_color(far, history_border_color(light), (scale - 0.2) / 0.8)
+}
+
 /// Brief neutral pulse when a selected history revision finishes rendering.
 pub fn history_frame_flash_color(light: bool) -> Color {
     if light { HISTORY_FRAME_FLASH_LIGHT } else { HISTORY_FRAME_FLASH_DARK }
@@ -1015,8 +1052,9 @@ mod tests {
     use super::{
         Span, ViewState, history_border_color, history_glow_bg, is_table_delimiter_line,
         lerp_color, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
-        selected_bg, starfield_color, starfield_star_at, time_machine_color_at,
-        time_machine_palette, time_machine_rotation_fraction,
+        ease_out_cubic, selected_bg, starfield_color, starfield_star_at,
+        time_machine_color_at, time_machine_palette, time_machine_rotation_fraction,
+        warp_ring_color, warp_ring_rect,
     };
     use crate::highlight::Highlighter;
     use ratatui::style::{Color, Modifier, Style};
@@ -1104,6 +1142,47 @@ mod tests {
         let clock = std::time::Instant::now();
         let f = time_machine_rotation_fraction(clock);
         assert!((0.0..1.0).contains(&f), "fraction in [0,1): {f}");
+    }
+
+    #[test]
+    fn warp_rings_fly_centered_between_a_dot_and_the_frame() {
+        use ratatui::layout::Rect;
+        let frame = Rect { x: 1, y: 2, width: 80, height: 40 };
+        // Full scale is the frame itself: the ring hands off seamlessly.
+        assert_eq!(warp_ring_rect(frame, 1.0), frame);
+        // Half scale is half the size, centered inside the frame.
+        let half = warp_ring_rect(frame, 0.5);
+        assert_eq!((half.width, half.height), (40, 20));
+        assert_eq!((half.x, half.y), (1 + 20, 2 + 10));
+        // A vanishing ring still keeps its corners (2×2 floor).
+        let dot = warp_ring_rect(frame, 0.0);
+        assert_eq!((dot.width, dot.height), (2, 2));
+        // Ease-out: starts at 0, lands at 1, front-loads the motion.
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert!(ease_out_cubic(0.5) > 0.5, "decelerating, not linear");
+    }
+
+    #[test]
+    fn warp_ring_color_brightens_with_proximity() {
+        for light in [false, true] {
+            // In flight the ring stays RGB and lands exactly on the
+            // history border color when it reaches the frame.
+            for i in 0..=10 {
+                let c = warp_ring_color(light, 0.2 + 0.8 * i as f32 / 10.0);
+                assert!(matches!(c, Color::Rgb(..)), "{c:?}");
+            }
+            assert_eq!(
+                warp_ring_color(light, 1.0),
+                history_border_color(light),
+                "a landed ring wears the frame's own purple"
+            );
+            assert_ne!(
+                warp_ring_color(light, 0.2),
+                warp_ring_color(light, 1.0),
+                "distance is visible"
+            );
+        }
     }
 
     #[test]

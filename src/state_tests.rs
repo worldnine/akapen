@@ -3202,6 +3202,37 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn the_generation_warp_flies_on_every_real_journey() {
+        // Traveling to a different generation arms the warp — in both
+        // directions — and `--no-fx` never flies.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "older draft".into(),
+            content: "line1\nline2\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.warp_fx.is_some(), "diving into the past warps");
+        // Coming back to NOW is a journey too.
+        app.warp_fx = None;
+        app.histories[0].position = 0;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.warp_fx.is_some(), "returning to NOW warps too");
+        // --no-fx: the render happens, the flight does not.
+        app.warp_fx = None;
+        app.config.fx = false;
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.warp_fx.is_none(), "--no-fx: no warp");
+    }
+
+    #[test]
     fn footer_badge_shows_the_state_not_just_the_mode() {
         // The badge leads the footer and flips with the transient states:
         // SELECT while a selection is active (both modes — the selection

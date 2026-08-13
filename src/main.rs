@@ -1276,6 +1276,13 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
     else {
         return false;
     };
+    // Which way this travel went, judged against the last RENDERED
+    // position (higher index = older): the warp flies inward going
+    // deeper into the past, outward coming back toward NOW.
+    let old_rendered = app
+        .histories
+        .get(index)
+        .map_or(position, |history| history.rendered_position);
     if let Some(history) = app.histories.get_mut(index) {
         history.rendered_position = position;
     }
@@ -1372,6 +1379,15 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
             &app.highlight,
             &path,
         );
+        // The generation warp: window outlines fly through the frame in
+        // the direction of travel. Only when the position actually
+        // moved — a same-position re-render is not a journey.
+        if animate && position != old_rendered {
+            app.warp_fx = Some(crate::effects::warp_effect(
+                position > old_rendered,
+                app.ui_light,
+            ));
+        }
     }
     // The anchor preserved the cursor's place, but the new document's
     // rows may land it under the timeline bar again; nudge the scroll
@@ -3252,6 +3268,20 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
                 f.render_effect(effect, rect, last_tick);
             }
         }
+        // The generation warp flies over everything in the frame —
+        // content, scatter effects, starfield — the way a window
+        // crosses in front of the room.
+        if let Some(effect) = app.warp_fx.as_mut() {
+            f.render_effect(effect, frame, last_tick);
+        }
+    }
+    // The warp is a one-shot flight: drop it when it completes, or when
+    // the view goes away mid-flight (left un-rendered it would never
+    // finish and would hold the tick rate high forever).
+    if app.warp_fx.as_ref().is_some_and(|fx| fx.done())
+        || !(app.config.fx && app.view_active())
+    {
+        app.warp_fx = None;
     }
     // The timeline bar's own slide-in/out, rendered over its rows (the
     // static bar is drawn above, the shader wipes and reveals it).

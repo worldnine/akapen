@@ -17,8 +17,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::STATUS_SECS;
 use crate::view::{
-    perimeter_index, starfield_color, starfield_star_at, time_machine_color_at,
-    time_machine_palette, time_machine_rotation_fraction, TIME_MACHINE_ROTATION_MS,
+    ease_out_cubic, perimeter_index, starfield_color, starfield_star_at, time_machine_color_at,
+    time_machine_palette, time_machine_rotation_fraction, warp_ring_color, warp_ring_rect,
+    TIME_MACHINE_ROTATION_MS,
 };
 
 /// How long the timeline bar's slide-in/out takes (milliseconds).
@@ -170,6 +171,103 @@ pub(crate) fn starfield_effect(light: bool) -> Effect {
             }
         },
     )
+}
+
+/// How long the generation-warp zoom takes (milliseconds).
+pub(crate) const WARP_MS: u32 = 280;
+/// How many window outlines fly during a warp.
+const WARP_RINGS: usize = 3;
+/// Each ring launches this fraction of the flight after the previous.
+const WARP_STAGGER: f32 = 0.22;
+
+/// The generation warp: Mac Time Machine's flying windows, translated.
+/// When the selected revision finishes rendering, a few window outlines
+/// (`┌─┐│└┘` rings) fly through the frame — DEEPER into the past they
+/// approach out of the depth (small → full frame, dim → bright) and
+/// hand off to the real border; BACK toward NOW they recede the other
+/// way (full → small, bright → dim) and vanish. Rings are staggered so
+/// the flight reads as a cascade, and each ring decelerates on a cubic
+/// ease-out. The rings repaint buffer cells for [`WARP_MS`] only — the
+/// text underneath returns untouched on the next frame.
+pub(crate) fn warp_effect(deeper: bool, light: bool) -> Effect {
+    fx::effect_fn_buf(
+        (),
+        EffectTimer::from_ms(WARP_MS, Interpolation::Linear),
+        move |_state: &mut (), ctx, buf| {
+            let t = ctx.timer.alpha();
+            let area = ctx.area;
+            if area.width < 8 || area.height < 6 {
+                return; // too small for a flight to read
+            }
+            // Total flight time covers the last ring's stagger.
+            let span = 1.0 + WARP_STAGGER * (WARP_RINGS - 1) as f32;
+            for k in 0..WARP_RINGS {
+                let tk = (t * span - WARP_STAGGER * k as f32).clamp(0.0, 1.0);
+                if tk <= 0.0 || tk >= 1.0 {
+                    continue; // not launched yet, or already gone
+                }
+                let eased = ease_out_cubic(tk);
+                let scale = if deeper {
+                    0.2 + 0.8 * eased
+                } else {
+                    1.0 - 0.8 * eased
+                };
+                if scale >= 0.98 {
+                    continue; // coincides with the real frame: hand off
+                }
+                let ring = warp_ring_rect(area, scale);
+                draw_ring(buf, ring, area, warp_ring_color(light, scale));
+            }
+        },
+    )
+}
+
+/// Draw one warp ring outline into the buffer. Wide glyphs need care in
+/// both directions: a wide glyph LEFT of a ring cell shadows it (the
+/// renderer skips cells behind a wide symbol), so it is blanked; a ring
+/// glyph landing ON a wide glyph's lead cell leaves its continuation
+/// cell orphaned, so that is blanked too. Both blanks last one frame —
+/// the static draw repaints the text underneath.
+fn draw_ring(
+    buf: &mut ratatui::buffer::Buffer,
+    ring: ratatui::layout::Rect,
+    bounds: ratatui::layout::Rect,
+    color: Color,
+) {
+    if ring.width < 2 || ring.height < 2 {
+        return;
+    }
+    let (l, r) = (ring.left(), ring.right() - 1);
+    let (t, b) = (ring.top(), ring.bottom() - 1);
+    for x in l..=r {
+        let top_ch = if x == l { '┌' } else if x == r { '┐' } else { '─' };
+        set_ring_cell(buf, x, t, top_ch, color, bounds);
+        let bot_ch = if x == l { '└' } else if x == r { '┘' } else { '─' };
+        set_ring_cell(buf, x, b, bot_ch, color, bounds);
+    }
+    for y in (t + 1)..b {
+        set_ring_cell(buf, l, y, '│', color, bounds);
+        set_ring_cell(buf, r, y, '│', color, bounds);
+    }
+}
+
+fn set_ring_cell(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    ch: char,
+    color: Color,
+    bounds: ratatui::layout::Rect,
+) {
+    if x > bounds.left() && buf[(x - 1, y)].symbol().width() == 2 {
+        buf[(x - 1, y)].set_char(' '); // unshadow: the wide glyph would hide the ring cell
+    }
+    let wide = buf[(x, y)].symbol().width() == 2;
+    buf[(x, y)].set_char(ch);
+    buf[(x, y)].set_fg(color);
+    if wide && x + 1 < bounds.right() {
+        buf[(x + 1, y)].set_char(' '); // the lead cell shrank: free its continuation
+    }
 }
 
 /// The toast's lifetime effect: fade in from black (120 ms), hold, fade
