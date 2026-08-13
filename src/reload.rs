@@ -6,6 +6,7 @@ use std::process::Command;
 use std::time::{Instant, SystemTime};
 
 use ratatui::crossterm::cursor::Hide;
+use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 
 use crate::app::App;
 use crate::comment::Comment;
@@ -111,7 +112,11 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
     let args: Vec<&str> = parts.collect();
 
     // Suspend the TUI entirely: `ratatui::restore()` leaves the alternate
-    // screen, disables raw mode, and shows the cursor.
+    // screen, disables raw mode, and shows the cursor — but it does not
+    // touch mouse capture. Drop the capture first, or every mouse move
+    // while the editor runs is injected into its stdin as SGR escape
+    // bytes (vim's cursor jumps around, nano renders garbage).
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
     let status = Command::new(bin)
@@ -124,9 +129,12 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
     // `DefaultTerminal`. The old terminal's Drop is harmless (it only
     // frees buffers, never touches the terminal).
     *terminal = ratatui::init();
-    // `ratatui::init()` does EnterAlternateScreen + EnableMouseCapture,
-    // but NOT Hide — the cursor stays visible until we hide it again.
-    let _ = ratatui::crossterm::execute!(std::io::stdout(), Hide);
+    // `ratatui::init()` does raw mode + EnterAlternateScreen only — it
+    // never enables mouse capture and never hides the cursor, so both are
+    // re-established explicitly. The capture is load-bearing: if the
+    // editor disabled tracking while it ran, akapen would otherwise come
+    // back with mouse input silently dead.
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture, Hide);
 
     match status {
         Ok(s) if s.success() => {
@@ -176,6 +184,16 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     // definition and snapshots are intentionally disabled in this mode.
     let reply = app.config.reply;
     let current = app.current_file_path().to_path_buf();
+    if reply {
+        // Auto-reload replaces the message wholesale, so comments pinned
+        // to the old message go with it (the event loop's call-site
+        // comment says as much: they were either sent or are stale).
+        // Keeping them would leave stale quoted snippets in the `l` list
+        // and let `s` send them against the new message. Comments on
+        // other message files survive — reply mode opens several
+        // messages as files.
+        app.comments.retain(|comment| comment.file_path != current);
+    }
     let had_live_comments = app
         .comments
         .iter()
@@ -208,9 +226,34 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     } else if let Some(history) = app.histories.get_mut(app.current_file_index)
         && let Some(live) = history.revisions.first_mut()
     {
+        // Without a snapshot cache (reply mode, or HOME/XDG_CACHE_HOME/
+        // AKAPEN_CACHE_DIR all unset) the replaced NOW would vanish from
+        // the timeline, and the live-comment re-anchoring below could not
+        // resolve `context_for_content(&old_content)` — the comments
+        // would keep `revision: None` and silently re-anchor to the new
+        // content with a stale snippet. Park the old NOW as an in-memory
+        // LOCAL generation at position 1 first (duplicate-guarded: a Git
+        // revision may already carry the same content).
         live.content = history_content;
         history.position = 0;
         history.rendered_position = 0;
+        if !history
+            .revisions
+            .iter()
+            .any(|revision| revision.content == old_content)
+        {
+            let id = crate::snapshot::content_id(old_content.as_bytes());
+            history.revisions.insert(
+                1,
+                crate::history::Revision {
+                    id: Some(format!("local:{id}")),
+                    short_id: id.chars().take(7).collect(),
+                    summary: "local snapshot".into(),
+                    content: old_content.clone(),
+                    source: crate::history::RevisionSource::Local,
+                },
+            );
+        }
     }
     if had_live_comments {
         let old_context = app
@@ -295,13 +338,17 @@ pub(crate) fn file_externally_changed(app: &App, i: usize) -> bool {
 #[cfg(test)]
 mod handoff_tests {
     use crate::app::{App, Mode};
+    use crate::comment::Comment;
     use crate::config::{Config, EscQuit};
     use crate::highlight::{Highlighter, syntax_for};
+    use crate::history::{DocumentHistory, RevisionSource};
     use crate::ime::ImeMode;
     use crate::source::Source;
     use crate::view::ViewState;
     use crate::{on_source_key, on_view_key};
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    use std::io::Write;
+    use std::path::Path;
 
     fn real_app() -> App {
         let path = "testdata/full.md";
@@ -348,5 +395,111 @@ mod handoff_tests {
         assert_eq!(app.view.cursor, 45);
         on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
         assert_eq!(app.cursor, 45, "ラウンドトリップで行が動かない");
+    }
+
+    /// A fresh app over a temp file with `n` lines ("line1"..), mirroring
+    /// state_tests' make_app (the tempdir is returned so the tests can
+    /// rewrite the file on disk before reloading). `reply` builds the
+    /// `--reply` variant: same file, snapshots/cache disabled.
+    fn temp_app(n: usize, mode: Mode, reply: bool) -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 1..=n {
+            writeln!(f, "line{i}").unwrap();
+        }
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            reply,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+            fx: true,
+        };
+        let source = Source::load(path).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        // App::new no longer tokenizes (run() supplies the spans), so
+        // fill them here exactly like run() does.
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        let mut history = DocumentHistory::load(&app.files[0], &app.source.content, 0);
+        history.acknowledge_in_memory(&app.source.content);
+        app.histories = vec![history];
+        app.mode = mode;
+        app.gutter_cols = 3;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        (app, dir)
+    }
+
+    fn add_comment(app: &mut App, path: &Path, text: &str) {
+        app.comments.push(Comment {
+            file_path: path.to_path_buf(),
+            start: 1,
+            end: 1,
+            lines: "line1".into(),
+            revision: None,
+            text: text.into(),
+        });
+    }
+
+    #[test]
+    fn reply_reload_drops_current_file_comments_and_keeps_other_files() {
+        let (mut app, dir) = temp_app(3, Mode::Source, true);
+        let current = app.current_file_path().to_path_buf();
+        // Reply mode opens each message as its own file; a comment on
+        // another message must survive the current one's auto-reload.
+        let other = dir.path().join("other.md");
+        std::fs::write(&other, "another message\n").unwrap();
+        app.files.push(other.clone());
+        add_comment(&mut app, &current, "on the old message");
+        add_comment(&mut app, &other, "on another message");
+        // The agent refreshes the message: content actually changes.
+        std::fs::write(&current, "new message line 1\nnew message line 2\n").unwrap();
+        assert!(crate::reload::reload_source(&mut app, false).is_ok());
+        assert_eq!(
+            app.comments.len(),
+            1,
+            "the old message's comment was dropped with it"
+        );
+        assert_eq!(
+            app.comments[0].file_path, other,
+            "other files' comments survive"
+        );
+    }
+
+    #[test]
+    fn cacheless_reload_anchors_live_comments_to_an_in_memory_local_generation() {
+        let (mut app, _dir) = temp_app(3, Mode::Source, false);
+        assert!(app.snapshot_cache.is_none(), "no HOME cache in tests");
+        let current = app.current_file_path().to_path_buf();
+        add_comment(&mut app, &current, "on the old NOW");
+        let old = app.source.content.clone();
+        std::fs::write(app.current_file_path(), "line1\nchanged\nline3\n").unwrap();
+        assert!(crate::reload::reload_source(&mut app, false).is_ok());
+        // The comment leaves `None` and pins to the parked LOCAL
+        // generation — without the in-memory insert the old content would
+        // have vanished from history and the comment would silently
+        // re-anchor to the new NOW with a stale snippet.
+        let history = &app.histories[0];
+        let expected = history
+            .context_for_content(&old)
+            .expect("the old content resolves to a generation");
+        assert!(
+            expected.starts_with("local:"),
+            "in-memory LOCAL id: {expected}"
+        );
+        assert_eq!(app.comments[0].revision.as_deref(), Some(expected.as_str()));
+        let parked = &history.revisions[1];
+        assert_eq!(parked.content, old, "the old NOW survives as a generation");
+        assert_eq!(parked.id.as_deref(), Some(expected.as_str()));
+        assert_eq!(parked.source, RevisionSource::Local);
     }
 }

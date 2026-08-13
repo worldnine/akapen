@@ -477,9 +477,13 @@ pub(crate) fn footer_hints(app: &App) -> String {
     // (provenance, position, id, baseline context) — one place, so the
     // top and bottom never show the same text. The footer keeps the
     // short navigation affordance only. `t` opens the full revision list
-    // whenever a timeline actually exists (more than one point).
+    // whenever a timeline actually exists (more than one point). Reply
+    // mode has no timeline at all — `t`/`←`/`→` all flash "history
+    // unavailable" — so advertising those keys would be lying.
     if matches!(app.mode, Mode::View | Mode::Source) {
-        if app.history().is_some_and(|history| history.revisions.len() > 1) {
+        if app.config.reply {
+            hints
+        } else if app.history().is_some_and(|history| history.revisions.len() > 1) {
             format!("{hints} · t detail · ← older · newer →")
         } else {
             format!("{hints} · ← older · newer →")
@@ -727,5 +731,65 @@ mod title_tests {
         // the result must stay inside the budget.
         let out = truncate_path(Path::new("日本語ドキュメント.md"), 8);
         assert!(UnicodeWidthStr::width(out.as_str()) <= 8);
+    }
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::footer_hints;
+    use crate::app::{App, Mode};
+    use crate::config::{Config, EscQuit};
+    use crate::highlight::Highlighter;
+    use crate::ime::ImeMode;
+    use crate::source::Source;
+    use crate::view::ViewState;
+
+    /// A minimal app for the footer: a temp file with a little content,
+    /// in source mode (the time-hint block matches View and Source).
+    fn footer_app(reply: bool) -> App {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            reply,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+            fx: true,
+        };
+        let source = Source::load(path).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 75, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.mode = Mode::Source;
+        app
+    }
+
+    #[test]
+    fn reply_footer_hides_the_unavailable_time_moves() {
+        // Reply mode has no history: `t`/`←`/`→` all error, so the
+        // footer must not advertise them.
+        let hints = footer_hints(&footer_app(true));
+        assert!(!hints.contains("t detail"), "no t detail in reply mode");
+        assert!(!hints.contains("← older"), "no ← in reply mode");
+        assert!(!hints.contains("newer →"), "no → in reply mode");
+        // The source-mode hints themselves stay.
+        assert!(hints.contains("j/k move"));
+        assert!(hints.contains("? help"));
+    }
+
+    #[test]
+    fn non_reply_footer_keeps_the_time_moves() {
+        let hints = footer_hints(&footer_app(false));
+        assert!(
+            hints.contains("← older"),
+            "the timeline hint stays outside reply mode"
+        );
+        assert!(hints.contains("newer →"));
     }
 }
