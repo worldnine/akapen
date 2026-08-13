@@ -117,6 +117,13 @@ pub(crate) struct App {
     /// of the baseline → displayed-generation diff. Display-only: cursor,
     /// selection, and comments never address these rows.
     pub(crate) comparison_deleted_blocks: Vec<DeletedBlock>,
+    /// Set when `n`/`N` lands on a pure deletion in source mode: the
+    /// anchor line whose inline deleted rows hold the focus (they render
+    /// bright instead of DIM, and `c` comments the deletion). The raw
+    /// value can go stale; [`App::deletion_focus`] is the live check —
+    /// moving the cursor off the line or starting a selection dissolves
+    /// the focus with no extra bookkeeping.
+    pub(crate) focused_deletion: Option<usize>,
     /// Until this instant the rendered view contains dim old blocks that
     /// are about to collapse out of the document.
     pub(crate) history_ghost_until: Option<Instant>,
@@ -339,6 +346,7 @@ impl App {
             comparison_changed: HashSet::new(),
             comparison_deleted_before: HashSet::new(),
             comparison_deleted_blocks: Vec::new(),
+            focused_deletion: None,
             history_ghost_until: None,
             history_render_due: None,
             history_frame_flash_until: None,
@@ -509,6 +517,31 @@ impl App {
     /// (above the line's text, below it). Blocks anchor BEFORE their line;
     /// a block whose anchor fell past the last line (content deleted at
     /// EOF) clamps to the last line and renders below its text instead.
+    /// The live deletion focus: the anchor line `n`/`N` landed on, as long
+    /// as the cursor is still there with no selection. Leaving the line or
+    /// starting a selection dissolves the focus; returning to the line
+    /// (before the next mark refresh clears the raw value) revives it.
+    pub(crate) fn deletion_focus(&self) -> Option<usize> {
+        let line = self.focused_deletion?;
+        (self.selection.is_none() && self.cursor == line).then_some(line)
+    }
+
+    /// The baseline text of the focused deletion: every block anchored at
+    /// the focused line, joined in document order. This is the snippet a
+    /// `c` comment quotes while the focus is live — the deleted content
+    /// itself, not the anchor line that happens to sit below it.
+    pub(crate) fn focused_deletion_content(&self) -> Option<String> {
+        let line = self.deletion_focus()?;
+        let last = self.source.len().saturating_sub(1);
+        let parts: Vec<&str> = self
+            .comparison_deleted_blocks
+            .iter()
+            .filter(|block| block.anchor.min(last) == line)
+            .map(|block| block.content.as_str())
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("\n"))
+    }
+
     pub(crate) fn deleted_blocks_at(&self, idx: usize) -> (Vec<&DeletedBlock>, Vec<&DeletedBlock>) {
         let last = self.source.len().saturating_sub(1);
         let mut above = Vec::new();
@@ -690,6 +723,7 @@ impl App {
             std::mem::take(&mut new.comparison_deleted_blocks);
 
         self.current_file_index = new_index;
+        self.focused_deletion = None;
         self.history_ghost_until = None;
         self.history_render_due = None;
         self.history_frame_flash_until = None;
