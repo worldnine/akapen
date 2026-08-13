@@ -163,6 +163,56 @@ pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
+/// One star of the time-machine starfield: its glyph and its twinkle
+/// phase (0.0..1.0 — the star's offset into the shared twinkle lap).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Star {
+    pub glyph: char,
+    pub phase: f32,
+}
+
+/// The star (if any) living at screen cell `(x, y)` while browsing the
+/// past: a pure integer hash decides placement (a ~2% sprinkle), glyph,
+/// and twinkle phase, so the sky is stable frame to frame — stars
+/// twinkle in place, they never jump — and tests can pin any cell.
+/// Screen-fixed on purpose: the page scrolls THROUGH the starfield,
+/// the way Time Machine's windows fly through its fixed sky.
+pub fn starfield_star_at(x: u16, y: u16) -> Option<Star> {
+    let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 16;
+    if h % 43 != 0 {
+        return None;
+    }
+    let glyph = match (h / 43) % 10 {
+        0 => '✦',
+        1 => '+',
+        _ => '·',
+    };
+    Some(Star {
+        glyph,
+        phase: ((h >> 16) & 0xFF) as f32 / 255.0,
+    })
+}
+
+/// The twinkle color of a star at `phase`, where `rot` is the shared
+/// rotation fraction (the same lap the frame gradient rides, see
+/// [`time_machine_rotation_fraction`]). Brightness swings on a
+/// phase-shifted sine between a barely-there dim and a bright core,
+/// both inside the nebula family, so the sky breathes with the frame
+/// instead of competing with it. On light backgrounds the "bright"
+/// pole is the saturated one — pale pink would wash out on white.
+pub fn starfield_color(light: bool, phase: f32, rot: f32) -> Color {
+    let t = 0.5 + 0.5 * ((rot + phase) * std::f32::consts::TAU).sin();
+    let (dim, bright) = if light {
+        (Color::Rgb(205, 198, 224), Color::Rgb(148, 92, 178))
+    } else {
+        (Color::Rgb(92, 84, 138), Color::Rgb(255, 194, 233))
+    };
+    lerp_color(dim, bright, t)
+}
+
 /// Brief neutral pulse when a selected history revision finishes rendering.
 pub fn history_frame_flash_color(light: bool) -> Color {
     if light { HISTORY_FRAME_FLASH_LIGHT } else { HISTORY_FRAME_FLASH_DARK }
@@ -965,7 +1015,8 @@ mod tests {
     use super::{
         Span, ViewState, history_border_color, history_glow_bg, is_table_delimiter_line,
         lerp_color, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
-        selected_bg, time_machine_color_at, time_machine_palette, time_machine_rotation_fraction,
+        selected_bg, starfield_color, starfield_star_at, time_machine_color_at,
+        time_machine_palette, time_machine_rotation_fraction,
     };
     use crate::highlight::Highlighter;
     use ratatui::style::{Color, Modifier, Style};
@@ -1053,6 +1104,52 @@ mod tests {
         let clock = std::time::Instant::now();
         let f = time_machine_rotation_fraction(clock);
         assert!((0.0..1.0).contains(&f), "fraction in [0,1): {f}");
+    }
+
+    #[test]
+    fn starfield_is_a_stable_sparse_sprinkle() {
+        // The same cell always answers with the same star (or none):
+        // placement is a pure hash, so the sky never flickers between
+        // frames.
+        for (x, y) in [(0u16, 0u16), (3, 5), (40, 12), (79, 23)] {
+            assert_eq!(starfield_star_at(x, y), starfield_star_at(x, y));
+        }
+        // Over a full 80×24 screen the sprinkle stays a sprinkle — a
+        // sky, not a blizzard — and every star wears a known glyph
+        // with a phase inside the twinkle lap.
+        let mut n = 0;
+        for x in 0..80u16 {
+            for y in 0..24u16 {
+                if let Some(star) = starfield_star_at(x, y) {
+                    n += 1;
+                    assert!(matches!(star.glyph, '·' | '✦' | '+'), "{:?}", star.glyph);
+                    assert!((0.0..=1.0).contains(&star.phase), "{}", star.phase);
+                }
+            }
+        }
+        assert!((10..=120).contains(&n), "sparse density: {n} stars on 80×24");
+    }
+
+    #[test]
+    fn starfield_twinkle_breathes_inside_the_nebula_family() {
+        for light in [false, true] {
+            // The swing stays RGB throughout the lap…
+            for i in 0..=10 {
+                let c = starfield_color(light, 0.3, i as f32 / 10.0);
+                assert!(matches!(c, Color::Rgb(..)), "{c:?}");
+            }
+            // …actually moves (a quarter-lap shifts the sine)…
+            assert_ne!(
+                starfield_color(light, 0.0, 0.0),
+                starfield_color(light, 0.0, 0.25)
+            );
+            // …and a star's phase is just its head start into the lap:
+            // shifting the clock by the phase lands on the same color.
+            assert_eq!(
+                starfield_color(light, 0.25, 0.0),
+                starfield_color(light, 0.0, 0.25)
+            );
+        }
     }
 
     #[test]

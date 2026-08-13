@@ -3206,9 +3206,16 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
             && app
                 .history_frame_flash_until
                 .is_none_or(|until| Instant::now() >= until)
-            && let Some(effect) = app.time_machine_fx.as_mut()
         {
-            f.render_effect(effect, frame, last_tick);
+            // The sky first, the frame over it: each repaints only its
+            // own cells (interior blanks vs border glyphs), the order
+            // just keeps the border unmistakably the frame's.
+            if let Some(effect) = app.starfield_fx.as_mut() {
+                f.render_effect(effect, frame, last_tick);
+            }
+            if let Some(effect) = app.time_machine_fx.as_mut() {
+                f.render_effect(effect, frame, last_tick);
+            }
         }
         // The scatter effects live on the text column (view-relative
         // rows mapped through the current scroll offset); finished

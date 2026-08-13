@@ -13,10 +13,12 @@ use ratatui::style::Color;
 use tachyonfx::fx::ShaderFnContext;
 use tachyonfx::{fx, CellFilter, CellIterator, Effect, EffectTimer, Interpolation, Motion};
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::app::STATUS_SECS;
 use crate::view::{
-    perimeter_index, time_machine_color_at, time_machine_palette, time_machine_rotation_fraction,
-    TIME_MACHINE_ROTATION_MS,
+    perimeter_index, starfield_color, starfield_star_at, time_machine_color_at,
+    time_machine_palette, time_machine_rotation_fraction, TIME_MACHINE_ROTATION_MS,
 };
 
 /// How long the timeline bar's slide-in/out takes (milliseconds).
@@ -101,6 +103,70 @@ pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
                 }
                 let perim = perimeter_index(rx, ry, w, h);
                 cell.set_fg(time_machine_color_at(palette, perim, perimeter, rot));
+            }
+        },
+    )
+}
+
+/// The starfield behind the page while browsing the past (`--fx`): a
+/// sparse, screen-fixed sprinkle of stars twinkling in the page's empty
+/// cells — the space the time-machine frame floats in. Stars are only
+/// painted where nothing lives: past each row's text tail (one breathing
+/// cell after the last glyph, its full width honored so a CJK tail never
+/// exposes its continuation cell), on blank rows, and never over a
+/// colored background (selection, review bands, the toast banner) — the
+/// text column stays calm while the emptiness around it becomes sky.
+/// Placement, glyph, and phase are a pure hash of the screen cell (see
+/// [`starfield_star_at`]); the twinkle rides the same rotation lap as
+/// the frame gradient, and the clock lives in the effect's own state so
+/// skipped frames never make the sky stutter.
+pub(crate) fn starfield_effect(light: bool) -> Effect {
+    fx::effect_fn_buf(
+        Instant::now(),
+        EffectTimer::from_ms(TIME_MACHINE_ROTATION_MS as u32 * 60, Interpolation::Linear),
+        move |clock: &mut Instant, ctx, buf| {
+            let rot = time_machine_rotation_fraction(*clock);
+            let area = ctx.area;
+            if area.width < 3 || area.height < 3 {
+                return; // no interior to sprinkle
+            }
+            let last_col = area.right() - 1; // the right border column
+            // The interior rows. The browsing timeline bar owns the
+            // bottom content row while it is up (the times row on wide
+            // terminals): the sky stops one row short of it.
+            let mut bottom = area.bottom() - 1;
+            if TIMELINE_BAR_VISIBLE.load(Ordering::Relaxed) {
+                bottom = bottom.saturating_sub(1);
+            }
+            for y in (area.y + 1)..bottom {
+                // Pass 1: the row's text tail — the column one past the
+                // last non-blank glyph plus one breathing cell. Stepping
+                // by glyph width skips the hidden continuation cells of
+                // wide characters.
+                let mut tail = area.x + 1;
+                let mut x = area.x + 1;
+                while x < last_col {
+                    let sym = buf[(x, y)].symbol();
+                    let w = sym.width().max(1) as u16;
+                    if !sym.trim().is_empty() {
+                        tail = x + w + 1;
+                    }
+                    x += w;
+                }
+                // Pass 2: stars only in the emptiness beyond the tail.
+                for x in tail..last_col {
+                    let cell = &mut buf[(x, y)];
+                    if !cell.symbol().trim().is_empty() {
+                        continue;
+                    }
+                    if cell.style().bg.is_some_and(|bg| bg != Color::Reset) {
+                        continue;
+                    }
+                    if let Some(star) = starfield_star_at(x, y) {
+                        cell.set_char(star.glyph);
+                        cell.set_fg(starfield_color(light, star.phase, rot));
+                    }
+                }
             }
         },
     )

@@ -2600,6 +2600,10 @@ use crate::comment::Selection;
             app.time_machine_fx.is_some(),
             "the time-machine frame effect exists with --fx"
         );
+        assert!(
+            app.starfield_fx.is_some(),
+            "the starfield exists with --fx too"
+        );
         // A fresh App built with `--no-fx` from the start has no frame
         // effect, and its toasts never fade.
         let (mut app, _dir) = make_session();

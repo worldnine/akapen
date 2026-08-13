@@ -139,6 +139,12 @@ pub(crate) struct App {
     /// past in view mode; `None` with `--no-fx`. Its rotation clock
     /// lives inside the effect itself.
     pub(crate) time_machine_fx: Option<tachyonfx::Effect>,
+    /// The twinkling starfield behind the page while browsing the past
+    /// (tachyonfx), created at startup alongside
+    /// [`App::time_machine_fx`] when `--fx` is on: stars live in the
+    /// page's empty cells, the space the frame floats in. Its twinkle
+    /// clock lives inside the effect too.
+    pub(crate) starfield_fx: Option<tachyonfx::Effect>,
     /// The timeline bar's slide-in/out effect (tachyonfx), created when
     /// the bar appears or disappears and rendered over its rows until
     /// it completes.
@@ -331,6 +337,7 @@ impl App {
         let time_machine_fx = config
             .fx
             .then(|| crate::effects::time_machine_border_effect(light));
+        let starfield_fx = config.fx.then(|| crate::effects::starfield_effect(light));
         Self {
             config,
             files,
@@ -348,6 +355,7 @@ impl App {
             history_render_due: None,
             history_frame_flash_until: None,
             time_machine_fx,
+            starfield_fx,
             timeline_fx: None,
             timeline_exit_until: None,
             timeline_exit_ms: Duration::from_millis(crate::effects::TIMELINE_SLIDE_MS as u64),
@@ -803,7 +811,8 @@ impl App {
         self.toast_fx.is_some()
             || !self.appear_fx.is_empty()
             || !self.ghost_fx.is_empty()
-            || (self.is_historical() && self.time_machine_fx.is_some())
+            || (self.is_historical()
+                && (self.time_machine_fx.is_some() || self.starfield_fx.is_some()))
     }
 
     pub(crate) fn current_revision_context(&self) -> Option<String> {
