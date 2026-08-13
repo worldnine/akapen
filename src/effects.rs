@@ -58,7 +58,7 @@ pub(crate) fn timeline_slide_out() -> Effect {
 
 /// The animated frame while browsing the past (`--fx`, the default): a
 /// custom shader repaints every border-glyph cell of the frame with the
-/// rotating purple→cyan gradient (one smooth wave per lap — see
+/// rotating purple→pink gradient (one smooth wave per lap — see
 /// [`time_machine_color_at`]). Markers (`▌`/`▀`/`▐`), the cursor `>`,
 /// and message text are not border glyphs and keep their own colors; the
 /// scrollbar thumb and the message row are drawn after the effect

@@ -3327,10 +3327,10 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     ),
                     crate::timeline::PointKind::Local => {
-                        ('●', Style::default().fg(Color::Cyan))
+                        ('●', Style::default().fg(crate::view::TIMELINE_LOCAL_COLOR))
                     }
                     crate::timeline::PointKind::Commit => {
-                        ('◼', Style::default().fg(Color::LightBlue))
+                        ('◼', Style::default().fg(crate::view::TIMELINE_COMMIT_COLOR))
                     }
                 },
                 None => (
