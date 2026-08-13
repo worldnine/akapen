@@ -4218,6 +4218,73 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn rewrite_pair_lights_as_one_block_when_selected() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nold-two\nline3\n");
+
+        // `n` lands on the rewritten line: the selection covers the green
+        // line, and the paired old content above lights up with it — the
+        // diff pair is one focused block.
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert!(app.selection.is_some(), "rewrites keep the line selection");
+        let (text, _) = build_rows(&app, 30, 75);
+        let old_body = &text.lines[1].spans[2];
+        assert_eq!(old_body.style.fg, Some(Color::LightRed));
+        assert_eq!(old_body.style.bg, Some(app.ui_selected_bg));
+        assert!(!old_body.style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(
+            text.lines[1].spans[0].content.as_ref(),
+            "▌",
+            "no `>` on rewrite old rows — the real cursor is on the new line"
+        );
+    }
+
+    #[test]
+    fn cursor_on_the_anchor_line_lights_its_deletion() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nGONE A\nGONE B\nline2\nline3\n");
+
+        // Plain j/k (no n, no focus): standing on the anchor line lights
+        // the deleted rows above it.
+        on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.deletion_focus(), None, "j/k does not create a focus");
+        let (text, _) = build_rows(&app, 30, 75);
+        let body = &text.lines[1].spans[2];
+        assert_eq!(body.style.fg, Some(Color::LightRed));
+        assert_eq!(body.style.bg, Some(app.ui_selected_bg));
+        assert_eq!(
+            text.lines[3].spans[0].content.as_ref(),
+            ">",
+            "without a focus the cursor glyph stays on the anchor line"
+        );
+    }
+
+    #[test]
+    fn view_n_on_a_deletion_hands_the_focus_to_source_via_tab() {
+        let mut app = make_app(3, Mode::View);
+        set_baseline(&mut app, "line1\nGONE A\nGONE B\nline2\nline3\n");
+
+        on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert!(
+            matches!(app.status.as_ref(),
+                Some((message, _, false)) if message.contains("Tab: inspect & comment")),
+            "the view flash points to source mode: {:?}",
+            app.status
+        );
+        assert!(app.selection.is_some(), "view keeps its anchor selection");
+
+        on_view_key(&mut app, KeyCode::Tab, KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Source);
+        assert_eq!(
+            app.deletion_focus(),
+            Some(1),
+            "Tab arrives in source with the deletion focused, as promised"
+        );
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
     fn clip_if_needed_only_marks_real_overflows() {
         assert_eq!(clip_if_needed("short", 24), "short");
         assert_eq!(clip_if_needed("testdata", 24), "testdata");

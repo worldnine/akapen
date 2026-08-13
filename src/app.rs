@@ -531,7 +531,13 @@ impl App {
     /// `c` comment quotes while the focus is live — the deleted content
     /// itself, not the anchor line that happens to sit below it.
     pub(crate) fn focused_deletion_content(&self) -> Option<String> {
-        let line = self.deletion_focus()?;
+        self.deleted_content_at(self.deletion_focus()?)
+    }
+
+    /// The baseline text deleted at `line` (every block anchored there),
+    /// joined in document order — regardless of any focus. `None` when no
+    /// deletion anchors at the line.
+    pub(crate) fn deleted_content_at(&self, line: usize) -> Option<String> {
         let last = self.source.len().saturating_sub(1);
         let parts: Vec<&str> = self
             .comparison_deleted_blocks
