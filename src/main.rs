@@ -1847,6 +1847,18 @@ fn enter_source_mode(app: &mut App) {
     } else {
         app.cursor = app.view.cursor;
     }
+    // A view-mode `n` that landed on a pure deletion carried its focus
+    // here (the view keeps a one-line selection for the `▀` mark). Drop
+    // that selection so the focus goes live: the promised "Tab: inspect
+    // & comment" arrives with the deleted rows focused, not with the
+    // untouched anchor line selected.
+    if app.focused_deletion == Some(app.cursor)
+        && app
+            .selection
+            .is_some_and(|sel| sel.range() == (app.cursor, app.cursor))
+    {
+        app.selection = None;
+    }
     app.mode = Mode::Source;
     // The row cache is built during source-mode drawing; build it now so
     // keep_cursor_visible can walk it (line_rows starts empty, and row_of
@@ -2318,8 +2330,10 @@ fn jump_review_mark(app: &mut App, dir: isize) {
     // not the (unchanged) line itself. In source mode the landing focuses
     // those rows — no selection on the anchor line, bright deleted rows,
     // and `c` comments the deletion — instead of highlighting a line the
-    // agent never touched. View mode keeps the selection: it has only the
-    // `▀` position mark to point at.
+    // agent never touched. View mode keeps the selection (it has only the
+    // `▀` position mark to point at) but records the focus too, so a Tab
+    // into source arrives with the deletion focused (see
+    // [`enter_source_mode`]) — the flash promises exactly that.
     let is_deletion = start == end
         && app.comparison_deleted_before.contains(&start)
         && !app.comparison_changed.contains(&start);
@@ -2327,7 +2341,7 @@ fn jump_review_mark(app: &mut App, dir: isize) {
         app.selection = None;
         app.focused_deletion = Some(start);
     } else {
-        app.focused_deletion = None;
+        app.focused_deletion = if is_deletion { Some(start) } else { None };
         app.selection = Some(Selection {
             anchor: start,
             cursor: end,
@@ -2341,17 +2355,25 @@ fn jump_review_mark(app: &mut App, dir: isize) {
     } else {
         app.center_source_range(start, end, app.source_viewport_rows() as u16);
     }
-    if is_deletion && app.mode == Mode::Source {
+    if is_deletion {
         let removed = app
-            .focused_deletion_content()
+            .deleted_content_at(start)
             .map(|content| content.split('\n').count())
             .unwrap_or(0);
+        // View shows only the `▀` position mark — the deleted content (and
+        // commenting on it) lives in source mode, so point the way there.
+        let action = if app.mode == Mode::Source {
+            "c: comment on deletion"
+        } else {
+            "Tab: inspect & comment"
+        };
         app.flash(format!(
-            "difference {}/{} · {} deleted line{} · c: comment on deletion",
+            "difference {}/{} · {} deleted line{} · {}",
             target + 1,
             targets.len(),
             removed,
-            if removed == 1 { "" } else { "s" }
+            if removed == 1 { "" } else { "s" },
+            action
         ));
     } else {
         app.flash(format!(
@@ -3734,12 +3756,19 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // The baseline text deleted at this position renders first: red
         // `▌` rows above their anchor line. Blocks that fell past the
         // last line (an EOF deletion) render below its text instead.
-        // While `n`'s deletion focus is on this line, the CURSOR's visual
-        // language moves onto these rows — bright red text, the DarkGray
-        // cursor band, and the `>` glyph on the first row — because they
-        // are the current difference; the anchor line below renders as an
-        // ordinary line meanwhile (two cursor bands would fight the eye).
+        //
+        // Lighting rule: the difference is the DIFF PAIR, so deleted rows
+        // light up (bright red on the DarkGray cursor band) whenever their
+        // anchor line is the cursor line or inside the selection — an
+        // `n`-landed rewrite lights old and new content as one block, and
+        // j/k passing the anchor lights its deletion too. `n`'s
+        // pure-deletion focus additionally moves the `>` glyph onto the
+        // first deleted row and renders the (untouched) anchor line as an
+        // ordinary line — two cursor bands would fight the eye.
         let deletion_focused = app.deletion_focus() == Some(idx);
+        let deletion_lit = deletion_focused
+            || idx == app.cursor
+            || app.selection.is_some_and(|s| s.contains(idx));
         let (deleted_above, deleted_below) = app.deleted_blocks_at(idx);
         for (i, block) in deleted_above.iter().enumerate() {
             out.extend(deleted_block_lines(
@@ -3747,7 +3776,7 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 &block.content,
                 width,
                 full_width,
-                deletion_focused,
+                deletion_lit,
                 deletion_focused && i == 0,
             ));
         }
@@ -3886,7 +3915,7 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 &block.content,
                 width,
                 full_width,
-                deletion_focused,
+                deletion_lit,
                 deletion_focused && deleted_above.is_empty() && i == 0,
             ));
         }
