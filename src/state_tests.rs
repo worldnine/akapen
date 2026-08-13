@@ -4136,6 +4136,70 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn n_focuses_pure_deletions_instead_of_selecting_the_anchor_line() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nGONE A\nGONE B\nline2\nline3\n");
+
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 1, "the cursor lands on the anchor line");
+        assert!(
+            app.selection.is_none(),
+            "the (unchanged) anchor line is not selected"
+        );
+        assert_eq!(app.deletion_focus(), Some(1));
+        assert!(
+            matches!(app.status.as_ref(), Some((message, _, false)) if message.contains("deleted")),
+            "the flash names the deletion: {:?}",
+            app.status
+        );
+
+        // Focused rows render bright (no DIM), and dissolve back to DIM
+        // when the cursor leaves the anchor line.
+        let (text, _) = build_rows(&app, 30, 75);
+        let body = &text.lines[1].spans[2];
+        assert_eq!(body.style.fg, Some(Color::LightRed));
+        assert!(!body.style.add_modifier.contains(Modifier::DIM));
+        on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
+        assert_eq!(app.deletion_focus(), None);
+        let (text, _) = build_rows(&app, 30, 75);
+        let body = &text.lines[1].spans[2];
+        assert!(body.style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn c_on_a_focused_deletion_quotes_the_deleted_text() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nGONE A\nGONE B\nline2\nline3\n");
+
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        assert_eq!((app.input_start, app.input_end), (1, 1));
+        app.input = "なぜ消した?".into();
+        app.input_cursor = app.input.len();
+        on_input_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        let comment = app.comments.last().expect("comment added");
+        assert_eq!((comment.start, comment.end), (2, 2), "anchored to the anchor line");
+        assert_eq!(
+            comment.lines, "GONE A\nGONE B",
+            "the snippet quotes the deleted baseline text, not the anchor line"
+        );
+    }
+
+    #[test]
+    fn esc_dismisses_the_deletion_focus_before_quitting() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nGONE A\nGONE B\nline2\nline3\n");
+
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(app.deletion_focus(), Some(1));
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert_eq!(app.deletion_focus(), None);
+        assert!(app.running, "Esc consumed the focus instead of quitting");
+    }
+
+    #[test]
     fn clip_if_needed_only_marks_real_overflows() {
         assert_eq!(clip_if_needed("short", 24), "short");
         assert_eq!(clip_if_needed("testdata", 24), "testdata");

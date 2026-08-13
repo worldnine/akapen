@@ -1137,6 +1137,7 @@ fn refresh_comparison_marks(app: &mut App) {
         app.comparison_changed.clear();
         app.comparison_deleted_before.clear();
         app.comparison_deleted_blocks.clear();
+        app.focused_deletion = None;
         return;
     };
     let (changed, deleted, blocks) =
@@ -1144,6 +1145,9 @@ fn refresh_comparison_marks(app: &mut App) {
     app.comparison_changed = changed;
     app.comparison_deleted_before = deleted;
     app.comparison_deleted_blocks = blocks;
+    // The blocks were replaced: a stale focus could light rows that mean
+    // something else now.
+    app.focused_deletion = None;
 }
 
 /// Move only the lightweight history cursor. The rendered Markdown remains
@@ -2310,10 +2314,25 @@ fn jump_review_mark(app: &mut App, dir: isize) {
             .unwrap_or(targets.len() - 1)
     };
     let (start, end) = targets[target];
-    app.selection = Some(Selection {
-        anchor: start,
-        cursor: end,
-    });
+    // A pure deletion's difference is the red rows above the target line,
+    // not the (unchanged) line itself. In source mode the landing focuses
+    // those rows — no selection on the anchor line, bright deleted rows,
+    // and `c` comments the deletion — instead of highlighting a line the
+    // agent never touched. View mode keeps the selection: it has only the
+    // `▀` position mark to point at.
+    let is_deletion = start == end
+        && app.comparison_deleted_before.contains(&start)
+        && !app.comparison_changed.contains(&start);
+    if is_deletion && app.mode == Mode::Source {
+        app.selection = None;
+        app.focused_deletion = Some(start);
+    } else {
+        app.focused_deletion = None;
+        app.selection = Some(Selection {
+            anchor: start,
+            cursor: end,
+        });
+    }
     app.cursor = end;
     app.view.goto_source_line(end);
     if app.mode == Mode::View {
@@ -2322,17 +2341,31 @@ fn jump_review_mark(app: &mut App, dir: isize) {
     } else {
         app.center_source_range(start, end, app.source_viewport_rows() as u16);
     }
-    app.flash(format!(
-        "difference {}/{} · L{}{}",
-        target + 1,
-        targets.len(),
-        start + 1,
-        if end > start {
-            format!("-{}", end + 1)
-        } else {
-            String::new()
-        }
-    ));
+    if is_deletion && app.mode == Mode::Source {
+        let removed = app
+            .focused_deletion_content()
+            .map(|content| content.split('\n').count())
+            .unwrap_or(0);
+        app.flash(format!(
+            "difference {}/{} · {} deleted line{} · c: comment on deletion",
+            target + 1,
+            targets.len(),
+            removed,
+            if removed == 1 { "" } else { "s" }
+        ));
+    } else {
+        app.flash(format!(
+            "difference {}/{} · L{}{}",
+            target + 1,
+            targets.len(),
+            start + 1,
+            if end > start {
+                format!("-{}", end + 1)
+            } else {
+                String::new()
+            }
+        ));
+    }
 }
 
 pub(crate) fn acknowledge_review(app: &mut App, announce: bool) -> bool {
@@ -2560,6 +2593,9 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
                 app.flash("reload cancelled");
             } else if app.selection.take().is_some() {
                 app.flash("selection cancelled");
+            } else if app.deletion_focus().is_some() {
+                app.focused_deletion = None;
+                app.flash("deletion focus cancelled");
             } else if app.esc_quit_enabled() {
                 request_quit(app);
             }
@@ -2722,17 +2758,24 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                 app.flash_err("empty comment — not added (Esc to cancel)");
                 return;
             }
+            // While `n`'s deletion focus is live (the composer keeps the
+            // cursor on the anchor line with no selection), the comment is
+            // about the deletion: quote the deleted baseline text instead
+            // of the anchor line the composer happens to sit on.
+            let deletion_snippet = app.focused_deletion_content();
             if let Some(idx) = app.editing_comment {
                 // Re-edit: replace the text and refresh its source snippet.
                 if let Some(c) = app.comments.get_mut(idx) {
                     c.text = text;
-                    c.lines = app.source.snippet(c.start, c.end);
+                    c.lines = deletion_snippet
+                        .unwrap_or_else(|| app.source.snippet(c.start, c.end));
                 }
                 app.flash(format!("comment updated ({} total)", app.comments.len()));
             } else {
-                let lines = app
-                    .source
-                    .snippet(app.input_start as u32 + 1, app.input_end as u32 + 1);
+                let lines = deletion_snippet.unwrap_or_else(|| {
+                    app.source
+                        .snippet(app.input_start as u32 + 1, app.input_end as u32 + 1)
+                });
                 let revision = app.current_revision_context();
                 app.comments.push(Comment {
                     file_path: app.current_file_path().to_path_buf(),
@@ -3691,9 +3734,12 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // The baseline text deleted at this position renders first: red
         // `▌` rows above their anchor line. Blocks that fell past the
         // last line (an EOF deletion) render below its text instead.
+        // While `n`'s deletion focus is on this line, the rows render
+        // bright instead of DIM — they ARE the current difference.
+        let deletion_focused = app.deletion_focus() == Some(idx);
         let (deleted_above, deleted_below) = app.deleted_blocks_at(idx);
         for block in &deleted_above {
-            out.extend(deleted_block_lines(app, &block.content, width));
+            out.extend(deleted_block_lines(app, &block.content, width, deletion_focused));
         }
         let selected = app.selection.is_some_and(|s| s.contains(idx));
         let revision = app.current_revision_context();
@@ -3825,7 +3871,7 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             out.push(Line::from(spans));
         }
         for block in &deleted_below {
-            out.extend(deleted_block_lines(app, &block.content, width));
+            out.extend(deleted_block_lines(app, &block.content, width, deletion_focused));
         }
         // Inline comment bars: one per comment ending on this line, stacked
         // (current file only; the one being re-edited is hidden under the
@@ -3864,14 +3910,29 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
 /// and a blank number column on the first wrapped row (the line has no
 /// number in the displayed document), a gutter-width indent on
 /// continuation rows, and the text in DIM red. Display-only rows: no
-/// cursor, selection, or comment treatment applies. The row count must
+/// cursor, selection, or comment treatment applies. While `n`'s deletion
+/// focus is on the block (`focused`), the DIM lifts and the mark
+/// brightens — the block is the current difference. The row count must
 /// match [`crate::app::deleted_block_rows`] — same per-line
 /// [`wrap_spans`] at the same width.
-fn deleted_block_lines(app: &App, content: &str, width: usize) -> Vec<Line<'static>> {
-    let text_style = Style::default()
-        .fg(Color::Red)
-        .add_modifier(Modifier::DIM);
-    let mark_style = Style::default().fg(Color::Red);
+fn deleted_block_lines(
+    app: &App,
+    content: &str,
+    width: usize,
+    focused: bool,
+) -> Vec<Line<'static>> {
+    let text_style = if focused {
+        Style::default().fg(Color::LightRed)
+    } else {
+        Style::default().fg(Color::Red).add_modifier(Modifier::DIM)
+    };
+    let mark_style = if focused {
+        Style::default()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Red)
+    };
     let mut out = Vec::new();
     for line in content.split('\n') {
         let wrapped = wrap_spans(
