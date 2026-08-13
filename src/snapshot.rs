@@ -141,6 +141,18 @@ impl SnapshotCache {
         self.materialize(&index)
     }
 
+    // STUB: feat/snapshot-parent の本実装にマージ時に置き換わる（parent 引数は捨てる）。
+    // history 側が参照する次のコミットまでは未使用なので allow を付ける。
+    #[allow(dead_code)]
+    pub(crate) fn record_with_parent(
+        &self,
+        path: &Path,
+        content: &str,
+        _parent: Option<String>,
+    ) -> Result<CachedFile> {
+        self.record(path, content)
+    }
+
     /// Start a new UI session for a file. Comment pins belong to the
     /// process that created them (comments themselves are not persisted),
     /// so stale pins from an earlier or crashed session are released here.
@@ -157,6 +169,17 @@ impl SnapshotCache {
         self.save_index(&canonical, &index)?;
         self.gc_global()?;
         self.materialize(&index)
+    }
+
+    // STUB: 同上
+    #[allow(dead_code)]
+    pub(crate) fn open_with_parent(
+        &self,
+        path: &Path,
+        content: &str,
+        _parent: Option<String>,
+    ) -> Result<CachedFile> {
+        self.open(path, content)
     }
 
     #[cfg(test)]
