@@ -3216,18 +3216,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     // while the toast is the top message).
     if app.config.fx && app.view_active() {
         crate::effects::set_timeline_bar_visible(timeline_on);
-        // How deep into the timeline the traveler is (0 = just behind
-        // NOW, 1 = the oldest revision) — the frame effects scale their
-        // drama with it. The LIVE position feeds it (not the rendered
-        // one), so the sky already thickens while an arrow is held.
-        let depth = app
-            .history()
-            .filter(|history| history.revisions.len() > 1)
-            .map(|history| {
-                history.position as f32 / (history.revisions.len() - 1) as f32
-            })
-            .unwrap_or(0.0);
-        crate::effects::set_time_depth(depth);
+        crate::effects::set_time_depth(travel_depth(app));
         // Same geometry draw_view builds: one column off the left edge,
         // the body's full height.
         let frame = Rect {
@@ -3352,6 +3341,18 @@ fn timeline_bar_rect(area: Rect) -> Rect {
 /// and the axis on the row above (`●` LOCAL / `◼` COMMIT / `◆` viewing
 /// / `▮` baseline, dim left of the review baseline). Drawn over the
 /// static UI before the effects; the slide effect animates it.
+/// How deep into the timeline the traveler is: 0 = just behind NOW,
+/// 1 = the oldest revision. The LIVE position feeds it (not the
+/// rendered one), so the effects already deepen while an arrow is held.
+/// The frame effects and the timeline bar's marker colors both scale
+/// their drama with it.
+fn travel_depth(app: &App) -> f32 {
+    app.history()
+        .filter(|history| history.revisions.len() > 1)
+        .map(|history| history.position as f32 / (history.revisions.len() - 1) as f32)
+        .unwrap_or(0.0)
+}
+
 fn draw_timeline_bar(f: &mut Frame, app: &App) {
     let width = f.area().width as usize;
     let height = f.area().height;
@@ -3366,6 +3367,17 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
     };
     let words_row = height.saturating_sub(1);
     let axis_row = height.saturating_sub(2);
+    // The scrubber's family colors ride the same depth shift as the
+    // frame: the deeper the traveler, the further LOCAL's pink and
+    // COMMIT's periwinkle sink toward violet — the bar and the frame
+    // read as one instrument. `--no-fx` keeps the static colors.
+    let depth_color = |c: Color| -> Color {
+        if app.config.fx {
+            crate::view::time_machine_depth_shift(app.ui_light, c, travel_depth(app))
+        } else {
+            c
+        }
+    };
 
     // Row 2: the axis — markers over the line. The line is dim left of
     // the review baseline (reviewed history is behind you) and normal
@@ -3402,12 +3414,14 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
                         '▮',
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     ),
-                    crate::timeline::PointKind::Local => {
-                        ('●', Style::default().fg(crate::view::TIMELINE_LOCAL_COLOR))
-                    }
-                    crate::timeline::PointKind::Commit => {
-                        ('◼', Style::default().fg(crate::view::TIMELINE_COMMIT_COLOR))
-                    }
+                    crate::timeline::PointKind::Local => (
+                        '●',
+                        Style::default().fg(depth_color(crate::view::TIMELINE_LOCAL_COLOR)),
+                    ),
+                    crate::timeline::PointKind::Commit => (
+                        '◼',
+                        Style::default().fg(depth_color(crate::view::TIMELINE_COMMIT_COLOR)),
+                    ),
                 },
                 None => (
                     '─',

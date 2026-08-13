@@ -20,6 +20,7 @@ use crate::view::{
     ease_out_cubic, perimeter_index, rotation_period_ms, starfield_color, starfield_star_at,
     time_machine_color_at, time_machine_depth_shift, time_machine_palette,
     time_machine_rotation_fraction, warp_ring_color, warp_ring_rect, TIME_MACHINE_ROTATION_MS,
+    WARP_INNER_SCALE,
 };
 
 /// How long the timeline bar's slide-in/out takes (milliseconds).
@@ -237,10 +238,14 @@ pub(crate) fn warp_effect(deeper: bool, light: bool) -> Effect {
                     continue; // not launched yet, or already gone
                 }
                 let eased = ease_out_cubic(tk);
+                // The flight stays in the frame's outer margin: rings
+                // travel between WARP_INNER_SCALE and the frame itself,
+                // never across the middle of the page.
+                let travel = 1.0 - WARP_INNER_SCALE;
                 let scale = if deeper {
-                    0.2 + 0.8 * eased
+                    WARP_INNER_SCALE + travel * eased
                 } else {
-                    1.0 - 0.8 * eased
+                    1.0 - travel * eased
                 };
                 if scale >= 0.98 {
                     continue; // coincides with the real frame: hand off

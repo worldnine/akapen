@@ -251,6 +251,12 @@ pub fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// How far into the frame a warp ring flies: 1.0 is the frame itself,
+/// this is the innermost scale a ring ever reaches. The flight lives in
+/// the frame's outer margin — a ring crossing the middle of the page
+/// reads as an attack on the text, not as a window passing by.
+pub const WARP_INNER_SCALE: f32 = 0.75;
+
 /// The warp ring's rectangle at `scale` (0.0..=1.0 of the frame), centered
 /// in `area`: the outline of a Time Machine window mid-flight. Never
 /// thinner than 2×2 (a ring needs corners) and never larger than the
@@ -272,15 +278,16 @@ pub fn warp_ring_rect(area: ratatui::layout::Rect, scale: f32) -> ratatui::layou
 /// the nebula's hot pink — so the window visibly approaches out of (or
 /// recedes into) the depth. The square root front-loads the ramp: a
 /// window crossing a 450 ms flight must look bright early, not only in
-/// its last frames. Scale runs 0.2..1.0 in flight; the clamps absorb
-/// the ends.
+/// its last frames. Scale runs [`WARP_INNER_SCALE`]..1.0 in flight; the
+/// clamps absorb the ends.
 pub fn warp_ring_color(light: bool, scale: f32) -> Color {
     let (far, near) = if light {
         (Color::Rgb(185, 165, 215), Color::Rgb(190, 70, 170))
     } else {
         (Color::Rgb(120, 105, 175), Color::Rgb(250, 120, 190))
     };
-    lerp_color(far, near, ((scale - 0.2) / 0.8).clamp(0.0, 1.0).sqrt())
+    let progress = (scale - WARP_INNER_SCALE) / (1.0 - WARP_INNER_SCALE);
+    lerp_color(far, near, progress.clamp(0.0, 1.0).sqrt())
 }
 
 /// Brief neutral pulse when a selected history revision finishes rendering.
@@ -1087,7 +1094,7 @@ mod tests {
         lerp_color, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
         ease_out_cubic, rotation_period_ms, selected_bg, starfield_color, starfield_star_at,
         time_machine_color_at, time_machine_depth_shift, time_machine_palette,
-        time_machine_rotation_fraction, warp_ring_color, warp_ring_rect,
+        time_machine_rotation_fraction, warp_ring_color, warp_ring_rect, WARP_INNER_SCALE,
     };
     use crate::highlight::Highlighter;
     use ratatui::style::{Color, Modifier, Style};
@@ -1199,10 +1206,11 @@ mod tests {
     #[test]
     fn warp_ring_color_brightens_with_proximity() {
         for light in [false, true] {
-            // In flight the ring stays RGB and lands exactly on the
-            // history border color when it reaches the frame.
+            // In flight (the outer margin, WARP_INNER_SCALE..1.0) the
+            // ring stays RGB throughout.
             for i in 0..=10 {
-                let c = warp_ring_color(light, 0.2 + 0.8 * i as f32 / 10.0);
+                let scale = WARP_INNER_SCALE + (1.0 - WARP_INNER_SCALE) * i as f32 / 10.0;
+                let c = warp_ring_color(light, scale);
                 assert!(matches!(c, Color::Rgb(..)), "{c:?}");
             }
             let near = if light {
@@ -1216,7 +1224,7 @@ mod tests {
                 "a landed ring blazes the nebula's hot pink"
             );
             assert_ne!(
-                warp_ring_color(light, 0.2),
+                warp_ring_color(light, WARP_INNER_SCALE),
                 warp_ring_color(light, 1.0),
                 "distance is visible"
             );
@@ -1224,7 +1232,8 @@ mod tests {
         // The ramp is front-loaded: by mid-flight the dark theme's red
         // channel (120 far → 250 near) is already closer to the near
         // pole than to the far one.
-        let Color::Rgb(mid_r, ..) = warp_ring_color(false, 0.6) else {
+        let mid = (WARP_INNER_SCALE + 1.0) / 2.0;
+        let Color::Rgb(mid_r, ..) = warp_ring_color(false, mid) else {
             panic!("rgb")
         };
         assert!(
