@@ -259,10 +259,11 @@ pub fn render(source: &Source, width: usize, highlighter: &Highlighter) -> Rende
             row_lines.push(r_lines);
         }
     }
-    // The vendored renderer emits the ● bullet itself (list markers only),
-    // so no post-pass rewriting is needed — and none may exist: a
-    // span-text pass also matched fenced-code lines like "-" or "- [x]"
-    // and silently destroyed their content.
+    // The vendored renderer emits list markers itself, copied verbatim
+    // from the source (`-`/`*`/`+`, ordered numbers as written), so no
+    // post-pass rewriting is needed — and none may exist: a span-text
+    // pass also matched fenced-code lines like "-" or "- [x]" and
+    // silently destroyed their content.
     let source_starts = build_starts_from_tags(&rows, &row_lines, &source.lines);
     let row_segments = build_row_segments_from_tags(&rows, &row_lines);
     // Which source lines rendered any text at all (appear in the tags).
@@ -855,23 +856,25 @@ mod tests {
     }
 
     #[test]
-    fn unordered_list_markers_become_bullets() {
+    fn list_markers_render_as_written_in_source() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         std::fs::write(
             &path,
-            "- りんご\n- バナナ\n  - 子リスト\n\n1. 番号\n\n- [x] 完了\n",
+            "- りんご\n- バナナ\n  - 子リスト\n\n1. 番号\n\n- [x] 完了\n\n* 星\n\n7. 七番\n",
         )
         .unwrap();
         let source = Source::load(path).unwrap();
         let Rendered { rows, .. } = render(&source, 60, &Highlighter::new(None, false));
         let all: String = rows.iter().flatten().map(|s| s.text.as_str()).collect();
-        assert!(all.contains("● りんご"), "bullet marker: {all:?}");
-        assert!(all.contains("● バナナ"));
-        assert!(all.contains("● 子リスト"), "nested items get bullets too");
-        assert!(all.contains("1. 番号"), "ordered markers stay numbers");
-        assert!(all.contains("● [x] 完了"), "task lists keep their checkbox");
-        assert!(!all.contains("- りんご"), "no raw hyphen markers left");
+        assert!(all.contains("- りんご"), "source marker kept: {all:?}");
+        assert!(all.contains("- バナナ"));
+        assert!(all.contains("- 子リスト"), "nested items keep their marker too");
+        assert!(all.contains("1. 番号"), "ordered markers stay as written");
+        assert!(all.contains("- [x] 完了"), "task lists keep their checkbox");
+        assert!(all.contains("* 星"), "star markers stay stars");
+        assert!(all.contains("7. 七番"), "numbers are not renumbered");
+        assert!(!all.contains('●'), "no invented bullet anywhere: {all:?}");
     }
 
     #[test]
@@ -885,7 +888,13 @@ mod tests {
         let Rendered { rows, .. } = render(&source, 60, &Highlighter::new(None, false));
         let all: String = rows.iter().flatten().map(|s| s.text.as_str()).collect();
         assert!(all.contains("- literal dash line"), "code kept verbatim: {all:?}");
-        assert!(!all.contains("● literal dash line"));
+        // Exactly verbatim: no marker span or indent was prepended.
+        assert!(
+            rows.iter().any(|r| {
+                r.iter().map(|s| s.text.as_str()).collect::<String>() == "- literal dash line"
+            }),
+            "code line is not treated as a list item"
+        );
     }
 
     #[test]
@@ -961,12 +970,13 @@ mod tests {
     }
 
     #[test]
-    fn bullets_come_from_the_renderer_never_rewrite_code() {
+    fn markers_come_from_the_renderer_never_rewrite_code() {
         // Regression: the old post-pass rewrote any span whose text was
         // exactly "-", "- [x]" or "- [ ]" — a fenced code block holding
-        // those lines lost its content. The bullet is now emitted by the
-        // renderer's list marker, so code lines are never touched while
-        // real lists (including inside blockquotes) still get bullets.
+        // those lines lost its content. The marker is now emitted by the
+        // renderer's list handler (copied from the source), so code lines
+        // are never touched while real lists (including inside
+        // blockquotes) still get their marker span.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
         std::fs::write(
@@ -977,14 +987,15 @@ mod tests {
         let source = Source::load(path).unwrap();
         let Rendered { rows, .. } = render(&source, 60, &Highlighter::new(None, false));
         let row_text = |r: &[Span]| r.iter().map(|s| s.text.as_str()).collect::<String>();
-        // Code lines survive verbatim: exact text, and no bullet anywhere.
+        // Code lines survive verbatim: exact text (a list treatment would
+        // have appended the marker's trailing space or an indent).
         for needle in ["-", "- [x]", "- [ ]", "--"] {
             let row = rows.iter().find(|r| row_text(r) == needle).expect(needle);
             assert_eq!(row_text(row), needle, "code line {needle:?} kept verbatim");
-            assert!(!row_text(row).contains('●'), "code line {needle:?} has no bullet");
         }
-        // Real lists get the bullet — at top level and inside a blockquote.
-        assert!(rows.iter().any(|r| row_text(r) == "● real item"));
-        assert!(rows.iter().any(|r| row_text(r) == "> ● quote item"));
+        // Real lists get the marker span — at top level and inside a
+        // blockquote.
+        assert!(rows.iter().any(|r| row_text(r) == "- real item"));
+        assert!(rows.iter().any(|r| row_text(r) == "> - quote item"));
     }
 }
