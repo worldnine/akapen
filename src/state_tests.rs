@@ -4042,6 +4042,99 @@ use crate::comment::Selection;
         );
     }
 
+    /// Set the review baseline to `baseline` and recompute marks + layout,
+    /// as a reload/ack would. NOW stays what `make_app` wrote.
+    fn set_baseline(app: &mut App, baseline: &str) {
+        app.histories[0].reviewed_content = Some(baseline.to_string());
+        refresh_review_marks(app);
+        app.refresh_line_rows();
+    }
+
+    fn row_text(line: &ratatui::text::Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn deleted_baseline_rows_render_inline_in_source() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nGONE A\nGONE B\nline2\nline3\n");
+
+        // The two deleted rows are folded into line2's band: layout total
+        // and the renderer agree row for row.
+        let total: usize = app.line_rows.iter().sum();
+        assert_eq!(total, 5, "3 source lines + 2 inline deleted rows");
+        let (text, _) = build_rows(&app, 30, 75);
+        assert_eq!(text.lines.len(), 5);
+        assert!(row_text(&text.lines[0]).contains("line1"));
+        assert!(row_text(&text.lines[1]).contains("GONE A"));
+        assert!(row_text(&text.lines[2]).contains("GONE B"));
+        assert!(row_text(&text.lines[3]).contains("line2"));
+
+        // A deleted row: red `▌` mark, blank number column, DIM red text.
+        let deleted = &text.lines[1];
+        assert_eq!(deleted.spans[0].content.as_ref(), "▌");
+        assert_eq!(deleted.spans[0].style.fg, Some(Color::Red));
+        assert!(
+            deleted.spans[1].content.chars().all(|c| c == ' '),
+            "deleted rows have no line number: {:?}",
+            deleted.spans[1].content
+        );
+        let body = &deleted.spans[2];
+        assert_eq!(body.style.fg, Some(Color::Red));
+        assert!(body.style.add_modifier.contains(Modifier::DIM));
+        // No `▀` position mark remains in source mode.
+        assert!(
+            text.lines.iter().all(|l| row_text(l).chars().all(|c| c != '▀')),
+            "the deletion position mark is view-only now"
+        );
+    }
+
+    #[test]
+    fn rewritten_lines_show_their_baseline_text() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nold-two\nline3\n");
+
+        // A same-length rewrite is a full diff pair: the baseline text
+        // renders as a red row above the green rewritten line…
+        let (text, _) = build_rows(&app, 30, 75);
+        assert_eq!(text.lines.len(), 4);
+        assert!(row_text(&text.lines[1]).contains("old-two"));
+        assert!(row_text(&text.lines[2]).contains("line2"));
+        assert!(app.comparison_changed.contains(&1));
+        // …while the net-deletion position set (view mode's `▀`, the
+        // review badge) intentionally stays empty for rewrites.
+        assert!(app.comparison_deleted_before.is_empty());
+    }
+
+    #[test]
+    fn eof_deletion_renders_below_the_last_line() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nline2\nline3\ntail gone\n");
+
+        let (text, _) = build_rows(&app, 30, 75);
+        assert_eq!(text.lines.len(), 4);
+        assert!(row_text(&text.lines[2]).contains("line3"));
+        assert!(
+            row_text(&text.lines[3]).contains("tail gone"),
+            "an EOF deletion renders below the last line, not above it"
+        );
+    }
+
+    #[test]
+    fn mouse_maps_deleted_rows_to_their_anchor_line() {
+        let mut app = make_app(3, Mode::Source);
+        set_baseline(&mut app, "line1\nGONE A\nGONE B\nline2\nline3\n");
+
+        // Bands: line1 = row 0; line2 = rows 1-3 (two deleted rows + its
+        // text); line3 = row 4. A click on a deleted row selects the
+        // anchor line, same attribution as comment bars.
+        assert_eq!(source_line_at(&app, 75, 0), Some(0));
+        assert_eq!(source_line_at(&app, 75, 1), Some(1));
+        assert_eq!(source_line_at(&app, 75, 2), Some(1));
+        assert_eq!(source_line_at(&app, 75, 3), Some(1));
+        assert_eq!(source_line_at(&app, 75, 4), Some(2));
+    }
+
     #[test]
     fn clip_if_needed_only_marks_real_overflows() {
         assert_eq!(clip_if_needed("short", 24), "short");

@@ -97,6 +97,56 @@ pub(crate) fn review_transition(
     (changed, deleted_before)
 }
 
+/// Baseline-relative marks plus the baseline text of every change, in one
+/// diff pass: the changed/deleted-position sets are identical to
+/// [`review_transition`], and the returned blocks carry the OLD side of
+/// every non-equal op — rewrites included, unlike the position set, which
+/// counts only net deletions. Source mode renders these blocks inline as
+/// red deleted rows (a unified-diff-style old side); view mode and the
+/// review badge keep consuming only the sets.
+///
+/// Block anchors are NOT clamped: an anchor equal to the new line count
+/// means "deleted after the last line" and renders below it.
+pub(crate) fn comparison_transition(
+    reviewed: &str,
+    now: &str,
+) -> (HashSet<usize>, HashSet<usize>, Vec<DeletedBlock>) {
+    // Diff the raw texts, NOT a lines-rejoined copy: rejoining drops the
+    // trailing newline, which turns a pure EOF deletion into a spurious
+    // rewrite of the last line (its old text would render as a deleted
+    // row of its own). (`review_transition` keeps the rejoined diff so
+    // the badge count and its tests stay bit-identical.)
+    let diff = TextDiff::from_lines(reviewed, now);
+    let old: Vec<&str> = reviewed.lines().collect();
+    let last = now.lines().count().saturating_sub(1);
+    let mut changed = HashSet::new();
+    let mut deleted_before = HashSet::new();
+    let mut blocks = Vec::new();
+    for op in diff.ops() {
+        let old_range = op.old_range();
+        let new_range = op.new_range();
+        if op.tag() == DiffTag::Equal {
+            continue;
+        }
+        if !new_range.is_empty() {
+            changed.extend(new_range.clone());
+        }
+        if old_range.len() > new_range.len() {
+            deleted_before.insert(new_range.start.min(last));
+        }
+        if !old_range.is_empty() {
+            blocks.push(DeletedBlock {
+                anchor: new_range.start,
+                content: old
+                    .get(old_range)
+                    .map(|lines| lines.join("\n"))
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    (changed, deleted_before, blocks)
+}
+
 fn line_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec<DeletedBlock>) {
     let old_text = old.join("\n");
     let new_text = new.join("\n");

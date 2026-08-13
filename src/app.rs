@@ -10,7 +10,7 @@ use ratatui::style::Color;
 use crate::comment::{Comment, Selection};
 use crate::config::{Config, EscQuit};
 use crate::highlight::{Highlighter, Span as HiSpan, wrap_spans};
-use crate::history::DocumentHistory;
+use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
 use crate::overlay::Overlay;
 use crate::snapshot::SnapshotCache;
@@ -83,6 +83,7 @@ pub(crate) struct FileState {
     /// Baseline-relative marks for the generation actually on screen.
     pub(crate) comparison_changed: HashSet<usize>,
     pub(crate) comparison_deleted_before: HashSet<usize>,
+    pub(crate) comparison_deleted_blocks: Vec<DeletedBlock>,
 }
 
 /// The TUI application state.
@@ -110,6 +111,12 @@ pub(crate) struct App {
     /// describe the displayed generation rather than the working tree.
     pub(crate) comparison_changed: HashSet<usize>,
     pub(crate) comparison_deleted_before: HashSet<usize>,
+    /// The baseline text of every change (rewrites included), anchored at
+    /// its position in the displayed document. Source mode renders these
+    /// inline as red deleted rows above their anchor line — the old side
+    /// of the baseline → displayed-generation diff. Display-only: cursor,
+    /// selection, and comments never address these rows.
+    pub(crate) comparison_deleted_blocks: Vec<DeletedBlock>,
     /// Until this instant the rendered view contains dim old blocks that
     /// are about to collapse out of the document.
     pub(crate) history_ghost_until: Option<Instant>,
@@ -331,6 +338,7 @@ impl App {
             review_deleted_before: HashSet::new(),
             comparison_changed: HashSet::new(),
             comparison_deleted_before: HashSet::new(),
+            comparison_deleted_blocks: Vec::new(),
             history_ghost_until: None,
             history_render_due: None,
             history_frame_flash_until: None,
@@ -478,12 +486,44 @@ impl App {
             extra[self.input_end] +=
                 composer_line_count(&self.input, self.input_cursor, full_width);
         }
+        // Inline deleted rows (the baseline text of every change) belong
+        // to their anchor line's band, like cards do — the whole scroll /
+        // cursor / mouse stack keeps working off one row count per line.
+        // A block past the last line clamps to it (rendered below its
+        // text; see `deleted_blocks_at`).
+        for block in &self.comparison_deleted_blocks {
+            let i = block.anchor.min(extra.len().saturating_sub(1));
+            if i < extra.len() {
+                extra[i] += deleted_block_rows(&block.content, self.content_width.max(1) as usize);
+            }
+        }
         self.line_rows = self
             .base_rows
             .iter()
             .zip(extra)
             .map(|(b, e)| b + e)
             .collect();
+    }
+
+    /// The deleted blocks that render inside line `idx`'s band, split into
+    /// (above the line's text, below it). Blocks anchor BEFORE their line;
+    /// a block whose anchor fell past the last line (content deleted at
+    /// EOF) clamps to the last line and renders below its text instead.
+    pub(crate) fn deleted_blocks_at(&self, idx: usize) -> (Vec<&DeletedBlock>, Vec<&DeletedBlock>) {
+        let last = self.source.len().saturating_sub(1);
+        let mut above = Vec::new();
+        let mut below = Vec::new();
+        for block in &self.comparison_deleted_blocks {
+            if block.anchor.min(last) != idx {
+                continue;
+            }
+            if block.anchor > last {
+                below.push(block);
+            } else {
+                above.push(block);
+            }
+        }
+        (above, below)
     }
 
     /// The number of display rows in `width` columns for line `idx`.
@@ -614,6 +654,8 @@ impl App {
         old.comparison_changed = std::mem::take(&mut self.comparison_changed);
         old.comparison_deleted_before =
             std::mem::take(&mut self.comparison_deleted_before);
+        old.comparison_deleted_blocks =
+            std::mem::take(&mut self.comparison_deleted_blocks);
 
         // Close the composer if it was open.
         self.input.clear();
@@ -644,6 +686,8 @@ impl App {
         self.comparison_changed = std::mem::take(&mut new.comparison_changed);
         self.comparison_deleted_before =
             std::mem::take(&mut new.comparison_deleted_before);
+        self.comparison_deleted_blocks =
+            std::mem::take(&mut new.comparison_deleted_blocks);
 
         self.current_file_index = new_index;
         self.history_ghost_until = None;
@@ -771,4 +815,25 @@ impl App {
             EscQuit::Auto => self.config.callback.is_some(),
         }
     }
+}
+
+/// Display rows one deleted block occupies at `width` content columns:
+/// each baseline line wraps exactly like a source line does (an empty
+/// line still takes one row — `wrap_spans` never returns zero rows).
+/// `build_rows` paints the same wrap per line, so the row-count caches
+/// and the renderer cannot disagree.
+pub(crate) fn deleted_block_rows(content: &str, width: usize) -> usize {
+    content
+        .split('\n')
+        .map(|line| {
+            wrap_spans(
+                &[HiSpan {
+                    text: line.to_string(),
+                    style: ratatui::style::Style::default(),
+                }],
+                width,
+            )
+            .len()
+        })
+        .sum()
 }

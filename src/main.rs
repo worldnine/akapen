@@ -222,6 +222,7 @@ fn activate_first_file(app: &mut App) {
     app.review_deleted_before = std::mem::take(&mut fs.review_deleted_before);
     app.comparison_changed = std::mem::take(&mut fs.comparison_changed);
     app.comparison_deleted_before = std::mem::take(&mut fs.comparison_deleted_before);
+    app.comparison_deleted_blocks = std::mem::take(&mut fs.comparison_deleted_blocks);
 }
 
 fn run(config: Config) -> Result<()> {
@@ -308,21 +309,15 @@ fn run(config: Config) -> Result<()> {
                 .unwrap_or_else(|| DocumentHistory::load(path, &state.source.content, 64))
         })
         .collect();
-    for ((state, history), path) in file_states
-        .iter_mut()
-        .zip(histories.iter())
-        .zip(files.iter())
-    {
+    for (state, history) in file_states.iter_mut().zip(histories.iter()) {
         if let Some(reviewed) = history.reviewed_content.as_deref() {
-            let (changed, deleted) = history::review_transition(
-                supports_view(path),
-                reviewed,
-                &state.source.content,
-            );
+            let (changed, deleted, blocks) =
+                history::comparison_transition(reviewed, &state.source.content);
             state.review_changed = changed;
             state.review_deleted_before = deleted;
             state.comparison_changed = state.review_changed.clone();
             state.comparison_deleted_before = state.review_deleted_before.clone();
+            state.comparison_deleted_blocks = blocks;
         }
     }
     app.histories = histories;
@@ -871,6 +866,15 @@ fn source_line_at(app: &App, width: usize, display_row: usize) -> Option<usize> 
             // Wrap rows only — `rows_of` folds the attached bars in, which
             // would double-count the cards below.
             let line_rows = app.base_rows.get(idx).copied().unwrap_or(1);
+            // Inline deleted rows belong to their anchor line's band, so
+            // a click on one selects the anchor line (same attribution as
+            // the comment bars below).
+            let (deleted_above, deleted_below) = app.deleted_blocks_at(idx);
+            let deleted_rows: usize = deleted_above
+                .iter()
+                .chain(&deleted_below)
+                .map(|block| crate::app::deleted_block_rows(&block.content, width))
+                .sum();
             let card_rows: usize = cards
                 .iter()
                 .filter(|c| c.end as usize - 1 == idx)
@@ -881,7 +885,7 @@ fn source_line_at(app: &App, width: usize, display_row: usize) -> Option<usize> 
             } else {
                 0
             };
-            line_rows + card_rows + composer_rows
+            line_rows + deleted_rows + card_rows + composer_rows
         })
         .collect();
     index_at_abs(&rows, app.offset, app.offset + display_row)
@@ -1108,6 +1112,7 @@ pub(crate) fn refresh_review_marks(app: &mut App) {
         app.review_deleted_before.clear();
         app.comparison_changed.clear();
         app.comparison_deleted_before.clear();
+        app.comparison_deleted_blocks.clear();
         return;
     };
     let (changed, deleted) = history::review_transition(
@@ -1131,15 +1136,14 @@ fn refresh_comparison_marks(app: &mut App) {
     else {
         app.comparison_changed.clear();
         app.comparison_deleted_before.clear();
+        app.comparison_deleted_blocks.clear();
         return;
     };
-    let (changed, deleted) = history::review_transition(
-        supports_view(app.current_file_path()),
-        reviewed,
-        &app.source.content,
-    );
+    let (changed, deleted, blocks) =
+        history::comparison_transition(reviewed, &app.source.content);
     app.comparison_changed = changed;
     app.comparison_deleted_before = deleted;
+    app.comparison_deleted_blocks = blocks;
 }
 
 /// Move only the lightweight history cursor. The rendered Markdown remains
@@ -3662,9 +3666,11 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     let mut out: Vec<Line> = Vec::new();
     let mut composer_cursor: Option<(u16, u16)> = None;
     let width = content_width as usize;
-    // Compute baseline → displayed-generation marks once for this frame.
-    // Green means present/changed; red means deleted before a line.
-    let (scoped_added, scoped_deleted) = active_review_mark_sets(app);
+    // Baseline → displayed-generation marks. Green `▌` marks a line that
+    // is present and changed; the baseline text of every change renders
+    // inline as red `▌` deleted rows (see `deleted_block_lines`), so
+    // source mode needs no `▀` position mark — that stays view-only.
+    let scoped_added = &app.comparison_changed;
     let history_landing_pulse = app
         .history_frame_flash_until
         .is_some_and(|until| Instant::now() < until);
@@ -3682,6 +3688,13 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         if row >= app.offset + height as usize {
             break;
         }
+        // The baseline text deleted at this position renders first: red
+        // `▌` rows above their anchor line. Blocks that fell past the
+        // last line (an EOF deletion) render below its text instead.
+        let (deleted_above, deleted_below) = app.deleted_blocks_at(idx);
+        for block in &deleted_above {
+            out.extend(deleted_block_lines(app, &block.content, width));
+        }
         let selected = app.selection.is_some_and(|s| s.contains(idx));
         let revision = app.current_revision_context();
         let commented = app.comments.iter().any(|c| {
@@ -3690,15 +3703,12 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 && c.revision == revision
         });
         let added = scoped_added.contains(&idx);
-        let deleted_before = scoped_deleted.contains(&idx);
         let is_cursor = idx == app.cursor;
-        // `▌` is a current changed line; `▀` is a deletion position.
+        // `▌` marks a current changed line; deletions are their own rows.
         let cursor_mark = if is_cursor {
             ">"
         } else if added {
             "▌"
-        } else if deleted_before {
-            "▀"
         } else {
             " "
         };
@@ -3707,10 +3717,9 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // and clashed with the syntax highlighting). A selected row shares
         // the background; the `>` marker keeps the cursor visible at the
         // selection edge. Present/changed review lines get a restrained
-        // green background; pure deletions use only their red position mark.
+        // green background.
         let cursor_bg = is_cursor || selected;
         let changed_bg = added && !cursor_bg;
-        let deleted_fg = deleted_before && !cursor_bg && !changed_bg;
         let gutter_style = if cursor_bg {
             Style::default().bg(app.ui_selected_bg)
         } else if changed_bg {
@@ -3728,8 +3737,6 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             Style::default().fg(Color::Yellow)
         } else if changed_bg {
             Style::default().fg(Color::Green).bg(app.ui_changed_bg)
-        } else if deleted_fg {
-            Style::default().fg(Color::Red)
         } else {
             gutter_style
         };
@@ -3751,19 +3758,11 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         // color inherits the review mark under it. Mark-less rows keep the
         // classic LightCyan.
         let mark_style = if is_cursor {
-            let fg = if added {
-                Color::LightGreen
-            } else if deleted_before {
-                Color::LightRed
-            } else {
-                Color::LightCyan
-            };
+            let fg = if added { Color::LightGreen } else { Color::LightCyan };
             let s = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
         } else if changed_bg {
             Style::default().fg(Color::Green).bg(app.ui_changed_bg)
-        } else if deleted_fg {
-            Style::default().fg(Color::Red)
         } else {
             gutter_style
         };
@@ -3825,6 +3824,9 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             }
             out.push(Line::from(spans));
         }
+        for block in &deleted_below {
+            out.extend(deleted_block_lines(app, &block.content, width));
+        }
         // Inline comment bars: one per comment ending on this line, stacked
         // (current file only; the one being re-edited is hidden under the
         // edit composer).
@@ -3856,6 +3858,44 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         row += line_rows;
     }
     (Text::from(out), composer_cursor)
+}
+
+/// The rows one deleted block paints: per baseline line, a red `▌` mark
+/// and a blank number column on the first wrapped row (the line has no
+/// number in the displayed document), a gutter-width indent on
+/// continuation rows, and the text in DIM red. Display-only rows: no
+/// cursor, selection, or comment treatment applies. The row count must
+/// match [`crate::app::deleted_block_rows`] — same per-line
+/// [`wrap_spans`] at the same width.
+fn deleted_block_lines(app: &App, content: &str, width: usize) -> Vec<Line<'static>> {
+    let text_style = Style::default()
+        .fg(Color::Red)
+        .add_modifier(Modifier::DIM);
+    let mark_style = Style::default().fg(Color::Red);
+    let mut out = Vec::new();
+    for line in content.split('\n') {
+        let wrapped = wrap_spans(
+            &[HiSpan {
+                text: line.to_string(),
+                style: text_style,
+            }],
+            width,
+        );
+        for (k, frags) in wrapped.iter().enumerate() {
+            let mut spans: Vec<Span> = Vec::new();
+            if k == 0 {
+                spans.push(Span::styled("▌", mark_style));
+                spans.push(Span::raw(" ".repeat(app.source.gutter_width + 1)));
+            } else {
+                spans.push(Span::raw(" ".repeat(app.gutter_cols as usize)));
+            }
+            for f in frags {
+                spans.push(Span::styled(f.text.clone(), f.style));
+            }
+            out.push(Line::from(spans));
+        }
+    }
+    out
 }
 
 /// Display rows a saved-comment bar occupies under its anchor line

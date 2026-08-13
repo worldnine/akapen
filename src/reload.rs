@@ -271,6 +271,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
         app.review_deleted_before.clear();
         app.comparison_changed.clear();
         app.comparison_deleted_before.clear();
+        app.comparison_deleted_blocks.clear();
     } else {
         refresh_review_marks(app);
     }
