@@ -194,6 +194,38 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn composer_drops_unbound_ctrl_and_alt_chords() {
+        // A Ctrl/Alt chord with no composer meaning must not silently
+        // type its letter: Ctrl+w/u/k are readline keys elsewhere and
+        // Alt+j/k are review jumps in the other modes — inserting them
+        // would betray the modifier intent. Only the explicitly bound
+        // chords (Ctrl+j/a/e/c) act; everything else is dropped.
+        let mut app = make_app(5, Mode::Source);
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        on_input_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        on_input_key(&mut app, KeyCode::Char('l'), KeyModifiers::CONTROL);
+        on_input_key(&mut app, KeyCode::Char('j'), KeyModifiers::ALT);
+        on_input_key(&mut app, KeyCode::Char('k'), KeyModifiers::ALT);
+        assert!(app.input.is_empty(), "ctrl/alt chords never type: {:?}", app.input);
+        // The explicitly bound chords still work alongside the guard.
+        on_input_key(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(app.input, "\n", "Ctrl+j still inserts a newline");
+    }
+
+    #[test]
+    fn composer_accepts_shift_flagged_capitals() {
+        // Some terminals report capital letters WITH the SHIFT flag set
+        // (the reason the n/N review arms skip the empty-modifier guard).
+        // The composer's chord guard must therefore reject only
+        // CONTROL/ALT — an empty-modifier check would break uppercase
+        // typing on those terminals.
+        let mut app = make_app(5, Mode::Source);
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        on_input_key(&mut app, KeyCode::Char('N'), KeyModifiers::SHIFT);
+        assert_eq!(app.input, "N", "SHIFT-flagged capitals still type");
+    }
+
+    #[test]
     fn flash_err_beeps_once_per_error_message() {
         // The BEL decision comes from the current status: the identical
         // error still on screen within STATUS_SECS skips the bell, and

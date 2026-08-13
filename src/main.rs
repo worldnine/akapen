@@ -2818,7 +2818,14 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                 replace_view_preserving_cursor(app);
             }
         }
-        KeyCode::Char(c) => {
+        // Plain characters only: a Ctrl/Alt chord must never silently
+        // type into the draft (Ctrl+w/u/k are readline keys elsewhere,
+        // Alt+j/k are review jumps in the other modes — inserting their
+        // letters would betray the modifier intent). SHIFT is still
+        // accepted: some terminals report capital letters WITH the SHIFT
+        // flag (see the n/N arms), so an empty-modifier guard would
+        // break uppercase typing on them.
+        KeyCode::Char(c) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.input.insert(app.input_cursor, c);
             app.input_cursor += c.len_utf8();
         }
