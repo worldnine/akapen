@@ -7,7 +7,9 @@
 `git-integration-spec.md` の akapen に関する記述は本文書で置き換えられた。
 
 実装済みの v0.1 は、LOCAL を観測順で接続し、Git と本文が一致する世代を COMMIT として
-一つに表示する。親内容ハッシュによる分岐判定、別 ancestry の自動隔離、Git から再現
+一つに表示する。v0.1.1（2026-08）で、LOCAL に観測時 HEAD oid（parent）を記録し、
+parent と一致する Git 世代の直後に配置する血統順接続を追加した（§4.2）。親内容ハッシュ
+による分岐判定、別 ancestry の自動隔離、Git から再現
 できる blob の即時削除は、キャッシュ形式を拡張する後続項目とする。
 
 ## 1. 目的
@@ -91,6 +93,19 @@ Git コミットと LOCAL の内容ハッシュが同じなら同一世代へ統
 Git のコミット日時だけで LOCAL と並べない。世代は親の内容ハッシュと現在の Git
 ancestry によって接続する。現在の ancestry へ接続できない別ブランチ由来の LOCAL は、
 通常のタイムラインへ混ぜない。
+
+#### v0.1.1: 観測時 HEAD oid による血統順配置（実装済み）
+
+上記の ancestry 接続の第一歩として、各 LOCAL は観測時点の HEAD commit oid を
+**parent** としてキャッシュへ記録する。タイムライン構築時、LOCAL は「parent と
+一致する Git 世代の直後（newer 側）」に配置される。これにより、レビュー中に
+エージェントがコミットした場合（A → LOCAL 1 → commit B → LOCAL 2 → NOW）も
+血統どおりの順序になる。同一 parent を共有する LOCAL 同士は観測順を保つ。
+
+**既知の劣化（ancestry 隔離までの fallback）**: parent が現在の Git 履歴のどの
+コミットとも一致しない LOCAL（rebase・別ブランチ由来・非 git・旧キャッシュ由来）は、
+従来どおり「Git より新しい側・観測順」に置く。この位置は血統を保証しない。分岐の
+検出と隔離は親内容ハッシュを追加する後続項目で行う。
 
 ### 4.3 Git がない場合
 
@@ -259,7 +274,8 @@ Lines: 24-29
 - 内容ハッシュをキーにし、同一内容は一度だけ保存する
 - hunk や diff を永続化しない
 - v0.1 metadata は canonical path、取得時刻、review baseline、コメントによる pin を持つ
-- 親内容ハッシュ、provenance、Git oid は ancestry 対応時に追加する
+- v0.1.1 metadata は各スナップショットに parent（観測時 HEAD oid、git 環境のみ）を持つ
+- 親内容ハッシュによる分岐判定・provenance の保存・別 ancestry の隔離は後続項目とする
 - Git から再現できる本文 blob の即時省略は ancestry 対応時に追加する
 
 全文スナップショットは UI と同じモデルを保てる。保存上の最適化を後から加えても、
