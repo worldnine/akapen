@@ -259,25 +259,10 @@ pub fn render(source: &Source, width: usize, highlighter: &Highlighter) -> Rende
             row_lines.push(r_lines);
         }
     }
-    // tui-markdown hardcodes "- " as the unordered-list marker; replace it
-    // with a bullet so lists read as rendered, not raw markdown. The marker
-    // is its own span ("- " with optional indent), while code lines render
-    // as one content span per line — so "- literal dash line" in a code
-    // block is left alone. Blockquote prefixes (">") are skipped so lists
-    // inside quotes get bullets too.
-    for row in &mut rows {
-        for span in row.iter_mut() {
-            let t = span.text.trim();
-            if t == ">" || t.is_empty() {
-                continue;
-            }
-            if t == "-" || t == "- [x]" || t == "- [ ]" {
-                let indent = span.text.len() - span.text.trim_start().len();
-                span.text = format!("{}●{}", &span.text[..indent], &span.text[indent + 1..]);
-            }
-            break;
-        }
-    }
+    // The vendored renderer emits the ● bullet itself (list markers only),
+    // so no post-pass rewriting is needed — and none may exist: a
+    // span-text pass also matched fenced-code lines like "-" or "- [x]"
+    // and silently destroyed their content.
     let source_starts = build_starts_from_tags(&rows, &row_lines, &source.lines);
     let row_segments = build_row_segments_from_tags(&rows, &row_lines);
     // Which source lines rendered any text at all (appear in the tags).
@@ -553,8 +538,7 @@ mod tests {
 
     #[test]
     fn rendered_rows_match_golden_snapshot() {
-        // The final pipeline output (wrap + bullet replacement + blank
-        // insertion) at width 80.
+        // The final pipeline output (wrap + blank insertion) at width 80.
         let source = full_source();
         let Rendered { rows, .. } = render(&source, 80, &Highlighter::new(None, false));
         check_golden("testdata/golden_final_80.txt", &dump_rows(&rows));
@@ -976,5 +960,31 @@ mod tests {
         );
     }
 
-
+    #[test]
+    fn bullets_come_from_the_renderer_never_rewrite_code() {
+        // Regression: the old post-pass rewrote any span whose text was
+        // exactly "-", "- [x]" or "- [ ]" — a fenced code block holding
+        // those lines lost its content. The bullet is now emitted by the
+        // renderer's list marker, so code lines are never touched while
+        // real lists (including inside blockquotes) still get bullets.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(
+            &path,
+            "```\n-\n- [x]\n- [ ]\n--\n```\n\n- real item\n\n> - quote item\n",
+        )
+        .unwrap();
+        let source = Source::load(path).unwrap();
+        let Rendered { rows, .. } = render(&source, 60, &Highlighter::new(None, false));
+        let row_text = |r: &[Span]| r.iter().map(|s| s.text.as_str()).collect::<String>();
+        // Code lines survive verbatim: exact text, and no bullet anywhere.
+        for needle in ["-", "- [x]", "- [ ]", "--"] {
+            let row = rows.iter().find(|r| row_text(r) == needle).expect(needle);
+            assert_eq!(row_text(row), needle, "code line {needle:?} kept verbatim");
+            assert!(!row_text(row).contains('●'), "code line {needle:?} has no bullet");
+        }
+        // Real lists get the bullet — at top level and inside a blockquote.
+        assert!(rows.iter().any(|r| row_text(r) == "● real item"));
+        assert!(rows.iter().any(|r| row_text(r) == "> ● quote item"));
+    }
 }

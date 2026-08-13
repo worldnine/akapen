@@ -220,8 +220,8 @@
 "name"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"akapen"|Style::new().fg(Color::Rgb(166, 227, 161))
 "version"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"0.1.0"|Style::new().fg(Color::Rgb(250, 179, 135))
 "dependencies"|Style::new().fg(Color::Rgb(137, 180, 250));;":"|Style::new().fg(Color::Rgb(148, 226, 213))
-"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"●"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"ratatui"|Style::new().fg(Color::Rgb(166, 227, 161))
-"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"●"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"mdcat"|Style::new().fg(Color::Rgb(166, 227, 161))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"-"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"ratatui"|Style::new().fg(Color::Rgb(166, 227, 161))
+"  "|Style::new().fg(Color::Rgb(205, 214, 244));;"-"|Style::new().fg(Color::Rgb(147, 153, 178));;" "|Style::new().fg(Color::Rgb(205, 214, 244));;"mdcat"|Style::new().fg(Color::Rgb(166, 227, 161))
 
 "package"|Style::new().fg(Color::Rgb(203, 166, 247));;" main"|Style::new().fg(Color::Rgb(205, 214, 244))
 

@@ -1348,7 +1348,7 @@ mod tests {
         let rendered = text.lines.iter().map(ToString::to_string).collect_vec();
         #[rustfmt::skip]
         let expected = [
-            "- ┌───┐",
+            "● ┌───┐",
             "  │ A │",
             "  ├───┤",
             "  │ a │",
@@ -1372,7 +1372,7 @@ mod tests {
         assert_eq!(
             rendered,
             [
-                "- ┌───┐",
+                "● ┌───┐",
                 "  │ A │",
                 "  ├───┤",
                 "  │ a │",
@@ -1419,8 +1419,8 @@ mod tests {
         assert_eq!(
             rendered,
             [
-                "- Parent",
-                "    - ┌───┐",
+                "● Parent",
+                "    ● ┌───┐",
                 "      │ A │",
                 "      ├───┤",
                 "      │ a │",
@@ -1715,7 +1715,7 @@ mod tests {
             "},
             40,
         );
-        assert_eq!(rendered[0], "- ┌─────┬────┬─────────────────────────┐");
+        assert_eq!(rendered[0], "● ┌─────┬────┬─────────────────────────┐");
         assert_eq!(rendered[0].chars().count(), 40);
         assert!(rendered.iter().all(|l| l.chars().count() <= 40));
     }
