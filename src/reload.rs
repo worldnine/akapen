@@ -47,15 +47,13 @@ pub(crate) fn notify_file_changed(app: &mut App) {
 /// external edits replace the in-memory content. Comments remain attached
 /// to the exact generation they were written against.
 pub(crate) fn reload_now(app: &mut App) {
-    app.confirm_reload = false;
     finish_reload(app, false);
 }
 
-/// Reply-mode auto-reload (`--reply`): no confirmation. Fires from the
-/// change poll when scripts/akp refreshes the doc. On failure the ⚡ prompt
-/// stays up and `r` retries manually.
+/// Reply-mode auto-reload (`--reply`). Fires from the change poll when
+/// scripts/akp refreshes the doc. On failure the ⚡ prompt stays up and
+/// `r` retries manually.
 pub(crate) fn reload_now_auto(app: &mut App) {
-    app.confirm_reload = false;
     if finish_reload(app, false) {
         app.flash("auto-reloaded");
     }
@@ -64,9 +62,6 @@ pub(crate) fn reload_now_auto(app: &mut App) {
 /// `from_editor`: the reload came from `e` (an edit of one's own), so the
 /// new NOW is acknowledged immediately — one's own edit is not up for review.
 pub(crate) fn finish_reload(app: &mut App, from_editor: bool) -> bool {
-    // A reload that actually runs resolves any pending confirmation —
-    // including the open_editor path, which calls this directly.
-    app.confirm_reload = false;
     match reload_source(app, from_editor) {
         Ok(()) => {
             // Refresh the on-disk stamp so the next poll_file_change won't
@@ -98,8 +93,11 @@ pub(crate) fn finish_reload(app: &mut App, from_editor: bool) -> bool {
 pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal) {
     // Existing comments are preserved on their current generation. When
     // the editor returns, reload_source promotes live comments to the old
-    // LOCAL/COMMIT generation before loading the edited NOW.
-    app.confirm_edit = false;
+    // LOCAL/COMMIT generation before loading the edited NOW. The pre-edit
+    // on-disk content is captured first so it stays inspectable in the
+    // timeline even when it differs from what akapen last loaded (an
+    // agent edit skipped with `i`).
+    capture_pre_edit_snapshot(app);
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
     // `$EDITOR` may include arguments (e.g. `zed --wait`). Split into the
@@ -149,6 +147,34 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
     // Draw immediately — the alternate screen was just re-entered and is
     // blank. The fresh terminal is guaranteed to be in the correct state.
     let _ = terminal.draw(|f| draw(f, app));
+}
+
+/// Record the pre-edit on-disk content as a LOCAL generation before the
+/// editor runs, so the version the editor opens stays inspectable in the
+/// timeline even when it differs from what akapen last loaded (e.g. an
+/// agent edit the user skipped with `i`). Without this capture the reload
+/// on return rebuilds the timeline from the cache and the never-loaded
+/// on-disk content would vanish — along with the ability to compare
+/// pre/post edit in the time machine. Best-effort: a read or cache
+/// failure must never block the edit.
+///
+/// Cacheless environments (reply mode, no cache dirs) have no persistent
+/// timeline to lose the content from; reload_source's in-memory parking
+/// keeps the loaded generation, which is all they can retain anyway.
+pub(crate) fn capture_pre_edit_snapshot(app: &mut App) {
+    let Some(cache) = app.snapshot_cache.clone() else {
+        return;
+    };
+    let path = app.current_file_path().to_path_buf();
+    let Ok(disk) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if disk == app.source.content {
+        // The disk version is the version akapen shows — it was already
+        // recorded at load; re-recording would only re-observe it.
+        return;
+    }
+    let _ = cache.record_with_parent(&path, &disk, crate::history::head_oid(&path));
 }
 
 /// Explicitly skip an external edit (`i`): the on-disk state counts as
@@ -502,5 +528,76 @@ mod handoff_tests {
         assert_eq!(parked.content, old, "the old NOW survives as a generation");
         assert_eq!(parked.id.as_deref(), Some(expected.as_str()));
         assert_eq!(parked.source, RevisionSource::Local);
+    }
+
+    #[test]
+    fn edit_blocked_while_file_change_pending() {
+        // Source mode.
+        let (mut app, _dir) = temp_app(3, Mode::Source, false);
+        app.file_changed = true;
+        on_source_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, None);
+        assert!(
+            app.status.as_ref().is_some_and(|(msg, _, err)| *err
+                && msg.contains("r reload first")),
+            "source mode: the block explains itself"
+        );
+        // View mode.
+        let (mut app, _dir) = temp_app(3, Mode::View, false);
+        app.file_changed = true;
+        on_view_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, None);
+        assert!(
+            app.status.as_ref().is_some_and(|(msg, _, err)| *err
+                && msg.contains("r reload first")),
+            "view mode: the block explains itself"
+        );
+        // No pending change: `e` falls through (terminal None in tests), no
+        // spurious block toast.
+        let (mut app, _dir) = temp_app(3, Mode::Source, false);
+        on_source_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, None);
+        assert!(app.status.is_none(), "no pending change: not blocked");
+    }
+
+    #[test]
+    fn capture_pre_edit_keeps_the_ignored_disk_content_in_the_timeline() {
+        let (mut app, dir) = temp_app(3, Mode::Source, false);
+        let path = app.current_file_path().to_path_buf();
+        let initial = app.source.content.clone();
+        let cache = crate::snapshot::SnapshotCache::at(dir.path().join("cache"));
+        // The startup observation, like open_cached at launch.
+        cache.record_with_parent(&path, &initial, None).unwrap();
+        app.snapshot_cache = Some(cache);
+        // The agent writes v2 on disk; the user skipped it (`i`) and pressed
+        // `e` — the editor will open v2, which akapen never loaded.
+        let agent_version = "line1\nagent version\nline3\n";
+        std::fs::write(&path, agent_version).unwrap();
+        crate::reload::capture_pre_edit_snapshot(&mut app);
+        // The user edits to v3 in the editor; on return the reload runs.
+        let user_version = "line1\nuser version\nline3\n";
+        std::fs::write(&path, user_version).unwrap();
+        assert!(crate::reload::reload_source(&mut app, true).is_ok());
+        let history = &app.histories[0];
+        assert_eq!(
+            history.revisions[0].content, user_version,
+            "the edited content is NOW"
+        );
+        assert!(
+            history
+                .revisions
+                .iter()
+                .any(|revision| revision.content == agent_version),
+            "the pre-edit disk content (the agent's version) survives as a \
+             generation:\n{}",
+            history
+                .revisions
+                .iter()
+                .map(|revision| revision.content.clone())
+                .collect::<Vec<_>>()
+                .join("\n---\n")
+        );
+        assert!(
+            history.revisions[0].content != agent_version
+                && history.revisions[0].content != initial,
+            "NOW is the user's version"
+        );
     }
 }

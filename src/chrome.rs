@@ -560,10 +560,8 @@ pub(crate) fn draw_banner(f: &mut Frame, area: Rect, row: u16, msg: &str, is_err
     );
 }
 
-/// The persistent prompt text, if any: quit confirmation, edit
-/// confirmation, reload confirmation, or a pending file change.
-/// Priority: quit > edit > reload > change (the old footer order). The
-/// quit line advertises the Esc binding that is actually active.
+/// The persistent prompt text, if any: the quit confirmation or a pending
+/// file change. Priority: quit > change.
 pub(crate) fn prompt_message(app: &App) -> Option<Cow<'static, str>> {
     if app.confirm_quit {
         if app.esc_quit_enabled() {
@@ -571,12 +569,8 @@ pub(crate) fn prompt_message(app: &App) -> Option<Cow<'static, str>> {
         } else {
             Some("unsent comments — q to quit, Esc to cancel".into())
         }
-    } else if app.confirm_edit {
-        Some("unsent comments — e again to edit & clear, Esc to cancel".into())
-    } else if app.confirm_reload {
-        Some("unsent comments — r again to reload & clear, Esc to cancel".into())
     } else if app.file_changed {
-        Some("file changed — r reload · i ignore".into())
+        Some("file changed — r reload first · i ignore".into())
     } else {
         None
     }

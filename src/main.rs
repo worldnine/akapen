@@ -2081,10 +2081,7 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         }
         KeyCode::Tab => {
             // View is only reachable for Markdown-family files; a source
-            // file (e.g. .rs) never leaves source mode. A mode flip
-            // cancels a pending reload confirmation: the prompt's context
-            // is the pane the user was looking at.
-            app.confirm_reload = false;
+            // file (e.g. .rs) never leaves source mode.
             if supports_view(app.current_file_path()) {
                 enter_source_mode(app);
             } else {
@@ -2121,6 +2118,12 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
                 // Reply mode: the doc is the agent's message — editing the
                 // temp copy would only diverge from the conversation.
                 app.flash_err("reply mode — editing disabled");
+            } else if app.file_changed {
+                // A pending agent edit is up for review; opening the editor
+                // now would fold it into one's own edit — the from_editor
+                // reload would acknowledge it without it ever appearing in
+                // the review marks. Review first (`r`), then edit.
+                app.flash_err("file changed — r reload first");
             } else if let Some(t) = terminal {
                 open_editor(app, t);
             }
@@ -2164,12 +2167,6 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
                     app.confirm_quit = false;
                     app.flash("quit cancelled");
                 }
-            } else if app.confirm_edit {
-                app.confirm_edit = false;
-                app.flash("edit cancelled");
-            } else if app.confirm_reload {
-                app.confirm_reload = false;
-                app.flash("reload cancelled");
             } else if app.selection.take().is_some() {
                 app.flash("selection cancelled");
             } else if app.esc_quit_enabled() {
@@ -2582,9 +2579,6 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         KeyCode::Tab => {
             // Non-Markdown files are source-only: Tab is a no-op with a
             // toast instead of rendering raw source as fake markdown.
-            // A mode flip cancels a pending reload confirmation: the
-            // prompt's context is the pane the user was looking at.
-            app.confirm_reload = false;
             if supports_view(app.current_file_path()) {
                 enter_view_mode(app);
             } else {
@@ -2607,12 +2601,6 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
                     app.confirm_quit = false;
                     app.flash("quit cancelled");
                 }
-            } else if app.confirm_edit {
-                app.confirm_edit = false;
-                app.flash("edit cancelled");
-            } else if app.confirm_reload {
-                app.confirm_reload = false;
-                app.flash("reload cancelled");
             } else if app.selection.take().is_some() {
                 app.flash("selection cancelled");
             } else if app.deletion_focus().is_some() {
@@ -2645,6 +2633,12 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
                 // Reply mode: the doc is the agent's message — editing the
                 // temp copy would only diverge from the conversation.
                 app.flash_err("reply mode — editing disabled");
+            } else if app.file_changed {
+                // A pending agent edit is up for review; opening the editor
+                // now would fold it into one's own edit — the from_editor
+                // reload would acknowledge it without it ever appearing in
+                // the review marks. Review first (`r`), then edit.
+                app.flash_err("file changed — r reload first");
             } else if let Some(t) = terminal {
                 open_editor(app, t);
             }

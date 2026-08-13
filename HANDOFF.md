@@ -123,3 +123,41 @@ push・マージはしていない。
 
 - この worktree 単体では snapshot.rs はスタブのため parent を保存しない（タイムラインの実挙動はまだ血統順にならない）。parent の保存は feat/snapshot-parent の本実装待ち。配置ロジックと fixture テストの検証は本 worktree 内で完結している。
 - `assemble_timeline` は load_with_local の実体として抽出した純粋関数。呼び出し箇所は `load_with_local`（load / load_cached / open_cached 経由）のみ。
+# HANDOFF: e 編集後の振る舞いの整理（editor-edit-after）
+
+作業 worktree: `akapen-editor-edit-after`（branch `editor-edit-after`、main HEAD 1f5715b から分岐）
+
+## 変更内容（3 点）
+
+### 1. ⚡ pending 中の `e` をブロック（レビュー規律の保護）
+- view / source 両モードの `e` ハンドラで `app.file_changed` を確認し、未解決の変更がある間は `$EDITOR` を起動しない
+- 理由: 従来は ⚡ pending 中に `e` すると、エディタが on-disk の新内容（エージェントの編集）を開き、復帰時の `from_editor=true` reload がそれを「自分の編集」として自動確認していた。エージェントの変更が一度もレビューマークに現れずに済まされる穴
+- ブロック時のフィードバック: 赤トースト + BEL（`flash_err("file changed — r reload first")`）。永続プロンプトも `file changed — r reload first · i ignore` に変更し `r` 先行を明示。`r`（reload）・`i`（ignore）で解決すれば `e` は通常通り動く
+
+### 2. 編集前の on-disk 内容を必ず世代捕捉（`capture_pre_edit_snapshot`）
+- `open_editor` がエディタを起動する前に、on-disk 内容を `record_with_parent(path, disk, head_oid(path))` で LOCAL 世代として記録
+- 対象: on-disk が akapen の表示内容（= 最終ロード内容）と異なる場合のみ。同一なら起動時ロードで既にスナップショット済みのためスキップ（再観測ノイズを避ける）
+- 効くケース: `i` で無視したエージェント編集（akapen が一度も読んでいない内容）を `e` で開いて編集しても、編集前の内容がタイムラインに残り、`←` で前後比較できる
+- best-effort: 読み取り失敗・キャッシュ失敗は編集を妨げない。キャッシュ無し環境（reply・キャッシュディレクトリ無し）は永続タイムライン自体が無いので対象外（reload_source の in-memory parking が従来どおり）
+
+### 3. 死んだ confirm_edit / confirm_reload の撤去
+- v1 の「`e`/`r` はコメントを消す」設計の名残で、現在はコメントを世代へ固定するため消えない
+- 削除: `App.confirm_edit` / `App.confirm_reload` フィールド・初期化・リセット、chrome.rs の該当プロンプト分岐（"unsent comments — e again to edit & clear" 等は嘘の文言 + 到達不能）、view/source 両モードの Esc 分岐、Tab での確認解除
+- `head_oid` を `pub(crate)` 化（reload.rs から再利用）
+
+## テスト（2 件追加、計 373）
+
+1. `edit_blocked_while_file_change_pending` — source/view 両モードで ⚡ pending 中に `e` がブロックトーストを出し、非 pending では誤発火しない
+2. `capture_pre_edit_keeps_the_ignored_disk_content_in_the_timeline` — `i` で無視した on-disk 内容が `e` → reload 後にタイムラインの世代として残る
+
+## 検証結果
+
+- `cargo test --locked`: **373 passed; 0 failed**（前回 371 + 追加 2）
+- `cargo clippy --locked --all-targets`: **警告 0**
+- 変更ファイル: src/reload.rs / src/main.rs / src/app.rs / src/chrome.rs / src/history.rs / src/state_tests.rs / README.md / README.ja.md
+
+## 設計判断の記録
+
+- ⚡ pending 中の `e` を「ブロック（r 先行強制）」にした。単一 baseline モデルではエージェントの未確認変更と自分の編集を分離して NOW に残せないため、規律を守るにはブロックが唯一の完全な解
+- `i`（明示的に無視）後の `e` は許可。このとき編集前内容は capture でタイムラインに残る
+- ブロックのトーストは永続プロンプトに劣後して非表示（draw_message の優先順位 quit > change）だが、BEL ビープが鳴り、プロンプト自体が「r reload first」を明示するので伝わる

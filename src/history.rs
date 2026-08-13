@@ -530,7 +530,7 @@ fn repo_root(path: &Path) -> Option<PathBuf> {
 
 /// 観測時点の HEAD commit oid。git 環境でなければ None（= 非 git は従来の観測順のまま）。
 /// 失敗（非 git・git エラー・untracked）はすべて None に落とす（soft failure が既存の方針）。
-fn head_oid(path: &Path) -> Option<String> {
+pub(crate) fn head_oid(path: &Path) -> Option<String> {
     let root = repo_root(path)?;
     let output = Command::new("git")
         .arg("-C")

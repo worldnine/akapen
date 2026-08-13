@@ -3440,11 +3440,9 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn prompt_priority_quit_over_edit_over_reload_over_change() {
+    fn prompt_priority_quit_over_change() {
         let mut app = make_app(10, Mode::Source);
         app.confirm_quit = true;
-        app.confirm_edit = true;
-        app.confirm_reload = true;
         app.file_changed = true;
         assert_eq!(
             prompt_message(&app).as_deref(),
@@ -3453,17 +3451,7 @@ use crate::comment::Selection;
         app.confirm_quit = false;
         assert_eq!(
             prompt_message(&app).as_deref(),
-            Some("unsent comments — e again to edit & clear, Esc to cancel")
-        );
-        app.confirm_edit = false;
-        assert_eq!(
-            prompt_message(&app).as_deref(),
-            Some("unsent comments — r again to reload & clear, Esc to cancel")
-        );
-        app.confirm_reload = false;
-        assert_eq!(
-            prompt_message(&app).as_deref(),
-            Some("file changed — r reload · i ignore")
+            Some("file changed — r reload first · i ignore")
         );
         app.file_changed = false;
         assert_eq!(prompt_message(&app).as_deref(), None);

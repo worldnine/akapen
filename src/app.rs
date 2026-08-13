@@ -237,10 +237,6 @@ pub(crate) struct App {
     pub(crate) status: Option<(String, Instant, bool)>,
     /// Pending quit confirmation when unsent comments exist.
     pub(crate) confirm_quit: bool,
-    /// Pending external-edit confirmation when unsent comments exist (`e`).
-    pub(crate) confirm_edit: bool,
-    /// Pending reload confirmation when unsent comments exist (`r`).
-    pub(crate) confirm_reload: bool,
     /// Export text to print to stdout at the next loop turn (`s`): the TUI
     /// restores the terminal, prints, and re-enters raw mode.
     /// Cached wrapped row count per source line, for the current width.
@@ -387,8 +383,6 @@ impl App {
             comments: Vec::new(),
             status: None,
             confirm_quit: false,
-            confirm_edit: false,
-            confirm_reload: false,
             line_rows: Vec::new(),
             base_rows: Vec::new(),
             content_width: 0,
@@ -740,8 +734,6 @@ impl App {
         self.timeline_exit_until = None;
         self.timeline_restore = None;
         self.confirm_quit = false;
-        self.confirm_edit = false;
-        self.confirm_reload = false;
         self.drag_anchor = None;
         self.view_dirty = false;
         self.view_dirty_since = None;
