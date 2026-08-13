@@ -109,8 +109,32 @@ pub const TIMELINE_LOCAL_COLOR: Color = Color::Rgb(235, 110, 185);
 /// commits stay distinguishable from LOCAL's pink.
 pub const TIMELINE_COMMIT_COLOR: Color = Color::Rgb(185, 165, 235);
 
-/// The time it takes the gradient to complete one lap around the frame.
+/// The time it takes the gradient to complete one lap around the frame
+/// at the SHALLOWEST depth (just behind NOW). Deeper travel spins
+/// faster — see [`rotation_period_ms`].
 pub const TIME_MACHINE_ROTATION_MS: u64 = 4000;
+
+/// The gradient's lap time at travel `depth`: 4000 ms just behind NOW,
+/// tightening to 2400 ms at the oldest revision — the machine audibly
+/// works harder the deeper it reaches. Consumed as a per-frame phase
+/// increment (`dt / period`), so a depth change mid-lap never jumps
+/// the wave.
+pub fn rotation_period_ms(depth: f32) -> f32 {
+    TIME_MACHINE_ROTATION_MS as f32 - 1600.0 * depth.clamp(0.0, 1.0)
+}
+
+/// Sink a frame color toward the deep end of the nebula by `depth`:
+/// the purple→pink family stays recognizable, but the whole wave
+/// shifts toward a saturated violet the further back the traveler is.
+/// Depth 0 is the untouched palette.
+pub fn time_machine_depth_shift(light: bool, c: Color, depth: f32) -> Color {
+    let deep = if light {
+        Color::Rgb(90, 50, 140)
+    } else {
+        Color::Rgb(125, 75, 195)
+    };
+    lerp_color(c, deep, 0.4 * depth.clamp(0.0, 1.0))
+}
 
 /// The rotation fraction of the time-machine frame since `clock`
 /// started: 0.0 → 1.0 over one [`TIME_MACHINE_ROTATION_MS`] lap. Pure in
@@ -172,20 +196,27 @@ pub struct Star {
 }
 
 /// The star (if any) living at screen cell `(x, y)` while browsing the
-/// past: a pure integer hash decides placement (a ~2% sprinkle), glyph,
-/// and twinkle phase, so the sky is stable frame to frame — stars
-/// twinkle in place, they never jump — and tests can pin any cell.
-/// Screen-fixed on purpose: the page scrolls THROUGH the starfield,
-/// the way Time Machine's windows fly through its fixed sky.
-pub fn starfield_star_at(x: u16, y: u16) -> Option<Star> {
+/// past, at travel `depth` (0.0 = just behind NOW, 1.0 = the oldest
+/// revision): a pure integer hash decides placement, glyph, and twinkle
+/// phase, so the sky is stable frame to frame — stars twinkle in place,
+/// they never jump — and tests can pin any cell. Density rides the
+/// depth (a ~1.4% sprinkle just behind NOW, ~4.8% at the bottom of the
+/// timeline) and grows MONOTONICALLY: descending only ever adds stars
+/// around the ones already shining, so the sky visibly thickens the
+/// deeper you go without a single star blinking out. Screen-fixed on
+/// purpose: the page scrolls THROUGH the starfield, the way Time
+/// Machine's windows fly through its fixed sky.
+pub fn starfield_star_at(x: u16, y: u16, depth: f32) -> Option<Star> {
     let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77);
     h ^= h >> 13;
     h = h.wrapping_mul(0xC2B2_AE3D);
     h ^= h >> 16;
-    if h % 43 != 0 {
+    // Density in per-mille of cells, ramping with depth.
+    let permille = 14.0 + 34.0 * depth.clamp(0.0, 1.0);
+    if (h % 1000) as f32 >= permille {
         return None;
     }
-    let glyph = match (h / 43) % 10 {
+    let glyph = match (h / 1000) % 10 {
         0 => '✦',
         1 => '+',
         _ => '·',
@@ -1054,9 +1085,9 @@ mod tests {
     use super::{
         Span, ViewState, history_border_color, history_glow_bg, is_table_delimiter_line,
         lerp_color, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
-        ease_out_cubic, selected_bg, starfield_color, starfield_star_at,
-        time_machine_color_at, time_machine_palette, time_machine_rotation_fraction,
-        warp_ring_color, warp_ring_rect,
+        ease_out_cubic, rotation_period_ms, selected_bg, starfield_color, starfield_star_at,
+        time_machine_color_at, time_machine_depth_shift, time_machine_palette,
+        time_machine_rotation_fraction, warp_ring_color, warp_ring_rect,
     };
     use crate::highlight::Highlighter;
     use ratatui::style::{Color, Modifier, Style};
@@ -1208,22 +1239,57 @@ mod tests {
         // placement is a pure hash, so the sky never flickers between
         // frames.
         for (x, y) in [(0u16, 0u16), (3, 5), (40, 12), (79, 23)] {
-            assert_eq!(starfield_star_at(x, y), starfield_star_at(x, y));
+            assert_eq!(starfield_star_at(x, y, 0.5), starfield_star_at(x, y, 0.5));
         }
         // Over a full 80×24 screen the sprinkle stays a sprinkle — a
-        // sky, not a blizzard — and every star wears a known glyph
-        // with a phase inside the twinkle lap.
-        let mut n = 0;
+        // sky, not a blizzard — at both ends of the depth ramp, and
+        // every star wears a known glyph with a phase inside the
+        // twinkle lap.
+        let count = |depth: f32| -> usize {
+            let mut n = 0;
+            for x in 0..80u16 {
+                for y in 0..24u16 {
+                    if let Some(star) = starfield_star_at(x, y, depth) {
+                        n += 1;
+                        assert!(matches!(star.glyph, '·' | '✦' | '+'), "{:?}", star.glyph);
+                        assert!((0.0..=1.0).contains(&star.phase), "{}", star.phase);
+                    }
+                }
+            }
+            n
+        };
+        let shallow = count(0.0);
+        let deep = count(1.0);
+        assert!((8..=60).contains(&shallow), "shallow sky: {shallow} stars");
+        assert!((45..=170).contains(&deep), "deep sky: {deep} stars");
+        assert!(shallow < deep, "descending thickens the sky");
+        // Monotonic: every star shining near the surface still shines
+        // at the bottom — depth only ever ADDS stars.
         for x in 0..80u16 {
             for y in 0..24u16 {
-                if let Some(star) = starfield_star_at(x, y) {
-                    n += 1;
-                    assert!(matches!(star.glyph, '·' | '✦' | '+'), "{:?}", star.glyph);
-                    assert!((0.0..=1.0).contains(&star.phase), "{}", star.phase);
+                if let Some(star) = starfield_star_at(x, y, 0.0) {
+                    assert_eq!(starfield_star_at(x, y, 1.0), Some(star));
                 }
             }
         }
-        assert!((10..=120).contains(&n), "sparse density: {n} stars on 80×24");
+    }
+
+    #[test]
+    fn depth_scales_the_machinery() {
+        // The border wave tightens from a 4-second lap at the surface
+        // to 2.4 seconds at the oldest revision, clamped beyond.
+        assert_eq!(rotation_period_ms(0.0), 4000.0);
+        assert_eq!(rotation_period_ms(1.0), 2400.0);
+        assert_eq!(rotation_period_ms(2.0), 2400.0, "clamped");
+        // The palette sinks toward violet with depth — identity at the
+        // surface, visibly shifted (but still RGB) at the bottom.
+        for light in [false, true] {
+            let base = time_machine_palette(light)[2];
+            assert_eq!(time_machine_depth_shift(light, base, 0.0), base);
+            let sunk = time_machine_depth_shift(light, base, 1.0);
+            assert_ne!(sunk, base, "depth is visible");
+            assert!(matches!(sunk, Color::Rgb(..)));
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! effect's own state, so skipped frames (the render-complete flash, a
 //! prompt covering the message row) never disturb the wave.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Instant;
 
 use ratatui::style::Color;
@@ -17,9 +17,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::STATUS_SECS;
 use crate::view::{
-    ease_out_cubic, perimeter_index, starfield_color, starfield_star_at, time_machine_color_at,
-    time_machine_palette, time_machine_rotation_fraction, warp_ring_color, warp_ring_rect,
-    TIME_MACHINE_ROTATION_MS,
+    ease_out_cubic, perimeter_index, rotation_period_ms, starfield_color, starfield_star_at,
+    time_machine_color_at, time_machine_depth_shift, time_machine_palette,
+    time_machine_rotation_fraction, warp_ring_color, warp_ring_rect, TIME_MACHINE_ROTATION_MS,
 };
 
 /// How long the timeline bar's slide-in/out takes (milliseconds).
@@ -32,6 +32,23 @@ static TIMELINE_BAR_VISIBLE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn set_timeline_bar_visible(visible: bool) {
     TIMELINE_BAR_VISIBLE.store(visible, Ordering::Relaxed);
+}
+
+/// The travel depth (0 = just behind NOW, 1000 = the oldest revision),
+/// set by `draw` each frame from the live history position. The frame
+/// effects are created once at startup, so the depth reaches their
+/// shader closures through this channel — the same way the timeline
+/// bar's visibility does. Deeper travel means a denser sky, a faster
+/// border wave, and a palette sunk toward violet.
+static TIME_DEPTH_PERMILLE: AtomicU16 = AtomicU16::new(0);
+
+pub(crate) fn set_time_depth(depth: f32) {
+    let permille = (depth.clamp(0.0, 1.0) * 1000.0) as u16;
+    TIME_DEPTH_PERMILLE.store(permille, Ordering::Relaxed);
+}
+
+fn time_depth() -> f32 {
+    TIME_DEPTH_PERMILLE.load(Ordering::Relaxed) as f32 / 1000.0
 }
 
 /// The timeline bar's drawer opening: the bottom-anchored rows rise
@@ -70,10 +87,18 @@ pub(crate) fn timeline_slide_out() -> Effect {
 pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
     let palette = time_machine_palette(light);
     fx::effect_fn(
-        Instant::now(),
+        (Instant::now(), 0.0f32),
         EffectTimer::from_ms(TIME_MACHINE_ROTATION_MS as u32 * 60, Interpolation::Linear),
-        move |clock: &mut Instant, ctx: ShaderFnContext, cells: CellIterator| {
-            let rot = time_machine_rotation_fraction(*clock);
+        move |(last, phase): &mut (Instant, f32), ctx: ShaderFnContext, cells: CellIterator| {
+            // The wave advances by dt/period, so a depth change (the
+            // period tightens the deeper the traveler goes) speeds the
+            // rotation up smoothly instead of jumping the phase.
+            let now = Instant::now();
+            let dt = now.saturating_duration_since(*last).as_secs_f32();
+            *last = now;
+            let depth = time_depth();
+            *phase = (*phase + dt * 1000.0 / rotation_period_ms(depth)) % 1.0;
+            let rot = *phase;
             let area = ctx.area;
             let (w, h) = (area.width as usize, area.height as usize);
             // A degenerate frame (a terminal that briefly reports 0×0,
@@ -103,7 +128,8 @@ pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
                     continue;
                 }
                 let perim = perimeter_index(rx, ry, w, h);
-                cell.set_fg(time_machine_color_at(palette, perim, perimeter, rot));
+                let c = time_machine_color_at(palette, perim, perimeter, rot);
+                cell.set_fg(time_machine_depth_shift(light, c, depth));
             }
         },
     )
@@ -126,7 +152,11 @@ pub(crate) fn starfield_effect(light: bool) -> Effect {
         Instant::now(),
         EffectTimer::from_ms(TIME_MACHINE_ROTATION_MS as u32 * 60, Interpolation::Linear),
         move |clock: &mut Instant, ctx, buf| {
+            // Twinkle speed stays constant; only the DENSITY rides the
+            // travel depth (the sky thickens, it does not flicker
+            // faster).
             let rot = time_machine_rotation_fraction(*clock);
+            let depth = time_depth();
             let area = ctx.area;
             if area.width < 3 || area.height < 3 {
                 return; // no interior to sprinkle
@@ -163,7 +193,7 @@ pub(crate) fn starfield_effect(light: bool) -> Effect {
                     if cell.style().bg.is_some_and(|bg| bg != Color::Reset) {
                         continue;
                     }
-                    if let Some(star) = starfield_star_at(x, y) {
+                    if let Some(star) = starfield_star_at(x, y, depth) {
                         cell.set_char(star.glyph);
                         cell.set_fg(starfield_color(light, star.phase, rot));
                     }

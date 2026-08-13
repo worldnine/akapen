@@ -3216,6 +3216,18 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     // while the toast is the top message).
     if app.config.fx && app.view_active() {
         crate::effects::set_timeline_bar_visible(timeline_on);
+        // How deep into the timeline the traveler is (0 = just behind
+        // NOW, 1 = the oldest revision) — the frame effects scale their
+        // drama with it. The LIVE position feeds it (not the rendered
+        // one), so the sky already thickens while an arrow is held.
+        let depth = app
+            .history()
+            .filter(|history| history.revisions.len() > 1)
+            .map(|history| {
+                history.position as f32 / (history.revisions.len() - 1) as f32
+            })
+            .unwrap_or(0.0);
+        crate::effects::set_time_depth(depth);
         // Same geometry draw_view builds: one column off the left edge,
         // the body's full height.
         let frame = Rect {
