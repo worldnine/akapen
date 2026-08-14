@@ -477,6 +477,12 @@ pub(crate) fn anchored_line(old: &[String], new: &[String], line: usize) -> usiz
     if new.is_empty() {
         return 0;
     }
+    if old.is_empty() {
+        // An empty old document has no heading to anchor to: the cursor
+        // lands at the top of the new one (e.g. history browsing on an
+        // empty working tree).
+        return 0;
+    }
     let old_line = line.min(old.len().saturating_sub(1));
     let heading = (0..=old_line)
         .rev()
@@ -655,6 +661,19 @@ mod tests {
         let new = ["preface", "# Intro", "a", "## Detail", "changed", "two"]
             .map(str::to_string);
         assert_eq!(anchored_line(&old, &new, 4), 5);
+    }
+
+    #[test]
+    fn anchored_line_survives_an_empty_old_document() {
+        // History browsing on an empty working tree: no old lines, no
+        // headings — the cursor lands at the top of the new document
+        // instead of indexing out of bounds.
+        let old: Vec<String> = Vec::new();
+        let new = ["# New", "line"].map(str::to_string);
+        assert_eq!(anchored_line(&old, &new, 3), 0);
+        // And the reverse guard still holds: an empty new document.
+        let new: Vec<String> = Vec::new();
+        assert_eq!(anchored_line(&old, &new, 0), 0);
     }
 
     #[test]

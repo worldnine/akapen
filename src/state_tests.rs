@@ -2342,6 +2342,188 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn comments_overlay_enter_restores_a_historical_revision() {
+        // A comment anchored to a past revision (made while browsing the
+        // timeline) must restore that revision before jumping: its line
+        // numbers belong to that document, not the live tree, and its
+        // card only renders under that revision. Landing on NOW would
+        // point the selection at the wrong lines with no card in sight.
+        let (mut app, _dir) = make_app_keep(5, Mode::View);
+        let path = app.files[0].clone();
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "shorter version".into(),
+            content: "line1\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        let revision = app.histories[0].revisions[1].context().unwrap();
+        app.comments.push(Comment {
+            file_path: path,
+            start: 2,
+            end: 3,
+            lines: "line2\nline3".into(),
+            revision: Some(revision.clone()),
+            text: "on the past".into(),
+        });
+        on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, None, "Enter closes the list");
+        assert_eq!(
+            app.histories[0].position, 1,
+            "the comment's revision is restored"
+        );
+        assert_eq!(
+            app.source.content, "line1\nline2\nline3\n",
+            "the document shows the comment's revision"
+        );
+        let (a, b) = app.selection.unwrap().range();
+        assert_eq!((a, b), (1, 2), "selection lands on the comment's lines");
+        assert!(
+            visible_cards(&app)
+                .iter()
+                .any(|c| c.revision.as_deref() == Some(revision.as_str())),
+            "the comment's card is visible under its revision"
+        );
+    }
+
+    #[test]
+    fn comments_overlay_enter_restores_a_revision_on_another_file() {
+        // The comment list spans every file; jumping to a historical
+        // comment on ANOTHER file must restore that file's revision, not
+        // just switch and land on the wrong lines.
+        let (mut app, _dir) = make_session();
+        let b = app.files[1].clone();
+        app.histories = vec![
+            DocumentHistory {
+                revisions: vec![history::Revision {
+                    id: None,
+                    short_id: "now".into(),
+                    summary: "working tree".into(),
+                    content: "# a\n\nline2\nline3\n".into(),
+                    source: history::RevisionSource::Now,
+                }],
+                position: 0,
+                rendered_position: 0,
+                reviewed_id: None,
+                reviewed_content: None,
+            },
+            DocumentHistory {
+                revisions: vec![
+                    history::Revision {
+                        id: None,
+                        short_id: "now".into(),
+                        summary: "working tree".into(),
+                        content: "fn main() {}\n".into(),
+                        source: history::RevisionSource::Now,
+                    },
+                    history::Revision {
+                        id: Some("local:old".into()),
+                        short_id: "old".into(),
+                        summary: "older shape".into(),
+                        content: "fn old() {}\n".into(),
+                        source: history::RevisionSource::Local,
+                    },
+                ],
+                position: 0,
+                rendered_position: 0,
+                reviewed_id: None,
+                reviewed_content: None,
+            },
+        ];
+        let revision = app.histories[1].revisions[1].context().unwrap();
+        app.comments.push(Comment {
+            file_path: b,
+            start: 1,
+            end: 1,
+            lines: "fn old() {}".into(),
+            revision: Some(revision.clone()),
+            text: "old fn".into(),
+        });
+        // a.md (index 0) has no comments, so the first selectable entry
+        // is b.rs's comment.
+        on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.current_file_index, 1, "switched to the comment's file");
+        assert_eq!(
+            app.histories[1].position, 1,
+            "the target file's revision is restored"
+        );
+        assert_eq!(
+            app.source.content, "fn old() {}\n",
+            "the target file shows that revision"
+        );
+        assert_eq!(app.selection.unwrap().range(), (0, 0));
+    }
+
+    #[test]
+    fn comments_overlay_enter_falls_back_when_the_revision_is_stale() {
+        // A comment whose revision no longer exists in the history (e.g.
+        // a pruned local snapshot) falls back to a plain line jump in
+        // the current document instead of panicking or mis-seeking.
+        let (mut app, _dir) = make_app_keep(5, Mode::View);
+        let path = app.files[0].clone();
+        app.comments.push(Comment {
+            file_path: path,
+            start: 2,
+            end: 2,
+            lines: "line2".into(),
+            revision: Some("local:pruned".into()),
+            text: "ghost".into(),
+        });
+        on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, None);
+        assert_eq!(
+            app.histories[0].position, 0,
+            "no seek without a matching revision"
+        );
+        assert_eq!(
+            app.selection.unwrap().range(),
+            (1, 1),
+            "plain line jump in the current document"
+        );
+    }
+
+    #[test]
+    fn comments_overlay_enter_returns_to_now_for_a_live_comment() {
+        // Selecting a live (revision-less) comment while browsing the
+        // past returns to NOW: the comment lives in the working tree, so
+        // the jump must show it there, not in the wrong document.
+        let (mut app, _dir) = make_app_keep(5, Mode::View);
+        let path = app.files[0].clone();
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "shorter".into(),
+            content: "line1\nline2\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        // Browse into the past, then open the list from there.
+        app.histories[0].position = 1;
+        app.history_render_due = Some(std::time::Instant::now());
+        render_pending_history(&mut app, false);
+        assert_eq!(app.source.content, "line1\nline2\n", "browsing the past");
+        app.comments.push(Comment {
+            file_path: path,
+            start: 3,
+            end: 3,
+            lines: "line3".into(),
+            revision: None,
+            text: "live".into(),
+        });
+        on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.histories[0].position, 0, "back to NOW");
+        assert_eq!(
+            app.source.content, "line1\nline2\nline3\nline4\nline5\n",
+            "the working tree is rendered"
+        );
+        assert_eq!(app.selection.unwrap().range(), (2, 2));
+    }
+
+    #[test]
     fn reload_preserves_comments_on_all_files() {
         let (mut app, _dir) = make_session();
         let a = app.files[0].clone();
