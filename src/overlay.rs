@@ -16,6 +16,7 @@ use crate::app::{App, Mode, supports_view};
 use crate::clip_ellipsis;
 use crate::comment::{Comment, Selection};
 use crate::reload::file_externally_changed;
+use crate::render_pending_history;
 use crate::replace_view_preserving_cursor;
 
 /// The kind of overlay currently open (Ctrl+p = files, `l` = comments,
@@ -262,9 +263,49 @@ pub(crate) fn activate_overlay_selection(app: &mut App) {
                 let target_path = c.file_path.clone();
                 let target_start = c.start;
                 let target_end = c.end;
+                let target_revision = c.revision.clone();
                 if let Some(pos) = app.files.iter().position(|f| f == &target_path) {
                     app.overlay = None;
                     app.switch_to_file(pos);
+                    // A comment anchors to the document it was made
+                    // against: a historical one (made while browsing the
+                    // timeline) restores that revision before the jump —
+                    // its line numbers belong to that document, and its
+                    // card only renders under that revision; a live one
+                    // returns to NOW when the user happens to be browsing
+                    // the past. The target revision is materialized
+                    // synchronously here (the overlay is closed above;
+                    // the pending-scrub guard means the common at-NOW
+                    // jump to a live comment skips the render and its
+                    // landing pulse entirely), so the selection below
+                    // lands on the comment's actual lines. A historical
+                    // revision that no longer exists in the history falls
+                    // back to the plain line jump.
+                    let restored = app.histories.get_mut(pos).is_some_and(|history| {
+                        let target = match target_revision.as_deref() {
+                            Some(revision) => history
+                                .revisions
+                                .iter()
+                                .position(|r| r.context().as_deref() == Some(revision)),
+                            None => Some(0),
+                        };
+                        match target {
+                            Some(target) => {
+                                history.position = target;
+                                true
+                            }
+                            None => false,
+                        }
+                    });
+                    if restored
+                        && app
+                            .histories
+                            .get(pos)
+                            .is_some_and(|history| history.position != history.rendered_position)
+                    {
+                        app.history_render_due = Some(std::time::Instant::now());
+                        render_pending_history(app, false);
+                    }
                     let last = app.source.len().saturating_sub(1);
                     let start = (target_start.saturating_sub(1) as usize).min(last);
                     let end = (target_end.saturating_sub(1) as usize).min(last);
