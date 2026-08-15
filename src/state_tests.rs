@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::comment::Selection;
     use crate::config::{Config, EscQuit};
+    use ratatui::backend::Backend;
     use crate::highlight::Highlighter;
     use crate::ime::ImeMode;
     use crate::source::Source;
@@ -36,6 +37,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();
@@ -77,6 +79,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();
@@ -772,6 +775,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();
@@ -819,6 +823,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();
@@ -853,6 +858,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();
@@ -1784,6 +1790,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();
@@ -1895,6 +1902,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();
@@ -2194,6 +2202,7 @@ use crate::comment::Selection;
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(config.files[0].clone()).unwrap();
@@ -2781,6 +2790,10 @@ use crate::comment::Selection;
         assert!(
             app.time_machine_fx.is_some(),
             "the time-machine frame effect exists with --fx"
+        );
+        assert!(
+            app.starfield_fx.is_some(),
+            "the starfield exists with --fx too"
         );
         // A fresh App built with `--no-fx` from the start has no frame
         // effect, and its toasts never fade.
@@ -3377,6 +3390,226 @@ use crate::comment::Selection;
             app.ghost_fx.is_empty(),
             "no deletions in the new revision, no stale ghosts"
         );
+    }
+
+    #[test]
+    fn the_add_phase_waits_for_the_delete_phase() {
+        // A revision that BOTH removes and adds lines plays as two
+        // phases: the scatter-in for the new text is parked behind the
+        // ghost phase (backspace + collapse), so the reveal starts only
+        // after [`crate::effects::GHOST_PHASE_MS`] — the new text
+        // materializes in its final position and never moves. The
+        // `fx::delay` wrapper makes the effect's total timer span the
+        // delete phase plus the reveal.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:mix".into()),
+            short_id: "mix".into(),
+            summary: "removes line2/line4, adds line6".into(),
+            content: "line1\nline3\nline5\nline6\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(!app.ghost_fx.is_empty(), "deletions ghost out");
+        assert!(!app.appear_fx.is_empty(), "additions scatter in");
+        let (_, _, fx) = &app.appear_fx[0];
+        let total = fx.timer().map(|t| t.duration().as_millis()).unwrap_or(0);
+        assert!(
+            total > crate::effects::GHOST_PHASE_MS as u128,
+            "the add phase waits for the delete phase (got {total} ms)"
+        );
+
+        // A pure-add revision has no delete phase: the stream starts
+        // immediately, so the effect spans only its own reveal.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:add".into()),
+            short_id: "add".into(),
+            summary: "added a line".into(),
+            content: "line1\nline2\nline3\nline4\nline5\nline6\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.ghost_fx.is_empty(), "no deletions, no ghost phase");
+        let (_, _, fx) = &app.appear_fx[0];
+        let total = fx.timer().map(|t| t.duration().as_millis()).unwrap_or(0);
+        assert!(
+            total <= crate::effects::GHOST_PHASE_MS as u128,
+            "pure adds stream in immediately (got {total} ms)"
+        );
+    }
+
+    #[test]
+    fn the_collapse_preserves_the_parked_add_phase() {
+        // The add phase is parked behind the delete phase (see
+        // `the_add_phase_waits_for_the_delete_phase`). The ghost collapse
+        // rebuilds the view to the same ghost-free layout the parked
+        // effects were built against — it must NOT drop them, or the new
+        // text would never stream in and only the backspace would show.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:mix".into()),
+            short_id: "mix".into(),
+            summary: "removes line2/line4, adds line6".into(),
+            content: "line1\nline3\nline5\nline6\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(!app.appear_fx.is_empty(), "the add phase is parked");
+        let parked = app.appear_fx.len();
+        // The ghost phase expires: the layout collapses, the parked
+        // effects must survive to stream in.
+        app.history_ghost_until = Some(Instant::now() - Duration::from_millis(1));
+        expire_history_ghosts(&mut app);
+        assert_eq!(
+            app.appear_fx.len(),
+            parked,
+            "the collapse keeps the parked add phase"
+        );
+        assert!(app.ghost_fx.is_empty(), "the ghosts themselves are gone");
+        assert!(app.history_ghost_until.is_none());
+    }
+
+    #[test]
+    fn the_ghost_collapse_waits_for_the_composer() {
+        // Typing a comment right after a generation move lands the
+        // composer inside the ghost phase (deletions backspace out for
+        // ~550 ms before the layout folds). The collapse rebuilds the
+        // view — if it fires while the composer is open, the rows below
+        // the comment's anchor move and the terminal cursor jumps.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:del".into()),
+            short_id: "del".into(),
+            summary: "deleted a line".into(),
+            content: "line1\nline3\nline4\nline5\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(!app.ghost_fx.is_empty(), "deletions ghost out");
+        let rows_with_ghosts = app.view.rows.len();
+        // Comment the cursor line while the ghosts are still up.
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input, "composer open");
+        let anchor_while_typing = view_composer_anchor(&app);
+        // The ghost phase expires mid-typing.
+        app.history_ghost_until = Some(Instant::now() - Duration::from_millis(1));
+        expire_history_ghosts(&mut app);
+        assert_eq!(
+            view_composer_anchor(&app),
+            anchor_while_typing,
+            "the collapse must not move the composer while typing"
+        );
+        assert_eq!(
+            app.view.rows.len(),
+            rows_with_ghosts,
+            "ghost rows stay until the composer closes"
+        );
+        // Once the composer closes, the collapse runs and folds the
+        // ghosts away.
+        on_input_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.mode, Mode::View, "composer closed");
+        expire_history_ghosts(&mut app);
+        assert!(app.history_ghost_until.is_none());
+        assert!(
+            app.view.rows.len() < rows_with_ghosts,
+            "the collapse folds the ghost rows after the composer"
+        );
+    }
+
+    #[test]
+    fn the_landing_pulse_fires_immediately_for_instant_transitions() {
+        // `--no-fx` renders without effects: there is nothing to settle,
+        // so the pulse fires on the first paint after the render — the
+        // pre-change behavior stays intact for transitions that cannot
+        // animate.
+        let mut app = make_app(5, Mode::View);
+        app.config.fx = false;
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "older".into(),
+            content: "line1\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.warp_fx.is_none(), "--no-fx arms no effects");
+        assert!(app.history_frame_flash_pending);
+        begin_history_frame_flash_after_draw(&mut app);
+        assert!(!app.history_frame_flash_pending);
+        assert!(
+            app.history_frame_flash_until.is_some(),
+            "an instant transition pulses immediately"
+        );
+    }
+
+    #[test]
+    fn a_comment_op_interrupting_the_transition_drops_the_pulse() {
+        // A comment op (Enter with a card, `d` delete, …) rebuilds the
+        // view and drops the transition's scatter effects mid-flight: the
+        // screen will not settle into the new generation on its own, so
+        // the landing pulse must not fire for a transition that never
+        // landed.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:add".into()),
+            short_id: "add".into(),
+            summary: "added a line".into(),
+            content: "line1\nline2\nline3\nline4\nline5\nline6\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.history_frame_flash_pending);
+        replace_view_preserving_cursor(&mut app);
+        assert!(
+            !app.history_frame_flash_pending,
+            "the interrupted transition never pulses"
+        );
+        begin_history_frame_flash_after_draw(&mut app);
+        assert!(app.history_frame_flash_until.is_none());
+    }
+
+    #[test]
+    fn the_generation_warp_flies_on_every_real_journey() {
+        // Traveling to a different generation arms the warp — in both
+        // directions — and `--no-fx` never flies.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "older draft".into(),
+            content: "line1\nline2\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.warp_fx.is_some(), "diving into the past warps");
+        // Coming back to NOW is a journey too.
+        app.warp_fx = None;
+        app.histories[0].position = 0;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.warp_fx.is_some(), "returning to NOW warps too");
+        // --no-fx: the render happens, the flight does not.
+        app.warp_fx = None;
+        app.config.fx = false;
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        assert!(app.warp_fx.is_none(), "--no-fx: no warp");
     }
 
     #[test]
@@ -4119,6 +4352,19 @@ use crate::comment::Selection;
             app.history_frame_flash_until.is_none(),
             "the pulse does not overlap the first paint of the rendered document"
         );
+        // The transition is still animating (warp + ghost + stream): the
+        // pulse waits for the screen to settle instead of firing into
+        // the motion.
+        begin_history_frame_flash_after_draw(&mut app);
+        assert!(
+            app.history_frame_flash_pending,
+            "the pulse waits for the transition to settle"
+        );
+        assert!(app.history_frame_flash_until.is_none());
+        // Once the transition effects complete, the next paint pulses.
+        app.warp_fx = None;
+        app.appear_fx.clear();
+        app.ghost_fx.clear();
         begin_history_frame_flash_after_draw(&mut app);
         assert!(!app.history_frame_flash_pending);
         assert!(app.history_frame_flash_until.is_some());
@@ -4544,4 +4790,243 @@ use crate::comment::Selection;
         let out = clip_if_needed(&long, 10);
         assert_eq!(UnicodeWidthStr::width(out.as_str()), 10);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn depth_reaches_the_frame_through_draw() {
+        // Full-path probe: draw() feeds travel_depth into the border
+        // effect every frame, so a deeper generation shows a deeper
+        // frame. Sampled on the TOP border (the left border column x=1
+        // carries the cursor/comment markers, which are not border
+        // glyphs and stay out of the effect).
+        let border_color = |app: &mut App, position: usize| -> Color {
+            app.histories[0].position = position;
+            app.histories[0].rendered_position = position;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let buf = terminal.backend().buffer();
+            buf[(40, 1)].fg
+        };
+        let mut app = make_app(5, Mode::View);
+        // Three revisions so position 1 = mid (depth 0.5), 2 = oldest
+        // (depth 1.0): the same border cell must sink between them.
+        app.histories[0].revisions.push(crate::history::Revision {
+            id: Some("local:mid".into()),
+            short_id: "mid".into(),
+            summary: "middle".into(),
+            content: "line1\nline2\nline3\n".into(),
+            source: crate::history::RevisionSource::Local,
+        });
+        app.histories[0].revisions.push(crate::history::Revision {
+            id: Some("local:old".into()),
+            short_id: "old".into(),
+            summary: "oldest".into(),
+            content: "line1\n".into(),
+            source: crate::history::RevisionSource::Local,
+        });
+        let mid = border_color(&mut app, 1);
+        let old = border_color(&mut app, 2);
+        eprintln!("mid={mid:?} old={old:?}");
+        assert_ne!(mid, old, "the frame color must sink with depth");
+    }
+
+    #[test]
+    fn composer_cursor_is_stable_while_typing_in_the_time_machine() {
+        // Typing a comment while browsing history must keep the terminal
+        // cursor glued to the `▏` glyph. Dump the cursor position across
+        // frames and flag any jump that isn't the expected rightward
+        // drift of the text cursor.
+        let cursor_pos = |app: &mut App| -> (u16, u16) {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            terminal.backend_mut().get_cursor_position().unwrap().into()
+        };
+        let mut app = make_app(5, Mode::View);
+        // A generation with deletions AND additions (ghost phase runs).
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:mix".into()),
+            short_id: "mix".into(),
+            summary: "removes line2, adds line6".into(),
+            content: "line1\nline3\nline4\nline5\nline6\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        // Comment the cursor line while the transition is still playing.
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        let mut prev = cursor_pos(&mut app);
+        eprintln!("start: {prev:?}");
+        for ch in "hello world".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+            let pos = cursor_pos(&mut app);
+            eprintln!("after {ch}: {pos:?}");
+            // The cursor moves right as text grows; a jump UP or a jump
+            // of more than 2 rows signals a layout fight.
+            let (px, py) = prev;
+            let (x, y) = pos;
+            assert!(
+                y >= py && (y - py) <= 2 && x >= px.saturating_sub(2),
+                "cursor jumped after '{ch}': {prev:?} -> {pos:?}"
+            );
+            prev = pos;
+        }
+    }
+
+    #[test]
+    fn composer_cursor_stays_put_at_the_document_bottom() {
+        // A comment on the LAST line while browsing history: the bar
+        // extends past the document and the per-frame nudge must keep
+        // the cursor still while the text wraps — no upward jumps.
+        let cursor_pos = |app: &mut App| -> (u16, u16) {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 24)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            terminal.backend_mut().get_cursor_position().unwrap().into()
+        };
+        let mut app = make_app(12, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:add".into()),
+            short_id: "add".into(),
+            summary: "added a line".into(),
+            content: (1..=13).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n") + "\n",
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        // Move the view cursor to the last line and comment it.
+        app.view.goto_source_line(11);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        let mut prev = cursor_pos(&mut app);
+        eprintln!("start: {prev:?}");
+        for ch in "a very long comment that wraps across several rows of the narrow bar".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+            let pos = cursor_pos(&mut app);
+            let (px, py) = prev;
+            let (x, y) = pos;
+            if y == py {
+                // Same row: the text cursor only ever moves right.
+                assert!(x >= px, "cursor went left after '{ch}': {prev:?} -> {pos:?}");
+            } else {
+                // A wrap moves the cursor down one row and back to the
+                // text start — never up, never more than one row.
+                assert!(
+                    y > py && y - py <= 1,
+                    "cursor jumped rows after '{ch}': {prev:?} -> {pos:?}"
+                );
+            }
+            prev = pos;
+        }
+        eprintln!("end: {prev:?}");
+    }
+
+    #[test]
+    fn composer_cursor_is_stable_in_source_mode_time_machine() {
+        // Source mode is the one place the timeline bar takes a content
+        // row (keep_cursor_out_of_timeline nudges the scroll): typing a
+        // comment while browsing must not make the cursor fight that.
+        let cursor_pos = |app: &mut App| -> (u16, u16) {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            terminal.backend_mut().get_cursor_position().unwrap().into()
+        };
+        let mut app = make_app(10, Mode::Source);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:del".into()),
+            short_id: "del".into(),
+            summary: "removes line2".into(),
+            content: "line1\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        app.histories[0].position = 1;
+        app.history_render_due = Some(Instant::now());
+        assert!(render_pending_history(&mut app, true));
+        on_source_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        let mut prev = cursor_pos(&mut app);
+        eprintln!("start: {prev:?}");
+        for ch in "hello source comment".chars() {
+            on_input_key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+            let pos = cursor_pos(&mut app);
+            let (px, py) = prev;
+            let (x, y) = pos;
+            if y == py {
+                assert!(x >= px, "cursor went left after '{ch}': {prev:?} -> {pos:?}");
+            } else {
+                assert!(
+                    y > py && y - py <= 1,
+                    "cursor jumped rows after '{ch}': {prev:?} -> {pos:?}"
+                );
+            }
+            prev = pos;
+        }
+        eprintln!("end: {prev:?}");
+    }
+
+    #[test]
+    fn no_cursor_anchor_stops_publishing_the_position() {
+        // The composer publishes the hidden hardware cursor position so
+        // the macOS IME anchors its composition window at the `▏` — but
+        // terminals with cursor-following shaders blaze around that
+        // motion. `--no-cursor-anchor` must keep the position untouched.
+        let published = |app: &mut App| -> Option<(u16, u16)> {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let pos = terminal.backend_mut().get_cursor_position().unwrap();
+            let pos: (u16, u16) = pos.into();
+            // The test backend reports the last published position; with
+            // nothing published it stays at the default (0,0).
+            (pos != (0, 0)).then_some(pos)
+        };
+        // Anchor on (default): the position is published inside the bar.
+        let mut app = make_app(5, Mode::View);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert!(published(&mut app).is_some(), "the anchor publishes the position");
+        // Anchor off: nothing is published, the `▏` glyph still draws.
+        let mut app = make_app(5, Mode::View);
+        app.config.cursor_anchor = false;
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert!(
+            published(&mut app).is_none(),
+            "--no-cursor-anchor stops publishing the position"
+        );
+    }
+
+    #[test]
+    fn the_composer_keeps_the_hardware_cursor_hidden() {
+        // The composer publishes the (hidden) cursor position every frame
+        // for the macOS IME anchor. ratatui's draw re-SHOWS the cursor
+        // whenever a frame publishes a position, so akapen re-hides it
+        // right after every draw — a visible hardware cursor next to the
+        // `▏` glyph makes cursor-following terminal shaders (Ghostty's
+        // cursor_blaze) animate around it.
+        let mut app = make_app(5, Mode::View);
+        on_view_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, None);
+        assert_eq!(app.mode, Mode::Input);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        // The premise: ratatui's position publish shows the cursor — the
+        // exact behavior the event loop's re-hide compensates for.
+        assert!(
+            terminal.backend().cursor_visible(),
+            "premise: a publishing draw shows the hardware cursor"
+        );
+        // The event loop re-hides it right after every draw.
+        terminal.backend_mut().hide_cursor().unwrap();
+        assert!(
+            !terminal.backend().cursor_visible(),
+            "the hardware cursor stays hidden while composing"
+        );
+        // The position is still published for the IME even though the
+        // cursor is hidden (visibility and position are separate).
+        let pos = terminal.backend_mut().get_cursor_position().unwrap();
+        assert_ne!(pos, ratatui::layout::Position::new(0, 0));
     }

@@ -6,17 +6,21 @@
 //! effect's own state, so skipped frames (the render-complete flash, a
 //! prompt covering the message row) never disturb the wave.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Instant;
 
 use ratatui::style::Color;
 use tachyonfx::fx::ShaderFnContext;
 use tachyonfx::{fx, CellFilter, CellIterator, Effect, EffectTimer, Interpolation, Motion};
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::app::STATUS_SECS;
 use crate::view::{
-    perimeter_index, time_machine_color_at, time_machine_palette, time_machine_rotation_fraction,
-    TIME_MACHINE_ROTATION_MS,
+    ease_out_cubic, perimeter_index, rotation_period_ms, starfield_color, starfield_star_at,
+    time_machine_color_at, time_machine_depth_shift, time_machine_palette,
+    time_machine_rotation_fraction, warp_ring_color, warp_ring_rect, TIME_MACHINE_ROTATION_MS,
+    WARP_INNER_SCALE,
 };
 
 /// How long the timeline bar's slide-in/out takes (milliseconds).
@@ -29,6 +33,23 @@ static TIMELINE_BAR_VISIBLE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn set_timeline_bar_visible(visible: bool) {
     TIMELINE_BAR_VISIBLE.store(visible, Ordering::Relaxed);
+}
+
+/// The travel depth (0 = just behind NOW, 1000 = the oldest revision),
+/// set by `draw` each frame from the live history position. The frame
+/// effects are created once at startup, so the depth reaches their
+/// shader closures through this channel — the same way the timeline
+/// bar's visibility does. Deeper travel means a denser sky, a faster
+/// border wave, and a palette sunk toward violet.
+static TIME_DEPTH_PERMILLE: AtomicU16 = AtomicU16::new(0);
+
+pub(crate) fn set_time_depth(depth: f32) {
+    let permille = (depth.clamp(0.0, 1.0) * 1000.0) as u16;
+    TIME_DEPTH_PERMILLE.store(permille, Ordering::Relaxed);
+}
+
+fn time_depth() -> f32 {
+    TIME_DEPTH_PERMILLE.load(Ordering::Relaxed) as f32 / 1000.0
 }
 
 /// The timeline bar's drawer opening: the bottom-anchored rows rise
@@ -67,10 +88,18 @@ pub(crate) fn timeline_slide_out() -> Effect {
 pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
     let palette = time_machine_palette(light);
     fx::effect_fn(
-        Instant::now(),
+        (Instant::now(), 0.0f32),
         EffectTimer::from_ms(TIME_MACHINE_ROTATION_MS as u32 * 60, Interpolation::Linear),
-        move |clock: &mut Instant, ctx: ShaderFnContext, cells: CellIterator| {
-            let rot = time_machine_rotation_fraction(*clock);
+        move |(last, phase): &mut (Instant, f32), ctx: ShaderFnContext, cells: CellIterator| {
+            // The wave advances by dt/period, so a depth change (the
+            // period tightens the deeper the traveler goes) speeds the
+            // rotation up smoothly instead of jumping the phase.
+            let now = Instant::now();
+            let dt = now.saturating_duration_since(*last).as_secs_f32();
+            *last = now;
+            let depth = time_depth();
+            *phase = (*phase + dt * 1000.0 / rotation_period_ms(depth)) % 1.0;
+            let rot = *phase;
             let area = ctx.area;
             let (w, h) = (area.width as usize, area.height as usize);
             // A degenerate frame (a terminal that briefly reports 0×0,
@@ -100,10 +129,192 @@ pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
                     continue;
                 }
                 let perim = perimeter_index(rx, ry, w, h);
-                cell.set_fg(time_machine_color_at(palette, perim, perimeter, rot));
+                let c = time_machine_color_at(palette, perim, perimeter, rot);
+                cell.set_fg(time_machine_depth_shift(light, c, depth));
             }
         },
     )
+}
+
+/// The starfield behind the page while browsing the past (`--fx`): a
+/// sparse, screen-fixed sprinkle of stars twinkling in the page's empty
+/// cells — the space the time-machine frame floats in. Stars are only
+/// painted where nothing lives: past each row's text tail (one breathing
+/// cell after the last glyph, its full width honored so a CJK tail never
+/// exposes its continuation cell), on blank rows, and never over a
+/// colored background (selection, review bands, the toast banner) — the
+/// text column stays calm while the emptiness around it becomes sky.
+/// Placement, glyph, and phase are a pure hash of the screen cell (see
+/// [`starfield_star_at`]); the twinkle rides the same rotation lap as
+/// the frame gradient, and the clock lives in the effect's own state so
+/// skipped frames never make the sky stutter.
+pub(crate) fn starfield_effect(light: bool) -> Effect {
+    fx::effect_fn_buf(
+        Instant::now(),
+        EffectTimer::from_ms(TIME_MACHINE_ROTATION_MS as u32 * 60, Interpolation::Linear),
+        move |clock: &mut Instant, ctx, buf| {
+            // Twinkle speed stays constant; only the DENSITY rides the
+            // travel depth (the sky thickens, it does not flicker
+            // faster).
+            let rot = time_machine_rotation_fraction(*clock);
+            let depth = time_depth();
+            let area = ctx.area;
+            if area.width < 3 || area.height < 3 {
+                return; // no interior to sprinkle
+            }
+            let last_col = area.right() - 1; // the right border column
+            // The interior rows. The browsing timeline bar owns the
+            // bottom content row while it is up (the times row on wide
+            // terminals): the sky stops one row short of it.
+            let mut bottom = area.bottom() - 1;
+            if TIMELINE_BAR_VISIBLE.load(Ordering::Relaxed) {
+                bottom = bottom.saturating_sub(1);
+            }
+            for y in (area.y + 1)..bottom {
+                // Pass 1: the row's text tail — the column one past the
+                // last non-blank glyph plus one breathing cell. Stepping
+                // by glyph width skips the hidden continuation cells of
+                // wide characters.
+                let mut tail = area.x + 1;
+                let mut x = area.x + 1;
+                while x < last_col {
+                    let sym = buf[(x, y)].symbol();
+                    let w = sym.width().max(1) as u16;
+                    if !sym.trim().is_empty() {
+                        tail = x + w + 1;
+                    }
+                    x += w;
+                }
+                // Pass 2: stars only in the emptiness beyond the tail.
+                for x in tail..last_col {
+                    let cell = &mut buf[(x, y)];
+                    if !cell.symbol().trim().is_empty() {
+                        continue;
+                    }
+                    if cell.style().bg.is_some_and(|bg| bg != Color::Reset) {
+                        continue;
+                    }
+                    if let Some(star) = starfield_star_at(x, y, depth) {
+                        cell.set_char(star.glyph);
+                        // The twinkle color rides the SAME depth shift
+                        // as the frame: deeper travel sinks the sky
+                        // toward indigo-violet with the border, so the
+                        // stars and the frame read as one universe (the
+                        // density already rode the depth; the color
+                        // joins it here).
+                        let twinkle = starfield_color(light, star.phase, rot);
+                        cell.set_fg(time_machine_depth_shift(light, twinkle, depth));
+                    }
+                }
+            }
+        },
+    )
+}
+
+/// How long the generation-warp zoom takes (milliseconds).
+pub(crate) const WARP_MS: u32 = 450;
+/// How many window outlines fly during a warp.
+const WARP_RINGS: usize = 4;
+/// Each ring launches this fraction of the flight after the previous.
+const WARP_STAGGER: f32 = 0.18;
+
+/// The generation warp: Mac Time Machine's flying windows, translated.
+/// When the selected revision finishes rendering, a few window outlines
+/// (`┌─┐│└┘` rings) fly through the frame — DEEPER into the past they
+/// approach out of the depth (small → full frame, dim → bright) and
+/// hand off to the real border; BACK toward NOW they recede the other
+/// way (full → small, bright → dim) and vanish. Rings are staggered so
+/// the flight reads as a cascade, and each ring decelerates on a cubic
+/// ease-out. The rings repaint buffer cells for [`WARP_MS`] only — the
+/// text underneath returns untouched on the next frame.
+pub(crate) fn warp_effect(deeper: bool, light: bool) -> Effect {
+    fx::effect_fn_buf(
+        (),
+        EffectTimer::from_ms(WARP_MS, Interpolation::Linear),
+        move |_state: &mut (), ctx, buf| {
+            let t = ctx.timer.alpha();
+            let area = ctx.area;
+            if area.width < 8 || area.height < 6 {
+                return; // too small for a flight to read
+            }
+            // Total flight time covers the last ring's stagger.
+            let span = 1.0 + WARP_STAGGER * (WARP_RINGS - 1) as f32;
+            for k in 0..WARP_RINGS {
+                let tk = (t * span - WARP_STAGGER * k as f32).clamp(0.0, 1.0);
+                if tk <= 0.0 || tk >= 1.0 {
+                    continue; // not launched yet, or already gone
+                }
+                let eased = ease_out_cubic(tk);
+                // The flight stays in the frame's outer margin: rings
+                // travel between WARP_INNER_SCALE and the frame itself,
+                // never across the middle of the page.
+                let travel = 1.0 - WARP_INNER_SCALE;
+                let scale = if deeper {
+                    WARP_INNER_SCALE + travel * eased
+                } else {
+                    1.0 - travel * eased
+                };
+                if scale >= 0.98 {
+                    continue; // coincides with the real frame: hand off
+                }
+                let ring = warp_ring_rect(area, scale);
+                draw_ring(buf, ring, area, warp_ring_color(light, scale));
+            }
+        },
+    )
+}
+
+/// Draw one warp ring outline into the buffer. Wide glyphs need care in
+/// both directions: a wide glyph LEFT of a ring cell shadows it (the
+/// renderer skips cells behind a wide symbol), so it is blanked; a ring
+/// glyph landing ON a wide glyph's lead cell leaves its continuation
+/// cell orphaned, so that is blanked too. Both blanks last one frame —
+/// the static draw repaints the text underneath.
+fn draw_ring(
+    buf: &mut ratatui::buffer::Buffer,
+    ring: ratatui::layout::Rect,
+    bounds: ratatui::layout::Rect,
+    color: Color,
+) {
+    if ring.width < 2 || ring.height < 2 {
+        return;
+    }
+    let (l, r) = (ring.left(), ring.right() - 1);
+    let (t, b) = (ring.top(), ring.bottom() - 1);
+    for x in l..=r {
+        let top_ch = if x == l { '┌' } else if x == r { '┐' } else { '─' };
+        set_ring_cell(buf, x, t, top_ch, color, bounds);
+        let bot_ch = if x == l { '└' } else if x == r { '┘' } else { '─' };
+        set_ring_cell(buf, x, b, bot_ch, color, bounds);
+    }
+    for y in (t + 1)..b {
+        set_ring_cell(buf, l, y, '│', color, bounds);
+        set_ring_cell(buf, r, y, '│', color, bounds);
+    }
+}
+
+fn set_ring_cell(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    ch: char,
+    color: Color,
+    bounds: ratatui::layout::Rect,
+) {
+    if x > bounds.left() && buf[(x - 1, y)].symbol().width() == 2 {
+        buf[(x - 1, y)].set_char(' '); // unshadow: the wide glyph would hide the ring cell
+    }
+    let wide = buf[(x, y)].symbol().width() == 2;
+    let cell = &mut buf[(x, y)];
+    cell.set_char(ch);
+    cell.set_style(
+        ratatui::style::Style::new()
+            .fg(color)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    );
+    if wide && x + 1 < bounds.right() {
+        buf[(x + 1, y)].set_char(' '); // the lead cell shrank: free its continuation
+    }
 }
 
 /// The toast's lifetime effect: fade in from black (120 ms), hold, fade
@@ -133,20 +344,23 @@ pub(crate) fn toast_effect() -> Effect {
 /// revision's rendered text), and only those cells materialize — the
 /// unchanged text is never hidden. The reveal order is READING order
 /// (left→right, top→bottom) across the new characters, like an LLM
-/// streaming its output: the text types in from the front. `stagger_ms`
-/// cascades later blocks.
+/// streaming its output: the text types in from the front. `delay_ms`
+/// parks the reveal: the base delay holds the block until the delete
+/// phase (ghost backspace + layout collapse) has finished — the new text
+/// then streams into its FINAL position and never moves — and later
+/// blocks cascade by an extra 60 ms each.
 ///
 /// Hidden cells are REPAINTED with their own background color rather than
 /// blanked: the glyphs stay (their width never changes, so ratatui's diff
 /// never takes the wide→narrow path that broke CJK backgrounds), and the
 /// original text color is captured on the first frame so the stream
 /// cursor can restore it — no checkerboard, no visible space glyphs.
-pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effect {
+pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, delay_ms: u32) -> Effect {
     fx::delay(
-        stagger_ms,
+        delay_ms,
         fx::effect_fn_buf(
             (mask, None::<std::collections::HashMap<(u16, u16), Color>>),
-            (450, Interpolation::Linear),
+            (APPEAR_REVEAL_MS, Interpolation::Linear),
             |(mask, fg_cache), ctx, buf| {
                 let alpha = ctx.timer.alpha();
                 let area = ctx.area;
@@ -231,20 +445,37 @@ fn blank_cell(cell: &mut ratatui::buffer::Cell) {
     cell.set_char(' ');
 }
 
+/// The deletion ghost's hold-before-backspace: the ghost stays whole
+/// long enough to read before its cells scatter out.
+pub(crate) const GHOST_HOLD_MS: u32 = 150;
+/// The backspace scatter-out: ghost cells blank in reverse reading order
+/// (right→left, bottom→top) over this span. Kept shorter than the
+/// reveal so the erase reads as a quick tidy-up, not the main event.
+pub(crate) const GHOST_BACKSPACE_MS: u32 = 400;
+/// The whole delete phase (hold + backspace). The layout collapses at
+/// exactly this mark, and the add phase's scatter-in starts after it
+/// (see `App::history_ghost_until` and `GHOST_SETTLE_MS`).
+pub(crate) const GHOST_PHASE_MS: u32 = GHOST_HOLD_MS + GHOST_BACKSPACE_MS;
+
+/// How long the scatter-in reveal takes: the new characters stream in
+/// left→right over this span. Longer than the backspace so the add
+/// phase — the point of the journey — gets the eye time to register.
+pub(crate) const APPEAR_REVEAL_MS: u32 = 550;
+
 /// Scatter-out for the deletion ghosts, BACKSPACE-style: the ghost stays
-/// whole for 150 ms (long enough to read), then its cells blank out in
-/// REVERSE reading order — right→left, bottom→top, exactly like
-/// backspacing through the text — completing when the 650 ms ghost
-/// lifetime collapses the layout. The ghost rows carry NO background
-/// (the deletion band was dropped from the spec), so the cells are
-/// BLANKED rather than repainted — wide glyphs go through
-/// [`blank_cell`], which keeps the trailing column intact.
+/// whole for [`GHOST_HOLD_MS`] (long enough to read), then its cells
+/// blank out in REVERSE reading order — right→left, bottom→top, exactly
+/// like backspacing through the text — completing when the
+/// [`GHOST_PHASE_MS`] ghost lifetime collapses the layout. The ghost
+/// rows carry NO background (the deletion band was dropped from the
+/// spec), so the cells are BLANKED rather than repainted — wide glyphs
+/// go through [`blank_cell`], which keeps the trailing column intact.
 pub(crate) fn ghost_effect() -> Effect {
     fx::delay(
-        150,
+        GHOST_HOLD_MS,
         fx::effect_fn_buf(
             (None::<Vec<usize>>, 0usize),
-            (500, Interpolation::Linear),
+            (GHOST_BACKSPACE_MS, Interpolation::Linear),
             |(text_counts, total), ctx, buf| {
                 let alpha = ctx.timer.alpha();
                 let area = ctx.area;
@@ -312,4 +543,3 @@ pub(crate) fn ghost_effect() -> Effect {
         ),
     )
 }
-

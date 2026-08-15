@@ -109,8 +109,35 @@ pub const TIMELINE_LOCAL_COLOR: Color = Color::Rgb(235, 110, 185);
 /// commits stay distinguishable from LOCAL's pink.
 pub const TIMELINE_COMMIT_COLOR: Color = Color::Rgb(185, 165, 235);
 
-/// The time it takes the gradient to complete one lap around the frame.
+/// The time it takes the gradient to complete one lap around the frame
+/// at the SHALLOWEST depth (just behind NOW). Deeper travel spins
+/// faster — see [`rotation_period_ms`].
 pub const TIME_MACHINE_ROTATION_MS: u64 = 4000;
+
+/// The gradient's lap time at travel `depth`: 4000 ms just behind NOW,
+/// tightening to 2400 ms at the oldest revision — the machine audibly
+/// works harder the deeper it reaches. Consumed as a per-frame phase
+/// increment (`dt / period`), so a depth change mid-lap never jumps
+/// the wave.
+pub fn rotation_period_ms(depth: f32) -> f32 {
+    TIME_MACHINE_ROTATION_MS as f32 - 1600.0 * depth.clamp(0.0, 1.0)
+}
+
+/// Sink a frame color toward the deep end of the nebula by `depth`:
+/// the purple→pink family stays recognizable, but the whole wave
+/// shifts toward a saturated indigo-violet the further back the
+/// traveler is — the surface's pink reads plainly different from the
+/// bottom's violet. Depth 0 is the untouched palette; the 75% lerp is
+/// deliberate, so even a few generations back the change is visible
+/// (the earlier 40% washed out against the rotating wave).
+pub fn time_machine_depth_shift(light: bool, c: Color, depth: f32) -> Color {
+    let deep = if light {
+        Color::Rgb(75, 40, 155)
+    } else {
+        Color::Rgb(105, 55, 205)
+    };
+    lerp_color(c, deep, 0.75 * depth.clamp(0.0, 1.0))
+}
 
 /// The rotation fraction of the time-machine frame since `clock`
 /// started: 0.0 → 1.0 over one [`TIME_MACHINE_ROTATION_MS`] lap. Pure in
@@ -161,6 +188,109 @@ pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
         }
         _ => b,
     }
+}
+
+/// One star of the time-machine starfield: its glyph and its twinkle
+/// phase (0.0..1.0 — the star's offset into the shared twinkle lap).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Star {
+    pub glyph: char,
+    pub phase: f32,
+}
+
+/// The star (if any) living at screen cell `(x, y)` while browsing the
+/// past, at travel `depth` (0.0 = just behind NOW, 1.0 = the oldest
+/// revision): a pure integer hash decides placement, glyph, and twinkle
+/// phase, so the sky is stable frame to frame — stars twinkle in place,
+/// they never jump — and tests can pin any cell. Density rides the
+/// depth (a ~1.4% sprinkle just behind NOW, ~4.8% at the bottom of the
+/// timeline) and grows MONOTONICALLY: descending only ever adds stars
+/// around the ones already shining, so the sky visibly thickens the
+/// deeper you go without a single star blinking out. Screen-fixed on
+/// purpose: the page scrolls THROUGH the starfield, the way Time
+/// Machine's windows fly through its fixed sky.
+pub fn starfield_star_at(x: u16, y: u16, depth: f32) -> Option<Star> {
+    let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 16;
+    // Density in per-mille of cells, ramping with depth.
+    let permille = 14.0 + 34.0 * depth.clamp(0.0, 1.0);
+    if (h % 1000) as f32 >= permille {
+        return None;
+    }
+    let glyph = match (h / 1000) % 10 {
+        0 => '✦',
+        1 => '+',
+        _ => '·',
+    };
+    Some(Star {
+        glyph,
+        phase: ((h >> 16) & 0xFF) as f32 / 255.0,
+    })
+}
+
+/// The twinkle color of a star at `phase`, where `rot` is the shared
+/// rotation fraction (the same lap the frame gradient rides, see
+/// [`time_machine_rotation_fraction`]). Brightness swings on a
+/// phase-shifted sine between a barely-there dim and a bright core,
+/// both inside the nebula family, so the sky breathes with the frame
+/// instead of competing with it. On light backgrounds the "bright"
+/// pole is the saturated one — pale pink would wash out on white.
+pub fn starfield_color(light: bool, phase: f32, rot: f32) -> Color {
+    let t = 0.5 + 0.5 * ((rot + phase) * std::f32::consts::TAU).sin();
+    let (dim, bright) = if light {
+        (Color::Rgb(205, 198, 224), Color::Rgb(148, 92, 178))
+    } else {
+        (Color::Rgb(92, 84, 138), Color::Rgb(255, 194, 233))
+    };
+    lerp_color(dim, bright, t)
+}
+
+/// Cubic ease-out: fast start, soft landing. The warp rings ride this so
+/// an approaching window decelerates into place instead of slamming.
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// How far into the frame a warp ring flies: 1.0 is the frame itself,
+/// this is the innermost scale a ring ever reaches. The flight lives in
+/// the frame's outer margin — a ring crossing the middle of the page
+/// reads as an attack on the text, not as a window passing by.
+pub const WARP_INNER_SCALE: f32 = 0.75;
+
+/// The warp ring's rectangle at `scale` (0.0..=1.0 of the frame), centered
+/// in `area`: the outline of a Time Machine window mid-flight. Never
+/// thinner than 2×2 (a ring needs corners) and never larger than the
+/// frame itself.
+pub fn warp_ring_rect(area: ratatui::layout::Rect, scale: f32) -> ratatui::layout::Rect {
+    let s = scale.clamp(0.0, 1.0);
+    let w = ((area.width as f32 * s).round() as u16).clamp(2, area.width);
+    let h = ((area.height as f32 * s).round() as u16).clamp(2, area.height);
+    ratatui::layout::Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// The warp ring's color at `scale`: apparent distance maps to
+/// brightness — a far ring is a readable mid-purple, a near ring blazes
+/// the nebula's hot pink — so the window visibly approaches out of (or
+/// recedes into) the depth. The square root front-loads the ramp: a
+/// window crossing a 450 ms flight must look bright early, not only in
+/// its last frames. Scale runs [`WARP_INNER_SCALE`]..1.0 in flight; the
+/// clamps absorb the ends.
+pub fn warp_ring_color(light: bool, scale: f32) -> Color {
+    let (far, near) = if light {
+        (Color::Rgb(185, 165, 215), Color::Rgb(190, 70, 170))
+    } else {
+        (Color::Rgb(120, 105, 175), Color::Rgb(250, 120, 190))
+    };
+    let progress = (scale - WARP_INNER_SCALE) / (1.0 - WARP_INNER_SCALE);
+    lerp_color(far, near, progress.clamp(0.0, 1.0).sqrt())
 }
 
 /// Brief neutral pulse when a selected history revision finishes rendering.
@@ -965,7 +1095,9 @@ mod tests {
     use super::{
         Span, ViewState, history_border_color, history_glow_bg, is_table_delimiter_line,
         lerp_color, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
-        selected_bg, time_machine_color_at, time_machine_palette, time_machine_rotation_fraction,
+        ease_out_cubic, rotation_period_ms, selected_bg, starfield_color, starfield_star_at,
+        time_machine_color_at, time_machine_depth_shift, time_machine_palette,
+        time_machine_rotation_fraction, warp_ring_color, warp_ring_rect, WARP_INNER_SCALE,
     };
     use crate::highlight::Highlighter;
     use ratatui::style::{Color, Modifier, Style};
@@ -1053,6 +1185,145 @@ mod tests {
         let clock = std::time::Instant::now();
         let f = time_machine_rotation_fraction(clock);
         assert!((0.0..1.0).contains(&f), "fraction in [0,1): {f}");
+    }
+
+    #[test]
+    fn warp_rings_fly_centered_between_a_dot_and_the_frame() {
+        use ratatui::layout::Rect;
+        let frame = Rect { x: 1, y: 2, width: 80, height: 40 };
+        // Full scale is the frame itself: the ring hands off seamlessly.
+        assert_eq!(warp_ring_rect(frame, 1.0), frame);
+        // Half scale is half the size, centered inside the frame.
+        let half = warp_ring_rect(frame, 0.5);
+        assert_eq!((half.width, half.height), (40, 20));
+        assert_eq!((half.x, half.y), (1 + 20, 2 + 10));
+        // A vanishing ring still keeps its corners (2×2 floor).
+        let dot = warp_ring_rect(frame, 0.0);
+        assert_eq!((dot.width, dot.height), (2, 2));
+        // Ease-out: starts at 0, lands at 1, front-loads the motion.
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert!(ease_out_cubic(0.5) > 0.5, "decelerating, not linear");
+    }
+
+    #[test]
+    fn warp_ring_color_brightens_with_proximity() {
+        for light in [false, true] {
+            // In flight (the outer margin, WARP_INNER_SCALE..1.0) the
+            // ring stays RGB throughout.
+            for i in 0..=10 {
+                let scale = WARP_INNER_SCALE + (1.0 - WARP_INNER_SCALE) * i as f32 / 10.0;
+                let c = warp_ring_color(light, scale);
+                assert!(matches!(c, Color::Rgb(..)), "{c:?}");
+            }
+            let near = if light {
+                Color::Rgb(190, 70, 170)
+            } else {
+                Color::Rgb(250, 120, 190)
+            };
+            assert_eq!(
+                warp_ring_color(light, 1.0),
+                near,
+                "a landed ring blazes the nebula's hot pink"
+            );
+            assert_ne!(
+                warp_ring_color(light, WARP_INNER_SCALE),
+                warp_ring_color(light, 1.0),
+                "distance is visible"
+            );
+        }
+        // The ramp is front-loaded: by mid-flight the dark theme's red
+        // channel (120 far → 250 near) is already closer to the near
+        // pole than to the far one.
+        let mid = (WARP_INNER_SCALE + 1.0) / 2.0;
+        let Color::Rgb(mid_r, ..) = warp_ring_color(false, mid) else {
+            panic!("rgb")
+        };
+        assert!(
+            mid_r.abs_diff(250) < mid_r.abs_diff(120),
+            "brightness arrives early: mid r = {mid_r}"
+        );
+    }
+
+    #[test]
+    fn starfield_is_a_stable_sparse_sprinkle() {
+        // The same cell always answers with the same star (or none):
+        // placement is a pure hash, so the sky never flickers between
+        // frames.
+        for (x, y) in [(0u16, 0u16), (3, 5), (40, 12), (79, 23)] {
+            assert_eq!(starfield_star_at(x, y, 0.5), starfield_star_at(x, y, 0.5));
+        }
+        // Over a full 80×24 screen the sprinkle stays a sprinkle — a
+        // sky, not a blizzard — at both ends of the depth ramp, and
+        // every star wears a known glyph with a phase inside the
+        // twinkle lap.
+        let count = |depth: f32| -> usize {
+            let mut n = 0;
+            for x in 0..80u16 {
+                for y in 0..24u16 {
+                    if let Some(star) = starfield_star_at(x, y, depth) {
+                        n += 1;
+                        assert!(matches!(star.glyph, '·' | '✦' | '+'), "{:?}", star.glyph);
+                        assert!((0.0..=1.0).contains(&star.phase), "{}", star.phase);
+                    }
+                }
+            }
+            n
+        };
+        let shallow = count(0.0);
+        let deep = count(1.0);
+        assert!((8..=60).contains(&shallow), "shallow sky: {shallow} stars");
+        assert!((45..=170).contains(&deep), "deep sky: {deep} stars");
+        assert!(shallow < deep, "descending thickens the sky");
+        // Monotonic: every star shining near the surface still shines
+        // at the bottom — depth only ever ADDS stars.
+        for x in 0..80u16 {
+            for y in 0..24u16 {
+                if let Some(star) = starfield_star_at(x, y, 0.0) {
+                    assert_eq!(starfield_star_at(x, y, 1.0), Some(star));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn depth_scales_the_machinery() {
+        // The border wave tightens from a 4-second lap at the surface
+        // to 2.4 seconds at the oldest revision, clamped beyond.
+        assert_eq!(rotation_period_ms(0.0), 4000.0);
+        assert_eq!(rotation_period_ms(1.0), 2400.0);
+        assert_eq!(rotation_period_ms(2.0), 2400.0, "clamped");
+        // The palette sinks toward violet with depth — identity at the
+        // surface, visibly shifted (but still RGB) at the bottom.
+        for light in [false, true] {
+            let base = time_machine_palette(light)[2];
+            assert_eq!(time_machine_depth_shift(light, base, 0.0), base);
+            let sunk = time_machine_depth_shift(light, base, 1.0);
+            assert_ne!(sunk, base, "depth is visible");
+            assert!(matches!(sunk, Color::Rgb(..)));
+        }
+    }
+
+    #[test]
+    fn starfield_twinkle_breathes_inside_the_nebula_family() {
+        for light in [false, true] {
+            // The swing stays RGB throughout the lap…
+            for i in 0..=10 {
+                let c = starfield_color(light, 0.3, i as f32 / 10.0);
+                assert!(matches!(c, Color::Rgb(..)), "{c:?}");
+            }
+            // …actually moves (a quarter-lap shifts the sine)…
+            assert_ne!(
+                starfield_color(light, 0.0, 0.0),
+                starfield_color(light, 0.0, 0.25)
+            );
+            // …and a star's phase is just its head start into the lap:
+            // shifting the clock by the phase lands on the same color.
+            assert_eq!(
+                starfield_color(light, 0.25, 0.0),
+                starfield_color(light, 0.0, 0.25)
+            );
+        }
     }
 
     #[test]

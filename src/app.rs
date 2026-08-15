@@ -139,6 +139,19 @@ pub(crate) struct App {
     /// past in view mode; `None` with `--no-fx`. Its rotation clock
     /// lives inside the effect itself.
     pub(crate) time_machine_fx: Option<tachyonfx::Effect>,
+    /// The twinkling starfield behind the page while browsing the past
+    /// (tachyonfx), created at startup alongside
+    /// [`App::time_machine_fx`] when `--fx` is on: stars live in the
+    /// page's empty cells, the space the frame floats in. Its twinkle
+    /// clock lives inside the effect too.
+    pub(crate) starfield_fx: Option<tachyonfx::Effect>,
+    /// The generation-warp zoom (tachyonfx): window outlines flying
+    /// through the frame when a selected revision finishes rendering —
+    /// approaching from the depth going DEEPER into the past, receding
+    /// coming BACK toward NOW. Created by `render_pending_history` in
+    /// view mode with `--fx` on; dropped when the flight completes (or
+    /// the view goes away mid-flight).
+    pub(crate) warp_fx: Option<tachyonfx::Effect>,
     /// The timeline bar's slide-in/out effect (tachyonfx), created when
     /// the bar appears or disappears and rendered over its rows until
     /// it completes.
@@ -284,6 +297,10 @@ pub(crate) struct App {
     pub(crate) ui_history_border: Color,
     pub(crate) ui_history_frame_flash: Color,
     pub(crate) ui_scrollbar: Color,
+    /// The raw `--light` / dark flag the ui colors were resolved from,
+    /// kept for effects created after startup (the generation warp
+    /// picks its ring colors at flight time).
+    pub(crate) ui_light: bool,
     /// Active scrollbar drag: `(start track row, start scroll offset)` —
     /// set on a thumb press, cleared on release (viewport-only scroll, so
     /// the cursor keeps its absolute position).
@@ -331,6 +348,7 @@ impl App {
         let time_machine_fx = config
             .fx
             .then(|| crate::effects::time_machine_border_effect(light));
+        let starfield_fx = config.fx.then(|| crate::effects::starfield_effect(light));
         Self {
             config,
             files,
@@ -348,6 +366,8 @@ impl App {
             history_render_due: None,
             history_frame_flash_until: None,
             time_machine_fx,
+            starfield_fx,
+            warp_fx: None,
             timeline_fx: None,
             timeline_exit_until: None,
             timeline_exit_ms: Duration::from_millis(crate::effects::TIMELINE_SLIDE_MS as u64),
@@ -406,6 +426,7 @@ impl App {
             ui_history_border: history_border_color(light),
             ui_history_frame_flash: history_frame_flash_color(light),
             ui_scrollbar: scrollbar_thumb(light),
+            ui_light: light,
             scrollbar_drag: None,
         }
     }
@@ -803,7 +824,9 @@ impl App {
         self.toast_fx.is_some()
             || !self.appear_fx.is_empty()
             || !self.ghost_fx.is_empty()
-            || (self.is_historical() && self.time_machine_fx.is_some())
+            || self.warp_fx.is_some()
+            || (self.is_historical()
+                && (self.time_machine_fx.is_some() || self.starfield_fx.is_some()))
     }
 
     pub(crate) fn current_revision_context(&self) -> Option<String> {
