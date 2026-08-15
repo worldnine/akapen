@@ -196,7 +196,14 @@ pub(crate) fn starfield_effect(light: bool) -> Effect {
                     }
                     if let Some(star) = starfield_star_at(x, y, depth) {
                         cell.set_char(star.glyph);
-                        cell.set_fg(starfield_color(light, star.phase, rot));
+                        // The twinkle color rides the SAME depth shift
+                        // as the frame: deeper travel sinks the sky
+                        // toward indigo-violet with the border, so the
+                        // stars and the frame read as one universe (the
+                        // density already rode the depth; the color
+                        // joins it here).
+                        let twinkle = starfield_color(light, star.phase, rot);
+                        cell.set_fg(time_machine_depth_shift(light, twinkle, depth));
                     }
                 }
             }
@@ -337,20 +344,23 @@ pub(crate) fn toast_effect() -> Effect {
 /// revision's rendered text), and only those cells materialize — the
 /// unchanged text is never hidden. The reveal order is READING order
 /// (left→right, top→bottom) across the new characters, like an LLM
-/// streaming its output: the text types in from the front. `stagger_ms`
-/// cascades later blocks.
+/// streaming its output: the text types in from the front. `delay_ms`
+/// parks the reveal: the base delay holds the block until the delete
+/// phase (ghost backspace + layout collapse) has finished — the new text
+/// then streams into its FINAL position and never moves — and later
+/// blocks cascade by an extra 60 ms each.
 ///
 /// Hidden cells are REPAINTED with their own background color rather than
 /// blanked: the glyphs stay (their width never changes, so ratatui's diff
 /// never takes the wide→narrow path that broke CJK backgrounds), and the
 /// original text color is captured on the first frame so the stream
 /// cursor can restore it — no checkerboard, no visible space glyphs.
-pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, stagger_ms: u32) -> Effect {
+pub(crate) fn appear_effect(mask: Vec<Vec<(u16, u16)>>, delay_ms: u32) -> Effect {
     fx::delay(
-        stagger_ms,
+        delay_ms,
         fx::effect_fn_buf(
             (mask, None::<std::collections::HashMap<(u16, u16), Color>>),
-            (450, Interpolation::Linear),
+            (APPEAR_REVEAL_MS, Interpolation::Linear),
             |(mask, fg_cache), ctx, buf| {
                 let alpha = ctx.timer.alpha();
                 let area = ctx.area;
@@ -435,20 +445,37 @@ fn blank_cell(cell: &mut ratatui::buffer::Cell) {
     cell.set_char(' ');
 }
 
+/// The deletion ghost's hold-before-backspace: the ghost stays whole
+/// long enough to read before its cells scatter out.
+pub(crate) const GHOST_HOLD_MS: u32 = 150;
+/// The backspace scatter-out: ghost cells blank in reverse reading order
+/// (right→left, bottom→top) over this span. Kept shorter than the
+/// reveal so the erase reads as a quick tidy-up, not the main event.
+pub(crate) const GHOST_BACKSPACE_MS: u32 = 400;
+/// The whole delete phase (hold + backspace). The layout collapses at
+/// exactly this mark, and the add phase's scatter-in starts after it
+/// (see `App::history_ghost_until` and `GHOST_SETTLE_MS`).
+pub(crate) const GHOST_PHASE_MS: u32 = GHOST_HOLD_MS + GHOST_BACKSPACE_MS;
+
+/// How long the scatter-in reveal takes: the new characters stream in
+/// left→right over this span. Longer than the backspace so the add
+/// phase — the point of the journey — gets the eye time to register.
+pub(crate) const APPEAR_REVEAL_MS: u32 = 550;
+
 /// Scatter-out for the deletion ghosts, BACKSPACE-style: the ghost stays
-/// whole for 150 ms (long enough to read), then its cells blank out in
-/// REVERSE reading order — right→left, bottom→top, exactly like
-/// backspacing through the text — completing when the 650 ms ghost
-/// lifetime collapses the layout. The ghost rows carry NO background
-/// (the deletion band was dropped from the spec), so the cells are
-/// BLANKED rather than repainted — wide glyphs go through
-/// [`blank_cell`], which keeps the trailing column intact.
+/// whole for [`GHOST_HOLD_MS`] (long enough to read), then its cells
+/// blank out in REVERSE reading order — right→left, bottom→top, exactly
+/// like backspacing through the text — completing when the
+/// [`GHOST_PHASE_MS`] ghost lifetime collapses the layout. The ghost
+/// rows carry NO background (the deletion band was dropped from the
+/// spec), so the cells are BLANKED rather than repainted — wide glyphs
+/// go through [`blank_cell`], which keeps the trailing column intact.
 pub(crate) fn ghost_effect() -> Effect {
     fx::delay(
-        150,
+        GHOST_HOLD_MS,
         fx::effect_fn_buf(
             (None::<Vec<usize>>, 0usize),
-            (500, Interpolation::Linear),
+            (GHOST_BACKSPACE_MS, Interpolation::Linear),
             |(text_counts, total), ctx, buf| {
                 let alpha = ctx.timer.alpha();
                 let area = ctx.area;
@@ -516,4 +543,3 @@ pub(crate) fn ghost_effect() -> Effect {
         ),
     )
 }
-

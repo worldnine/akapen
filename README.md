@@ -113,7 +113,7 @@ Mouse: wheel scrolls the view without moving the cursor; click moves the cursor;
 
 ## The gradebook, in detail
 
-akapen treats every version as a complete document. Git commits and bounded LOCAL snapshots share one timeline; Git is optional. Browsing feels like the draft is alive: as you hold `Left`/`Right`, changed lines stream in left→right like an LLM, removed lines backspace away right→left as dim ghosts, and the layout collapses only after — history effects use neutral brightness, never add/delete colors, and the page frame changes while you are in the past.
+akapen treats every version as a complete document. Git commits and bounded LOCAL snapshots share one timeline; Git is optional. Browsing feels like the draft is alive: as you hold `Left`/`Right`, each settled generation change plays as two phases — removed lines first backspace away right→left as dim ghosts and the layout folds shut, then changed lines stream in left→right like an LLM, materializing in their final positions so nothing moves after appearing. History effects use neutral brightness, never add/delete colors, and the page frame changes while you are in the past.
 
 1. Read and comment on the rendered document or its source.
 2. When an agent edits the file, akapen shows `⚡`. Press `r` to load the new complete version.

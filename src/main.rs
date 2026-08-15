@@ -36,6 +36,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use ratatui::Frame;
+use ratatui::backend::Backend;
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -96,6 +97,10 @@ fn main() -> Result<()> {
                  \x20 --dark            force dark mode\n\
                  \x20 --no-fx           disable the animated time-machine frame\n\
                  \x20                   (the rotating gradient border while browsing the past)\n\
+                 \x20 --no-cursor-anchor stop publishing the hidden cursor position at\n\
+                 \x20                   the composer's `▏` (calms cursor-following\n\
+                 \x20                   terminal shaders; the IME composition window\n\
+                 \x20                   then loses its anchor)\n\
                  \x20 --callback <cmd>  shell command to spawn on exit\n\
                  \x20                   (e.g. return to a file-picker after quit)\n\
                  \x20 --esc-quit <auto|always|never> whether Esc may quit\n\
@@ -444,6 +449,15 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         render_history_when_settled(app);
         expire_history_ghosts(app);
         terminal.draw(|f| draw(f, app))?;
+        // ratatui re-SHOWS the hardware cursor whenever a frame publishes
+        // a position (the composer's IME anchor at the `▏` — see
+        // apply_buffer_with_cursor: Some(position) => show_cursor()). The
+        // cursor must stay hidden for the whole session: the `▏`/`>` are
+        // the visible cursors, and a visible hardware cursor makes
+        // cursor-following terminal shaders (Ghostty's cursor_blaze)
+        // animate around it. The position still updates while hidden, so
+        // the macOS IME keeps its anchor.
+        let _ = terminal.backend_mut().hide_cursor();
         begin_history_frame_flash_after_draw(app);
         // Resize debounce: re-render the view once the pane settles.
         if app.view_dirty {
@@ -1067,6 +1081,20 @@ pub(crate) fn replace_view_preserving_cursor(app: &mut App) {
     // would have expired within ~650 ms anyway).
     app.appear_fx.clear();
     app.ghost_fx.clear();
+    // A comment op aborts a transition that was still in flight: the
+    // screen will not settle into the new generation on its own, so the
+    // landing pulse that marks that settlement is dropped too.
+    app.history_frame_flash_pending = false;
+    rebuild_view_preserving_cursor(app);
+}
+
+/// The shared half of [`replace_view_preserving_cursor`]: re-render the
+/// current document and keep the cursor line on its screen row. The
+/// history-ghost collapse uses this directly — it rebuilds the SAME
+/// ghost-free layout the parked appear effects were built against, so
+/// their rows stay valid and the reveal survives to stream in right
+/// after the collapse.
+fn rebuild_view_preserving_cursor(app: &mut App) {
     let line = app.view.cursor;
     let screen = app.view.cursor_row() as isize - app.view.offset as isize;
     // Current file's cards, minus the one being re-edited (hidden under
@@ -1249,6 +1277,11 @@ fn keep_cursor_out_of_timeline(app: &mut App) {
     app.keep_cursor_visible(viewport as u16);
 }
 
+/// A beat of stillness after the ghost collapse before the add phase
+/// streams in: the folded layout needs a moment to register before the
+/// new text types over it (delete phase → add phase handoff).
+const GHOST_SETTLE_MS: u32 = 60;
+
 /// Render the final revision selected by [`select_history`]. This is the
 /// only expensive half of time travel and runs once after the arrow stops.
 pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
@@ -1332,7 +1365,35 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
 
     let file_comments: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
     let mut view = render_current_view(app, &file_comments);
-    if animate && !source_mode && !deleted_blocks.is_empty() {
+    // The delete phase: removed lines ghost out (backspace order) and the
+    // layout folds shut. The scatter-in effects for the new text are built
+    // BEFORE the ghosts are inserted — against the GHOST-FREE layout, so
+    // their rows are the FINAL ones (ghost rows are transient and push
+    // content down; masks computed against the ghost-included view would
+    // map to displaced rows and jump when the collapse pulls them back
+    // up). The reveal is parked behind the delete phase: the new text
+    // streams in only after the ghosts have backspaced away and the
+    // collapse has settled — delete first, then add, so nothing moves
+    // after appearing.
+    let delete_phase = animate && !source_mode && !deleted_blocks.is_empty();
+    let appear_delay = if delete_phase {
+        crate::effects::GHOST_PHASE_MS + GHOST_SETTLE_MS
+    } else {
+        0
+    };
+    let appear_fx = if app.config.fx && !source_mode {
+        appear_effects(
+            &view,
+            &changed_lines,
+            &old_lines,
+            &app.highlight,
+            &path,
+            appear_delay,
+        )
+    } else {
+        Vec::new()
+    };
+    if delete_phase {
         let ghost_rows = insert_history_ghosts(
             &mut view,
             &deleted_blocks,
@@ -1340,9 +1401,12 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
             &path,
             app.ui_history_glow_bg,
         );
-        app.history_ghost_until = Some(Instant::now() + Duration::from_millis(650));
         // The scatter-out effects ride the ghost rows (view-relative);
-        // they complete exactly when the ghosts expire above.
+        // they complete exactly when the ghosts expire below, and the
+        // collapse hands off to the parked appear effects above.
+        app.history_ghost_until = Some(
+            Instant::now() + Duration::from_millis(crate::effects::GHOST_PHASE_MS as u64),
+        );
         if app.config.fx {
             app.ghost_fx = ghost_rows
                 .into_iter()
@@ -1370,15 +1434,11 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
     // Scatter-in effects for the blocks that appeared in this revision
     // (view mode, `--fx` on): each changed block's mask covers only the
     // characters that are genuinely new (diffed against the old
-    // revision's rendered text), cascading down the document.
+    // revision's rendered text), built above against the ghost-free
+    // layout and parked behind the delete phase; the new characters
+    // cascade in reading order once the ghosts have collapsed.
     if app.config.fx && !source_mode {
-        app.appear_fx = appear_effects(
-            &app.view,
-            &changed_lines,
-            &old_lines,
-            &app.highlight,
-            &path,
-        );
+        app.appear_fx = appear_fx;
         // The generation warp: window outlines fly through the frame in
         // the direction of travel. Only when the position actually
         // moved — a same-position re-render is not a journey.
@@ -1406,14 +1466,17 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
 /// The changed blocks' scatter-in effects: contiguous runs of changed
 /// source lines become one block; its mask is the display-column ranges
 /// of the characters that are new relative to the old revision's
-/// rendered text (see [`appear_mask`]). Each effect is staggered after
-/// the previous block.
+/// rendered text (see [`appear_mask`]). Each effect is parked behind
+/// `base_delay_ms` (the delete phase — ghost backspace + collapse —
+/// when one runs; 0 for a transition with nothing to delete) plus a
+/// per-block stagger of 60 ms that cascades later blocks.
 fn appear_effects(
     view: &ViewState,
     changed: &HashSet<usize>,
     old_lines: &[String],
     highlighter: &Highlighter,
     path: &Path,
+    base_delay_ms: u32,
 ) -> Vec<(usize, usize, tachyonfx::Effect)> {
     let mut lines: Vec<usize> = changed.iter().copied().collect();
     lines.sort_unstable();
@@ -1451,7 +1514,7 @@ fn appear_effects(
         out.push((
             row0,
             height,
-            crate::effects::appear_effect(mask, out.len() as u32 * 60),
+            crate::effects::appear_effect(mask, base_delay_ms + out.len() as u32 * 60),
         ));
     }
     out
@@ -1732,13 +1795,25 @@ fn inserted_columns(old: &str, new: &str) -> Vec<(u16, u16)> {
         .collect()
 }
 
-/// Start the landing pulse only after one complete terminal paint of the
-/// newly rendered document. This keeps the pulse a completion signal rather
-/// than part of the document transition itself.
+/// Start the landing pulse only after the transition has actually
+/// settled: the render itself is instant, but the warp, the ghost
+/// backspace, and the streaming reveal keep the screen moving for up
+/// to ~1.1 s after it. The pulse marks the END of that motion — the
+/// new document fully in place — not the render itself. Instant
+/// transitions (`--no-fx`, source mode, a same-content re-render) arm
+/// no effects, so the check passes on the first paint and the pulse
+/// fires as before.
 fn begin_history_frame_flash_after_draw(app: &mut App) {
-    if app.history_frame_flash_pending {
+    if !app.history_frame_flash_pending {
+        return;
+    }
+    // The draw pass above retained only unfinished effects, so whatever
+    // is still queued here is genuinely moving the screen.
+    let transition_done =
+        app.warp_fx.is_none() && app.appear_fx.is_empty() && app.ghost_fx.is_empty();
+    if transition_done {
         app.history_frame_flash_pending = false;
-        app.history_frame_flash_until = Some(Instant::now() + Duration::from_millis(250));
+        app.history_frame_flash_until = Some(Instant::now() + Duration::from_millis(350));
     }
 }
 
@@ -1872,12 +1947,25 @@ fn insert_history_ghosts(
 }
 
 fn expire_history_ghosts(app: &mut App) {
+    // The composer owns the screen while Input is open: collapsing the
+    // ghosts rebuilds the view under the comment bar and jumps the
+    // terminal cursor. The expiry stays armed (the ghost rows keep
+    // their place) until Enter or Esc returns to the view.
+    if app.mode == Mode::Input {
+        return;
+    }
     if app
         .history_ghost_until
         .is_some_and(|until| Instant::now() >= until)
     {
         app.history_ghost_until = None;
-        replace_view_preserving_cursor(app);
+        // The ghost rows come out of the view (the collapse). The parked
+        // appear effects SURVIVE this rebuild: they were built against
+        // exactly this ghost-free layout, so their rows are still valid
+        // and the add phase streams in right after (see
+        // [`render_pending_history`]).
+        app.ghost_fx.clear();
+        rebuild_view_preserving_cursor(app);
     }
 }
 
@@ -3263,23 +3351,34 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
                     height: (y1 - y0).max(1),
                 })
             };
-        app.appear_fx.retain(|(_, _, fx)| !fx.done());
-        for (row, height, effect) in app.appear_fx.iter_mut() {
-            if let Some(rect) = rect_for(*row, *height) {
-                f.render_effect(effect, rect, last_tick);
+        // The composer owns the text column while it is open: the
+        // scatter effects AND the warp pause behind it (render_effect is
+        // skipped, so their timers hold) — a transition that was under
+        // way when the comment bar opened freezes until Enter/Esc
+        // returns to the view. The border rotation keeps flying (it
+        // lives in the frame's own cells, never over the text).
+        let composing = app.mode == Mode::Input && app.composer_return == Mode::View;
+        if !composing {
+            app.appear_fx.retain(|(_, _, fx)| !fx.done());
+            for (row, height, effect) in app.appear_fx.iter_mut() {
+                if let Some(rect) = rect_for(*row, *height) {
+                    f.render_effect(effect, rect, last_tick);
+                }
             }
-        }
-        app.ghost_fx.retain(|(_, _, fx)| !fx.done());
-        for (row, height, effect) in app.ghost_fx.iter_mut() {
-            if let Some(rect) = rect_for(*row, *height) {
-                f.render_effect(effect, rect, last_tick);
+            app.ghost_fx.retain(|(_, _, fx)| !fx.done());
+            for (row, height, effect) in app.ghost_fx.iter_mut() {
+                if let Some(rect) = rect_for(*row, *height) {
+                    f.render_effect(effect, rect, last_tick);
+                }
             }
-        }
-        // The generation warp flies over everything in the frame —
-        // content, scatter effects, starfield — the way a window
-        // crosses in front of the room.
-        if let Some(effect) = app.warp_fx.as_mut() {
-            f.render_effect(effect, frame, last_tick);
+            // The generation warp flies over everything in the frame —
+            // content, scatter effects, starfield — the way a window
+            // crosses in front of the room. Paused while the composer is
+            // open: at its innermost scale the bottom ring crosses the
+            // lower text rows, where the comment bar lives.
+            if let Some(effect) = app.warp_fx.as_mut() {
+                f.render_effect(effect, frame, last_tick);
+            }
         }
     }
     // The warp is a one-shot flight: drop it when it completes, or when
@@ -3653,11 +3752,16 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         }
         // Terminal-cursor position inside the bar: on the `▏` glyph (the
         // macOS IME anchors its inline composition window here), sharing
-        // the drawer's row math via composer_cursor_pos.
+        // the drawer's row math via composer_cursor_pos. The hardware
+        // cursor is hidden, but the POSITION is published every frame for
+        // that anchor — terminals running cursor-following shaders
+        // (Ghostty's cursor_blaze etc.) blaze around the motion, so
+        // `--no-cursor-anchor` stops publishing (the `▏` glyph is
+        // akapen-drawn and unaffected; only the IME anchor is lost).
         let (crow, ccol) = composer_cursor_pos(&app.input, app.input_cursor, full_width);
         // Top rule at `start_row`, text rows from `start_row + 1`.
         let row = start_row + 1 + crow;
-        if row < inner.height as usize {
+        if app.config.cursor_anchor && row < inner.height as usize {
             f.set_cursor_position(Position {
                 x: content.x + ccol as u16,
                 y: inner.y + row as u16,
@@ -3802,8 +3906,11 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
     // The logical cursor position is still published every frame even
     // though the hardware cursor is hidden: the macOS IME anchors its
     // inline composition window to this spot, so conversion stays inside
-    // the bar and follows the `▏` glyph.
-    if let Some((col, row)) = composer_cursor {
+    // the bar and follows the `▏` glyph. `--no-cursor-anchor` stops the
+    // publishing for terminals whose shaders blaze around cursor motion.
+    if app.config.cursor_anchor
+        && let Some((col, row)) = composer_cursor
+    {
         f.set_cursor_position(Position {
             x: inner.x + col,
             y: inner.y + row,
@@ -4506,6 +4613,7 @@ mod mouse_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path.clone()).unwrap();
@@ -4552,6 +4660,7 @@ mod mouse_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path.clone()).unwrap();
@@ -4639,6 +4748,7 @@ mod mouse_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();
@@ -4677,6 +4787,7 @@ mod mouse_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(config.files[0].clone()).unwrap();
@@ -4811,6 +4922,7 @@ mod mouse_view_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path.into()).unwrap();
@@ -5007,7 +5119,7 @@ mod history_animation_tests {
         let changed = HashSet::from([0usize, 1, 4]);
         let old_lines: Vec<String> =
             vec!["x".into(), "".into(), "b".into(), "".into(), "e".into(), "".into()];
-        let fx = appear_effects(&view, &changed, &old_lines, &highlight, Path::new("doc.md"));
+        let fx = appear_effects(&view, &changed, &old_lines, &highlight, Path::new("doc.md"), 0);
         assert_eq!(fx.len(), 2, "lines 0-1 merge into one block");
         assert_eq!((fx[0].0, fx[0].1), (0, 2), "block 1 covers rows 0-1");
         assert_eq!(fx[1].0, view.source_starts[4], "block 2 starts at line 4's row");

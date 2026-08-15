@@ -125,15 +125,18 @@ pub fn rotation_period_ms(depth: f32) -> f32 {
 
 /// Sink a frame color toward the deep end of the nebula by `depth`:
 /// the purple→pink family stays recognizable, but the whole wave
-/// shifts toward a saturated violet the further back the traveler is.
-/// Depth 0 is the untouched palette.
+/// shifts toward a saturated indigo-violet the further back the
+/// traveler is — the surface's pink reads plainly different from the
+/// bottom's violet. Depth 0 is the untouched palette; the 75% lerp is
+/// deliberate, so even a few generations back the change is visible
+/// (the earlier 40% washed out against the rotating wave).
 pub fn time_machine_depth_shift(light: bool, c: Color, depth: f32) -> Color {
     let deep = if light {
-        Color::Rgb(90, 50, 140)
+        Color::Rgb(75, 40, 155)
     } else {
-        Color::Rgb(125, 75, 195)
+        Color::Rgb(105, 55, 205)
     };
-    lerp_color(c, deep, 0.4 * depth.clamp(0.0, 1.0))
+    lerp_color(c, deep, 0.75 * depth.clamp(0.0, 1.0))
 }
 
 /// The rotation fraction of the time-machine frame since `clock`

@@ -754,6 +754,7 @@ mod footer_tests {
             light: None,
             callback: None,
             esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
             fx: true,
         };
         let source = Source::load(path).unwrap();

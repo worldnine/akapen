@@ -89,6 +89,13 @@ pub struct Config {
     /// purple→pink gradient around the page while browsing the past).
     /// The static history border color stays either way.
     pub fx: bool,
+    /// `--no-cursor-anchor`: stop publishing the (hidden) hardware
+    /// cursor position at the composer's `▏` while typing. The position
+    /// exists so the macOS IME anchors its inline composition window
+    /// there; terminals running cursor-following shaders (Ghostty's
+    /// cursor_blaze etc.) blaze around that motion, so this lets shader
+    /// users trade the IME anchor for a calm composer.
+    pub cursor_anchor: bool,
 }
 
 impl Config {
@@ -108,6 +115,7 @@ impl Config {
         let mut callback: Option<String> = None;
         let mut esc_quit = EscQuit::Auto;
         let mut fx = true;
+        let mut cursor_anchor = true;
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -122,6 +130,7 @@ impl Config {
                     }
                 }
                 "--no-fx" => fx = false,
+                "--no-cursor-anchor" => cursor_anchor = false,
                 "--send-cmd" => send_cmd = it.next(),
                 "--send-agent" => send_agent = true,
                 "--reply" => reply = true,
@@ -156,6 +165,7 @@ impl Config {
             callback,
             esc_quit,
             fx,
+            cursor_anchor,
         }))
     }
 
@@ -278,6 +288,19 @@ mod tests {
         assert!(
             cfg(&parse(&["x.md", "--no-fx", "--send-agent"])).send_agent,
             "--no-fx is independent of other flags"
+        );
+    }
+
+    #[test]
+    fn cursor_anchor_defaults_to_on_and_no_cursor_anchor_disables_it() {
+        assert!(
+            cfg(&parse(&["x.md"])).cursor_anchor,
+            "publishing the cursor position is the default (IME anchor)"
+        );
+        assert!(!cfg(&parse(&["x.md", "--no-cursor-anchor"])).cursor_anchor);
+        assert!(
+            cfg(&parse(&["x.md", "--no-cursor-anchor", "--send-agent"])).send_agent,
+            "--no-cursor-anchor is independent of other flags"
         );
     }
 
