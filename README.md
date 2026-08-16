@@ -54,7 +54,7 @@ cargo build --release
 # binary: target/release/akapen
 ```
 
-No external binaries required — rendering is built in. On macOS the optional IME helper is compiled once with `swiftc` (auto-disabled if unavailable).
+No external binaries required — rendering is built in. On macOS the optional IME helper is compiled once with `swiftc` (auto-disabled if unavailable). The same helper doubles as a standalone input-source CLI (`ime get|list|abc|jp|set <id>|watch <abc|jp> --app <bundle-id>|guard <abc|jp> --app <bundle-id>`) for focus watchers, sticky-ASCII guards, and plugin wrappers — install with `scripts/install-ime.sh`, see the Japanese README for herdr/plugin integration recipes.
 
 ## Usage
 
@@ -181,11 +181,11 @@ akapen ... --send-agent --reply
 - **Auto-reload, no diff**: the document reloads automatically when it changes on disk, and the reload skips the diff — in reply mode the doc is a single agent message, so every refresh replaces the whole content.
 - **Reply-mode UI**: the title shows `reply` (not the temp path), `]`/`[` moves between the recent messages, `e` (edit) and the file picker are disabled.
 
-The companion script [`scripts/akp`](scripts/akp) builds the document set: it resolves the sole agent in the current herdr tab, extracts the most recent text-bearing assistant messages from the session transcript (pi/claude/codex JSONL located by session id, hermes SQLite), and opens akapen on them. Codex timestamp-prefixed rollout files and its `response_item` / `output_text` records are supported. Re-invoking refreshes the documents in place.
+The companion script [`plugins/akp/scripts/akp`](plugins/akp/scripts/akp) builds the document set: it resolves the sole agent in the current herdr tab, extracts the most recent text-bearing assistant messages from the session transcript (pi/claude/codex JSONL located by session id, hermes SQLite), and opens akapen on them. Codex timestamp-prefixed rollout files and its `response_item` / `output_text` records are supported. Re-invoking refreshes the documents in place.
 
 ### herdr plugin
 
-The repository is also a [herdr plugin](herdr-plugin.toml): `herdr plugin link <this repo>` registers three actions — `akp.open` (bottom split), `akp.open-side` (side split), `akp.open-float` (session popup) — all selectable from the command palette. Each placement toggles (one pane per tab; the pane closes itself when akapen exits) and splits relative to the tab's *agent* pane, not the focused pane.
+The repository hosts herdr plugins one per directory under [`plugins/`](plugins): `herdr plugin link <repo>/plugins/akp` registers the three actions — `akp.open` (bottom split), `akp.open-side` (side split), `akp.open-float` (session popup) — all selectable from the command palette; `herdr plugin link <repo>/plugins/ime` registers the per-pane input-source hooks (requires the `ime` CLI installed via `scripts/install-ime.sh`). Each placement toggles (one pane per tab; the pane closes itself when akapen exits) and splits relative to the tab's *agent* pane, not the focused pane.
 
 Convention: herdr integration code lives in the tool's own repo as a plugin (`herdr plugin link`) — new integrations go there, not in `~/.local/bin`.
 

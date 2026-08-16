@@ -1,0 +1,40 @@
+# herdr-plugin.toml — ime: ペイン単位の macOS 入力ソース（IME）管理。
+#
+# 依存: スタンドアロン CLI `ime` が必要（scripts/install-ime.sh で
+# ~/.local/bin/ime にインストール。ソースはリポジトリの scripts/ime.swift —
+# akapen 本体も同じソースを include_str! で埋め込む）。
+#
+# フックの動き:
+#   - pane.created  → 新しい pane が開かれたら英数（ABC）にする。
+#     herdr の入力ソースは端末アプリ（Ghostty）単位で管理されるため、端末全体が
+#     英数ベースになる。日本語が必要な場所（akapen composer 等）は明示的に
+#     `ime jp` を使う運用と相性が良い。--no-focus 分割のようにフォーカスイベントを
+#     一度も受け取らない pane もここで英数化される。
+#   - pane.focused  → ペイン切り替え時の IME メモリ: フォーカスが移るたびに
+#     「今の入力ソースを前のペインに保存 → 新しいペインの保存済みソースを復元」。
+#     macOS の入力ソースはアプリ単位なので、これでペイン単位の IME 状態を
+#     エミュレートする（例: akapen の composer で日本語を打っていたペインに戻ると
+#     日本語が復元され、他のペインは英数ベースのまま）。状態は ~/.cache/ime-panes/。
+#     未知のペインは --default abc（英数ベース）。
+#
+# 注意:
+#   - CLI/API 起点のフォーカス変更（`herdr pane focus` 等）ではフックが発火しない
+#     （TUI 操作のみ。herdr の既知の癖）。
+#   - `ime guard`（常駐ガード）とは併用しないこと（復元した日本語を潰す）。
+#   - コマンドはインストール済みバイナリの絶対パスを指す。
+id = "ime"
+name = "ime"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Per-pane macOS input-source memory for herdr panes (ime CLI)"
+platforms = ["macos"]
+
+[[events]]
+on = "pane.created"
+platforms = ["macos"]
+command = ["/Users/nagata/.local/bin/ime", "abc"]
+
+[[events]]
+on = "pane.focused"
+platforms = ["macos"]
+command = ["/Users/nagata/.local/bin/ime", "pane-focus", "--default", "abc"]

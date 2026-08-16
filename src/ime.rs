@@ -125,6 +125,43 @@ fn set_japanese() {
     let _ = ime(&["jp"]);
 }
 
+/// Suspend marker for an external `ime guard` daemon (the standalone CLI
+/// built from `scripts/ime.swift`). The guard keeps the host input source
+/// pinned to ASCII while its target app is frontmost — exactly the policy
+/// that makes herdr prefix/picker interactions safe — but it must stand
+/// down while the comment composer is open, or Japanese comments become
+/// impossible. The path matches the guard's default; override with
+/// `IME_GUARD_SUSPEND_FILE` (the guard accepts the same env var).
+/// Resolve the suspend marker path: the `IME_GUARD_SUSPEND_FILE` override
+/// when set, otherwise `<home>/.cache/ime-guard.suspend`. Pure so tests can
+/// pin it without touching the process environment.
+fn guard_suspend_path_from_env(home: &str, env: Option<&str>) -> PathBuf {
+    match env {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => PathBuf::from(home).join(".cache").join("ime-guard.suspend"),
+    }
+}
+
+fn guard_suspend_path() -> PathBuf {
+    guard_suspend_path_from_env(
+        &std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
+        std::env::var("IME_GUARD_SUSPEND_FILE").ok().as_deref(),
+    )
+}
+
+/// Best-effort: tell the guard daemon (if any) to stop forcing ASCII for
+/// as long as the suspend marker exists.
+fn suspend_external_ime_guard() {
+    let p = guard_suspend_path();
+    let _ = std::fs::create_dir_all(p.parent().unwrap_or_else(|| std::path::Path::new(".")));
+    let _ = std::fs::write(&p, "");
+}
+
+/// Best-effort: remove the suspend marker so a running guard resumes.
+fn resume_external_ime_guard() {
+    let _ = std::fs::remove_file(guard_suspend_path());
+}
+
 /// Input-source control policy, from `--ime <mode>`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ImeMode {
@@ -150,13 +187,16 @@ impl ImeMode {
 
 /// While the comment composer is open: optionally force Japanese for typing,
 /// and always switch back to ASCII on drop (unless `Off`) so j/k navigation
-/// is never captured by the IME afterwards.
+/// is never captured by the IME afterwards. While the composer is open the
+/// external `ime guard` daemon is suspended (see [`suspend_external_ime_guard`])
+/// so the user's IME state stays under the composer's control.
 pub struct ImeGuard {
     mode: ImeMode,
 }
 
 impl ImeGuard {
     pub fn enter(mode: ImeMode) -> Self {
+        suspend_external_ime_guard();
         if mode == ImeMode::Jp {
             set_japanese();
         }
@@ -166,6 +206,7 @@ impl ImeGuard {
 
 impl Drop for ImeGuard {
     fn drop(&mut self) {
+        resume_external_ime_guard();
         if self.mode != ImeMode::Off {
             set_ascii();
         }
@@ -219,6 +260,27 @@ impl Drop for SessionIme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_suspend_path_defaults_to_cache_with_env_override() {
+        // The suspend marker must live at the guard CLI's default path so
+        // `ime guard` (run standalone, e.g. from launchd) and akapen agree
+        // without configuration.
+        assert_eq!(
+            guard_suspend_path_from_env("/Users/me", None),
+            PathBuf::from("/Users/me/.cache/ime-guard.suspend")
+        );
+        // … and the env override must win when both sides are configured
+        // with a custom --suspend-file.
+        assert_eq!(
+            guard_suspend_path_from_env("/Users/me", Some("/tmp/custom.suspend")),
+            PathBuf::from("/tmp/custom.suspend")
+        );
+        assert_eq!(
+            guard_suspend_path_from_env("/Users/me", Some("")),
+            PathBuf::from("/Users/me/.cache/ime-guard.suspend")
+        );
+    }
 
     #[test]
     fn helper_source_supports_the_commands() {

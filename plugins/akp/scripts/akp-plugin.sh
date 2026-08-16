@@ -18,6 +18,9 @@ case "$PLACEMENT" in
   float) DIR="";    LABEL="akp-float" ;;
   *)     DIR=down;  LABEL="akp-down" ;;
 esac
+# 分割 ratio は「元 pane の取り分」（新 pane は 1-ratio）。
+# デフォルト 0.7 → akp pane は 30%。AKP_SPLIT_RATIO で調整可。
+SPLIT_RATIO="${AKP_SPLIT_RATIO:-0.7}"
 
 DEBUG_LOG="${TMPDIR:-/tmp}/akp-action.log"
 {
@@ -51,7 +54,7 @@ EXISTING=$(herdr pane list | jq -r --arg tab "$TAB" --arg label "$LABEL" \
 
 if [ -n "$EXISTING" ]; then
   # 内容を更新（安定パスを上書き → 起動中の akapen が自動リロード）して focus
-  HERDR_TAB_ID="$TAB" "$ROOT/scripts/akp" --refresh 2>/dev/null || true
+  AKP_FOCUSED_PANE="${HERDR_PANE_ID:-}" "$ROOT/scripts/akp" --refresh 2>/dev/null || true
   if [ "$PLACEMENT" = "float" ]; then
     herdr plugin pane focus "$EXISTING" 2>/dev/null || true
   elif [ -n "$AGENT_PANE" ]; then
@@ -68,19 +71,22 @@ if [ "$PLACEMENT" = "float" ]; then
   # 自動リロードされる）。
   if ! OUT=$(herdr plugin pane open --plugin akp --entrypoint float 2>&1); then
     if printf '%s' "$OUT" | grep -q "popup already open"; then
-      HERDR_TAB_ID="$TAB" "$ROOT/scripts/akp" --refresh 2>/dev/null || true
+      AKP_FOCUSED_PANE="${HERDR_PANE_ID:-}" "$ROOT/scripts/akp" --refresh 2>/dev/null || true
       exit 0
     fi
     printf '%s\n' "$OUT" >&2
     exit 1
   fi
 else
-  RESPONSE=$(herdr pane split "${SPLIT_TARGET[@]}" --direction "$DIR" --focus)
+  RESPONSE=$(herdr pane split "${SPLIT_TARGET[@]}" --direction "$DIR" --focus --ratio "$SPLIT_RATIO")
   {
     echo "split_target=${SPLIT_TARGET[*]:-} dir=$DIR"
     echo "split_response=$RESPONSE"
   } >> "$DEBUG_LOG"
   PANE_ID=$(printf '%s' "$RESPONSE" | jq -r '.result.pane.pane_id')
   herdr pane rename "$PANE_ID" "$LABEL"
-  herdr pane run "$PANE_ID" "$ROOT/scripts/akp"
+  # 新規 pane は action の環境を引き継がないので、フォーカス中 pane（= 起動時の
+  # HERDR_PANE_ID）をコマンド文字列で渡す。複数エージェントのタブで、フォーカス
+  # 中のエージェントを返信先に選ぶために使う。
+  herdr pane run "$PANE_ID" "AKP_FOCUSED_PANE='${HERDR_PANE_ID:-}' \"$ROOT/scripts/akp\""
 fi

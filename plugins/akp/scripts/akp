@@ -30,6 +30,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 AKAPEN = os.environ.get("AKAPEN", "akapen")
@@ -90,18 +91,86 @@ def own_pane_id():
     return None
 
 
-def pick_agent(listing, me=None):
-    """The sole agent in this tab, else the sole workspace agent.
+def focused_pane_id():
+    """The pane the user was focused on when invoking (best effort).
+
+    Action wrappers pass it explicitly via AKP_FOCUSED_PANE; the float
+    popup carries it in HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id. Used
+    to disambiguate tabs with several agents: the focused agent is the
+    one the user is looking at.
+    """
+    f = os.environ.get("AKP_FOCUSED_PANE")
+    if f:
+        return f
+    ctx = os.environ.get("HERDR_PLUGIN_CONTEXT_JSON")
+    if ctx:
+        try:
+            return json.loads(ctx).get("focused_pane_id")
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def target_state_path(tab):
+    """Per-tab record of the agent pane the akp pane is replying to.
+
+    The toggle-refresh runs from the keybinding wrapper, where the focused
+    pane is the akp pane itself (not an agent), so the focused-agent
+    preference cannot resolve the target in a multi-agent tab. The fresh
+    launch records its pick here; refreshes reuse it."""
+    return os.path.join(
+        tempfile.gettempdir(), f"akp-{tab.replace(':', '-')}-target"
+    )
+
+
+def read_target_pane(tab):
+    try:
+        return Path(target_state_path(tab)).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def write_target_pane(tab, pane_id):
+    try:
+        Path(target_state_path(tab)).write_text(pane_id)
+    except OSError:
+        pass
+
+
+def pick_agent(listing, me=None, focused=None, preferred=None):
+    """The agent to reply to, in order: the focused agent in this tab, the
+    recorded target from a previous launch of the same akp pane, the sole
+    agent in this tab, else the sole workspace agent.
 
     me: the pane id to exclude as "self", or None to exclude nothing —
     --refresh uses None because it runs from the keybinding wrapper where
     HERDR_PANE_ID (if set at all) points at the focused pane, which is
     legitimately the agent itself.
+
+    focused: the pane the user was focused on at invocation. With several
+    agents in the tab (e.g. pi + claude side by side), the sole-agent
+    rules cannot disambiguate; preferring the focused agent keeps
+    prefix+a working from inside an agent's pane.
+
+    preferred: the recorded target pane from the fresh launch of this
+    akp pane. Refresh presses happen while the akp pane itself is
+    focused (split uses --focus), so focused is not an agent there; the
+    recorded target keeps the refresh updating the same agent's messages
+    instead of refusing.
     """
     tab, ws, _ = herdr_env()
 
     def real(a):
         return a.get("agent") and (me is None or a.get("pane_id") != me)
+
+    if focused:
+        for a in listing:
+            if real(a) and a.get("pane_id") == focused and a.get("tab_id") == tab:
+                return a
+    if preferred:
+        for a in listing:
+            if real(a) and a.get("pane_id") == preferred and a.get("tab_id") == tab:
+                return a
 
     in_tab = [a for a in listing if real(a) and a.get("tab_id") == tab]
     if len(in_tab) == 1:
@@ -285,6 +354,25 @@ def doc_path(tab_id, idx):
     return os.path.join(tempfile.gettempdir(), name)
 
 
+def close_own_pane_if_normal():
+    """Close our own pane after a pre-launch failure exit.
+
+    The close-on-exit callback only registers once akapen launches; when
+    akp refuses (multi-agent tab, no agent, no text), the pane would stay
+    behind as a dead akp-down shell that the toggle keeps finding. Only
+    safe in a normal pane: in the keybinding wrapper and in the float
+    popup, HERDR_PLUGIN_ID is set and own_pane_id() would resolve the
+    user's focused pane — never close that.
+    """
+    if os.environ.get("HERDR_PLUGIN_ID"):
+        return
+    me = os.environ.get("HERDR_PANE_ID")
+    if not me:
+        return
+    time.sleep(0.5)  # let the error message render before the pane dies
+    subprocess.run(["herdr", "pane", "close", me], capture_output=True, text=True)
+
+
 def main():
     args = sys.argv[1:]
     refresh = "--refresh" in args
@@ -292,17 +380,36 @@ def main():
     tab, _, _ = herdr_env()
     if not tab:
         sys.exit("akp: HERDR_TAB_ID not set — run inside a herdr pane")
-    if refresh:
-        # Wrapper context: never exclude self — HERDR_PANE_ID here is the
-        # focused pane (possibly the agent itself), not our own pane.
-        agent = pick_agent(agents(), me=None)
-    else:
-        agent = pick_agent(agents(), me=os.environ.get("HERDR_PANE_ID"))
-    source = session_path(agent)
-    n = min(int(os.environ.get("AKP_HISTORY", "10")), 99)
-    texts = latest_text_messages(source, n)
-    if not texts:
-        sys.exit("akp: no assistant text message in the session")
+    try:
+        if refresh:
+            # Wrapper context: never exclude self — HERDR_PANE_ID here is the
+            # focused pane (possibly the agent itself), not our own pane.
+            # The recorded target (from the fresh launch) keeps the refresh
+            # on the same agent when the focused pane is the akp pane.
+            agent = pick_agent(
+                agents(),
+                me=None,
+                focused=focused_pane_id(),
+                preferred=read_target_pane(tab),
+            )
+        else:
+            agent = pick_agent(
+                agents(),
+                me=os.environ.get("HERDR_PANE_ID"),
+                focused=focused_pane_id(),
+            )
+        # Record/refresh the per-tab target so the next toggle-refresh
+        # keeps replying to the same agent (the focused pane on refresh
+        # presses is the akp pane itself, not an agent).
+        write_target_pane(tab, agent.get("pane_id"))
+        source = session_path(agent)
+        n = min(int(os.environ.get("AKP_HISTORY", "10")), 99)
+        texts = latest_text_messages(source, n)
+        if not texts:
+            sys.exit("akp: no assistant text message in the session")
+    except SystemExit:
+        close_own_pane_if_normal()
+        raise
     docs = []
     for i, text in enumerate(reversed(texts), start=1):
         doc = doc_path(tab, i)
@@ -322,7 +429,7 @@ def main():
         f"latest {len(docs)} message(s); ]/[ navigate · s send · q quit (closes pane)",
         file=sys.stderr,
     )
-    cmd = [AKAPEN, *docs, "--send-agent", "--reply"]
+    cmd = [AKAPEN, *docs, "--send-agent", "--reply", "--ime", "jp"]
     if is_float:
         # Popup: no pane ID, closes automatically when the command exits.
         # A close callback would target the underlying tiled pane — never

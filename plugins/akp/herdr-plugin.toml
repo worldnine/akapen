@@ -15,6 +15,11 @@
 # HERDR_PLUGIN_CONTEXT_JSON and skips the close-on-exit callback there.
 # "popup already open" is the singleton guard; the action treats it as
 # the toggle (refresh the running popup).
+#
+# リポジトリ構成: herdr プラグインは plugins/<id>/ に1プラグインずつ置く。
+# ime は plugins/ime/herdr-plugin.toml（別プラグイン）。link はそれぞれ:
+#   herdr plugin link <repo>/plugins/akp
+#   herdr plugin link <repo>/plugins/ime
 id = "akp"
 name = "akp"
 version = "0.1.0"

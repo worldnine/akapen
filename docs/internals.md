@@ -145,7 +145,7 @@ vim の IM 制御と同じ思想: コマンドモードは常に ASCII、compose
 - ファイルは**一切書き換えない**。コメントはメモリと出力チャネル（クリップボード /
   stdout / send コマンド）にだけ存在する。
 
-## リプライモード（`--reply` / scripts/akp）
+## リプライモード（`--reply` / plugins/akp/scripts/akp）
 
 - **送信形式** = 引用 + 空行 + コメント。location と行番号を落とす（会話にファイル
   参照は無意味）。空行は必須: CommonMark の lazy continuation で、`> ` の直後の

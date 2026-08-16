@@ -277,6 +277,61 @@ LOCAL スナップショットは内容ハッシュ単位のgzip圧縮で、リ�
 開くと日本語へ自動切替されます。`off` で無効化。Carbon TIS API を使う Swift ヘルパを
 初回のみ `~/.cache/akapen/ime` にビルドします（swiftc が無い環境では自動的に無効化）。
 
+**IME ヘルパを汎用 CLI として使う（`ime`）**: この機能が使う `scripts/ime.swift` は
+akapen 専用ではなく、単体の macOS 入力ソース切替 CLI として他のツールからも呼べます。
+`scripts/install-ime.sh` で `~/.local/bin/ime` にインストール（`INSTALL_DIR` で変更可。
+swiftc が必要）。
+
+```
+ime get                   # 現在の入力ソース ID
+ime list                  # 有効な入力ソース一覧（ID<TAB>名前）
+ime abc                   # ABC レイアウトへ（無ければ US へ）
+ime jp                    # 最初の有効な日本語ソースへ（かなモード優先）
+ime set <id>              # ID 指定で切替（ime list で ID を調べられる）
+ime watch <abc|jp> --app <bundle-id>   # 対象アプリが前面に来たら切替（常駐）
+ime guard <abc|jp> --app <bundle-id> [--interval 1] [--verbose]
+                                       # 対象アプリが前面の間、日本語に戻るたびに
+                                       # 英数へ引き戻す（常駐）
+ime guard suspend|resume|status       # 常駐ガードの一時停止/再開/状態確認
+```
+
+- **herdr のフォーカス連動**: herdr 自体にフォーカスイベントのフックはありませんが、
+  ホスト端末の bundle-id を監視する `watch` で「herdr にフォーカスが移った途端に英数」
+  が実現できます（例: Ghostty なら `ime watch abc --app com.mitchellh.ghostty` を
+  ログイン項目や launchd で常駐させる）。入力ソースはアプリ単位で管理されるため、
+  切り替わるのは端末アプリ全体（herdr の全ペイン）である点に注意。
+- **herdr の prefix 後の「戻さない」**: herdr の `switch_ascii_input_source_in_prefix`
+  （config.toml の `[experimental]`）は prefix モード中だけ ASCII にして**終了時に元の
+  入力ソースへ復元**します（プレフィックスコマンドの誤発火防止が目的）。復元後に
+  日本語へ戻したくない場合は `ime guard abc --app <端末のbundle-id>` を常駐させると、
+  日本語ソースに戻るたびに（既定 1 秒以内で）英数へ引き戻されます。akapen の
+  composer が開いている間は guard が自動で一時停止するため（`~/.cache/ime-guard.suspend`
+  を composer の間だけ作成）、日本語コメントはそのまま打てます。手動で止めたい場合は
+  `ime guard suspend` / `ime guard resume`。
+- **プラグインの前処理**: 日本語入力だと壊れるプラグインは、呼び出し前に英数を強制。
+  zsh なら wrapper をひとつ足すだけ:
+
+  ```zsh
+  ime-run() { # ime-run <abc|jp> -- <command...>  実行前後に切替・復元
+    local saved=$(ime get 2>/dev/null || true)
+    ime "$1" >/dev/null 2>&1 || true; shift; [[ ${1:-} == "--" ]] && shift
+    "$@"; local rc=$?
+    [[ -n "$saved" ]] && ime set "$saved" >/dev/null 2>&1 || true
+    return $rc
+  }
+  alias ghq='ime-run abc -- ghq'   # 例: 日本語を打つと壊れるコマンド
+  ```
+
+終了コードは 成功 `0` / 対象なし `1` / 使い方エラー `2`。切替は非同期のため内部で
+ポーリングして反映を待ちます（最大 0.6 秒）。権限（アクセシビリティ等）は不要です。
+
+macOS の既知バグ（TIS が CJKV ソースの切り替えに失敗し、メニューバーの表示だけ
+変わって IME が実際にはエンゲージしない — Karabiner-Elements#1602）への対処として、
+`ime jp` / `ime set <日本語ソース>` では macism と同じワークアラウンドを実行します:
+一瞬（150ms）だけキーウィンドウを持つアクセサリアプリとして自分をアクティブ化し、
+IME をエンゲージさせてからフォーカスを元のアプリへ返します。待機時間は環境変数
+`IME_ENGAGE_WAIT_MS` で調整できます（0 で無効化。macOS 26 では 150ms が最小の安定値）。
+
 **入力中はカーソルがバー内に表示されます**: ターミナルの実カーソルは
 非表示にし（モダンな TUI の標準方式。Hermes / pi.dev と同じ）、挿入位置に
 `▏` を描画します。実カーソルを出さないため、日本語 IME の変換確定による
@@ -337,13 +392,16 @@ akapen ... --send-agent --reply
 - **自動リロード・diff なし**: ドキュメントが変わると自動でリロードされ、diff は計算しない（reply モードのドキュメントは1メッセージ丸ごと置換されるため）
 - **reply 用 UI**: タイトルは `reply`（一時ファイルパスは出さない）、`]`/`[` で直近メッセージを移動、`e`（編集）とファイルピッカーは無効化
 
-`scripts/akp`（`akp` として配置）がドキュメント一式を組み立てます: カレントタブの唯一エージェントを解決し、セッショントランスクリプト（pi/claude/codex はセッションID検索の JSONL、hermes は SQLite）から直近の text を含むアシスタントメッセージを抽出して akapen で開きます。Codex のタイムスタンプ付き rollout ファイルと `response_item` / `output_text` 形式にも対応しています。再実行するとその場でリフレッシュされます。
+`plugins/akp/scripts/akp`（`akp` として配置）がドキュメント一式を組み立てます: カレントタブの唯一エージェントを解決し、セッショントランスクリプト（pi/claude/codex はセッションID検索の JSONL、hermes は SQLite）から直近の text を含むアシスタントメッセージを抽出して akapen で開きます。Codex のタイムスタンプ付き rollout ファイルと `response_item` / `output_text` 形式にも対応しています。再実行するとその場でリフレッシュされます。
 
 ### herdr プラグイン
 
-このリポジトリはそのまま [herdr プラグイン](herdr-plugin.toml) です: `herdr plugin link <このリポジトリ>` で3つのアクション — `akp.open`（下分割）/ `akp.open-side`（横分割）/ `akp.open-float`（セッションポップアップ）— が登録され、コマンドパレットから選べます。各配置はトグル（タブに1つ、akapen を抜けると pane ごと自動クローズ）で、分割はフォーカス中 pane ではなく**タブのエージェント pane** 基準に行われます。
+このリポジトリは herdr プラグインを **`plugins/<id>/` に1プラグインずつ**置いています（`herdr plugin link <repo>/plugins/akp` と `<repo>/plugins/ime` の2つ）。
 
-**流儀**: herdr 連携コードはツールのリポジトリに plugin として同居させる（`herdr plugin link`）。新規連携は `~/.local/bin` にスクリプトを置かず、リポジトリの `herdr-plugin.toml` に追加すること。
+- **akp**（[plugins/akp](plugins/akp)）: 3つのアクション — `akp.open`（下分割）/ `akp.open-side`（横分割）/ `akp.open-float`（セッションポップアップ）— が登録され、コマンドパレットから選べます。各配置はトグル（タブに1つ、akapen を抜けると pane ごと自動クローズ）で、**再押下は同じ pane をリフレッシュ**します（同じ安定パスに最新メッセージを上書き → 起動中の akapen がリプライモード自動リロード）。分割はフォーカス中 pane ではなく**タブのエージェント pane** 基準に行われ、分割 ratio はデフォルト 0.7（元 pane 70% / akp pane 30%）— `AKP_SPLIT_RATIO` 環境変数で調整できます。返信先の解決は「タブ内の唯一エージェント」が基本ですが、**複数エージェントのタブではフォーカス中のエージェントを優先**し、初回起動時に選んだ返信先はタブ単位で記録されてリフレッシュ時にも引き継がれます（pi と claude が並ぶタブでも、見ているエージェントに返信できます）。解決できない場合（フォーカスが非エージェント等）はクリップボードフォールバックで終了し、その場合 akp の pane は自動で閉じます。
+- **ime**（[plugins/ime](plugins/ime)）: ペイン単位の入力ソース管理（`pane.created` → 英数、`pane.focused` → ペインごとの IME メモリ復元）。`ime` CLI（`scripts/install-ime.sh` で `~/.local/bin/ime` にインストール）が必要。
+
+**流儀**: herdr 連携コードはツールのリポジトリに plugin として同居させる（`herdr plugin link`）。新規連携は `~/.local/bin` にスクリプトを置かず、リポジトリの `plugins/<id>/herdr-plugin.toml` に追加すること。
 特定の agent に固定で送りたい場合や、herdr 以外の宛先に使います:
 
 ```bash
