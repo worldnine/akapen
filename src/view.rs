@@ -37,8 +37,8 @@ const HISTORY_GLOW_BG_DARK: Color = Color::Rgb(70, 73, 88);
 const HISTORY_GLOW_BG_LIGHT: Color = Color::Rgb(218, 220, 228);
 const HISTORY_BORDER_DARK: Color = Color::Rgb(170, 150, 215);
 const HISTORY_BORDER_LIGHT: Color = Color::Rgb(105, 85, 155);
-const HISTORY_FRAME_FLASH_DARK: Color = Color::Rgb(235, 235, 245);
-const HISTORY_FRAME_FLASH_LIGHT: Color = Color::Rgb(50, 50, 65);
+const LANDING_PULSE_DARK: Color = Color::Rgb(235, 235, 245);
+const LANDING_PULSE_LIGHT: Color = Color::Rgb(50, 50, 65);
 
 pub fn selected_bg(light: bool) -> Color {
     if light { SELECTED_BG_LIGHT } else { SELECTED_BG_DARK }
@@ -255,10 +255,13 @@ pub fn ease_out_cubic(t: f32) -> f32 {
 }
 
 /// How far into the frame a warp ring flies: 1.0 is the frame itself,
-/// this is the innermost scale a ring ever reaches. The flight lives in
-/// the frame's outer margin — a ring crossing the middle of the page
-/// reads as an attack on the text, not as a window passing by.
-pub const WARP_INNER_SCALE: f32 = 0.75;
+/// this is the innermost scale a ring ever reaches. The flight hugs the
+/// frame — at this scale the ring's outline sits just inside the frame
+/// edge (`(1 − WARP_INNER_SCALE)/2` of the frame in, 3.5% at 0.93), so
+/// the rings sweep a thin band of the outer margin instead of crossing
+/// the middle of the page. A ring crossing the text would read as an
+/// attack on it, not as a window passing by.
+pub const WARP_INNER_SCALE: f32 = 0.93;
 
 /// The warp ring's rectangle at `scale` (0.0..=1.0 of the frame), centered
 /// in `area`: the outline of a Time Machine window mid-flight. Never
@@ -293,9 +296,12 @@ pub fn warp_ring_color(light: bool, scale: f32) -> Color {
     lerp_color(far, near, progress.clamp(0.0, 1.0).sqrt())
 }
 
-/// Brief neutral pulse when a selected history revision finishes rendering.
-pub fn history_frame_flash_color(light: bool) -> Color {
-    if light { HISTORY_FRAME_FLASH_LIGHT } else { HISTORY_FRAME_FLASH_DARK }
+/// The landing pulse's bright pole: the frame flares toward this color
+/// and settles back when a selected history revision finishes rendering
+/// (see [`crate::effects::landing_pulse_effect`]). Near-white on dark
+/// themes (the border reads as a hot flash), dark on light themes.
+pub fn landing_pulse_color(light: bool) -> Color {
+    if light { LANDING_PULSE_LIGHT } else { LANDING_PULSE_DARK }
 }
 
 /// View-mode frame border color.

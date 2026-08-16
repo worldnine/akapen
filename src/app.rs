@@ -16,7 +16,7 @@ use crate::overlay::Overlay;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
 use crate::view::{
-    ViewState, border_color, changed_bg, deleted_bg, history_border_color, history_frame_flash_color,
+    ViewState, border_color, changed_bg, deleted_bg, history_border_color, landing_pulse_color,
     history_glow_bg, scrollbar_thumb, selected_bg,
 };
 use crate::{
@@ -131,9 +131,18 @@ pub(crate) struct App {
     /// arrow is held. Once input settles, this deadline triggers one render
     /// of the final selected revision.
     pub(crate) history_render_due: Option<Instant>,
-    /// Brief whole-frame pulse confirming that the selected revision has
-    /// finished rendering, even when no changed block is in the viewport.
-    pub(crate) history_frame_flash_until: Option<Instant>,
+    /// The landing pulse (tachyonfx): a brief brighten-and-settle beat on
+    /// the frame border when the selected revision finishes rendering and
+    /// the transition effects (warp, ghost, stream) have settled. It rides
+    /// ON TOP of the rotating time-machine gradient — the rotation never
+    /// pauses — and drops itself when the 400 ms flight completes. `None`
+    /// with `--no-fx` or while the transition is still moving.
+    pub(crate) landing_pulse_fx: Option<tachyonfx::Effect>,
+    /// The landing pulse's time window, kept for source mode: source has
+    /// no frame border to flare, so the line-number gutter brightens for
+    /// the same window instead (see `build_rows`). Armed together with
+    /// [`App::landing_pulse_fx`] and cleared with it.
+    pub(crate) landing_pulse_until: Option<Instant>,
     /// The rotating time-machine frame effect (tachyonfx), created at
     /// startup when `--fx` is on. Rendered by `draw` while browsing the
     /// past in view mode; `None` with `--no-fx`. Its rotation clock
@@ -187,9 +196,10 @@ pub(crate) struct App {
     /// advances the effects' timers.
     pub(crate) last_draw: Option<Instant>,
     /// Set once the new Markdown view is built. The event loop paints that
-    /// view once without a pulse, then turns this into `flash_until` so the
-    /// completion signal starts on the following frame.
-    pub(crate) history_frame_flash_pending: bool,
+    /// view once without a pulse, then arms the landing pulse (see
+    /// [`App::landing_pulse_fx`]) so the completion signal starts on the
+    /// following frame.
+    pub(crate) landing_pulse_pending: bool,
     /// The overlay currently open (Ctrl+p files / `l` comments / `?`
     /// help), if any.
     pub(crate) overlay: Option<Overlay>,
@@ -295,7 +305,9 @@ pub(crate) struct App {
     pub(crate) ui_history_glow_bg: Color,
     pub(crate) ui_border: Color,
     pub(crate) ui_history_border: Color,
-    pub(crate) ui_history_frame_flash: Color,
+    /// The landing pulse's bright pole: the frame flares toward this color
+    /// and settles back when a history transition completes.
+    pub(crate) ui_landing_pulse: Color,
     pub(crate) ui_scrollbar: Color,
     /// The raw `--light` / dark flag the ui colors were resolved from,
     /// kept for effects created after startup (the generation warp
@@ -364,7 +376,8 @@ impl App {
             focused_deletion: None,
             history_ghost_until: None,
             history_render_due: None,
-            history_frame_flash_until: None,
+            landing_pulse_fx: None,
+            landing_pulse_until: None,
             time_machine_fx,
             starfield_fx,
             warp_fx: None,
@@ -376,7 +389,7 @@ impl App {
             appear_fx: Vec::new(),
             ghost_fx: Vec::new(),
             last_draw: None,
-            history_frame_flash_pending: false,
+            landing_pulse_pending: false,
             overlay: None,
             pending_chord: None,
             overlay_cursor: 0,
@@ -424,7 +437,7 @@ impl App {
             ui_history_glow_bg: history_glow_bg(light),
             ui_border: border_color(light),
             ui_history_border: history_border_color(light),
-            ui_history_frame_flash: history_frame_flash_color(light),
+            ui_landing_pulse: landing_pulse_color(light),
             ui_scrollbar: scrollbar_thumb(light),
             ui_light: light,
             scrollbar_drag: None,
@@ -749,8 +762,9 @@ impl App {
         self.focused_deletion = None;
         self.history_ghost_until = None;
         self.history_render_due = None;
-        self.history_frame_flash_until = None;
-        self.history_frame_flash_pending = false;
+        self.landing_pulse_pending = false;
+        self.landing_pulse_fx = None;
+        self.landing_pulse_until = None;
         self.timeline_fx = None;
         self.timeline_exit_until = None;
         self.timeline_restore = None;
@@ -825,6 +839,7 @@ impl App {
             || !self.appear_fx.is_empty()
             || !self.ghost_fx.is_empty()
             || self.warp_fx.is_some()
+            || self.landing_pulse_fx.is_some()
             || (self.is_historical()
                 && (self.time_machine_fx.is_some() || self.starfield_fx.is_some()))
     }

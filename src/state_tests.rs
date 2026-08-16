@@ -3528,9 +3528,10 @@ use crate::comment::Selection;
     #[test]
     fn the_landing_pulse_fires_immediately_for_instant_transitions() {
         // `--no-fx` renders without effects: there is nothing to settle,
-        // so the pulse fires on the first paint after the render — the
-        // pre-change behavior stays intact for transitions that cannot
-        // animate.
+        // so the completion signal fires on the first paint after the
+        // render. The frame has no effect to ride (`--no-fx`), so only
+        // the timing window arms — source mode's gutter signal — and no
+        // pulse effect is created.
         let mut app = make_app(5, Mode::View);
         app.config.fx = false;
         app.histories[0].revisions.push(history::Revision {
@@ -3544,12 +3545,16 @@ use crate::comment::Selection;
         app.history_render_due = Some(Instant::now());
         assert!(render_pending_history(&mut app, true));
         assert!(app.warp_fx.is_none(), "--no-fx arms no effects");
-        assert!(app.history_frame_flash_pending);
-        begin_history_frame_flash_after_draw(&mut app);
-        assert!(!app.history_frame_flash_pending);
+        assert!(app.landing_pulse_pending);
+        begin_landing_pulse_after_draw(&mut app);
+        assert!(!app.landing_pulse_pending);
         assert!(
-            app.history_frame_flash_until.is_some(),
-            "an instant transition pulses immediately"
+            app.landing_pulse_until.is_some(),
+            "an instant transition signals immediately"
+        );
+        assert!(
+            app.landing_pulse_fx.is_none(),
+            "--no-fx arms no pulse effect (the frame stays static)"
         );
     }
 
@@ -3571,14 +3576,15 @@ use crate::comment::Selection;
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
         assert!(render_pending_history(&mut app, true));
-        assert!(app.history_frame_flash_pending);
+        assert!(app.landing_pulse_pending);
         replace_view_preserving_cursor(&mut app);
         assert!(
-            !app.history_frame_flash_pending,
+            !app.landing_pulse_pending,
             "the interrupted transition never pulses"
         );
-        begin_history_frame_flash_after_draw(&mut app);
-        assert!(app.history_frame_flash_until.is_none());
+        begin_landing_pulse_after_draw(&mut app);
+        assert!(app.landing_pulse_until.is_none());
+        assert!(app.landing_pulse_fx.is_none());
     }
 
     #[test]
@@ -4347,27 +4353,32 @@ use crate::comment::Selection;
         render_history_when_settled(&mut app);
         assert_eq!(app.source.content, "# Old\n");
         assert!(app.history_render_due.is_none());
-        assert!(app.history_frame_flash_pending);
+        assert!(app.landing_pulse_pending);
         assert!(
-            app.history_frame_flash_until.is_none(),
+            app.landing_pulse_until.is_none() && app.landing_pulse_fx.is_none(),
             "the pulse does not overlap the first paint of the rendered document"
         );
         // The transition is still animating (warp + ghost + stream): the
         // pulse waits for the screen to settle instead of firing into
         // the motion.
-        begin_history_frame_flash_after_draw(&mut app);
+        begin_landing_pulse_after_draw(&mut app);
         assert!(
-            app.history_frame_flash_pending,
+            app.landing_pulse_pending,
             "the pulse waits for the transition to settle"
         );
-        assert!(app.history_frame_flash_until.is_none());
-        // Once the transition effects complete, the next paint pulses.
+        assert!(app.landing_pulse_until.is_none());
+        // Once the transition effects complete, the next paint pulses:
+        // view mode with `--fx` arms the pulse effect itself.
         app.warp_fx = None;
         app.appear_fx.clear();
         app.ghost_fx.clear();
-        begin_history_frame_flash_after_draw(&mut app);
-        assert!(!app.history_frame_flash_pending);
-        assert!(app.history_frame_flash_until.is_some());
+        begin_landing_pulse_after_draw(&mut app);
+        assert!(!app.landing_pulse_pending);
+        assert!(app.landing_pulse_until.is_some());
+        assert!(
+            app.landing_pulse_fx.is_some(),
+            "view mode with --fx arms the pulse effect"
+        );
         select_history(&mut app, 1);
         assert!(
             matches!(app.status.as_ref(), Some((message, _, true)) if message == "oldest document version"),
@@ -4437,7 +4448,7 @@ use crate::comment::Selection;
     fn source_history_uses_the_gutter_landing_pulse() {
         let mut app = make_app(3, Mode::Source);
         app.cursor = 0;
-        app.history_frame_flash_until = Some(std::time::Instant::now() + Duration::from_secs(1));
+        app.landing_pulse_until = Some(std::time::Instant::now() + Duration::from_secs(1));
         app.gutter_cols = 4;
         app.ensure_row_cache(60);
         app.refresh_line_rows();
@@ -4445,7 +4456,7 @@ use crate::comment::Selection;
         let (text, _) = build_rows(&app, 10, 60);
         assert_eq!(
             text.lines[2].spans[1].style.fg,
-            Some(app.ui_history_frame_flash),
+            Some(app.ui_landing_pulse),
             "the line-number rail pulses after landing"
         );
         assert!(

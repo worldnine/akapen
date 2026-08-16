@@ -458,7 +458,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         // animate around it. The position still updates while hidden, so
         // the macOS IME keeps its anchor.
         let _ = terminal.backend_mut().hide_cursor();
-        begin_history_frame_flash_after_draw(app);
+        begin_landing_pulse_after_draw(app);
         // Resize debounce: re-render the view once the pane settles.
         if app.view_dirty {
             let since = app.view_dirty_since.unwrap_or_else(Instant::now);
@@ -1084,7 +1084,7 @@ pub(crate) fn replace_view_preserving_cursor(app: &mut App) {
     // A comment op aborts a transition that was still in flight: the
     // screen will not settle into the new generation on its own, so the
     // landing pulse that marks that settlement is dropped too.
-    app.history_frame_flash_pending = false;
+    app.landing_pulse_pending = false;
     rebuild_view_preserving_cursor(app);
 }
 
@@ -1243,8 +1243,9 @@ pub(crate) fn select_history(app: &mut App, delta: isize) -> bool {
     app.history_render_due = Some(Instant::now() + HISTORY_RENDER_DEBOUNCE);
     // A previous landing pulse must not bleed into the first frame of the
     // next selected document.
-    app.history_frame_flash_until = None;
-    app.history_frame_flash_pending = false;
+    app.landing_pulse_fx = None;
+    app.landing_pulse_until = None;
+    app.landing_pulse_pending = false;
     app.flash(label);
     true
 }
@@ -1321,7 +1322,7 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
     }
     if app.source.content == content {
         refresh_comparison_marks(app);
-        app.history_frame_flash_pending = true;
+        app.landing_pulse_pending = true;
         return true;
     }
 
@@ -1453,7 +1454,7 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
     // rows may land it under the timeline bar again; nudge the scroll
     // back above the covered rows (no-op at NOW).
     keep_cursor_out_of_timeline(app);
-    app.history_frame_flash_pending = true;
+    app.landing_pulse_pending = true;
     // The render above is the expensive half of time travel (~100 ms on
     // a large document in a debug build). The effects created in it
     // (warp, appear, ghosts) are advanced by the wall-clock delta since
@@ -1795,16 +1796,19 @@ fn inserted_columns(old: &str, new: &str) -> Vec<(u16, u16)> {
         .collect()
 }
 
-/// Start the landing pulse only after the transition has actually
+/// Arm the landing pulse only after the transition has actually
 /// settled: the render itself is instant, but the warp, the ghost
 /// backspace, and the streaming reveal keep the screen moving for up
 /// to ~1.1 s after it. The pulse marks the END of that motion — the
-/// new document fully in place — not the render itself. Instant
-/// transitions (`--no-fx`, source mode, a same-content re-render) arm
-/// no effects, so the check passes on the first paint and the pulse
-/// fires as before.
-fn begin_history_frame_flash_after_draw(app: &mut App) {
-    if !app.history_frame_flash_pending {
+/// new document fully in place — not the render itself. It rides on
+/// top of the rotating border (the wave never pauses) and lasts
+/// [`LANDING_PULSE_MS`]; source mode (no frame to flare) uses the same
+/// window to brighten its gutter instead. Instant transitions
+/// (`--no-fx`, source mode, a same-content re-render) arm no effects,
+/// so the check passes on the first paint and the pulse fires as
+/// before.
+fn begin_landing_pulse_after_draw(app: &mut App) {
+    if !app.landing_pulse_pending {
         return;
     }
     // The draw pass above retained only unfinished effects, so whatever
@@ -1812,8 +1816,13 @@ fn begin_history_frame_flash_after_draw(app: &mut App) {
     let transition_done =
         app.warp_fx.is_none() && app.appear_fx.is_empty() && app.ghost_fx.is_empty();
     if transition_done {
-        app.history_frame_flash_pending = false;
-        app.history_frame_flash_until = Some(Instant::now() + Duration::from_millis(350));
+        app.landing_pulse_pending = false;
+        if app.config.fx && app.view_active() {
+            app.landing_pulse_fx =
+                Some(crate::effects::landing_pulse_effect(app.ui_landing_pulse));
+        }
+        app.landing_pulse_until =
+            Some(Instant::now() + Duration::from_millis(crate::effects::LANDING_PULSE_MS as u64));
     }
 }
 
@@ -3314,17 +3323,19 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
             height: body.height,
         };
         if app.is_historical() {
-            // The sky is interior-only and must not blink off during
-            // the render-complete flash — only the border rotation
-            // yields to it (the flash IS the border for that moment).
+            // The sky is interior-only and never blinks off: the border
+            // rotation and the landing pulse repaint only the frame's
+            // own cells, so the stars keep twinkling underneath.
             if let Some(effect) = app.starfield_fx.as_mut() {
                 f.render_effect(effect, frame, last_tick);
             }
-            if app
-                .history_frame_flash_until
-                .is_none_or(|until| Instant::now() >= until)
-                && let Some(effect) = app.time_machine_fx.as_mut()
-            {
+            // The border rotation runs continuously through the whole
+            // transition; the landing pulse rides ON TOP of it once the
+            // replacement settles, so the wave never pauses.
+            if let Some(effect) = app.time_machine_fx.as_mut() {
+                f.render_effect(effect, frame, last_tick);
+            }
+            if let Some(effect) = app.landing_pulse_fx.as_mut() {
                 f.render_effect(effect, frame, last_tick);
             }
         }
@@ -3359,13 +3370,23 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         // lives in the frame's own cells, never over the text).
         let composing = app.mode == Mode::Input && app.composer_return == Mode::View;
         if !composing {
-            app.appear_fx.retain(|(_, _, fx)| !fx.done());
+            // Changed blocks that have scrolled off-screen drop their
+            // effects rather than hold them: left un-rendered their
+            // timers never advance, so a transition whose changed blocks
+            // are all off-screen would never settle (the landing pulse
+            // waits on `appear_fx`/`ghost_fx` staying empty) and
+            // scrolling the block back in would suddenly start its
+            // stream mid-transition. Off-screen changes simply land
+            // already-rendered.
+            app.appear_fx
+                .retain(|(row, height, fx)| !fx.done() && rect_for(*row, *height).is_some());
             for (row, height, effect) in app.appear_fx.iter_mut() {
                 if let Some(rect) = rect_for(*row, *height) {
                     f.render_effect(effect, rect, last_tick);
                 }
             }
-            app.ghost_fx.retain(|(_, _, fx)| !fx.done());
+            app.ghost_fx
+                .retain(|(row, height, fx)| !fx.done() && rect_for(*row, *height).is_some());
             for (row, height, effect) in app.ghost_fx.iter_mut() {
                 if let Some(rect) = rect_for(*row, *height) {
                     f.render_effect(effect, rect, last_tick);
@@ -3388,6 +3409,14 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         || !(app.config.fx && app.view_active())
     {
         app.warp_fx = None;
+    }
+    // The landing pulse is a one-shot beat too: drop it when it
+    // completes, or when the view leaves browsing mid-pulse (left
+    // un-rendered it would never finish).
+    if app.landing_pulse_fx.as_ref().is_some_and(|fx| fx.done())
+        || !(app.config.fx && app.view_active() && app.is_historical())
+    {
+        app.landing_pulse_fx = None;
     }
     // The timeline bar's own slide-in/out, rendered over its rows (the
     // static bar is drawn above, the shader wipes and reveals it).
@@ -3686,21 +3715,15 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     if composing {
         app.keep_composer_visible_view(inner.height as usize);
     }
-    let frame_flashing = app
-        .history_frame_flash_until
-        .is_some_and(|until| Instant::now() < until);
-    let page_border = if frame_flashing {
-        app.ui_history_frame_flash
-    } else if app.is_historical() {
+    // The frame border reads as the history state while browsing; the
+    // landing pulse (an effect) flares over it and settles without ever
+    // replacing this color, and the rotation never pauses for it.
+    let page_border = if app.is_historical() {
         app.ui_history_border
     } else {
         app.ui_border
     };
-    let border_style = if frame_flashing {
-        Style::default().fg(page_border).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(page_border)
-    };
+    let border_style = Style::default().fg(page_border);
     let (mut text, mut gutter) = app.view.visible_text_with_glow(
         inner.height as usize,
         &marked,
@@ -3933,8 +3956,8 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     // inline as red `▌` deleted rows (see `deleted_block_lines`), so
     // source mode needs no `▀` position mark — that stays view-only.
     let scoped_added = &app.comparison_changed;
-    let history_landing_pulse = app
-        .history_frame_flash_until
+    let landing_pulse = app
+        .landing_pulse_until
         .is_some_and(|until| Instant::now() < until);
     // Comment bars span the whole pane (gutter included), pi.dev-style.
     let full_width = (content_width + app.gutter_cols) as usize;
@@ -4022,12 +4045,13 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         } else {
             gutter_style
         };
-        // Source has no permanent frame, so its completion pulse uses the
-        // stable line-number rail instead. It starts only after the newly
+        // Source has no permanent frame, so its completion signal uses
+        // the stable line-number rail instead — the same window as the
+        // view mode's landing pulse. It starts only after the newly
         // selected source has already been painted once.
-        if history_landing_pulse {
+        if landing_pulse {
             num_style = num_style
-                .fg(app.ui_history_frame_flash)
+                .fg(app.ui_landing_pulse)
                 .add_modifier(Modifier::BOLD);
         }
         let num = Span::styled(

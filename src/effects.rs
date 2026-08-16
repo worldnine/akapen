@@ -3,8 +3,8 @@
 //! Both are ordinary tachyonfx [`Effect`]s rendered by [`crate::draw`]
 //! after the static UI, so they animate by repainting buffer cells
 //! without ever touching the layout. The rotation clock lives in the
-//! effect's own state, so skipped frames (the render-complete flash, a
-//! prompt covering the message row) never disturb the wave.
+//! effect's own state, so skipped frames (a prompt covering the message
+//! row) never disturb the wave.
 
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::Instant;
@@ -17,8 +17,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::STATUS_SECS;
 use crate::view::{
-    ease_out_cubic, perimeter_index, rotation_period_ms, starfield_color, starfield_star_at,
-    time_machine_color_at, time_machine_depth_shift, time_machine_palette,
+    ease_out_cubic, lerp_color, perimeter_index, rotation_period_ms, starfield_color,
+    starfield_star_at, time_machine_color_at, time_machine_depth_shift, time_machine_palette,
     time_machine_rotation_fraction, warp_ring_color, warp_ring_rect, TIME_MACHINE_ROTATION_MS,
     WARP_INNER_SCALE,
 };
@@ -144,6 +144,8 @@ pub(crate) fn time_machine_border_effect(light: bool) -> Effect {
 /// exposes its continuation cell), on blank rows, and never over a
 /// colored background (selection, review bands, the toast banner) — the
 /// text column stays calm while the emptiness around it becomes sky.
+/// The sky is interior-only, so the border rotation and the landing
+/// pulse — which repaint only the frame's own cells — never disturb it.
 /// Placement, glyph, and phase are a pure hash of the screen cell (see
 /// [`starfield_star_at`]); the twinkle rides the same rotation lap as
 /// the frame gradient, and the clock lives in the effect's own state so
@@ -245,16 +247,17 @@ pub(crate) fn warp_effect(deeper: bool, light: bool) -> Effect {
                     continue; // not launched yet, or already gone
                 }
                 let eased = ease_out_cubic(tk);
-                // The flight stays in the frame's outer margin: rings
-                // travel between WARP_INNER_SCALE and the frame itself,
-                // never across the middle of the page.
+                // The flight stays in a thin band just inside the frame:
+                // rings travel between WARP_INNER_SCALE and the frame
+                // itself, hugging the inner edge instead of crossing the
+                // middle of the page.
                 let travel = 1.0 - WARP_INNER_SCALE;
                 let scale = if deeper {
                     WARP_INNER_SCALE + travel * eased
                 } else {
                     1.0 - travel * eased
                 };
-                if scale >= 0.98 {
+                if scale >= 0.99 {
                     continue; // coincides with the real frame: hand off
                 }
                 let ring = warp_ring_rect(area, scale);
@@ -314,6 +317,72 @@ fn set_ring_cell(
     );
     if wide && x + 1 < bounds.right() {
         buf[(x + 1, y)].set_char(' '); // the lead cell shrank: free its continuation
+    }
+}
+
+/// How long the landing pulse takes (milliseconds): the frame's brief
+/// brighten-and-settle beat that marks a history transition's completion.
+/// Matches the old flat flash's presence without ever freezing the wave.
+pub(crate) const LANDING_PULSE_MS: u32 = 400;
+
+/// The landing pulse: when the text replacement settles, the frame
+/// briefly flares toward `bright` and settles back — a soft "landed"
+/// beat that confirms the selected revision is fully in place. It rides
+/// ON TOP of the rotating time-machine gradient: each frame it reads the
+/// border cells' current color (the rotation painted them just before)
+/// and brightens it by the pulse envelope, so the wave keeps flowing
+/// underneath and the rotation never pauses. Only border-glyph cells
+/// join (markers, the cursor `>`, and message text keep their own
+/// colors), and the timeline bar's bottom border row stays calm while it
+/// is up — the same guards the border rotation uses.
+pub(crate) fn landing_pulse_effect(bright: Color) -> Effect {
+    fx::effect_fn_buf(
+        (),
+        EffectTimer::from_ms(LANDING_PULSE_MS, Interpolation::Linear),
+        move |_state: &mut (), ctx, buf| {
+            let env = landing_pulse_env(ctx.timer.alpha());
+            if env <= 0.0 {
+                return;
+            }
+            let area = ctx.area;
+            let (w, h) = (area.width as usize, area.height as usize);
+            if w == 0 || h == 0 {
+                return;
+            }
+            let last_col = w - 1;
+            let last_row = h - 1;
+            for y in 0..h {
+                if TIMELINE_BAR_VISIBLE.load(Ordering::Relaxed) && y == last_row {
+                    continue;
+                }
+                for x in 0..w {
+                    if x != 0 && y != 0 && x != last_col && y != last_row {
+                        continue; // content cells stay untouched
+                    }
+                    let cell = &mut buf[(area.x + x as u16, area.y + y as u16)];
+                    // Only the frame's own glyphs join the pulse.
+                    if !matches!(cell.symbol(), "│" | "─" | "┌" | "┐" | "└" | "┘") {
+                        continue;
+                    }
+                    let fg = cell.style().fg.unwrap_or(Color::Reset);
+                    cell.set_fg(lerp_color(fg, bright, env * 0.6));
+                }
+            }
+        },
+    )
+}
+
+/// The pulse's envelope over its lifetime (0.0..=1.0): a quick ease-out
+/// rise, a short hold at the peak, then a smooth settle — a landing
+/// thump, not a strobe.
+fn landing_pulse_env(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.3 {
+        ease_out_cubic(t / 0.3)
+    } else if t < 0.5 {
+        1.0
+    } else {
+        1.0 - ease_out_cubic((t - 0.5) / 0.5)
     }
 }
 
