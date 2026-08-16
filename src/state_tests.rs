@@ -2397,6 +2397,50 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn comments_overlay_enter_restores_a_legacy_bare_local_revision() {
+        // 旧形式（`local:<id>` 裸）で保存済みのコメントは、新形式 context
+        // （id — 説明文）の世代と identity 部分だけで照合され、移行なしで復元できる。
+        let (mut app, _dir) = make_app_keep(5, Mode::View);
+        let path = app.files[0].clone();
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("local:legacyid".into()),
+            short_id: "legacy".into(),
+            summary:
+                "akapen local snapshot: uncommitted state captured 2026-08-16T05:03:22Z \
+                 (not a git object)"
+                    .into(),
+            content: "line1\nline2\nline3\n".into(),
+            source: history::RevisionSource::Local,
+        });
+        // アップグレード前のセッションで保存された裸の id を持つコメント。
+        app.comments.push(Comment {
+            file_path: path,
+            start: 2,
+            end: 3,
+            lines: "line2\nline3".into(),
+            revision: Some("local:legacyid".into()),
+            text: "on the past".into(),
+        });
+        on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
+        on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.overlay, None, "Enter closes the list");
+        assert_eq!(
+            app.histories[0].position, 1,
+            "the legacy bare id still restores the new-format generation"
+        );
+        assert_eq!(
+            app.source.content, "line1\nline2\nline3\n",
+            "the document shows the comment's revision"
+        );
+        assert!(
+            visible_cards(&app).iter().any(|c| {
+                crate::history::same_revision(c.revision.as_deref(), Some("local:legacyid"))
+            }),
+            "the card renders under the new-format context"
+        );
+    }
+
+    #[test]
     fn comments_overlay_enter_restores_a_revision_on_another_file() {
         // The comment list spans every file; jumping to a historical
         // comment on ANOTHER file must restore that file's revision, not

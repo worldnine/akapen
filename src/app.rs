@@ -495,9 +495,11 @@ impl App {
         let full_width = (self.content_width + self.gutter_cols) as usize;
         let mut extra = vec![0usize; self.base_rows.len()];
         let current = self.current_file_path().to_path_buf();
+        // 世代照合は「id — 説明文」の identity（「 — 」の左）だけで行う。
+        let revision = self.current_revision_context();
         for (raw, c) in self.comments.iter().enumerate() {
             if c.file_path != current
-                || c.revision != self.current_revision_context()
+                || !crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
                 || (self.mode == Mode::Input && self.editing_comment == Some(raw))
             {
                 continue;

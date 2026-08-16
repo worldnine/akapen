@@ -124,7 +124,7 @@ pub(crate) fn visible_cards(app: &App) -> Vec<&Comment> {
         .enumerate()
         .filter(|(i, c)| {
             c.file_path == *current
-                && c.revision == revision
+                && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
                 && !(app.mode == Mode::Input && app.editing_comment == Some(*i))
         })
         .map(|(_, c)| c)
@@ -286,7 +286,14 @@ pub(crate) fn activate_overlay_selection(app: &mut App) {
                             Some(revision) => history
                                 .revisions
                                 .iter()
-                                .position(|r| r.context().as_deref() == Some(revision)),
+                                .position(|r| {
+                                    // 旧形式（`local:<id>` 裸）で保存済みのコメントも
+                                    // identity 部だけで照合して復元できる。
+                                    crate::history::same_revision(
+                                        r.context().as_deref(),
+                                        Some(revision),
+                                    )
+                                }),
                             None => Some(0),
                         };
                         match target {

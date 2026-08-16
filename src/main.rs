@@ -3070,7 +3070,7 @@ fn open_composer(app: &mut App, return_to: Mode) {
     let revision = app.current_revision_context();
     let edit_idx = app.comments.iter().position(|c| {
         c.file_path == current
-            && c.revision == revision
+            && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
             && (c.start.saturating_sub(1) as usize) == start
             && (c.end.saturating_sub(1) as usize) == end
     });
@@ -3131,7 +3131,9 @@ fn delete_comment_at_cursor(app: &mut App) {
     let current_file = app.current_file_path().to_path_buf();
     let revision = app.current_revision_context();
     app.comments.retain(|c| {
-        !(c.file_path == current_file && c.revision == revision && c.covers(line))
+        !(c.file_path == current_file
+            && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
+            && c.covers(line))
     });
     let removed = before - app.comments.len();
     if removed > 0 {
@@ -3982,7 +3984,7 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         let commented = app.comments.iter().any(|c| {
             c.covers(idx)
                 && c.file_path == app.current_file_path()
-                && c.revision == revision
+                && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
         });
         let added = scoped_added.contains(&idx);
         let is_cursor = idx == app.cursor && !deletion_focused;
