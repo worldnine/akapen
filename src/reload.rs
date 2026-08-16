@@ -269,12 +269,17 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
             .any(|revision| revision.content == old_content)
         {
             let id = crate::snapshot::content_id(old_content.as_bytes());
+            // キャッシュ無し経路には captured_ms が無いので、park 時点の現在時刻を
+            // 使って説明文を一度だけ焼き込む。キャッシュが無い以上セッションを
+            // 跨ぐ復元は元々不可能なので、セッション内で不変であれば良い。
+            // parent は分からないので説明文の「on top of commit」句は省略する。
+            let captured = crate::snapshot::now_ms();
             history.revisions.insert(
                 1,
                 crate::history::Revision {
                     id: Some(format!("local:{id}")),
                     short_id: id.chars().take(7).collect(),
-                    summary: "local snapshot".into(),
+                    summary: crate::history::local_revision_summary(captured, None),
                     content: old_content.clone(),
                     source: crate::history::RevisionSource::Local,
                 },
@@ -528,8 +533,27 @@ mod handoff_tests {
         assert_eq!(app.comments[0].revision.as_deref(), Some(expected.as_str()));
         let parked = &history.revisions[1];
         assert_eq!(parked.content, old, "the old NOW survives as a generation");
-        assert_eq!(parked.id.as_deref(), Some(expected.as_str()));
+        // id は裸の `local:<id>`、expected は新形式の「id — 説明文」。
+        // 同一性判定は identity 部だけで行う（旧形式の保存コメントと新形式
+        // context の照合が移行なしで動くための契約）。
+        assert!(crate::history::same_revision(
+            parked.id.as_deref(),
+            Some(expected.as_str())
+        ));
         assert_eq!(parked.source, RevisionSource::Local);
+        // 説明文は park 時点の現在時刻で一度だけ焼き込まれる。
+        assert!(
+            parked
+                .summary
+                .starts_with("akapen local snapshot: uncommitted state captured 20"),
+            "self-describing summary: {}",
+            parked.summary
+        );
+        assert!(
+            parked.summary.ends_with("(not a git object)"),
+            "negative git hint: {}",
+            parked.summary
+        );
     }
 
     #[test]

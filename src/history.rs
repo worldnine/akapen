@@ -42,14 +42,74 @@ impl Revision {
     pub(crate) fn context(&self) -> Option<String> {
         match self.source {
             RevisionSource::Now => None,
-            RevisionSource::Local => self.id.clone(),
-            RevisionSource::Git => Some(format!(
+            // LOCAL も Git と同じ「id — 説明文」形式。identity（「 — 」の左）は
+            // `local:<内容ハッシュ>` のままで、右側に LLM 向けの説明文を添える
+            // （同一性判定は左側のみで行う — 新旧形式の照合は [`same_revision`]）。
+            RevisionSource::Local | RevisionSource::Git => Some(format!(
                 "{} — {}",
                 self.id.as_deref().unwrap_or(&self.short_id),
                 self.summary
             )),
         }
     }
+}
+
+/// revision 文字列（`id — 説明文`）から identity（「 — 」の左側）を取り出す。
+/// 旧形式（`local:<id>` 裸）には区切りが無いので全体が identity になる —
+/// これが新旧形式の移行互換の要。identity 側に「 — 」が現れることは無い
+/// （hex oid / `local:<hex>`）ので、先頭の区切りで切るだけで十分。
+pub(crate) fn revision_id(context: &str) -> &str {
+    context.split_once(" — ").map_or(context, |(id, _)| id)
+}
+
+/// 2 つの revision 文字列が同じ世代を指すか。同一性判定は「 — 」の左側
+/// （機械用 identity）だけで行い、説明文（人間/LLM 用）は比較しない。
+/// None ↔ None は一致（Revision 行の無い NOW 同士）、None ↔ Some は不一致。
+pub(crate) fn same_revision(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => revision_id(a) == revision_id(b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// LOCAL 世代の説明文。受け取った LLM が `git show` などを空振りしないよう、
+/// 「git オブジェクトではない」という否定情報を必ず含める。
+/// キャッシュに固定保存された値（captured_ms / parent）だけから組み立てるので、
+/// 同じスナップショットからは常に同じ文字列が再構成される（決定的）。
+pub(crate) fn local_revision_summary(captured_ms: u64, parent: Option<&str>) -> String {
+    let mut summary = format!(
+        "akapen local snapshot: uncommitted state captured {}",
+        format_captured_utc(captured_ms)
+    );
+    if let Some(parent) = parent {
+        summary.push_str(&format!(
+            ", on top of commit {}",
+            parent.get(..7).unwrap_or(parent)
+        ));
+    }
+    summary.push_str(" (not a git object)");
+    summary
+}
+
+/// epoch ミリ秒を UTC の ISO 8601（秒精度、`2026-08-16T05:03:22Z`）に整形する。
+/// chrono 等の依存を持ち込まず、Howard Hinnant の civil_from_days で日付を求める。
+fn format_captured_utc(captured_ms: u64) -> String {
+    let secs = captured_ms / 1000;
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Newest-first history. Position zero is always the live working tree.
@@ -246,7 +306,13 @@ impl DocumentHistory {
             let local_revision = Revision {
                 id: Some(format!("local:{}", snapshot.id)),
                 short_id: snapshot.id.chars().take(7).collect(),
-                summary: "local snapshot".to_string(),
+                // キャッシュに保存された固定値だけから組み立てる（決定的）。
+                // parent が None（非 git 環境・旧メタデータ）なら説明文から
+                // 「on top of commit」句を省略する。
+                summary: local_revision_summary(
+                    snapshot.captured_ms,
+                    snapshot.parent.as_deref(),
+                ),
                 content: snapshot.content.clone(),
                 source: RevisionSource::Local,
             };
@@ -581,11 +647,139 @@ fn absolutize(path: &Path) -> PathBuf {
 mod tests {
     use super::{
         DocumentHistory, Revision, RevisionSource, anchored_line, head_oid,
-        review_transition,
+        local_revision_summary, review_transition, revision_id, same_revision,
     };
     use crate::snapshot::{CachedFile, CachedSnapshot, SnapshotCache};
     use serde::Deserialize;
     use std::process::Command;
+
+    #[test]
+    fn local_summary_comes_from_fixed_cache_values() {
+        // キャッシュに保存された固定値（captured_ms / parent）だけから説明文が
+        // 組み立てられ、再構成しても決定的。タスク例のタイムスタンプ
+        // （2026-08-16T05:03:22Z）で UTC 整形を検証する。
+        let gits = Vec::new();
+        let local = CachedFile {
+            snapshots: vec![CachedSnapshot {
+                id: "0123456789abcdef".repeat(4),
+                captured_ms: 1_786_856_602_000,
+                content: "old\n".into(),
+                pinned: false,
+                parent: Some("720a4450123456789abcdef0123456789abcdef".into()),
+            }],
+            reviewed_id: None,
+            reviewed_content: None,
+        };
+        let history = DocumentHistory::assemble_timeline("new\n", gits, local);
+        let local_revision = &history.revisions[1];
+        assert_eq!(
+            local_revision.summary,
+            "akapen local snapshot: uncommitted state captured \
+             2026-08-16T05:03:22Z, on top of commit 720a445 (not a git object)"
+        );
+        // context は「id — 説明文」の完全形（export にそのまま出る行）。
+        assert_eq!(
+            local_revision.context().as_deref(),
+            Some(
+                "local:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef — \
+                 akapen local snapshot: uncommitted state captured 2026-08-16T05:03:22Z, \
+                 on top of commit 720a445 (not a git object)"
+            )
+        );
+    }
+
+    #[test]
+    fn local_summary_omits_the_parent_clause_when_unknown() {
+        // parent が None（非 git 環境・旧メタデータ）なら「on top of commit」句を
+        // 省略し、否定情報の句だけを残す。
+        let gits = Vec::new();
+        let local = CachedFile {
+            snapshots: vec![CachedSnapshot {
+                id: "0123456789abcdef".repeat(4),
+                captured_ms: 0,
+                content: "old\n".into(),
+                pinned: false,
+                parent: None,
+            }],
+            reviewed_id: None,
+            reviewed_content: None,
+        };
+        let history = DocumentHistory::assemble_timeline("new\n", gits, local);
+        assert_eq!(
+            history.revisions[1].summary,
+            "akapen local snapshot: uncommitted state captured 1970-01-01T00:00:00Z \
+             (not a git object)"
+        );
+    }
+
+    #[test]
+    fn captured_ms_formats_as_utc_iso8601_with_seconds() {
+        // epoch ミリ秒 → UTC 秒精度 ISO 8601。うるう日・年境界・遠い未来も含めて
+        // civil_from_days の正しさを固定する。
+        let cases = [
+            (0u64, "1970-01-01T00:00:00Z"),
+            (1_750_000_000_000, "2025-06-15T15:06:40Z"),
+            (1_709_251_199_000, "2024-02-29T23:59:59Z"),
+            (1_735_689_600_000, "2025-01-01T00:00:00Z"),
+            (1_786_856_602_000, "2026-08-16T05:03:22Z"),
+            (2_000_000_000_000, "2033-05-18T03:33:20Z"),
+        ];
+        for (ms, expected) in cases {
+            assert_eq!(
+                local_revision_summary(ms, None),
+                format!(
+                    "akapen local snapshot: uncommitted state captured {expected} \
+                     (not a git object)"
+                ),
+                "captured_ms = {ms}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_revision_matches_on_the_identity_side_only() {
+        // 新形式同士: 説明文が違っても identity（「 — 」の左）が同じなら一致。
+        assert!(same_revision(
+            Some(
+                "local:abc — akapen local snapshot: uncommitted state captured \
+                 2026-08-16T05:03:22Z (not a git object)"
+            ),
+            Some(
+                "local:abc — akapen local snapshot: uncommitted state captured \
+                 2026-08-16T05:03:22Z, on top of commit 720a445 (not a git object)"
+            ),
+        ));
+        // 旧形式（裸の `local:<id>`）で保存済みのコメントが新形式 context に一致する。
+        assert!(same_revision(
+            Some("local:abc"),
+            Some("local:abc — akapen local snapshot: … (not a git object)")
+        ));
+        assert!(!same_revision(
+            Some("local:abc"),
+            Some("local:abd — akapen local snapshot: … (not a git object)")
+        ));
+        // Git 世代は従来どおり `oid — subject` の oid 部で比較される。
+        assert!(same_revision(
+            Some("0123456789abcdef0123456789abcdef01234567 — simplify intro"),
+            Some("0123456789abcdef0123456789abcdef01234567 — different subject"),
+        ));
+        assert!(!same_revision(
+            Some("0123456789abcdef0123456789abcdef01234567 — simplify intro"),
+            Some("ffffffffffffffffffffffffffffffffffffffff — simplify intro"),
+        ));
+        // None ↔ None は一致（Revision 行の無い NOW 同士）、None ↔ Some は不一致。
+        assert!(same_revision(None, None));
+        assert!(!same_revision(None, Some("local:abc — x")));
+        assert!(!same_revision(Some("local:abc — x"), None));
+    }
+
+    #[test]
+    fn revision_id_splits_only_the_first_separator() {
+        // subject 側に「 — 」を含む Git 世代でも identity は先頭の oid のまま。
+        assert_eq!(revision_id("abc — fix: a — b"), "abc");
+        // 旧形式は区切りが無いので全体が identity。
+        assert_eq!(revision_id("local:abc"), "local:abc");
+    }
 
     #[test]
     fn timeline_clamps_at_both_ends() {

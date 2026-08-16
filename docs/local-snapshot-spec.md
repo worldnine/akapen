@@ -308,8 +308,27 @@ Lines: 24-29
 
 - NOW のコメントは `Revision` を省略できる
 - 過去の Git 世代は commit id を付ける
-- 過去の LOCAL 世代は安定した local version id を付ける
+- 過去の LOCAL 世代は `local:<内容ハッシュ>` を付ける
 - コメントが付いた世代はキャッシュ GC から保護する
+
+### 9.1 Revision 行の形式
+
+`Revision:` 行は「`id — 説明文`」の形をとる。「 — 」より左が機械用 identity、
+右が人間/LLM 用の説明文で、同一性判定は左側のみで行う。Git 世代はフル oid と
+コミット subject、LOCAL 世代は内容ハッシュと次の説明文を載せる。
+
+```text
+Revision: local:<フルハッシュ> — akapen local snapshot: uncommitted state captured 2026-08-16T05:03:22Z, on top of commit 720a445 (not a git object)
+```
+
+- 説明文の `captured <UTC ISO 8601>` はスナップショットの取得時刻（キャッシュの
+  固定値なので再構成しても決定的）
+- `on top of commit <short 7桁>` は観測時点の HEAD oid。非 git 環境・旧メタデータ
+  で parent が無い場合はこの句を省略する
+- `(not a git object)` は「この id を git で解決しようとするな」という否定情報。
+  受け取った LLM が `git show` を空振りしないための最重要要素
+- 旧形式（`local:<id>` 裸）で保存済みのコメントも identity 部分だけで照合され、
+  移行処理なしで新形式の世代へ一致する
 
 ## 10. ローカルキャッシュ
 
