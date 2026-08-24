@@ -39,6 +39,8 @@ ashiato . --open-cmd "akapen {} --send-agent"   # ファイルピッカー → �
 
 `herdr plugin link <このリポジトリ>` でコマンドパレットに `akp.open` 系アクションが登録され、エージェントの直近チャットメッセージを akapen で開ける。
 
+> 実際の使い方の流れは [クイックスタート](docs/quickstart.md) を参照。
+
 [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr) の行コメント体験を markdown 向けに最適化した、よりシンプルな実装。1ペイン・2モード切替構成です。
 
 ## 二つのモード
@@ -181,7 +183,7 @@ cargo build --release
 | `Ctrl+n` / `Ctrl+p` | 次の/前のコメントへジャンプ（旧 `n` / `N` から移動） |
 | `Ctrl+o` | ファイルピッカー（旧 `Ctrl+p` から移動） |
 | l | 全ファイルのコメント一覧 |
-| e | `$EDITOR` でファイル編集（復帰時に再読込し、自分の編集は確認済みにする。⚡ pending 中は `r` で解決するまでブロック） |
+| e | `$EDITOR` でファイル編集（復帰時に再読込し、自分の編集は確認済みにする。⚡ pending 中は `r` で解決するまでブロック）。カーソル行 — 選択中はその先頭行 — から開く（`+N FILE` 慣習対応エディタ: vim / nano / emacs / micro 等のみ） |
 | y | 全コメントをクリップボードへ（コメントは保持） |
 | s | `--send-cmd` で送信（成功時のみクリア。**失敗時はコメント保持**で再送可能） |
 | d | カーソル位置のコメントを削除 |

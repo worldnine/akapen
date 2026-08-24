@@ -102,7 +102,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `Ctrl+n` / `Ctrl+p` | jump to the next / previous comment (moved from `n` / `N`) |
 | `Ctrl+o` | file picker (moved from `Ctrl+p`) |
 | `l` | all-comments overlay |
-| `e` | edit the file in `$EDITOR` (suspends the TUI, reloads and acknowledges your own edit on return; blocked while a file change is pending — `r` first) |
+| `e` | edit the file in `$EDITOR` (suspends the TUI, reloads and acknowledges your own edit on return; blocked while a file change is pending — `r` first). Opens at the cursor line — or the selection's start — via the `+N FILE` convention for editors that support it (vi/vim/nvim, nano, emacs, micro) |
 | `y` | copy all comments to the clipboard (comments are kept) |
 | `s` | send via `--send-cmd` / `--send-agent` (comments are cleared only on success) |
 | `d` | delete the comment under the cursor |

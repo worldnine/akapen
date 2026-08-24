@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime};
 use ratatui::crossterm::cursor::Hide;
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 
-use crate::app::App;
+use crate::app::{App, Mode};
 use crate::comment::Comment;
 use crate::highlight::syntax_for;
 use crate::overlay::visible_cards;
@@ -86,6 +86,49 @@ pub(crate) fn finish_reload(app: &mut App, from_editor: bool) -> bool {
     }
 }
 
+/// The 1-based source line where the editor should open: the selection's
+/// start when one is active, otherwise the current cursor line. Both modes
+/// keep the cursor as a 0-based source line, so the handoff is exact from
+/// view as well as source.
+pub(crate) fn editor_target_line(app: &App) -> usize {
+    let line = match app.selection {
+        Some(selection) => selection.anchor.min(selection.cursor),
+        None => match app.mode {
+            Mode::View => app.view.cursor,
+            _ => app.cursor,
+        },
+    };
+    // Clamp to the document (a trailing newline yields a phantom last
+    // line in some editors; `lines()` does not count it).
+    let last = app.source.content.lines().count().max(1);
+    (line + 1).min(last)
+}
+
+/// Whether the editor binary understands the `+N FILE` convention for
+/// opening at a 1-based line (vi family, nano/pico, emacs, micro). Editors
+/// outside this list may choke on the extra argument (`zed --wait` treats
+/// it as an unknown file), so the jump is opt-in per binary.
+fn editor_supports_line_jump(bin: &str) -> bool {
+    let name = std::path::Path::new(bin)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(bin);
+    matches!(
+        name,
+        "vi"
+            | "vim"
+            | "nvim"
+            | "view"
+            | "vimdiff"
+            | "ex"
+            | "nano"
+            | "pico"
+            | "emacs"
+            | "emacsclient"
+            | "micro"
+    )
+}
+
 /// Open the file in `$EDITOR` (fallback `nano`), suspend the TUI while the
 /// editor runs, then reload automatically on return. The new generation is
 /// retained but acknowledged as the user's own edit. Triggers on `e` in both
@@ -108,6 +151,11 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
     let mut parts = editor.split_whitespace();
     let bin = parts.next().unwrap_or("nano");
     let args: Vec<&str> = parts.collect();
+    let mut argv: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    if editor_supports_line_jump(bin) {
+        argv.push(format!("+{}", editor_target_line(app)));
+    }
+    argv.push(app.current_file_path().display().to_string());
 
     // Suspend the TUI entirely: `ratatui::restore()` leaves the alternate
     // screen, disables raw mode, and shows the cursor — but it does not
@@ -118,8 +166,7 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
     ratatui::restore();
 
     let status = Command::new(bin)
-        .args(&args)
-        .arg(app.current_file_path())
+        .args(&argv)
         .status();
 
     // Replace the terminal with a fresh one: `ratatui::init()` re-enters
@@ -581,6 +628,48 @@ mod handoff_tests {
         let (mut app, _dir) = temp_app(3, Mode::Source, false);
         on_source_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE, None);
         assert!(app.status.is_none(), "no pending change: not blocked");
+    }
+
+    #[test]
+    fn editor_opens_at_the_cursor_line() {
+        // Source mode: the cursor is a 0-based source line → +N is 1-based.
+        let (mut app, _dir) = temp_app(5, Mode::Source, false);
+        app.cursor = 2;
+        assert_eq!(crate::reload::editor_target_line(&app), 3);
+        // View mode: same source-line semantics.
+        let (mut app, _dir) = temp_app(5, Mode::View, false);
+        app.view.cursor = 1;
+        assert_eq!(crate::reload::editor_target_line(&app), 2);
+        // A selection opens at its start, not its extension end.
+        let (mut app, _dir) = temp_app(5, Mode::Source, false);
+        let mut selection = crate::comment::Selection::new(4);
+        selection.cursor = 2;
+        app.selection = Some(selection);
+        assert_eq!(crate::reload::editor_target_line(&app), 3);
+    }
+
+    #[test]
+    fn editor_line_clamps_to_the_document() {
+        // 3 lines of content; cursor past EOF clamps to the last line.
+        let (mut app, _dir) = temp_app(3, Mode::Source, false);
+        app.cursor = 99;
+        assert_eq!(crate::reload::editor_target_line(&app), 3);
+        // An empty document still yields line 1.
+        let (app, _dir) = temp_app(0, Mode::Source, false);
+        assert_eq!(crate::reload::editor_target_line(&app), 1);
+    }
+
+    #[test]
+    fn only_plus_n_editors_get_the_line_jump() {
+        use crate::reload::editor_supports_line_jump;
+        for bin in ["vim", "nvim", "vi", "nano", "emacs", "micro", "/usr/bin/nvim"] {
+            assert!(editor_supports_line_jump(bin), "{bin} supports +N");
+        }
+        for bin in ["zed", "code", "hx", "kak", "/opt/zed --wait"] {
+            assert!(!editor_supports_line_jump(bin), "{bin} does not");
+        }
+        // A path with a directory component resolves to the basename.
+        assert!(editor_supports_line_jump("/usr/local/bin/nano"));
     }
 
     #[test]
