@@ -21,7 +21,8 @@
 #   - CLI/API 起点のフォーカス変更（`herdr pane focus` 等）ではフックが発火しない
 #     （TUI 操作のみ。herdr の既知の癖）。
 #   - `ime guard`（常駐ガード）とは併用しないこと（復元した日本語を潰す）。
-#   - コマンドはインストール済みバイナリの絶対パスを指す。
+#   - コマンドは PATH から解決する（`ime` は scripts/install-ime.sh で
+#     ~/.local/bin/ime にインストールされる）。絶対パスを書くと他環境で壊れる。
 id = "ime"
 name = "ime"
 version = "0.1.0"
@@ -32,9 +33,9 @@ platforms = ["macos"]
 [[events]]
 on = "pane.created"
 platforms = ["macos"]
-command = ["/Users/nagata/.local/bin/ime", "abc"]
+command = ["ime", "abc"]
 
 [[events]]
 on = "pane.focused"
 platforms = ["macos"]
-command = ["/Users/nagata/.local/bin/ime", "pane-focus", "--default", "abc"]
+command = ["ime", "pane-focus", "--default", "abc"]
