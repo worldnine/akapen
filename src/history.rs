@@ -282,15 +282,23 @@ impl DocumentHistory {
 
         // Git アンカーは newest-first。live と同内容のコミットは NOW に統合され、
         // 同じ content のコミットは newest だけ残す（重複除去は従来と同じ方針）。
+        // ただし LOCAL の parent lookup はこの重複除去後の表示列ではなく除去前の
+        // 完全列に対して行うため、各表示コミットの「完全列での index」も保持する。
+        // （内容が重複して表示から落ちた parent に向く正しい LOCAL が、parent を
+        //  解決できず orphan 化して先頭に浮く誤順序を防ぐ。）
         let mut seen = HashSet::new();
-        let mut gits: Vec<Revision> = Vec::new();
-        for revision in git_revisions {
+        let mut displayed: Vec<(usize, Revision)> = Vec::new();
+        for (full_index, revision) in git_revisions.iter().enumerate() {
             if revision.content == live || !seen.insert(revision.content.clone()) {
                 continue;
             }
-            gits.push(revision);
+            displayed.push((full_index, revision.clone()));
         }
-        working.extend(gits.iter().cloned());
+        working.extend(
+            displayed
+                .iter()
+                .map(|(_, revision)| revision.clone()),
+        );
 
         // スナップショットは oldest-first で処理する。live または working 内の
         // いずれかと同内容なら LOCAL を生成しない（内容一致の LOCAL は COMMIT に
@@ -316,16 +324,28 @@ impl DocumentHistory {
                 content: snapshot.content.clone(),
                 source: RevisionSource::Local,
             };
-            // parent（観測時点の HEAD oid）が gits に一致すれば、そのコミットの
-            // 直前（newer 側）に挿入する。挿入位置は parent の gits 上の index に
-            // 固定されるため、同じ parent を共有する複数スナップショットは
-            // oldest-first 処理の結果 newest が前（NOW 寄り）で並ぶ。
+            // parent（観測時点の HEAD oid）の位置を「重複除去前の完全な git 列」
+            // から引く。表示済み commit に出てこない（内容重複で落ちた）parent
+            // でも、LOCAL はその parent より新しいので「parent より新しい表示
+            // commit のすぐ古い側」に挿入すれば正しいスロットになる。
             let anchor = snapshot.parent.as_deref().and_then(|parent| {
-                gits.iter()
+                git_revisions
+                    .iter()
                     .position(|revision| revision.id.as_deref() == Some(parent))
             });
             match anchor {
-                Some(git_index) => working.insert(git_index + 1, local_revision),
+                // working[0] は NOW。それ以降に「parent より新しい表示 commit」が
+                // count_newer 個並ぶので、LOCAL はその直後（INDEX 1+count_newer）へ。
+                // 同一 parent を共有する LOCAL は snapshots を oldest-first で処理し
+                // 同じ slot へ insert するため、後から挿入した新しい方が前に来て
+                // newest が前（NOW 寄り）に並ぶ。
+                Some(parent_full_index) => {
+                    let count_newer = displayed
+                        .iter()
+                        .filter(|(full_index, _)| *full_index < parent_full_index)
+                        .count();
+                    working.insert(1 + count_newer, local_revision);
+                }
                 // 非 git・rebase・別 ancestry の orphan は後回しにする。
                 None => orphans.push(local_revision),
             }
@@ -1041,7 +1061,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             fixtures.scenarios.len(),
-            6,
+            8,
             "fixture のシナリオ数が変わったら契約の見直しが必要"
         );
 

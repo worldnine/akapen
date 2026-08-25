@@ -70,6 +70,33 @@
         { "id": "4b54499d745d550ceffcd5953846c5aa3023b33adb5b003257915b1bb64af67a", "captured_ms": 1000, "pinned": false, "parent": "A", "content": "# Doc\n\nsecond edited\n" }
       ],
       "expected_newest_first_ids": ["now", "A"]
+    },
+    {
+      "name": "pre_commit_locals_with_null_parent_pile_above_git",
+      "live": "# Doc\n\nfinal\n",
+      "gits_newest_first": [
+        { "id": "A", "short_id": "aaaaaaa", "summary": "first commit", "content": "# Doc\n\nfirst\n" }
+      ],
+      "snapshots_oldest_first": [
+        { "id": "d0d0d0d0", "captured_ms": 1000, "pinned": false, "parent": null, "content": "# Doc\n\nstep0\n" },
+        { "id": "d1d1d1d1", "captured_ms": 2000, "pinned": false, "parent": null, "content": "# Doc\n\nstep1\n" }
+      ],
+      "expected_newest_first_ids": ["now", "local:d1d1d1d1", "local:d0d0d0d0", "A"]
+    },
+    {
+      "name": "local_parent_deduped_out_of_gits_stays_in_its_lineage_slot",
+      "live": "# Doc\n\nfinal\n",
+      "gits_newest_first": [
+        { "id": "D", "short_id": "ddddddd", "summary": "fourth (dup content)", "content": "# Doc\n\nsecond\n" },
+        { "id": "M", "short_id": "mmmmmmm", "summary": "third commit", "content": "# Doc\n\nthird\n" },
+        { "id": "B", "short_id": "bbbbbbb", "summary": "second commit", "content": "# Doc\n\nsecond\n" },
+        { "id": "A", "short_id": "aaaaaaa", "summary": "first commit", "content": "# Doc\n\nfirst\n" }
+      ],
+      "snapshots_oldest_first": [
+        { "id": "d0d0d0d0", "captured_ms": 1000, "pinned": false, "parent": "B", "content": "# Doc\n\nB-edited\n" },
+        { "id": "d1d1d1d1", "captured_ms": 2000, "pinned": false, "parent": "D", "content": "# Doc\n\nD-edited\n" }
+      ],
+      "expected_newest_first_ids": ["now", "local:d1d1d1d1", "D", "M", "local:d0d0d0d0", "A"]
     }
   ]
 }
