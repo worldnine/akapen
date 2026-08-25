@@ -4,8 +4,9 @@
 //! Everything here is pure layout math — the bar's drawing lives in
 //! `main.rs` (next to the other drawers) and consumes this module's
 //! [`TimelineLayout`]. The bar is bottom-anchored and always two rows:
-//! the state words replace the footer hints, the axis replaces the view
-//! frame's bottom border (so view mode loses no content rows at all).
+//! the state words (`HERE`/`NOW`) replace the footer hints, the axis
+//! replaces the view frame's bottom border (so view mode loses no
+//! content rows at all).
 //! The current revision is `◆`, the review baseline `▮`, LOCAL
 //! snapshots `●` and COMMITs `◼`, with NOW always at the right edge.
 //! The axis is dim left of the review baseline — reviewed history — and
@@ -45,8 +46,8 @@ pub(crate) struct TimelinePoint {
 pub(crate) struct TimelineLayout {
     /// Axis points, sorted by column.
     pub(crate) points: Vec<TimelinePoint>,
-    /// (start column, text) of the state words: `viewing`, `base`, and
-    /// `NOW` at the right edge.
+    /// (start column, text) of the state words: `HERE` at the current
+    /// point and `NOW` at the right edge.
     pub(crate) words: Vec<(usize, String)>,
     /// The column of the review baseline: the axis left of it is drawn
     /// dim — the reviewed history behind you — and the stretch from
@@ -149,32 +150,20 @@ pub(crate) fn layout_timeline(
         .collect();
     points.sort_by_key(|p| p.col);
 
-    // State words: `viewing` at the current point (shifted left when it
-    // would hit the NOW anchor), `base` at the baseline when it is a
-    // distinct, non-NOW point, and `NOW` at the right edge. Words are
-    // ASCII, so char width == byte length.
+    // State words: `HERE` at the current point (shifted left when it
+    // would hit the NOW anchor) and `NOW` at the right edge — the "you
+    // are here" pair. The baseline keeps no word of its own: the yellow
+    // `▎` marker plus the axis dimming to its left already tell that
+    // story. Words are ASCII, so char width == byte length.
     let mut words: Vec<(usize, String)> = Vec::new();
     if let Some(p) = points.iter().find(|p| p.current)
         && p.kind != PointKind::Now
     {
         let start = p
             .col
-            .saturating_sub(4)
-            .min(width.saturating_sub(12)); // "viewing" ends before NOW
-        words.push((start, "viewing".to_string()));
-    }
-    if let Some(p) = points
-        .iter()
-        .find(|p| p.baseline && !p.current && p.kind != PointKind::Now)
-    {
-        let start = p.col.saturating_sub(2); // "base" is 4 wide
-        let fits = start + 4 <= width.saturating_sub(4) // ends before NOW
-            && !words
-                .iter()
-                .any(|(s, t)| start < s + t.len() && *s < start + 4);
-        if fits {
-            words.push((start, "base".to_string()));
-        }
+            .saturating_sub(2)
+            .min(width.saturating_sub(8)); // "HERE" ends before NOW
+        words.push((start, "HERE".to_string()));
     }
     words.push((width.saturating_sub(3), "NOW".to_string()));
     words.sort_by_key(|(start, _)| *start);
@@ -198,6 +187,7 @@ mod tests {
             summary: name.into(),
             content: name.into(),
             source,
+            timestamp_ms: None,
         }
     }
 
@@ -276,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn words_mark_viewing_base_and_now() {
+    fn words_mark_here_and_now() {
         let mut h = history(vec![
             revision("now", RevisionSource::Now),
             revision("r1", RevisionSource::Local),
@@ -288,28 +278,15 @@ mod tests {
         h.reviewed_content = Some("r2".into());
         let layout = layout_timeline(&h, 120).unwrap();
         let texts: Vec<&str> = layout.words.iter().map(|(_, t)| t.as_str()).collect();
-        // Column order: the older baseline sits left of the viewing point.
-        assert_eq!(texts, ["base", "viewing", "NOW"]);
+        // The baseline keeps no word: the ▮ marker and the axis dimming
+        // carry it. Only the "you are here" pair remains.
+        assert_eq!(texts, ["HERE", "NOW"]);
         assert_eq!(layout.words.last().unwrap().0, 117, "NOW ends at the edge");
     }
 
     #[test]
-    fn baseline_on_the_current_point_collapses_to_viewing() {
-        let mut h = history(vec![
-            revision("now", RevisionSource::Now),
-            revision("r1", RevisionSource::Local),
-        ]);
-        h.position = 1;
-        h.reviewed_id = Some("r1".into());
-        h.reviewed_content = Some("r1".into());
-        let layout = layout_timeline(&h, 60).unwrap();
-        let texts: Vec<&str> = layout.words.iter().map(|(_, t)| t.as_str()).collect();
-        assert_eq!(texts, ["viewing", "NOW"]);
-    }
-
-    #[test]
-    fn viewing_word_never_overlaps_the_now_anchor() {
-        // Position 1 in a crowded history puts `viewing` right next to
+    fn here_word_never_overlaps_the_now_anchor() {
+        // Position 1 in a crowded history puts `HERE` right next to
         // NOW; the word shifts left instead of colliding.
         let mut h = history(vec![
             revision("now", RevisionSource::Now),
@@ -317,8 +294,8 @@ mod tests {
         ]);
         h.position = 1;
         let layout = layout_timeline(&h, 60).unwrap();
-        let viewing = layout.words.iter().find(|(_, t)| t == "viewing").unwrap();
+        let here = layout.words.iter().find(|(_, t)| t == "HERE").unwrap();
         let now = layout.words.iter().find(|(_, t)| t == "NOW").unwrap();
-        assert!(viewing.0 + viewing.1.len() <= now.0);
+        assert!(here.0 + here.1.len() <= now.0);
     }
 }

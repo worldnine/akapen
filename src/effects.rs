@@ -26,6 +26,25 @@ use crate::view::{
 /// How long the timeline bar's slide-in/out takes (milliseconds).
 pub(crate) const TIMELINE_SLIDE_MS: u32 = 200;
 
+/// How long the scrubber tooltip holds after the last history step
+/// before it leaves (milliseconds), and how long its dissolve takes.
+/// Their sum is the tooltip's total lifetime — `select_history` arms
+/// the deadline with it.
+pub(crate) const TOOLTIP_HOLD_MS: u32 = 1200;
+pub(crate) const TOOLTIP_DISSOLVE_MS: u32 = 250;
+
+/// The scrubber tooltip's exit: hold still while the traveler reads it,
+/// then dissolve cell by cell — the same “scatter through time”
+/// vocabulary as the history transitions, and unlike a color fade it
+/// needs no knowledge of the terminal background. Recreated on every
+/// history step, so a held arrow keeps the tooltip solid.
+pub(crate) fn tooltip_effect() -> Effect {
+    fx::sequence(&[
+        fx::sleep((TOOLTIP_HOLD_MS, Interpolation::Linear)),
+        fx::dissolve((TOOLTIP_DISSOLVE_MS, Interpolation::Linear)),
+    ])
+}
+
 /// Set by `draw` while the timeline bar covers the frame's bottom
 /// border row; the time-machine rotation then leaves that row alone so
 /// the axis line stays calm instead of joining the wave.

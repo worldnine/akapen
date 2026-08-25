@@ -329,6 +329,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
                     summary: crate::history::local_revision_summary(captured, None),
                     content: old_content.clone(),
                     source: crate::history::RevisionSource::Local,
+                    timestamp_ms: Some(captured),
                 },
             );
         }

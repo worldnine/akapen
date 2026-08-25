@@ -501,6 +501,14 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
             app.status = None;
             app.toast_fx = None;
         }
+        // Expire the scrubber tooltip (its dissolve has played out).
+        if app
+            .timeline_tooltip_until
+            .is_some_and(|until| until.elapsed() > Duration::ZERO)
+        {
+            app.timeline_tooltip_until = None;
+            app.timeline_tooltip_fx = None;
+        }
         if !app.running {
             return Ok(());
         }
@@ -1200,13 +1208,11 @@ pub(crate) fn select_history(app: &mut App, delta: isize) -> bool {
             return false;
         };
         // The lightweight cursor can reach an edge before its Markdown has
-        // rendered. Keep the useful yellow timeline label visible while the
-        // debounce catches up; reporting a boundary error here would hide
-        // the destination throughout a held-arrow scrub.
+        // rendered. Keep the scrubber tooltip alive while the debounce
+        // catches up; reporting a boundary error here would hide the
+        // destination throughout a held-arrow scrub.
         if history.rendered_position != history.position {
-            if let Some(label) = history.label() {
-                app.flash(label);
-            }
+            refresh_timeline_tooltip(app);
             return false;
         }
         let message = if delta > 0 {
@@ -1236,18 +1242,32 @@ pub(crate) fn select_history(app: &mut App, delta: isize) -> bool {
     // (a cursor parked on the last line would hide under the times row).
     keep_cursor_out_of_timeline(app);
 
-    let label = {
-        let history = &app.histories[index];
-        history.label().unwrap_or_default()
-    };
     app.history_render_due = Some(Instant::now() + HISTORY_RENDER_DEBOUNCE);
     // A previous landing pulse must not bleed into the first frame of the
     // next selected document.
     app.landing_pulse_fx = None;
     app.landing_pulse_until = None;
     app.landing_pulse_pending = false;
-    app.flash(label);
+    refresh_timeline_tooltip(app);
     true
+}
+
+/// Arm (or re-arm) the scrubber tooltip: every history step shows the
+/// revision readout (provenance · id · age · summary) above the axis
+/// for a short hold, then it dissolves. This replaced the old per-step
+/// toast — the same information, but next to the axis where the eye
+/// already is, and gone once the traveler settles. A step also
+/// retires any lingering toast (an old edge error must not squat on the
+/// tooltip's row).
+fn refresh_timeline_tooltip(app: &mut App) {
+    let total =
+        (crate::effects::TOOLTIP_HOLD_MS + crate::effects::TOOLTIP_DISSOLVE_MS) as u64;
+    app.timeline_tooltip_until = Some(Instant::now() + Duration::from_millis(total));
+    if app.config.fx {
+        app.timeline_tooltip_fx = Some(crate::effects::tooltip_effect());
+    }
+    app.status = None;
+    app.toast_fx = None;
 }
 
 /// While the timeline bar is on screen, nudge the scroll so the cursor
@@ -3444,6 +3464,35 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         };
         f.render_effect(effect, row, last_tick);
     }
+    // The scrubber tooltip's hold-then-dissolve, over its own cells only
+    // — suppressed while a prompt or toast owns the row (the tooltip is
+    // not drawn then either).
+    if app.config.fx
+        && timeline_on
+        && f.area().height >= 5
+        && app.status.is_none()
+        && prompt_message(app).is_none()
+        && let Some((start, parts)) = timeline_tooltip_layout(app, f.area().width as usize)
+    {
+        let total: usize = parts
+            .iter()
+            .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
+            .sum();
+        if let Some(effect) = app.timeline_tooltip_fx.as_mut() {
+            let rect = Rect {
+                x: start as u16,
+                y: f.area().height.saturating_sub(3),
+                width: total as u16,
+                height: 1,
+            };
+            f.render_effect(effect, rect, last_tick);
+        }
+    }
+    // A finished dissolve (or a bar that left the screen) drops the
+    // effect so the tick rate can settle.
+    if app.timeline_tooltip_fx.as_ref().is_some_and(|fx| fx.done()) || !timeline_on {
+        app.timeline_tooltip_fx = None;
+    }
 }
 
 
@@ -3466,11 +3515,14 @@ fn timeline_bar_rect(area: Rect) -> Rect {
 }
 
 /// The browsing timeline bar: two rows, bottom-anchored — the state
-/// words on the footer row (`viewing` at the current revision, `base`
-/// at the baseline, `NOW` at the right edge, `t: detail` right-aligned)
-/// and the axis on the row above (`●` LOCAL / `◼` COMMIT / `◆` viewing
-/// / `▮` baseline, dim left of the review baseline). Drawn over the
-/// static UI before the effects; the slide effect animates it.
+/// words on the footer row (`HERE` at the current revision, `NOW` at
+/// the right edge) and the axis on the row
+/// above (`●` LOCAL / `◼` COMMIT / `◆` the current point / `▮`
+/// baseline, dim left of the review baseline). While a history step is
+/// fresh, the scrubber tooltip travels with the `◆` on the message row
+/// above the axis (see [`timeline_tooltip_layout`]).
+/// Drawn over the static UI before the effects; the slide effect
+/// animates it.
 /// How deep into the timeline the traveler is: 0 = just behind NOW,
 /// 1 = the oldest revision. The LIVE position feeds it (not the
 /// rendered one), so the effects already deepen while an arrow is held.
@@ -3528,8 +3580,9 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Some(p) => match p.kind {
-                    // NOW always marks the right edge; the baseline
-                    // state there is already in the title label.
+                    // NOW always marks the right edge; a baseline
+                    // sitting there needs no marker of its own (the
+                    // whole axis reads dim — everything is reviewed).
                     crate::timeline::PointKind::Now => (
                         '●',
                         Style::default()
@@ -3586,38 +3639,22 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
         );
     }
 
-    // Row 3: the state words and the detail hint. The layout guarantees
-    // the words never overlap; the hint yields when a word already sits
-    // in its slot (rare: words hug the right edge only when the viewing
-    // point or baseline does).
+    // Row 3: the state words — nothing else. The `t` affordance is
+    // already advertised where it is learned (the normal footer shows
+    // `t detail` whenever a timeline exists, and `?` documents the
+    // scrub keys), so repeating it here only crowded the NOW corner.
     {
         let mut items: Vec<(usize, String, Style)> = layout
             .words
             .iter()
             .map(|(start, text)| {
-                let style = match text.as_str() {
-                    "viewing" => Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                    "base" => Style::default().fg(Color::Yellow),
-                    _ => Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD), // NOW
-                };
+                // The "you are here" pair (HERE / NOW) reads bright.
+                let style = Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD);
                 (*start, text.clone(), style)
             })
             .collect();
-        let hint_start = width.saturating_sub(13); // "t: detail" ends before NOW
-        let hint_blocked = items
-            .iter()
-            .any(|(start, text, _)| *start < hint_start + 9 && hint_start < start + text.len());
-        if !hint_blocked {
-            items.push((
-                hint_start,
-                "t: detail".to_string(),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
         items.sort_by_key(|(start, _, _)| *start);
         let mut spans: Vec<Span> = Vec::new();
         let mut pos = 0usize;
@@ -3643,7 +3680,133 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
             },
         );
     }
+
+    // The scrubber tooltip: the revision readout on the message row,
+    // riding over the `◆`. It yields the row entirely
+    // while a prompt or toast owns it (a centered banner over a longer
+    // tooltip would leave stray fragments at its sides).
+    if height >= 5
+        && app.status.is_none()
+        && prompt_message(app).is_none()
+        && let Some((start, parts)) = timeline_tooltip_layout(app, width)
+    {
+        let total: usize = parts
+            .iter()
+            .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
+            .sum();
+        let spans: Vec<Span> = parts
+            .into_iter()
+            .map(|(text, style)| Span::styled(text, style))
+            .collect();
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x: start as u16,
+                y: height.saturating_sub(3),
+                width: total as u16,
+                height: 1,
+            },
+        );
+    }
 }
+
+/// The scrubber tooltip's anchor and content: `(start column, styled
+/// parts)` — `BASELINE · ` when the point is the review baseline, the
+/// provenance glyph in its (depth-shifted) family color, `id · age`
+/// bright, and the summary dim. LOCAL's long deterministic sentence
+/// ("akapen local snapshot: uncommitted state captured …") collapses
+/// to "local snapshot" — the age next to it already says when.
+/// The band is centered over the `◆` and travels with it, clamped to
+/// the terminal edges (one-column margin) so it can never spill; the
+/// summary may use whatever width is left and is clipped only by the
+/// screen. Every part rides the nebula band ([`tooltip_band_bg`]) —
+/// the row floats over document text, and glyphs on the terminal's own
+/// background would blend into it.
+/// `None` once the hold window has expired or while the cursor sits at
+/// NOW.
+fn timeline_tooltip_layout(app: &App, width: usize) -> Option<(usize, Vec<(String, Style)>)> {
+    app.timeline_tooltip_until
+        .filter(|until| Instant::now() < *until)?;
+    let history = app.history()?;
+    let revision = history.current()?;
+    let col = crate::timeline::layout_timeline(history, width)?
+        .points
+        .iter()
+        .find(|p| p.current)?
+        .col;
+    let (glyph, family) = match revision.source {
+        crate::history::RevisionSource::Now => return None,
+        crate::history::RevisionSource::Local => ('●', crate::view::TIMELINE_LOCAL_COLOR),
+        crate::history::RevisionSource::Git => ('◼', crate::view::TIMELINE_COMMIT_COLOR),
+    };
+    let glyph_color = if app.config.fx {
+        crate::view::time_machine_depth_shift(app.ui_light, family, travel_depth(app))
+    } else {
+        family
+    };
+    // The row floats over document text. A black band vanished on dark
+    // terminals (their background IS black), so the band wears the
+    // time-machine nebula instead: a deep indigo clearly distinct from
+    // both the terminal background and the page — the readout is an
+    // instrument of the machine, not a line of the document.
+    let light = app.ui_light;
+    let on_band = Style::default().bg(crate::view::tooltip_band_bg(light));
+    let mut parts: Vec<(String, Style)> = Vec::new();
+    if history.baseline_position() == Some(history.position) {
+        parts.push((
+            " BASELINE ·".to_string(),
+            on_band
+                .fg(crate::view::tooltip_band_baseline_fg(light))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    parts.push((format!(" {glyph} "), on_band.fg(glyph_color)));
+    let mut head = revision.short_id.clone();
+    if let Some(then_ms) = revision.timestamp_ms {
+        head.push_str(&format!(
+            " · {}",
+            crate::history::relative_age(crate::snapshot::now_ms(), then_ms)
+        ));
+    }
+    parts.push((
+        head,
+        on_band
+            .fg(crate::view::tooltip_band_fg(light))
+            .add_modifier(Modifier::BOLD),
+    ));
+    let summary = match revision.source {
+        crate::history::RevisionSource::Local => "local snapshot".to_string(),
+        _ => revision.summary.clone(),
+    };
+    let used: usize = parts
+        .iter()
+        .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
+        .sum();
+    let budget = width.saturating_sub(2); // one-column margin each side
+    if !summary.is_empty() && budget > used + 3 {
+        let clipped = clip_title_label(&summary, budget - used - 3);
+        parts.push((
+            format!(" · {clipped}"),
+            on_band.fg(crate::view::tooltip_band_dim_fg(light)),
+        ));
+    }
+    // The band's closing pad, so the text never ends flush against the
+    // page text to its right.
+    parts.push((" ".to_string(), on_band));
+    // Centered over the ◆, clamped so the band never spills over either
+    // edge (right clamp first, then the left margin wins for bands as
+    // wide as the screen).
+    let total: usize = parts
+        .iter()
+        .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
+        .sum();
+    let start = col
+        .saturating_sub(total / 2)
+        .min(width.saturating_sub(total + 1))
+        .max(1);
+    Some((start, parts))
+}
+
 /// screen; keyboard navigation, clicks, and the mode handoffs reveal it.
 fn review_flags(marks: &HashSet<usize>, line_count: usize) -> Vec<bool> {
     (0..line_count).map(|line| marks.contains(&line)).collect()

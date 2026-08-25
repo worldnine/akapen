@@ -36,6 +36,10 @@ pub(crate) struct Revision {
     pub(crate) summary: String,
     pub(crate) content: String,
     pub(crate) source: RevisionSource,
+    /// When this generation came to be, epoch milliseconds: the commit
+    /// time for Git, `captured_ms` for LOCAL. `None` for NOW (it has no
+    /// age) and for revisions whose time is unknown.
+    pub(crate) timestamp_ms: Option<u64>,
 }
 
 impl Revision {
@@ -90,6 +94,31 @@ pub(crate) fn local_revision_summary(captured_ms: u64, parent: Option<&str>) -> 
     }
     summary.push_str(" (not a git object)");
     summary
+}
+
+/// epoch ミリ秒の差を人間向けの相対時刻（`2h ago` 等）にする。タイムマシンの
+/// スクラバー・ツールチップ用: 桁は常に 1 単位（`1d 3h` とはしない）で、
+/// 60 秒未満は `just now`。未来時刻（時計ズレ）は saturating で `just now` に落ちる。
+pub(crate) fn relative_age(now_ms: u64, then_ms: u64) -> String {
+    let secs = now_ms.saturating_sub(then_ms) / 1000;
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const MONTH: u64 = 30 * DAY;
+    const YEAR: u64 = 365 * DAY;
+    if secs < MINUTE {
+        "just now".to_string()
+    } else if secs < HOUR {
+        format!("{}m ago", secs / MINUTE)
+    } else if secs < DAY {
+        format!("{}h ago", secs / HOUR)
+    } else if secs < MONTH {
+        format!("{}d ago", secs / DAY)
+    } else if secs < YEAR {
+        format!("{}mo ago", secs / MONTH)
+    } else {
+        format!("{}y ago", secs / YEAR)
+    }
 }
 
 /// epoch ミリ秒を UTC の ISO 8601（秒精度、`2026-08-16T05:03:22Z`）に整形する。
@@ -278,6 +307,7 @@ impl DocumentHistory {
             summary: "working tree".to_string(),
             content: live.to_string(),
             source: RevisionSource::Now,
+            timestamp_ms: None,
         }];
 
         // Git アンカーは newest-first。live と同内容のコミットは NOW に統合され、
@@ -315,6 +345,7 @@ impl DocumentHistory {
                 ),
                 content: snapshot.content.clone(),
                 source: RevisionSource::Local,
+                timestamp_ms: Some(snapshot.captured_ms),
             };
             // parent（観測時点の HEAD oid）が gits に一致すれば、そのコミットの
             // 直前（newer 側）に挿入する。挿入位置は parent の gits 上の index に
@@ -413,7 +444,7 @@ fn load_git_revisions(path: &Path, limit: usize) -> Vec<Revision> {
     let Ok(rel) = abs.strip_prefix(&root) else {
         return revisions;
     };
-    let format = "%H%x1f%h%x1f%s";
+    let format = "%H%x1f%h%x1f%ct%x1f%s";
     let output = Command::new("git")
         .arg("-C")
         .arg(&root)
@@ -428,12 +459,15 @@ fn load_git_revisions(path: &Path, limit: usize) -> Vec<Revision> {
     }
 
     for line in String::from_utf8_lossy(&output.stdout).lines().take(limit) {
-        let mut fields = line.splitn(3, '\x1f');
-        let (Some(id), Some(short_id), Some(summary)) =
-            (fields.next(), fields.next(), fields.next())
+        // The commit time sits BEFORE the free-form subject, so a
+        // subject can never corrupt it.
+        let mut fields = line.splitn(4, '\x1f');
+        let (Some(id), Some(short_id), Some(commit_secs), Some(summary)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
+        let timestamp_ms = commit_secs.parse::<u64>().ok().map(|secs| secs * 1000);
         let spec = format!("{id}:{}", rel.to_string_lossy());
         let Ok(shown) = Command::new("git")
             .arg("-C")
@@ -458,6 +492,7 @@ fn load_git_revisions(path: &Path, limit: usize) -> Vec<Revision> {
             summary: summary.to_string(),
             content,
             source: RevisionSource::Git,
+            timestamp_ms,
         });
     }
     revisions
@@ -647,7 +682,7 @@ fn absolutize(path: &Path) -> PathBuf {
 mod tests {
     use super::{
         DocumentHistory, Revision, RevisionSource, anchored_line, head_oid,
-        local_revision_summary, review_transition, revision_id, same_revision,
+        local_revision_summary, relative_age, review_transition, revision_id, same_revision,
     };
     use crate::snapshot::{CachedFile, CachedSnapshot, SnapshotCache};
     use serde::Deserialize;
@@ -710,6 +745,22 @@ mod tests {
             "akapen local snapshot: uncommitted state captured 1970-01-01T00:00:00Z \
              (not a git object)"
         );
+    }
+
+    #[test]
+    fn relative_age_buckets_read_naturally() {
+        let now = 1_000_000_000_000u64;
+        let m = 60_000u64;
+        assert_eq!(relative_age(now, now), "just now");
+        assert_eq!(relative_age(now, now - 59_000), "just now");
+        assert_eq!(relative_age(now, now - m), "1m ago");
+        assert_eq!(relative_age(now, now - 59 * m), "59m ago");
+        assert_eq!(relative_age(now, now - 60 * m), "1h ago");
+        assert_eq!(relative_age(now, now - 24 * 60 * m), "1d ago");
+        assert_eq!(relative_age(now, now - 30 * 24 * 60 * m), "1mo ago");
+        assert_eq!(relative_age(now, now - 365 * 24 * 60 * m), "1y ago");
+        // 未来時刻（時計ズレ）はパニックせず `just now` に落ちる。
+        assert_eq!(relative_age(now - 1000, now), "just now");
     }
 
     #[test]
@@ -789,6 +840,7 @@ mod tests {
             summary: name.into(),
             content: name.into(),
             source: RevisionSource::Git,
+            timestamp_ms: None,
         };
         let mut history = DocumentHistory {
             revisions: vec![revision("now"), revision("old")],
@@ -811,6 +863,7 @@ mod tests {
             summary: name.into(),
             content: name.into(),
             source: RevisionSource::Git,
+            timestamp_ms: None,
         };
         let mut history = DocumentHistory {
             revisions: vec![revision("now"), revision("middle"), revision("oldest")],
@@ -834,6 +887,7 @@ mod tests {
             summary: name.into(),
             content: name.into(),
             source: RevisionSource::Git,
+            timestamp_ms: None,
         };
         let mut history = DocumentHistory {
             revisions: vec![revision("now"), revision("middle"), revision("oldest")],
@@ -1055,6 +1109,7 @@ mod tests {
                     summary: git.summary.clone(),
                     content: git.content.clone(),
                     source: RevisionSource::Git,
+                    timestamp_ms: None,
                 })
                 .collect();
             let snapshots: Vec<CachedSnapshot> = scenario
