@@ -714,8 +714,8 @@ pub(crate) fn draw_timeline_overlay(f: &mut Frame, app: &App) {
         let chron = n - i; // 1..n; n = NOW
         let current = i == history.position;
         let is_baseline = baseline == Some(i);
-        // The same marker vocabulary as the browsing bar: ◆ viewing,
-        // ▮ baseline, ● local / ◼ commit.
+        // The same marker vocabulary as the browsing bar: ◆ the
+        // current point, ▮ baseline, ● local / ◼ commit.
         let (marker, marker_style) = if current {
             ("◆", pink.add_modifier(Modifier::BOLD))
         } else if rev.source == crate::history::RevisionSource::Now {

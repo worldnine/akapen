@@ -177,6 +177,13 @@ pub(crate) struct App {
     /// The history position to restore when the timeline overlay closes
     /// with Esc (the fzf-style cancel contract).
     pub(crate) timeline_restore: Option<usize>,
+    /// While Some the scrubber tooltip rides above the timeline axis,
+    /// centered over the `◆` and clamped to the edges: provenance, id,
+    /// relative age, and summary of the revision at `◆`. Refreshed by
+    /// every history step, gone after the hold
+    /// window — the ephemeral half of the time-machine readout (the
+    /// title keeps only the tiny `◆ 3/7` badge).
+    pub(crate) timeline_tooltip_until: Option<Instant>,
     /// The active toast's fade-in/hold/fade-out effect (tachyonfx),
     /// created by `flash`/`flash_err` and dropped when the status
     /// expires. Rendered on the message row only while the toast is the
@@ -392,6 +399,7 @@ impl App {
             warp_fx: None,
             timeline_fx: None,
             timeline_exit_until: None,
+            timeline_tooltip_until: None,
             timeline_exit_ms: Duration::from_millis(crate::effects::TIMELINE_SLIDE_MS as u64),
             timeline_restore: None,
             toast_fx: None,
@@ -787,6 +795,7 @@ impl App {
         self.landing_pulse_until = None;
         self.timeline_fx = None;
         self.timeline_exit_until = None;
+        self.timeline_tooltip_until = None;
         self.timeline_restore = None;
         self.confirm_quit = false;
         self.drag_anchor = None;
@@ -856,6 +865,11 @@ impl App {
             return false;
         }
         self.toast_fx.is_some()
+            // The scrubber tooltip's exit dissolve is drawn by the bar
+            // drawer itself (not a tachyonfx shader — hidden cells must
+            // reveal the document, which a post-hoc shader cannot do),
+            // but it still needs fast ticks to animate smoothly.
+            || self.timeline_tooltip_until.is_some()
             || !self.appear_fx.is_empty()
             || !self.ghost_fx.is_empty()
             || self.warp_fx.is_some()

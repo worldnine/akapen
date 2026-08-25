@@ -109,6 +109,50 @@ pub const TIMELINE_LOCAL_COLOR: Color = Color::Rgb(235, 110, 185);
 /// commits stay distinguishable from LOCAL's pink.
 pub const TIMELINE_COMMIT_COLOR: Color = Color::Rgb(185, 165, 235);
 
+/// The scrubber tooltip's band background: a deep nebula indigo (pale
+/// lavender on light terminals) — clearly not the terminal background
+/// and clearly not the page, so the readout reads as a time-machine
+/// instrument floating over the document, in the same family as the
+/// rotating frame.
+pub fn tooltip_band_bg(light: bool) -> Color {
+    if light {
+        Color::Rgb(236, 226, 248)
+    } else {
+        Color::Rgb(48, 30, 82)
+    }
+}
+
+/// The band's main text (id · age): near-white on the indigo band,
+/// deep violet on the lavender one.
+pub fn tooltip_band_fg(light: bool) -> Color {
+    if light {
+        Color::Rgb(40, 25, 75)
+    } else {
+        Color::Rgb(240, 235, 250)
+    }
+}
+
+/// The band's secondary text (the commit summary): dimmer than the
+/// main text but still tinted toward the family, never the document's
+/// own gray.
+pub fn tooltip_band_dim_fg(light: bool) -> Color {
+    if light {
+        Color::Rgb(105, 85, 150)
+    } else {
+        Color::Rgb(190, 175, 225)
+    }
+}
+
+/// The band's BASELINE accent: the baseline yellow, darkened to amber
+/// on the pale lavender band where pure yellow would wash out.
+pub fn tooltip_band_baseline_fg(light: bool) -> Color {
+    if light {
+        Color::Rgb(150, 105, 10)
+    } else {
+        Color::Yellow
+    }
+}
+
 /// The time it takes the gradient to complete one lap around the frame
 /// at the SHALLOWEST depth (just behind NOW). Deeper travel spins
 /// faster — see [`rotation_period_ms`].

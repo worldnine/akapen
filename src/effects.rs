@@ -26,6 +26,16 @@ use crate::view::{
 /// How long the timeline bar's slide-in/out takes (milliseconds).
 pub(crate) const TIMELINE_SLIDE_MS: u32 = 200;
 
+/// How long the scrubber tooltip holds after the last history step
+/// before it leaves (milliseconds), and how long its exit dissolve
+/// takes. The dissolve is drawn by the bar drawer itself — hidden
+/// cells are simply not overdrawn, so the document shows through; a
+/// tachyonfx shader could only blank the band's own cells and would
+/// leave its background strip sitting over the page (the original
+/// artifact this replaced).
+pub(crate) const TOOLTIP_HOLD_MS: u32 = 1200;
+pub(crate) const TOOLTIP_DISSOLVE_MS: u32 = 250;
+
 /// Set by `draw` while the timeline bar covers the frame's bottom
 /// border row; the time-machine rotation then leaves that row alone so
 /// the axis line stays calm instead of joining the wave.

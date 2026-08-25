@@ -1447,6 +1447,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: old.into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
 
@@ -1466,6 +1467,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: "old first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -2443,6 +2445,7 @@ use crate::comment::Selection;
             summary: "shorter version".into(),
             content: "line1\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         let revision = app.histories[0].revisions[1].context().unwrap();
         app.comments.push(Comment {
@@ -2489,6 +2492,7 @@ use crate::comment::Selection;
                     .into(),
             content: "line1\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         // アップグレード前のセッションで保存された裸の id を持つコメント。
         app.comments.push(Comment {
@@ -2533,6 +2537,7 @@ use crate::comment::Selection;
                     summary: "working tree".into(),
                     content: "# a\n\nline2\nline3\n".into(),
                     source: history::RevisionSource::Now,
+                    timestamp_ms: None,
                 }],
                 position: 0,
                 rendered_position: 0,
@@ -2547,6 +2552,7 @@ use crate::comment::Selection;
                         summary: "working tree".into(),
                         content: "fn main() {}\n".into(),
                         source: history::RevisionSource::Now,
+                        timestamp_ms: None,
                     },
                     history::Revision {
                         id: Some("local:old".into()),
@@ -2554,6 +2560,7 @@ use crate::comment::Selection;
                         summary: "older shape".into(),
                         content: "fn old() {}\n".into(),
                         source: history::RevisionSource::Local,
+                        timestamp_ms: None,
                     },
                 ],
                 position: 0,
@@ -2630,6 +2637,7 @@ use crate::comment::Selection;
             summary: "shorter".into(),
             content: "line1\nline2\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         // Browse into the past, then open the list from there.
         app.histories[0].position = 1;
@@ -3231,12 +3239,13 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn the_generation_label_lives_in_the_title_not_the_footer() {
-        // Browsing history must not duplicate the generation label top
-        // and bottom: the title's state slot carries it (clipped to a
-        // budget), the footer keeps only the short navigation
-        // affordance — the old footer label was the same text twice and
-        // truncated the footer on narrow screens.
+    fn the_title_keeps_only_the_tiny_position_badge_while_browsing() {
+        // Browsing history must not duplicate the generation readout:
+        // the full label (provenance · id · age · summary) lives in the
+        // scrubber tooltip next to the timeline's ◆, the title keeps
+        // only the `◆ 1/2` position badge (the fallback identity for
+        // narrow terminals where the bar never appears), and the footer
+        // keeps only the short navigation affordance.
         let mut app = make_app(3, Mode::Source);
         app.histories[0].revisions.push(history::Revision {
             id: Some("local:old".into()),
@@ -3244,6 +3253,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: "old first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
 
@@ -3254,17 +3264,17 @@ use crate::comment::Selection;
             !hints.contains("LOCAL") && !hints.contains("local snapshot"),
             "no generation label in the footer: {hints}"
         );
-        // The title's state slot carries the label, within its budget.
+        // The title's state slot carries the tiny badge, nothing more.
         let m = title_metrics(&app, 80);
-        assert!(m.change.contains("LOCAL · 1/2"), "title shows the label: {}", m.change);
+        assert_eq!(m.change, " ◆ 1/2 ", "title keeps only the badge: {}", m.change);
         assert!(
-            m.change.contains("base 2/2"),
-            "the baseline context survives the clip: {}",
+            !m.change.contains("LOCAL") && !m.change.contains("base"),
+            "no long label in the title: {}",
             m.change
         );
         assert!(
             m.path.contains("doc"),
-            "the path survives beside the clipped label: {}",
+            "the path keeps the room the label used to take: {}",
             m.path
         );
     }
@@ -3278,6 +3288,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: "old first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         // At NOW the bar is hidden.
         assert!(!crate::timeline::timeline_visible(&app));
@@ -3315,6 +3326,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: "old first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         assert!(select_history(&mut app, 1));
         assert!(crate::timeline::timeline_visible(&app));
@@ -3333,6 +3345,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: "old first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].revisions.push(history::Revision {
             id: Some("cafe".into()),
@@ -3340,6 +3353,7 @@ use crate::comment::Selection;
             summary: "oldest".into(),
             content: "oldest first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Git,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         // Open via `t`.
@@ -3373,6 +3387,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: "old first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].revisions.push(history::Revision {
             id: Some("cafe".into()),
@@ -3380,6 +3395,7 @@ use crate::comment::Selection;
             summary: "oldest".into(),
             content: "oldest first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Git,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         on_view_key(&mut app, KeyCode::Char('t'), KeyModifiers::empty(), None);
@@ -3404,6 +3420,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: "old first line\nline2\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         on_view_key(&mut app, KeyCode::Char('t'), KeyModifiers::empty(), None);
@@ -3418,7 +3435,7 @@ use crate::comment::Selection;
         // Golden-ish frame check: while browsing, the timeline bar owns
         // the bottom three rows (2-row mode at 80 columns: words + axis;
         // the times row joins at 100+). The NOW anchor sits at the right
-        // edge, the viewing point is marked.
+        // edge, the current point is marked.
         let mut app = make_app(5, Mode::View);
         app.histories[0].revisions.push(history::Revision {
             id: Some("local:old".into()),
@@ -3426,6 +3443,7 @@ use crate::comment::Selection;
             summary: "local snapshot".into(),
             content: "old first line\nline2\nline3\nline4\nline5\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].revisions.push(history::Revision {
             id: Some("cafe".into()),
@@ -3433,6 +3451,7 @@ use crate::comment::Selection;
             summary: "oldest".into(),
             content: "oldest first line\nline2\nline3\nline4\nline5\n".into(),
             source: history::RevisionSource::Git,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         let mut terminal =
@@ -3454,14 +3473,14 @@ use crate::comment::Selection;
         let frame = frame_text(&terminal);
         let axis = &frame[22];
         assert!(axis.ends_with('●'), "NOW at the right edge: {axis}");
-        assert!(axis.contains('◆'), "viewing marker on the axis: {axis}");
+        assert!(axis.contains('◆'), "the current point on the axis: {axis}");
         assert!(axis.contains('◼'), "commit marker on the axis: {axis}");
         assert!(
             axis.find('◆').unwrap_or(0) < axis.rfind('●').unwrap_or(0),
-            "viewing sits left of NOW: {axis}"
+            "the current point sits left of NOW: {axis}"
         );
         let words = &frame[23];
-        assert!(words.contains("viewing"), "words row: {words}");
+        assert!(words.contains("HERE"), "words row: {words}");
         assert!(words.trim_end().ends_with("NOW"), "NOW at the right edge: {words}");
         // The footer hints are gone while the bar owns the row.
         assert!(!words.contains("VIEW"), "no mode badge under the bar: {words}");
@@ -3473,6 +3492,133 @@ use crate::comment::Selection;
         assert!(footer.contains("VIEW"), "footer badge returns: {footer}");
         let footer = &frame[23];
         assert!(footer.contains("VIEW"), "footer badge returns: {footer}");
+    }
+
+    #[test]
+    fn scrubber_tooltip_floats_over_the_axis_and_yields_to_toasts() {
+        // A history step floats the revision readout (glyph · id · age ·
+        // summary) on the message row above the axis; a toast owns that
+        // row outright, and an expired hold removes the tooltip.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("cafe".into()),
+            short_id: "cafe".into(),
+            summary: "old subject".into(),
+            content: "old first line\nline2\nline3\nline4\nline5\n".into(),
+            source: history::RevisionSource::Git,
+            timestamp_ms: Some(crate::snapshot::now_ms().saturating_sub(2 * 3_600_000)),
+        });
+        assert!(select_history(&mut app, 1));
+        assert!(app.timeline_tooltip_until.is_some());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let frame_text =
+            |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| -> Vec<String> {
+                let buf = terminal.backend().buffer();
+                buf.content
+                    .chunks(80)
+                    .map(|row| {
+                        row.iter()
+                            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                            .collect()
+                    })
+                    .collect()
+            };
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let frame = frame_text(&terminal);
+        // words 23 · axis 22 · tooltip on the message row 21.
+        let tooltip = &frame[21];
+        assert!(tooltip.contains("◼ cafe"), "provenance and id: {tooltip}");
+        assert!(tooltip.contains("2h ago"), "relative age: {tooltip}");
+        assert!(tooltip.contains("old subject"), "summary: {tooltip}");
+        // The readout floats over document text: it sits on the nebula
+        // band (never the terminal's own background) so it reads as a
+        // time-machine instrument, not a line of the page.
+        let x = tooltip.chars().position(|c| c == '◼').unwrap() as u16;
+        assert_eq!(
+            terminal.backend().buffer()[(x, 21)].bg,
+            crate::view::tooltip_band_bg(false),
+            "the tooltip rides the nebula band"
+        );
+        // A toast (an edge error) owns the row; the tooltip yields
+        // entirely instead of leaving fragments beside the banner.
+        app.flash_err("oldest document version");
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let frame = frame_text(&terminal);
+        let row = &frame[21];
+        assert!(row.contains("oldest document version"), "toast wins: {row}");
+        assert!(!row.contains("cafe"), "no tooltip fragments: {row}");
+        // Mid-dissolve the band must thin out, not linger as a solid
+        // strip: hidden cells are not overdrawn at all, so the document
+        // (and the terminal background) shows through them. The old
+        // tachyonfx dissolve blanked only the glyphs and left the whole
+        // background strip sitting over the page.
+        app.status = None;
+        app.toast_fx = None;
+        let band_cells = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            let buf = terminal.backend().buffer();
+            (0..80)
+                .filter(|&x| buf[(x, 21)].bg == crate::view::tooltip_band_bg(false))
+                .count()
+        };
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let full = band_cells(&terminal);
+        assert!(full > 0, "the band is on screen during the hold");
+        app.timeline_tooltip_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let dissolving = band_cells(&terminal);
+        assert!(
+            dissolving < full,
+            "mid-dissolve the band thins out: {dissolving} of {full} cells remain"
+        );
+        assert!(dissolving > 0, "mid-dissolve some of the band still shows");
+        // The hold expires: the readout leaves the screen.
+        app.timeline_tooltip_until = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let frame = frame_text(&terminal);
+        assert!(!frame[21].contains("cafe"), "expired tooltip is gone: {}", frame[21]);
+        assert_eq!(
+            band_cells(&terminal),
+            0,
+            "no background strip survives the deadline"
+        );
+    }
+
+    #[test]
+    fn scrubber_tooltip_clamps_at_the_edges_instead_of_spilling() {
+        // The band rides the ◆. Next to NOW the ◆ sits near the right
+        // edge; a long summary must clamp inside the screen (a spilled
+        // Rect would panic the buffer indexing) and clip with an
+        // ellipsis instead of crawling out.
+        let mut app = make_app(5, Mode::View);
+        app.histories[0].revisions.push(history::Revision {
+            id: Some("cafe".into()),
+            short_id: "cafe".into(),
+            summary: "a very long subject line that cannot possibly fit whole \
+                      into an eighty column terminal next to the other parts"
+                .into(),
+            content: "old first line\nline2\nline3\nline4\nline5\n".into(),
+            source: history::RevisionSource::Git,
+            timestamp_ms: Some(crate::snapshot::now_ms()),
+        });
+        assert!(select_history(&mut app, 1));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let row: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(80)
+            .nth(21)
+            .unwrap()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(row.contains("◼ cafe"), "the readout still shows: {row}");
+        assert!(row.contains('…'), "the summary clips with an ellipsis: {row}");
     }
 
     #[test]
@@ -3489,6 +3635,7 @@ use crate::comment::Selection;
             summary: "deleted a line".into(),
             content: "line1\nline3\nline4\nline5\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].revisions.push(history::Revision {
             id: Some("local:add".into()),
@@ -3496,6 +3643,7 @@ use crate::comment::Selection;
             summary: "added a line".into(),
             content: "line1\nline3\nline4\nline5\nline6\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         // Render the deletion revision: ghosts appear.
         app.histories[0].position = 1;
@@ -3530,6 +3678,7 @@ use crate::comment::Selection;
             summary: "removes line2/line4, adds line6".into(),
             content: "line1\nline3\nline5\nline6\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -3552,6 +3701,7 @@ use crate::comment::Selection;
             summary: "added a line".into(),
             content: "line1\nline2\nline3\nline4\nline5\nline6\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -3579,6 +3729,7 @@ use crate::comment::Selection;
             summary: "removes line2/line4, adds line6".into(),
             content: "line1\nline3\nline5\nline6\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -3612,6 +3763,7 @@ use crate::comment::Selection;
             summary: "deleted a line".into(),
             content: "line1\nline3\nline4\nline5\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -3662,6 +3814,7 @@ use crate::comment::Selection;
             summary: "older".into(),
             content: "line1\nline3\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -3694,6 +3847,7 @@ use crate::comment::Selection;
             summary: "added a line".into(),
             content: "line1\nline2\nline3\nline4\nline5\nline6\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -3720,6 +3874,7 @@ use crate::comment::Selection;
             summary: "older draft".into(),
             content: "line1\nline2\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -3935,6 +4090,7 @@ use crate::comment::Selection;
                 summary: "local snapshot".into(),
                 content: "old first line\nline2\nline3\n".into(),
                 source: history::RevisionSource::Local,
+                timestamp_ms: None,
             });
             app.histories[0].position = 1;
             app
@@ -4446,6 +4602,7 @@ use crate::comment::Selection;
                     summary: "working tree".into(),
                     content: "line1\n".into(),
                     source: crate::history::RevisionSource::Now,
+                    timestamp_ms: None,
                 },
                 crate::history::Revision {
                     id: Some("abc".into()),
@@ -4453,6 +4610,7 @@ use crate::comment::Selection;
                     summary: "old".into(),
                     content: "# Old\n".into(),
                     source: crate::history::RevisionSource::Git,
+                    timestamp_ms: None,
                 },
             ],
             position: 0,
@@ -4464,10 +4622,15 @@ use crate::comment::Selection;
         assert_eq!(app.histories[0].position, 1);
         assert_eq!(app.source.content, "line1\n", "selection is immediate but cheap");
         assert!(app.history_render_due.is_some());
+        assert!(
+            app.timeline_tooltip_until.is_some(),
+            "a history step arms the scrubber tooltip"
+        );
+        assert!(app.status.is_none(), "no per-step toast anymore");
         select_history(&mut app, 1);
         assert!(
-            matches!(app.status.as_ref(), Some((message, _, false)) if message.starts_with("COMMIT")),
-            "the edge label stays informational until that revision is rendered"
+            app.status.is_none() && app.timeline_tooltip_until.is_some(),
+            "the edge stays quiet (tooltip only) until that revision is rendered"
         );
         render_history_when_settled(&mut app);
         assert_eq!(app.source.content, "line1\n", "renderer waits for the debounce");
@@ -4509,8 +4672,8 @@ use crate::comment::Selection;
         select_history(&mut app, -1);
         select_history(&mut app, -1);
         assert!(
-            matches!(app.status.as_ref(), Some((message, _, false)) if message.contains("NOW")),
-            "the present label also stays informational until it is rendered"
+            app.status.is_none() && app.timeline_tooltip_until.is_some(),
+            "the present boundary also stays quiet until it is rendered"
         );
         app.history_render_due = Some(std::time::Instant::now());
         render_history_when_settled(&mut app);
@@ -4532,6 +4695,7 @@ use crate::comment::Selection;
                     summary: "working tree".into(),
                     content: "line1\n".into(),
                     source: crate::history::RevisionSource::Now,
+                    timestamp_ms: None,
                 },
                 crate::history::Revision {
                     id: Some("abc".into()),
@@ -4539,6 +4703,7 @@ use crate::comment::Selection;
                     summary: "old".into(),
                     content: "# Old\n\nsource history\n".into(),
                     source: crate::history::RevisionSource::Git,
+                    timestamp_ms: None,
                 },
             ],
             position: 0,
@@ -4951,6 +5116,7 @@ use crate::comment::Selection;
             summary: "middle".into(),
             content: "line1\nline2\nline3\n".into(),
             source: crate::history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].revisions.push(crate::history::Revision {
             id: Some("local:old".into()),
@@ -4958,6 +5124,7 @@ use crate::comment::Selection;
             summary: "oldest".into(),
             content: "line1\n".into(),
             source: crate::history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         let mid = border_color(&mut app, 1);
         let old = border_color(&mut app, 2);
@@ -4985,6 +5152,7 @@ use crate::comment::Selection;
             summary: "removes line2, adds line6".into(),
             content: "line1\nline3\nline4\nline5\nline6\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -5028,6 +5196,7 @@ use crate::comment::Selection;
             summary: "added a line".into(),
             content: (1..=13).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n") + "\n",
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());
@@ -5077,6 +5246,7 @@ use crate::comment::Selection;
             summary: "removes line2".into(),
             content: "line1\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n".into(),
             source: history::RevisionSource::Local,
+            timestamp_ms: None,
         });
         app.histories[0].position = 1;
         app.history_render_due = Some(Instant::now());

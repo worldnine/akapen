@@ -111,16 +111,9 @@ pub(crate) fn clip_ellipsis(s: &str, max_cols: usize) -> String {
     out
 }
 
-/// The history label's budget in the title bar: half the title (at
-/// least 24 columns), so the summary can never crowd the path out — the
-/// path is the title's file identity and must survive history browsing.
-pub(crate) fn label_budget(width: u16) -> usize {
-    (width as usize / 2).max(24)
-}
-
-/// Clip a history label (`COMMIT · 2/5 · 5b5f349 · subject`) for the
-/// title bar: the summary tail is the most expendable part, so it is cut
-/// first — the provenance/position/id head stays whole, and a trailing
+/// Clip a history label (`COMMIT · 2/5 · 5b5f349 · subject`) or a
+/// tooltip summary: the free-form tail is the most expendable part, so
+/// it is cut first — a structured head stays whole, and a trailing
 /// ` · base N/M` (the review baseline context) survives even when the
 /// summary above it must go. Never exceeds `max_cols` display columns.
 pub(crate) fn clip_title_label(label: &str, max_cols: usize) -> String {
@@ -238,15 +231,22 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
     } else {
         width.saturating_sub(indicator_w + esc_close_w)
     };
-    // Historical generations use this space for provenance, position, and
-    // baseline context — clipped so the summary tail can never crowd the
-    // path (the title's file identity) out of the bar. At NOW an external
-    // edit still outranks everything; otherwise the baseline gets a
-    // compact persistent identity of its own.
+    // Historical generations keep only a tiny `◆ 3/7` badge here: the
+    // full readout (provenance · id · age · summary) lives in the
+    // scrubber tooltip next to the timeline's `◆`, and the purple frame
+    // already says "you are in the past". The badge is the fallback
+    // identity for narrow terminals where the bar never appears. At NOW
+    // an external edit still outranks everything; otherwise the
+    // baseline gets a compact persistent identity of its own.
     let change = if app.is_historical() {
         app.history()
-            .and_then(|history| history.label())
-            .map(|label| format!(" {} ", clip_title_label(&label, label_budget(width))))
+            .map(|history| {
+                format!(
+                    " ◆ {}/{} ",
+                    history.revisions.len().saturating_sub(history.position),
+                    history.revisions.len()
+                )
+            })
             .unwrap_or_default()
     } else if app.file_changed {
         " ⚡ ".to_string()
@@ -625,7 +625,7 @@ mod width_tests {
 
 #[cfg(test)]
 mod title_tests {
-    use super::{change_badge_spans, clip_title_label, label_budget};
+    use super::{change_badge_spans, clip_title_label};
     use crate::truncate_path;
     use ratatui::style::Color;
     use std::path::Path;
@@ -665,12 +665,6 @@ mod title_tests {
     fn short_history_labels_pass_through_unclipped() {
         let label = "COMMIT · 4/5 · 5b5f349";
         assert_eq!(clip_title_label(label, 40), label);
-    }
-
-    #[test]
-    fn label_budget_scales_with_the_title_width() {
-        assert_eq!(label_budget(80), 40, "half the title");
-        assert_eq!(label_budget(40), 24, "never below 24 columns");
     }
 
     #[test]
