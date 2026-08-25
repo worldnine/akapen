@@ -1361,13 +1361,13 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn mixed_anchor_split_cell_survives_the_full_draw_path() {
-        // End-to-end doubt check: the `▀` fg/bg split cell (red over
-        // green) is written over the frame's left BORDER cells after the
-        // paragraph render — this asserts the actual terminal buffer, so
-        // any later pass clobbering the marker column (border repaints,
-        // effects, scrollbar) would fail here. Line index 2 is both
-        // changed and a deletion anchor; line index 4 is changed only.
+    fn mixed_anchor_red_bar_survives_the_full_draw_path() {
+        // End-to-end doubt check: the mixed anchor's red bar is written
+        // over the frame's left BORDER cells after the paragraph render
+        // — this asserts the actual terminal buffer, so any later pass
+        // clobbering the marker column (border repaints, effects,
+        // scrollbar) would fail here. Line index 2 is both changed and a
+        // deletion anchor; line index 4 is changed only.
         let (mut app, _dir) = make_app_keep(6, Mode::View);
         // Blank-line-separated paragraphs: consecutive lines would merge
         // into ONE rendered group and put every mark on one row.
@@ -1390,13 +1390,11 @@ use crate::comment::Selection;
         // y = 2 (title strip + frame border). Rendered rows: p1 (cursor,
         // y=2), blank (y=3), p2 (y=4), blank (y=5), p3 (y=6).
         let mixed = &buf[(1u16, 4u16)];
-        assert_eq!(mixed.symbol(), "▀", "the split cell reaches the buffer");
-        assert_eq!(mixed.style().fg, Some(Color::Red), "top half: deletion red");
-        assert_eq!(mixed.style().bg, Some(Color::Green), "bottom half: change green");
+        assert_eq!(mixed.symbol(), "▌", "the anchor row keeps the bar shape");
+        assert_eq!(mixed.style().fg, Some(Color::Red), "deletion red wins on the anchor row");
         let changed = &buf[(1u16, 6u16)];
         assert_eq!(changed.symbol(), "▌", "changed-only line keeps the bar");
         assert_eq!(changed.style().fg, Some(Color::Green));
-        assert_ne!(changed.style().bg, Some(Color::Green), "no bg on the plain bar");
         let plain = &buf[(1u16, 3u16)];
         assert_eq!(plain.symbol(), "│", "unmarked rows keep the border glyph");
     }
