@@ -507,7 +507,6 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
             .is_some_and(|until| until.elapsed() > Duration::ZERO)
         {
             app.timeline_tooltip_until = None;
-            app.timeline_tooltip_fx = None;
         }
         if !app.running {
             return Ok(());
@@ -1260,12 +1259,16 @@ pub(crate) fn select_history(app: &mut App, delta: isize) -> bool {
 /// retires any lingering toast (an old edge error must not squat on the
 /// tooltip's row).
 fn refresh_timeline_tooltip(app: &mut App) {
-    let total =
-        (crate::effects::TOOLTIP_HOLD_MS + crate::effects::TOOLTIP_DISSOLVE_MS) as u64;
-    app.timeline_tooltip_until = Some(Instant::now() + Duration::from_millis(total));
-    if app.config.fx {
-        app.timeline_tooltip_fx = Some(crate::effects::tooltip_effect());
-    }
+    // The deadline covers the hold plus — with fx on — the exit
+    // dissolve the drawer plays over the final stretch; without fx the
+    // band simply vanishes when the hold ends.
+    let total = crate::effects::TOOLTIP_HOLD_MS
+        + if app.config.fx {
+            crate::effects::TOOLTIP_DISSOLVE_MS
+        } else {
+            0
+        };
+    app.timeline_tooltip_until = Some(Instant::now() + Duration::from_millis(total as u64));
     app.status = None;
     app.toast_fx = None;
 }
@@ -3464,35 +3467,6 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         };
         f.render_effect(effect, row, last_tick);
     }
-    // The scrubber tooltip's hold-then-dissolve, over its own cells only
-    // — suppressed while a prompt or toast owns the row (the tooltip is
-    // not drawn then either).
-    if app.config.fx
-        && timeline_on
-        && f.area().height >= 5
-        && app.status.is_none()
-        && prompt_message(app).is_none()
-        && let Some((start, parts)) = timeline_tooltip_layout(app, f.area().width as usize)
-    {
-        let total: usize = parts
-            .iter()
-            .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
-            .sum();
-        if let Some(effect) = app.timeline_tooltip_fx.as_mut() {
-            let rect = Rect {
-                x: start as u16,
-                y: f.area().height.saturating_sub(3),
-                width: total as u16,
-                height: 1,
-            };
-            f.render_effect(effect, rect, last_tick);
-        }
-    }
-    // A finished dissolve (or a bar that left the screen) drops the
-    // effect so the tick rate can settle.
-    if app.timeline_tooltip_fx.as_ref().is_some_and(|fx| fx.done()) || !timeline_on {
-        app.timeline_tooltip_fx = None;
-    }
 }
 
 
@@ -3690,23 +3664,58 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
         && prompt_message(app).is_none()
         && let Some((start, parts)) = timeline_tooltip_layout(app, width)
     {
-        let total: usize = parts
-            .iter()
-            .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
-            .sum();
-        let spans: Vec<Span> = parts
-            .into_iter()
-            .map(|(text, style)| Span::styled(text, style))
-            .collect();
-        f.render_widget(
-            Paragraph::new(Line::from(spans)),
-            Rect {
-                x: start as u16,
-                y: height.saturating_sub(3),
-                width: total as u16,
-                height: 1,
-            },
-        );
+        // The exit dissolve is the drawer's own: over the deadline's
+        // final stretch a growing fraction of cells is simply NOT
+        // overdrawn, so the document underneath shows through. (A
+        // post-hoc tachyonfx dissolve could only blank the band's own
+        // cells — its background strip kept sitting over the page.)
+        // `--no-fx` never enters the window: its deadline excludes the
+        // dissolve, so the band stays whole and pops off.
+        let gone = app
+            .timeline_tooltip_until
+            .map(|until| {
+                let remaining = until
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u32;
+                if !app.config.fx || remaining >= crate::effects::TOOLTIP_DISSOLVE_MS {
+                    0.0
+                } else {
+                    1.0 - remaining as f32 / crate::effects::TOOLTIP_DISSOLVE_MS as f32
+                }
+            })
+            .unwrap_or(0.0);
+        let y = height.saturating_sub(3);
+        let buf = f.buffer_mut();
+        let mut x = start;
+        for (text, style) in parts {
+            // Contiguous visible runs render together; a hidden cell
+            // breaks the run and leaves the underlying cell untouched.
+            let mut run = String::new();
+            let mut run_x = x;
+            for ch in text.chars() {
+                let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                // A stable per-column hash (Knuth multiplicative) sets
+                // each cell's dissolve threshold, so cells wink out in
+                // a fixed spatially-random order as `gone` rises — no
+                // flicker from re-randomizing every frame. Wide chars
+                // live or die whole, keyed on their leading column.
+                let keep = gone == 0.0
+                    || (x.wrapping_mul(2_654_435_761) >> 7) % 1000 >= (gone * 1000.0) as usize;
+                if keep {
+                    if run.is_empty() {
+                        run_x = x;
+                    }
+                    run.push(ch);
+                } else if !run.is_empty() {
+                    buf.set_string(run_x as u16, y, &run, style);
+                    run.clear();
+                }
+                x += w;
+            }
+            if !run.is_empty() {
+                buf.set_string(run_x as u16, y, &run, style);
+            }
+        }
     }
 }
 

@@ -3470,14 +3470,42 @@ use crate::comment::Selection;
         let row = &frame[21];
         assert!(row.contains("oldest document version"), "toast wins: {row}");
         assert!(!row.contains("cafe"), "no tooltip fragments: {row}");
-        // The hold expires: the readout leaves the screen.
+        // Mid-dissolve the band must thin out, not linger as a solid
+        // strip: hidden cells are not overdrawn at all, so the document
+        // (and the terminal background) shows through them. The old
+        // tachyonfx dissolve blanked only the glyphs and left the whole
+        // background strip sitting over the page.
         app.status = None;
         app.toast_fx = None;
+        let band_cells = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            let buf = terminal.backend().buffer();
+            (0..80)
+                .filter(|&x| buf[(x, 21)].bg == crate::view::tooltip_band_bg(false))
+                .count()
+        };
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let full = band_cells(&terminal);
+        assert!(full > 0, "the band is on screen during the hold");
+        app.timeline_tooltip_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let dissolving = band_cells(&terminal);
+        assert!(
+            dissolving < full,
+            "mid-dissolve the band thins out: {dissolving} of {full} cells remain"
+        );
+        assert!(dissolving > 0, "mid-dissolve some of the band still shows");
+        // The hold expires: the readout leaves the screen.
         app.timeline_tooltip_until = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_millis(1));
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let frame = frame_text(&terminal);
         assert!(!frame[21].contains("cafe"), "expired tooltip is gone: {}", frame[21]);
+        assert_eq!(
+            band_cells(&terminal),
+            0,
+            "no background strip survives the deadline"
+        );
     }
 
     #[test]
