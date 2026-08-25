@@ -3564,10 +3564,22 @@ use crate::comment::Selection;
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let full = band_cells(&terminal);
         assert!(full > 0, "the band is on screen during the hold");
-        app.timeline_tooltip_until =
-            Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let dissolving = band_cells(&terminal);
+        // The dissolve fraction rides the wall clock (deadline minus
+        // now), so under parallel test load a single draw can slip past
+        // the 150 ms target and see an empty (or still-full) band.
+        // Retry until one draw lands inside the window; a systematic
+        // regression (band never thins, or vanishes wholesale) fails
+        // every attempt.
+        let mut dissolving = full;
+        for _ in 0..20 {
+            app.timeline_tooltip_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            dissolving = band_cells(&terminal);
+            if dissolving > 0 && dissolving < full {
+                break;
+            }
+        }
         assert!(
             dissolving < full,
             "mid-dissolve the band thins out: {dissolving} of {full} cells remain"
