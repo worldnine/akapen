@@ -165,6 +165,11 @@ pub(crate) fn starfield_effect(light: bool) -> Effect {
                 return; // no interior to sprinkle
             }
             let last_col = area.right() - 1; // the right border column
+            // The scrollbar thumb rides one column inside the right
+            // border (a `▐` mirroring the marker gutter). It is chrome,
+            // not text: the tail scan must not mistake it for the row's
+            // last glyph, or every thumb row would lose its whole sky.
+            let scrollbar_col = last_col.saturating_sub(1);
             // The interior rows. The browsing timeline bar owns the
             // bottom content row while it is up (the times row on wide
             // terminals): the sky stops one row short of it.
@@ -179,7 +184,7 @@ pub(crate) fn starfield_effect(light: bool) -> Effect {
                 // wide characters.
                 let mut tail = area.x + 1;
                 let mut x = area.x + 1;
-                while x < last_col {
+                while x < scrollbar_col {
                     let sym = buf[(x, y)].symbol();
                     let w = sym.width().max(1) as u16;
                     if !sym.trim().is_empty() {
@@ -611,4 +616,51 @@ pub(crate) fn ghost_effect() -> Effect {
             },
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use std::time::Duration;
+
+    /// The scrollbar thumb (`▐`, one column inside the right border) is
+    /// chrome, not text: the tail scan must not mistake it for the
+    /// row's last glyph, or every row the thumb covers would lose its
+    /// whole sky (the regression: no stars left of the scrollbar).
+    #[test]
+    fn starfield_shines_left_of_the_scrollbar_thumb() {
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        let thumb_x = area.right() - 2;
+        for y in (area.y + 1)..area.bottom() - 1 {
+            buf[(thumb_x, y)].set_symbol("▐");
+        }
+        let mut fx = starfield_effect(false);
+        fx.process(Duration::from_millis(16), &mut buf, area);
+        // Depth-0 stars survive at every depth (density only grows and
+        // the glyph hash ignores depth), so the check holds even if a
+        // parallel test's draw() bumps the shared depth. Stop one row
+        // short of the interior bottom so a concurrently visible
+        // timeline bar cannot shrink the sky under the assertion.
+        let mut seen = 0usize;
+        for y in (area.y + 1)..area.bottom() - 2 {
+            for x in (area.x + 1)..thumb_x {
+                if let Some(star) = starfield_star_at(x, y, 0.0) {
+                    seen += 1;
+                    assert_eq!(
+                        buf[(x, y)].symbol(),
+                        star.glyph.to_string(),
+                        "star at ({x},{y}) must shine left of the thumb"
+                    );
+                }
+            }
+        }
+        assert!(seen > 0, "the seeded sky places stars in this area");
+        // The thumb itself is never overwritten by a star.
+        for y in (area.y + 1)..area.bottom() - 1 {
+            assert_eq!(buf[(thumb_x, y)].symbol(), "▐");
+        }
+    }
 }
