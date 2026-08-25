@@ -1994,7 +1994,7 @@ fn enter_source_mode(app: &mut App) {
         app.cursor = app.view.cursor;
     }
     // A view-mode `n` that landed on a pure deletion carried its focus
-    // here (the view keeps a one-line selection for the `▀` mark). Drop
+    // here (the view keeps a one-line selection for the red `▌` mark). Drop
     // that selection so the focus goes live: the promised "Tab: inspect
     // & comment" arrives with the deleted rows focused, not with the
     // untouched anchor line selected.
@@ -2474,7 +2474,7 @@ fn jump_review_mark(app: &mut App, dir: isize) {
     // those rows — no selection on the anchor line, bright deleted rows,
     // and `c` comments the deletion — instead of highlighting a line the
     // agent never touched. View mode keeps the selection (it has only the
-    // `▀` position mark to point at) but records the focus too, so a Tab
+    // red `▌` position mark to point at) but records the focus too, so a Tab
     // into source arrives with the deletion focused (see
     // [`enter_source_mode`]) — the flash promises exactly that.
     let is_deletion = start == end
@@ -2503,7 +2503,7 @@ fn jump_review_mark(app: &mut App, dir: isize) {
             .deleted_content_at(start)
             .map(|content| content.split('\n').count())
             .unwrap_or(0);
-        // View shows only the `▀` position mark — the deleted content (and
+        // View shows only the red `▌` position mark — the deleted content (and
         // commenting on it) lives in source mode, so point the way there.
         let action = if app.mode == Mode::Source {
             "c: comment on deletion"
@@ -3956,7 +3956,7 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     // Baseline → displayed-generation marks. Green `▌` marks a line that
     // is present and changed; the baseline text of every change renders
     // inline as red `▌` deleted rows (see `deleted_block_lines`), so
-    // source mode needs no `▀` position mark — that stays view-only.
+    // source mode needs no red `▌` position mark — that stays view-only.
     let scoped_added = &app.comparison_changed;
     let landing_pulse = app
         .landing_pulse_until

@@ -4569,7 +4569,8 @@ use crate::comment::Selection;
             Some(app.ui_deleted_bg),
             "the right-edge fill carries the red band"
         );
-        // No `▀` position mark remains in source mode.
+        // No `▀` glyph remains in source mode (the deletion position
+        // mark is a red `▌` in view mode only).
         assert!(
             text.lines.iter().all(|l| row_text(l).chars().all(|c| c != '▀')),
             "the deletion position mark is view-only now"
@@ -4653,7 +4654,7 @@ use crate::comment::Selection;
         assert!(row_text(&text.lines[1]).contains("old-two"));
         assert!(row_text(&text.lines[2]).contains("line2"));
         assert!(app.comparison_changed.contains(&1));
-        // …while the net-deletion position set (view mode's `▀`, the
+        // …while the net-deletion position set (view mode's red `▌`, the
         // review badge) intentionally stays empty for rewrites.
         assert!(app.comparison_deleted_before.is_empty());
     }
