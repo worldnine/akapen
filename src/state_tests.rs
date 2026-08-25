@@ -1361,6 +1361,47 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn mixed_anchor_split_cell_survives_the_full_draw_path() {
+        // End-to-end doubt check: the `▀` fg/bg split cell (red over
+        // green) is written over the frame's left BORDER cells after the
+        // paragraph render — this asserts the actual terminal buffer, so
+        // any later pass clobbering the marker column (border repaints,
+        // effects, scrollbar) would fail here. Line index 2 is both
+        // changed and a deletion anchor; line index 4 is changed only.
+        let (mut app, _dir) = make_app_keep(6, Mode::View);
+        // Blank-line-separated paragraphs: consecutive lines would merge
+        // into ONE rendered group and put every mark on one row.
+        std::fs::write(app.current_file_path(), "p1\n\np2\n\np3\n").unwrap();
+        reload_source(&mut app, false).unwrap();
+        app.histories[0].acknowledge_in_memory(&app.source.content);
+        app.comparison_changed.clear();
+        app.comparison_deleted_before.clear();
+        // Source lines: 0 "p1", 1 "", 2 "p2", 3 "", 4 "p3". p2 is both
+        // changed and a deletion anchor; p3 is changed only.
+        app.comparison_changed.insert(2);
+        app.comparison_deleted_before.insert(2);
+        app.comparison_changed.insert(4);
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        // The marker column rides the left border at x = 1 (the page
+        // floats one column off the screen edge) and view rows start at
+        // y = 2 (title strip + frame border). Rendered rows: p1 (cursor,
+        // y=2), blank (y=3), p2 (y=4), blank (y=5), p3 (y=6).
+        let mixed = &buf[(1u16, 4u16)];
+        assert_eq!(mixed.symbol(), "▀", "the split cell reaches the buffer");
+        assert_eq!(mixed.style().fg, Some(Color::Red), "top half: deletion red");
+        assert_eq!(mixed.style().bg, Some(Color::Green), "bottom half: change green");
+        let changed = &buf[(1u16, 6u16)];
+        assert_eq!(changed.symbol(), "▌", "changed-only line keeps the bar");
+        assert_eq!(changed.style().fg, Some(Color::Green));
+        assert_ne!(changed.style().bg, Some(Color::Green), "no bg on the plain bar");
+        let plain = &buf[(1u16, 3u16)];
+        assert_eq!(plain.symbol(), "│", "unmarked rows keep the border glyph");
+    }
+
+    #[test]
     fn acknowledge_clears_review_marks_and_moves_the_baseline() {
         let (mut app, _dir) = make_app_keep(3, Mode::Source);
         std::fs::write(app.current_file_path(), "line1\nchanged\nline3\n").unwrap();

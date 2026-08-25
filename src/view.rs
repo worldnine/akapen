@@ -863,10 +863,13 @@ impl ViewState {
                 // it reads as the emphasis (Light + BOLD), so a one-line
                 // review mark is not hidden by the cursor. Mark-less
                 // rows keep the classic LightCyan.
-                let fg = if changed_row {
-                    Color::LightGreen
-                } else if deleted_row {
+                let fg = if deleted_row {
+                    // The deletion anchor outranks the change mark (same
+                    // precedence as the bar below): red information must
+                    // not vanish where a deletion overlaps a rewrite.
                     Color::LightRed
+                } else if changed_row {
+                    Color::LightGreen
                 } else {
                     Color::LightCyan
                 };
@@ -879,16 +882,27 @@ impl ViewState {
                 ("▌", Style::default().fg(Color::Cyan))
             } else if marked_row {
                 ("▌", Style::default().fg(Color::Yellow))
-            } else if changed_row {
+            } else if deleted_row && changed_row {
+                // A deletion anchor ON a rewritten line: both marks in
+                // ONE cell via the fg/bg split — `▀` paints the top half
+                // in the fg (red) and the terminal fills the rest with
+                // the bg (green), so the cell reads as a unified diff's
+                // "- above +" compressed into one square. Neither the
+                // deletion nor the change is swallowed, no third color is
+                // introduced, and the split survives any terminal width
+                // (unlike splitting across wrap rows). Glow/selection
+                // overwrite the bg below — the band's continuity wins for
+                // that moment and the red top half still marks the spot.
                 if group_emphasized[src] {
                     (
-                        "▌",
+                        "▀",
                         Style::default()
-                            .fg(Color::LightGreen)
+                            .fg(Color::LightRed)
+                            .bg(Color::LightGreen)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    ("▌", Style::default().fg(Color::Green))
+                    ("▀", Style::default().fg(Color::Red).bg(Color::Green))
                 }
             } else if deleted_row {
                 // Deleted blocks are shown by POSITION only (3-1): the
@@ -907,6 +921,17 @@ impl ViewState {
                     )
                 } else {
                     ("▌", Style::default().fg(Color::Red))
+                }
+            } else if changed_row {
+                if group_emphasized[src] {
+                    (
+                        "▌",
+                        Style::default()
+                            .fg(Color::LightGreen)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("▌", Style::default().fg(Color::Green))
                 }
             } else {
                 ("│", border_style)
@@ -2117,6 +2142,58 @@ mod tests {
         assert_eq!(gutter[4].glyph, "│", "the merged block's later rows stay clean");
         assert_eq!(gutter[1].style.fg, Some(Color::Red), "deleted marks are red");
         assert_eq!(gutter[3].style.fg, Some(Color::Red), "deleted marks are red");
+    }
+
+    #[test]
+    fn deletion_anchor_on_a_changed_line_renders_the_split_cell() {
+        // A deletion whose anchor lands on a REWRITTEN line (mixed ±
+        // area): the anchor row carries BOTH marks in one cell — `▀`
+        // with red fg over a green bg, a unified diff's "- above +"
+        // compressed into one square — and the remaining rows of the
+        // area read green. Line 1 is both changed and the deletion
+        // anchor, wrapping over rows 1-3; line 2 (row 4) is changed only.
+        let view = ViewState {
+            rows: vec![vec![]; 5],
+            offset: 0,
+            cursor: 0,
+            source_starts: vec![0, 1, 4],
+            ..Default::default()
+        };
+        let changed = vec![false, true, true];
+        let deleted = vec![false, true, false];
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &changed,
+            &deleted,
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[1].glyph, "▀", "anchor row carries the split cell");
+        assert_eq!(gutter[1].style.fg, Some(Color::Red), "top half: the deletion");
+        assert_eq!(gutter[1].style.bg, Some(Color::Green), "bottom half: the change");
+        assert_eq!(gutter[2].glyph, "▌", "continuation rows keep the change bar");
+        assert_eq!(gutter[2].style.fg, Some(Color::Green), "continuation rows are green");
+        assert_eq!(gutter[3].style.fg, Some(Color::Green));
+        assert_eq!(gutter[4].glyph, "▌", "the changed-only line keeps its bar");
+        assert_eq!(gutter[4].style.fg, Some(Color::Green));
+        // The cursor on a mixed line inherits the anchor's red, matching
+        // the bar's precedence.
+        let view = ViewState { cursor: 1, ..view };
+        let (_, gutter) = view.visible_text(
+            10,
+            &[],
+            &changed,
+            &deleted,
+            &[],
+            None,
+            Color::Rgb(88, 91, 112),
+            Style::default(),
+        );
+        assert_eq!(gutter[1].glyph, ">");
+        assert_eq!(gutter[1].style.fg, Some(Color::LightRed));
     }
 
     #[test]
