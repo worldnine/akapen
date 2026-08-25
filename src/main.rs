@@ -3945,6 +3945,10 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Build the visible source-mode rows: `[status][number] ` + content, each
 /// source line wrapped to `content_width`, continuation rows bare content.
+/// The rows are exactly the viewport window `[offset, offset + height)`:
+/// a band straddling the top edge is trimmed to its visible tail, so the
+/// screen never drifts from the row math (`keep_cursor_visible`, the
+/// scrollbar, and the mouse mapping all count in display rows).
 /// Selected lines get the selection background; the cursor line a `>` marker.
 /// While the composer is open, also returns where the terminal cursor should
 /// sit inside it (body-relative column/row), so the real bar cursor (and the
@@ -3966,6 +3970,11 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
     // The current file's cards (the edited one is hidden while composing).
     let cards = visible_cards(app);
     let mut row = 0usize;
+    // Rows of the first emitted band that lie ABOVE the scroll offset:
+    // the offset lands mid-band whenever a wrapped line, a comment card,
+    // or a deleted block straddles the pane's top edge, but the loop
+    // emits whole bands — the surplus is trimmed after the loop.
+    let mut skip: Option<usize> = None;
     for idx in 0..app.source.len() {
         let line_rows = app.rows_of(idx);
         if row + line_rows <= app.offset {
@@ -3974,6 +3983,9 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         }
         if row >= app.offset + height as usize {
             break;
+        }
+        if skip.is_none() {
+            skip = Some(app.offset.saturating_sub(row));
         }
         // The baseline text deleted at this position renders first: red
         // `▌` rows above their anchor line. Blocks that fell past the
@@ -4198,6 +4210,22 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
         }
         row += line_rows;
     }
+    // Trim the top band's rows above the offset and cap at the viewport.
+    // Without the trim everything on screen sits `offset - band_start`
+    // rows LOWER than the row math believes, and a cursor computed to be
+    // on the pane's last row renders below the bottom edge — off screen.
+    let skip = skip.unwrap_or(0).min(out.len());
+    if skip > 0 {
+        out.drain(..skip);
+    }
+    out.truncate(height as usize);
+    // The composer-cursor row was recorded in emitted-band coordinates:
+    // shift it by the trim, and drop it once it leaves the viewport (the
+    // IME anchor must never point at a row that is not on screen).
+    let composer_cursor = composer_cursor.and_then(|(col, r)| {
+        let r = (r as usize).checked_sub(skip)?;
+        (r < height as usize).then_some((col, r as u16))
+    });
     (Text::from(out), composer_cursor)
 }
 
@@ -4724,6 +4752,123 @@ mod mouse_tests {
         assert!(
             !row1.starts_with('>'),
             "no gutter markers on continuation rows, got {row1:?}"
+        );
+    }
+
+    /// An app whose line 1 wraps into 2 display rows at width 57,
+    /// followed by `short_lines` one-row lines ("line2"..).
+    fn wrap_app(short_lines: usize) -> App {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wrap_scroll_test.md");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", "あ".repeat(40)).unwrap(); // 80 cols -> 2 rows at 57
+        for i in 2..=short_lines + 1 {
+            writeln!(f, "line{i}").unwrap();
+        }
+        let config = Config {
+            files: vec![path.clone()],
+            send_cmd: None,
+            send_agent: false,
+            reply: false,
+            theme: Some("base16-ocean.dark".into()),
+            ime: ImeMode::Off,
+            light: None,
+            callback: None,
+            esc_quit: EscQuit::Auto,
+            cursor_anchor: true,
+            fx: true,
+        };
+        let source = Source::load(path.clone()).unwrap();
+        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let view = ViewState::render(&source, 57, &highlight);
+        let mut app = App::new(config, source, highlight, view, false);
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        app.mode = Mode::Source;
+        app.gutter_cols = 1 + app.source.gutter_width as u16 + 1;
+        app.ensure_row_cache(57);
+        app.refresh_line_rows();
+        app
+    }
+
+    fn row_string(line: &ratatui::text::Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn mid_band_offset_trims_the_top_rows() {
+        // The scroll offset lands on line 1's SECOND wrapped row: the
+        // window must start at that continuation row, not re-emit the
+        // whole band from the pane top (which shifted everything down
+        // and pushed the bottom row — the cursor's — off screen).
+        let mut app = wrap_app(9);
+        assert_eq!(app.rows_of(0), 2, "premise: line 1 wraps into 2 rows");
+        app.offset = 1;
+        let (text, _) = build_rows(&app, 5, 57);
+        assert_eq!(text.lines.len(), 5, "exactly the viewport window");
+        let row0 = row_string(&text.lines[0]);
+        assert!(
+            !row0.contains(" 1 "),
+            "the band's first row is above the offset and must be \
+             trimmed, got {row0:?}"
+        );
+        assert!(
+            row_string(&text.lines[1]).contains("line2"),
+            "line 2 sits right under the continuation row"
+        );
+        assert!(
+            row_string(&text.lines[4]).contains("line5"),
+            "the window's last row is offset+height-1, not clipped away"
+        );
+    }
+
+    #[test]
+    fn cursor_stays_inside_the_window_scrolling_down() {
+        // j all the way down: every step keeps the cursor band inside
+        // [offset, offset+viewport) even while a wrapped line straddles
+        // the top edge (the original bug: the cursor drifted below the
+        // bottom edge and came back only at band boundaries).
+        let mut app = wrap_app(9);
+        let viewport = 4u16;
+        for _ in 0..app.source.len() {
+            move_cursor(&mut app, 1, viewport);
+            let start = app.row_of(app.cursor);
+            let end = start + app.rows_of(app.cursor);
+            assert!(
+                start >= app.offset && end <= app.offset + viewport as usize,
+                "cursor band [{start},{end}) escaped the window \
+                 [{},{})",
+                app.offset,
+                app.offset + viewport as usize
+            );
+            // And the rendered window agrees: the `>` glyph is on screen.
+            let (text, _) = build_rows(&app, viewport, 57);
+            assert!(
+                text.lines.iter().any(|l| row_string(l).starts_with('>')),
+                "the rendered window must contain the cursor glyph"
+            );
+        }
+    }
+
+    #[test]
+    fn keep_cursor_visible_prefers_the_band_start_when_taller_than_viewport() {
+        // A card stack taller than the viewport: the whole band cannot
+        // fit, so the band's START (the `>` row) wins over its end.
+        let mut app = test_app();
+        app.comments[0].text = "x\n".repeat(30).trim_end().to_string();
+        app.refresh_line_rows();
+        app.cursor = 4; // the commented line
+        let viewport = 10u16;
+        assert!(
+            app.rows_of(4) > viewport as usize,
+            "premise: the band overflows the viewport"
+        );
+        app.keep_cursor_visible(viewport);
+        assert_eq!(
+            app.offset,
+            app.row_of(4),
+            "the band start (cursor row) stays on the top row"
         );
     }
 

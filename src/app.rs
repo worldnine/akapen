@@ -627,6 +627,13 @@ impl App {
             self.offset = start;
         } else if end > self.offset + height {
             self.offset = end.saturating_sub(height);
+            // A band taller than the viewport (a long wrapped line, a
+            // tall card stack) cannot fit whole: prefer its START — the
+            // `>` glyph lives on the band's first text row — over its
+            // end, or the cursor itself scrolls off the top edge.
+            if start < self.offset {
+                self.offset = start;
+            }
         }
     }
 
