@@ -228,6 +228,15 @@ pub(crate) struct App {
     pub(crate) highlight: Highlighter,
     /// Rendered view-mode rows.
     pub(crate) view: ViewState,
+    /// The last full terminal buffer akapen drew. The wide-char residue
+    /// pass ([`crate::clear_wide_char_residue`]) compares it with the
+    /// newly drawn frame to find wide characters whose blanked right half
+    /// ratatui's diff skipped (a real terminal keeps the halved glyph —
+    /// the backspace afterimage). `None` before the first frame.
+    pub(crate) last_frame: Option<ratatui::buffer::Buffer>,
+    /// The frame drawn BEFORE the current one (`last_frame` is updated at
+    /// the end of every draw).
+    pub(crate) prior_frame: Option<ratatui::buffer::Buffer>,
     /// Current mode.
     pub(crate) mode: Mode,
     /// Source-mode scroll offset in display rows.
@@ -403,6 +412,8 @@ impl App {
             // tokenizing again here would double the work for file 0.
             spans: Vec::new(),
             view,
+            last_frame: None,
+            prior_frame: None,
             mode: initial_mode,
             offset: 0,
             cursor: 0,

@@ -14,7 +14,7 @@ use crate::highlight::syntax_for;
 use crate::overlay::visible_cards;
 use crate::source::Source;
 use crate::{
-    acknowledge_review, draw, refresh_review_marks, render_view_with_cards,
+    AppTerminal, acknowledge_review, draw_frame, refresh_review_marks, render_view_with_cards,
     source_content_width, view_render_width,
 };
 
@@ -133,7 +133,7 @@ fn editor_supports_line_jump(bin: &str) -> bool {
 /// editor runs, then reload automatically on return. The new generation is
 /// retained but acknowledged as the user's own edit. Triggers on `e` in both
 /// modes.
-pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal) {
+pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
     // Existing comments are preserved on their current generation. When
     // the editor returns, reload_source promotes live comments to the old
     // LOCAL/COMMIT generation before loading the edited NOW. The pre-edit
@@ -169,16 +169,11 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
         .args(&argv)
         .status();
 
-    // Replace the terminal with a fresh one: `ratatui::init()` re-enters
-    // raw mode + alternate screen and returns a properly initialised
-    // `DefaultTerminal`. The old terminal's Drop is harmless (it only
-    // frees buffers, never touches the terminal).
-    *terminal = ratatui::init();
-    // `ratatui::init()` does raw mode + EnterAlternateScreen only — it
-    // never enables mouse capture and never hides the cursor, so both are
-    // re-established explicitly. The capture is load-bearing: if the
-    // editor disabled tracking while it ran, akapen would otherwise come
-    // back with mouse input silently dead.
+    // Replace the terminal with a fresh one: the no-blink init re-enters
+    // raw mode + alternate screen (keeping the hardware cursor never
+    // visible) and returns a properly initialised terminal. The old one's
+    // Drop is harmless (it only frees buffers, never touches the
+    // terminal).
     let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture, Hide);
 
     match status {
@@ -193,7 +188,7 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut ratatui::DefaultTerminal
 
     // Draw immediately — the alternate screen was just re-entered and is
     // blank. The fresh terminal is guaranteed to be in the correct state.
-    let _ = terminal.draw(|f| draw(f, app));
+    let _ = draw_frame(terminal, app);
 }
 
 /// Record the pre-edit on-disk content as a LOCAL generation before the

@@ -36,7 +36,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use ratatui::Frame;
-use ratatui::backend::Backend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -48,7 +48,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use tachyonfx::EffectRenderer;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::*;
 use crate::chrome::*;
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
                  \x20 --no-fx           disable the animated time-machine frame\n\
                  \x20                   (the rotating gradient border while browsing the past)\n\
                  \x20 --no-cursor-anchor stop publishing the hidden cursor position at\n\
-                 \x20                   the composer's `▏` (calms cursor-following\n\
+                 \x20                   the composer's caret (calms cursor-following\n\
                  \x20                   terminal shaders; the IME composition window\n\
                  \x20                   then loses its anchor)\n\
                  \x20 --callback <cmd>  shell command to spawn on exit\n\
@@ -197,7 +197,7 @@ fn rebind_to_controlling_pty() -> bool {
 
 /// Restores the terminal on drop: cursor, mouse capture, raw mode, and
 /// alternate screen. `run()` creates it immediately after
-/// `ratatui::init()`, so every early error return (a failed
+/// the no-blink terminal init, so every early error return (a failed
 /// `terminal.size()`, an I/O error in `event_loop`) still leaves the
 /// shell usable. ratatui 0.30's `Terminal` has no Drop-based restore and
 /// the panic hook only fires on panics, so a plain `?` would otherwise
@@ -230,6 +230,88 @@ fn activate_first_file(app: &mut App) {
     app.comparison_deleted_blocks = std::mem::take(&mut fs.comparison_deleted_blocks);
 }
 
+/// A `CrosstermBackend` whose `show_cursor` is a no-op.
+///
+/// ratatui sends `show_cursor` on EVERY frame that publishes a cursor
+/// position — which akapen does whenever the composer is open (the macOS
+/// IME anchors its composition window there) — and akapen re-hides it
+/// right after the draw. That visibility toggling makes the terminal's
+/// hardware cursor flash at the redraw rate: the fast, annoying blinking
+/// around the caret. akapen draws its own caret, so the hardware cursor
+/// must simply never appear; the published POSITION still flows for the
+/// IME. Visibility and position are separate, so dropping only the Show
+/// keeps the anchor intact.
+#[derive(Debug)]
+pub(crate) struct NoBlinkBackend<W: std::io::Write + Send> {
+    inner: CrosstermBackend<W>,
+}
+
+impl NoBlinkBackend<std::io::Stdout> {
+    /// Enter raw mode + the alternate screen and return a terminal whose
+    /// cursor never becomes visible (the analogue of `ratatui::init()`
+    /// plus the no-blink promise). The caller's own guard restores the
+    /// terminal on exit.
+    pub(crate) fn init() -> Result<AppTerminal> {
+        ratatui::crossterm::terminal::enable_raw_mode()?;
+        let _ = ratatui::crossterm::execute!(
+            std::io::stdout(),
+            ratatui::crossterm::cursor::Hide,
+            ratatui::crossterm::terminal::EnterAlternateScreen
+        );
+        let backend = NoBlinkBackend {
+            inner: CrosstermBackend::new(std::io::stdout()),
+        };
+        Ok(ratatui::Terminal::new(backend)?)
+    }
+}
+
+impl<W: std::io::Write + Send> Backend for NoBlinkBackend<W> {
+    type Error = std::io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        self.inner.draw(content)
+    }
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.hide_cursor()
+    }
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        // The whole point: never let the hardware cursor blink. The IME
+        // anchor (set_cursor_position) still updates.
+        Ok(())
+    }
+    fn get_cursor_position(&mut self) -> Result<ratatui::layout::Position, Self::Error> {
+        self.inner.get_cursor_position()
+    }
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+        &mut self,
+        position: P,
+    ) -> Result<(), Self::Error> {
+        self.inner.set_cursor_position(position)
+    }
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.inner.clear()
+    }
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> Result<(), Self::Error> {
+        self.inner.clear_region(clear_type)
+    }
+    fn size(&self) -> Result<ratatui::layout::Size, Self::Error> {
+        self.inner.size()
+    }
+    fn window_size(&mut self) -> Result<ratatui::backend::WindowSize, Self::Error> {
+        self.inner.window_size()
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.inner.flush()
+    }
+}
+
+/// The session terminal: ratatui over [`NoBlinkBackend`], so the hardware
+/// cursor never blinks while the IME anchor keeps flowing.
+pub(crate) type AppTerminal = ratatui::Terminal<NoBlinkBackend<std::io::Stdout>>;
+
 fn run(config: Config) -> Result<()> {
     // A piped/redirected stdin must not kill the TUI (see above).
     ensure_terminal_stdin();
@@ -246,7 +328,7 @@ fn run(config: Config) -> Result<()> {
         sources.push(Source::load(f.clone())?);
     }
 
-    let mut terminal = ratatui::init();
+    let mut terminal = NoBlinkBackend::init()?;
     // From here on the terminal is in raw mode + alternate screen; the
     // guard's Drop restores it on every return path, early or normal.
     let terminal_guard = TerminalGuard;
@@ -340,9 +422,10 @@ fn run(config: Config) -> Result<()> {
         ));
     }
     // The hardware cursor stays hidden for the whole session (modern-TUI
-    // pattern, like Hermes/pi.dev): the composer draws its own `▏` glyph,
-    // and the IME still anchors its inline composition window to the
-    // logical cursor position we keep publishing via set_cursor_position.
+    // pattern, like Hermes/pi.dev): the composer draws its own block
+    // caret, and the IME still anchors its inline composition window to
+    // the logical cursor position we keep publishing via
+    // set_cursor_position.
     let _ = execute!(std::io::stdout(), Hide);
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let res = event_loop(&mut terminal, &mut app);
@@ -390,9 +473,83 @@ fn stdin_hung_up() -> bool {
     n > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0
 }
 
-fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
-    // Paint the initial frame before waiting for input.
+/// Draw one frame through ratatui, then repair the terminal's wide-char
+/// afterimages (see [`clear_wide_char_residue`]). The main session draws
+/// go through here so the repair covers every redraw.
+pub(crate) fn draw_frame(
+    terminal: &mut AppTerminal,
+    app: &mut App,
+) -> std::io::Result<()> {
     terminal.draw(|f| draw(f, app))?;
+    let current = app.last_frame.take().unwrap_or_default();
+    if let Some(prev) = app.prior_frame.take() {
+        clear_wide_char_residue(&prev, &current);
+    }
+    app.prior_frame = Some(current);
+    Ok(())
+}
+
+/// Re-draw the right halves of wide characters that a previous frame
+/// blanked but ratatui's diff never addressed.
+///
+/// When a wide (CJK) character is removed or replaced, the diff emits the
+/// new glyph for its LEFT cell but skips the RIGHT cell: in ratatui's
+/// buffer that continuation cell is blank both before and after, so the
+/// diff considers it unchanged. A real terminal, however, visibly renders
+/// the wide character's right half there — the skipped cell keeps the
+/// halved glyph, so backspacing through mixed-width text leaves
+/// afterimages (and shifts everything below). This pass queues an
+/// explicit space over every such cell after the draw.
+pub(crate) fn clear_wide_char_residue(
+    prev: &ratatui::buffer::Buffer,
+    curr: &ratatui::buffer::Buffer,
+) {
+    let mut out = std::io::stdout().lock();
+    let _ = clear_wide_char_residue_to(prev, curr, &mut out);
+}
+
+/// The writer-injectable core of [`clear_wide_char_residue`], so tests
+/// can capture the queued cleanup cells.
+pub(crate) fn clear_wide_char_residue_to<W: std::io::Write>(
+    prev: &ratatui::buffer::Buffer,
+    curr: &ratatui::buffer::Buffer,
+    out: &mut W,
+) -> std::io::Result<()> {
+    use ratatui::crossterm::queue;
+    use ratatui::crossterm::cursor::MoveTo;
+    use ratatui::crossterm::style::Print;
+    use unicode_width::UnicodeWidthStr;
+
+    let area = prev.area;
+    let mut wrote = false;
+    for y in 0..area.height {
+        for x in 0..area.width.saturating_sub(1) {
+            // A column that no longer begins a wide character, whose next
+            // cell is blank (the diff skipped it), where the previous
+            // frame HAD a wide character covering x..x+1.
+            let wide_before = UnicodeWidthStr::width(prev[(x, y)].symbol()) == 2;
+            if !wide_before {
+                continue;
+            }
+            if UnicodeWidthStr::width(curr[(x, y)].symbol()) == 2 {
+                continue; // a new wide character owns both cells now
+            }
+            if curr[(x + 1, y)].symbol() != " " {
+                continue; // the diff emitted the content there
+            }
+            queue!(out, MoveTo(x + 1, y), Print(" "))?;
+            wrote = true;
+        }
+    }
+    if wrote {
+        out.flush()?;
+    }
+    Ok(())
+}
+
+fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
+    // Paint the initial frame before waiting for input.
+    draw_frame(terminal, app)?;
     // Death watchdog: exit cleanly when the session dies under us. With
     // a controlling terminal we watch `/dev/tty`; without one from the
     // start (pipe-based virtual terminal) we watch stdin for HUP.
@@ -448,15 +605,13 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
         expire_pending_chord(app);
         render_history_when_settled(app);
         expire_history_ghosts(app);
-        terminal.draw(|f| draw(f, app))?;
-        // ratatui re-SHOWS the hardware cursor whenever a frame publishes
-        // a position (the composer's IME anchor at the `▏` — see
-        // apply_buffer_with_cursor: Some(position) => show_cursor()). The
-        // cursor must stay hidden for the whole session: the `▏`/`>` are
-        // the visible cursors, and a visible hardware cursor makes
-        // cursor-following terminal shaders (Ghostty's cursor_blaze)
-        // animate around it. The position still updates while hidden, so
-        // the macOS IME keeps its anchor.
+        draw_frame(terminal, app)?;
+        // The hardware cursor never becomes visible: the session runs on
+        // [`NoBlinkBackend`], whose show_cursor is a no-op, so the
+        // per-frame publish of the composer's IME anchor cannot make the
+        // terminal cursor flash at the redraw rate. This hide is a
+        // belt-and-suspenders reminder for the crossterm Hide at startup;
+        // the position still updates for the macOS IME anchor.
         let _ = terminal.backend_mut().hide_cursor();
         begin_landing_pulse_after_draw(app);
         // Resize debounce: re-render the view once the pane settles.
@@ -507,7 +662,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<
     }
 }
 
-fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut ratatui::DefaultTerminal>) {
+fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut AppTerminal>) {
     // Overlay intercepts its own keys first.
     if app.overlay.is_some() {
         return on_overlay_key(app, key, modifiers);
@@ -2127,7 +2282,7 @@ fn view_move_cursor(app: &mut App, dir: isize) {
 /// (anchored at the paragraph head), j/k extend it while active, `c`
 /// comments the selection, `n`/`N` jump to comment blocks, Tab toggles to
 /// source mode carrying the selection over.
-pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut ratatui::DefaultTerminal>) {
+pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut AppTerminal>) {
     let viewport = app.view_viewport_rows();
     match key {
         // The rendered document is the timeline. No diff pane is opened:
@@ -2653,7 +2808,7 @@ fn source_move_cursor_display(app: &mut App, delta: isize, viewport: u16) {
 }
 
 /// Source mode: navigate, select, comment, manage, quit.
-pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut ratatui::DefaultTerminal>) {
+pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut AppTerminal>) {
     // `viewport` is the height keep_cursor_visible must scroll against: the
     // comment pane's real content height (draw_source's inner.height), not
     // the raw terminal height — the title bar and footer take those rows,
@@ -3444,6 +3599,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         };
         f.render_effect(effect, row, last_tick);
     }
+    // Keep the completed frame for the wide-char residue pass: the next
+    // draw's wrapper compares it against the freshly drawn frame to blank
+    // the right halves of wide characters the diff skipped (see
+    // [`clear_wide_char_residue`]).
+    app.last_frame = Some(f.buffer_mut().clone());
 }
 
 
@@ -3775,13 +3935,13 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
                 std::iter::repeat_n(GutterCell::border(border_style), n),
             );
         }
-        // Terminal-cursor position inside the bar: on the `▏` glyph (the
+        // Terminal-cursor position inside the bar: on the block caret (the
         // macOS IME anchors its inline composition window here), sharing
         // the drawer's row math via composer_cursor_pos. The hardware
         // cursor is hidden, but the POSITION is published every frame for
         // that anchor — terminals running cursor-following shaders
         // (Ghostty's cursor_blaze etc.) blaze around the motion, so
-        // `--no-cursor-anchor` stops publishing (the `▏` glyph is
+        // `--no-cursor-anchor` stops publishing (the caret is
         // akapen-drawn and unaffected; only the IME anchor is lost).
         let (crow, ccol) = composer_cursor_pos(&app.input, app.input_cursor, full_width);
         // Top rule at `start_row`, text rows from `start_row + 1`.
@@ -3931,7 +4091,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
     // The logical cursor position is still published every frame even
     // though the hardware cursor is hidden: the macOS IME anchors its
     // inline composition window to this spot, so conversion stays inside
-    // the bar and follows the `▏` glyph. `--no-cursor-anchor` stops the
+    // the bar and follows the block caret. `--no-cursor-anchor` stops the
     // publishing for terminals whose shaders blaze around cursor motion.
     if app.config.cursor_anchor
         && let Some((col, row)) = composer_cursor
@@ -4188,10 +4348,10 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
                 full_width,
                 app.editing_comment.is_some(),
             ));
-            // Terminal-cursor position inside the bar: on the `▏` glyph.
+            // Terminal-cursor position inside the bar: on the block caret.
             // The macOS IME draws its inline composition window at this
             // spot too. composer_cursor_pos shares the drawer's row math,
-            // so the anchor can never drift from the glyph.
+            // so the anchor can never drift from the caret.
             let (crow, ccol) = composer_cursor_pos(&app.input, app.input_cursor, full_width);
             // Top rule at `start_row`, text rows from `start_row + 1`.
             composer_cursor = Some((ccol as u16, (start_row + 1 + crow) as u16));
@@ -4321,16 +4481,26 @@ pub(crate) fn card_line_count(c: &Comment, full_width: usize) -> usize {
     body.max(1) + 2
 }
 
-/// The composer's wrapped body rows as plain strings: the input with the
-/// `▏` cursor glyph inserted at `cursor` (byte offset), split into
-/// logical lines and wrapped to `full_width`. The drawer, the row count,
-/// and the terminal-cursor anchor all derive from THIS, so the layout,
-/// the glyph, and the IME window can never disagree.
-fn composer_body_rows(text: &str, cursor: usize, full_width: usize) -> Vec<String> {
-    let mut display = text.to_string();
-    display.insert(cursor.min(display.len()), '▏');
+/// The composer's wrapped body rows as plain strings: the input split
+/// into logical lines and wrapped to `full_width`, WITHOUT any cursor
+/// glyph. The body is stable no matter where the insertion point sits, so
+/// moving the cursor can never reflow the bar. (The old design embedded a
+/// `▏` glyph in the text before wrapping: the near-invisible 1/8-width
+/// sliver read as a half-width space, and wide-char + glyph interplay at
+/// width boundaries flipped the row segmentation — "a half-width space
+/// slips in and it shifts".) The caret is painted afterwards by
+/// [`cursor_caret_line`] at the column [`composer_cursor_pos`] reports.
+fn composer_body_rows(text: &str, full_width: usize) -> Vec<String> {
+    // The cursor glyph is deliberately NOT part of this wrap: the body
+    // must be stable no matter where the insertion point sits, so moving
+    // the cursor can never reflow the bar. (Embedding the `▏` in the text
+    // before wrapping made a wide char + glyph interplay leave a stray
+    // blank cell at width boundaries, and flipped the segmentation as the
+    // cursor crossed a wrap — "a half-width space slips in and it shifts".)
+    // [`composer_lines`] overlays the glyph afterwards at the column
+    // [`composer_cursor_pos`] reports, so the IME anchor still lands on it.
     let mut rows = Vec::new();
-    for logical in display.split('\n') {
+    for logical in text.split('\n') {
         let wrapped = wrap_spans(
             &[HiSpan {
                 text: logical.to_string(),
@@ -4345,37 +4515,124 @@ fn composer_body_rows(text: &str, cursor: usize, full_width: usize) -> Vec<Strin
     rows
 }
 
-/// The `▏` glyph's position inside the composer body: (body row, display
-/// column). Row 0 is the first text row under the top rule.
+/// The caret's cell inside the composer body: (body row, display
+/// column). Row 0 is the first text row under the top rule. Computed by
+/// wrapping the PREFIX `text[..cursor]` with the same wrap the body uses,
+/// so the insertion point — and the IME anchor — exactly tracks the drawn
+/// glyph without reflowing the wrapped rows. A prefix that ends flush at
+/// the width boundary puts the cursor at the start of the next row.
 fn composer_cursor_pos(text: &str, cursor: usize, full_width: usize) -> (usize, usize) {
-    let rows = composer_body_rows(text, cursor, full_width);
-    // The cursor glyph is the (n+1)-th `▏` in the display text, where n
-    // is the count of `▏` the user typed BEFORE the cursor (the glyph is
-    // inserted at `cursor`, so everything before it keeps its order). A
-    // plain find would grab the user's own glyph when the text contains
-    // `▏` before the cursor; rfind would grab it when one follows the
-    // cursor — counting picks the cursor glyph in both cases, so the IME
-    // anchor never drifts from the rendered cursor.
-    let before = text[..cursor.min(text.len())].matches('▏').count();
-    let mut seen = 0;
-    for (i, row) in rows.iter().enumerate() {
-        let mut from = 0;
-        while let Some(pos) = row[from..].find('▏') {
-            let abs = from + pos;
-            seen += 1;
-            if seen == before + 1 {
-                return (i, UnicodeWidthStr::width(&row[..abs]));
-            }
-            from = abs + '▏'.len_utf8();
+    let cursor = cursor.min(text.len());
+    // Guard: `cursor` must be on a char boundary to slice the prefix.
+    let cursor = (0..=cursor)
+        .rev()
+        .find(|&c| text.is_char_boundary(c))
+        .unwrap_or(0);
+    let prefix = &text[..cursor];
+    let mut rows: Vec<String> = Vec::new();
+    for logical in prefix.split('\n') {
+        let wrapped = wrap_spans(
+            &[HiSpan {
+                text: logical.to_string(),
+                style: Style::default(),
+            }],
+            full_width,
+        );
+        for row in wrapped {
+            rows.push(row.iter().map(|s| s.text.as_str()).collect::<String>());
         }
     }
-    (rows.len().saturating_sub(1), 0)
+    let Some(last) = rows.last() else {
+        return (0, 0);
+    };
+    let col = UnicodeWidthStr::width(last.as_str());
+    let row = rows.len() - 1;
+    // An insertion point flush at the width boundary sits on the NEXT row
+    // (the character after it would wrap there). [`composer_lines`] appends
+    // a caret-only row when that next row does not exist (input ending
+    // exactly at the boundary) so the caret always has a cell.
+    if col >= full_width {
+        (row + 1, 0)
+    } else {
+        (row, col)
+    }
+}
+
+/// The composer's body rows plus the caret cell, with a caret-only
+/// trailing row appended when the insertion point lands flush at the
+/// width boundary and there is no next row. Both [`composer_lines`] and
+/// [`composer_line_count`] go through here, so height and render always
+/// agree.
+fn composer_body_with_caret(
+    text: &str,
+    cursor: usize,
+    full_width: usize,
+) -> (Vec<String>, (usize, usize)) {
+    let mut body = composer_body_rows(text, full_width);
+    let (mut crow, ccol) = composer_cursor_pos(text, cursor, full_width);
+    if crow >= body.len() {
+        body.push(String::new());
+        crow = body.len() - 1;
+    }
+    (body, (crow, ccol))
+}
+
+/// Render the cursor as a background block over the character at the
+/// insertion point (classic block caret) instead of inserting a `▏`
+/// glyph. The old glyph was a LEFT ONE EIGHTH BLOCK — a 1/8-wide sliver
+/// that most terminal fonts render as a nearly invisible gap, so the
+/// caret read as "a half-width space slipped in" and the insertion point
+/// was untraceable (`テストコ▏メント。` → `コ` and `メ` looked
+/// disconnected). A background block on the existing character needs no
+/// glyph: nothing can render as a stray space, nothing shifts, and the
+/// caret is unmistakable.
+fn cursor_caret_line(row: &str, col: usize) -> Line<'static> {
+    // Composer cyan on black type: the block caret inverts the char under
+    // it, readable in dark and light themes alike.
+    let caret = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let mut width = 0usize;
+    let mut caret_at = row.len();
+    for (byte, ch) in row.char_indices() {
+        if width >= col {
+            caret_at = byte;
+            break;
+        }
+        width += UnicodeWidthChar::width(ch).unwrap_or(0);
+        caret_at = byte + ch.len_utf8();
+    }
+    if caret_at < row.len() {
+        // Block over the character sitting at the insertion point.
+        let ch = row[caret_at..].chars().next().unwrap();
+        let end = caret_at + ch.len_utf8();
+        Line::from(vec![
+            Span::raw(row[..caret_at].to_string()),
+            Span::styled(ch.to_string(), caret),
+            Span::raw(row[end..].to_string()),
+        ])
+    } else {
+        // End of the line: a thin underline caret (a filled block cell
+        // there reads as a bulky full-width square — the "ダサい" initial
+        // cursor on an empty draft). Cyan underline on the empty cell
+        // where the next character — or the IME composition — lands.
+        Line::from(vec![
+            Span::raw(row.to_string()),
+            Span::styled(
+                " ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ])
+    }
 }
 
 /// Display rows the composer bar occupies (top rule + wrapped input +
-/// bottom rule). Must match [`composer_lines`].
+/// bottom rule). Independent of the cursor position: the body is wrapped
+/// without the cursor glyph, so the height never changes as you move the
+/// insertion point (and never differs between count and render).
 pub(crate) fn composer_line_count(text: &str, cursor: usize, full_width: usize) -> usize {
-    composer_body_rows(text, cursor, full_width).len().max(1) + 2
+    let (body, _) = composer_body_with_caret(text, cursor, full_width);
+    body.len().max(1) + 2
 }
 
 /// A saved comment as a full-width bar: top and bottom rules only (no side
@@ -4411,9 +4668,9 @@ fn comment_bar_lines(c: &Comment, full_width: usize) -> Vec<Line<'static>> {
 }
 
 /// The inline comment input bar: the same top/bottom rules in cyan while
-/// composing. The `▏` cursor glyph sits at the insertion point (the
-/// hardware cursor stays hidden — see run(); this is the modern-TUI
-/// pattern used by Hermes/pi.dev, language-independent and immune to the
+/// composing. The block caret sits at the insertion point, painted over
+/// the character there (the hardware cursor stays hidden — see run();
+/// this is the modern-TUI pattern, language-independent and immune to the
 /// IME commit drift of a real cursor). `editing` flips the label to
 /// `edit` when the composer is replacing an existing comment.
 fn composer_lines(
@@ -4439,8 +4696,18 @@ fn composer_lines(
         Span::styled(label, title),
         Span::styled(fill, rule),
     ])];
-    for piece in composer_body_rows(text, cursor, full_width) {
-        lines.push(Line::from(Span::raw(piece)));
+    // Wrap the text without any glyph, then paint a background block
+    // caret over the character at the insertion point — the body rows stay
+    // stable as the cursor moves, and the caret (unlike a glyph) can never
+    // read as a stray space or shift the layout.
+    let (body, (cursor_row, cursor_col)) =
+        composer_body_with_caret(text, cursor, full_width);
+    for (i, piece) in body.into_iter().enumerate() {
+        if i == cursor_row {
+            lines.push(cursor_caret_line(&piece, cursor_col));
+        } else {
+            lines.push(Line::from(Span::raw(piece)));
+        }
     }
     lines.push(Line::from(Span::styled("─".repeat(full_width), rule)));
     lines
@@ -4496,8 +4763,12 @@ mod bar_tests {
         let lines = composer_lines(text, text.len(), 2, 4, 80, true);
         let top: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(top.starts_with(" edit · 3-5 "), "edit label: {top}");
+        // No glyph is inserted into the text: the body row holds the raw
+        // input plus the end-of-text caret as a filled cell.
         let text_row: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text_row.ends_with('▏'), "cursor glyph on the last text row");
+        assert_eq!(text_row, "テスト ", "body + filled caret cell, no glyph");
+        let pos = caret_in(&lines[1]).expect("block caret on the last text row");
+        assert_eq!(pos.1, " ", "end-of-text caret fills the next cell");
         let bottom: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(
             bottom.chars().filter(|&c| c == '─').count(),
@@ -4506,22 +4777,91 @@ mod bar_tests {
         );
     }
 
+    /// The styled caret of a composer line: (display column of the caret,
+    /// its content). The block caret is fg Black on bg Cyan; the
+    /// end-of-line caret is a cyan underline.
+    fn caret_in(line: &Line<'static>) -> Option<(usize, String)> {
+        let caret = |span: &Span<'static>| {
+            span.style.bg == Some(Color::Cyan)
+                || (span.style.fg == Some(Color::Cyan)
+                    && span
+                        .style
+                        .add_modifier
+                        .contains(Modifier::UNDERLINED))
+        };
+        let mut col = 0usize;
+        for span in &line.spans {
+            if caret(span) {
+                return Some((col, span.content.to_string()));
+            }
+            col += UnicodeWidthStr::width(span.content.as_ref());
+        }
+        None
+    }
+
     #[test]
-    fn composer_glyph_follows_the_cursor() {
-        // ▏ renders at the cursor position, not pinned to the end.
+    fn cursor_movement_does_not_reflow_the_composer() {
+        // The caret is painted over the wrapped body, never part of the
+        // wrap: moving the insertion point must leave the rows identical
+        // and only slide the caret. (The old embedding re-wrapped on
+        // every move and left a stray half-width blank at width
+        // boundaries.)
+        let text = "あいうえおかきくけこさしすせそ".to_string();
+        let width = 24;
+        let mut bases: Vec<String> = Vec::new();
+        for cursor in [3, 9, 12, 15, 18, 21, 30] {
+            let rows = composer_lines(&text, cursor, 0, 0, width, false);
+            let body_lines: Vec<&Line<'_>> = rows[1..rows.len() - 1].iter().collect();
+            let carets: Vec<_> = body_lines
+                .iter()
+                .filter_map(|l| caret_in(l))
+                .collect();
+            assert_eq!(carets.len(), 1, "cursor={cursor}: exactly one caret");
+            let (crow, ccol) = composer_cursor_pos(&text, cursor, width);
+            // The caret sits on body row `crow` at display column `ccol`
+            // (or on the caret-only trailing row when the input ends
+            // flush at the width boundary — composer_lines already
+            // appended it, so rows[1 + crow] exists).
+            let (c_crow, c_ccol) = if crow >= body_lines.len() {
+                (body_lines.len() - 1, 0)
+            } else {
+                (crow, ccol)
+            };
+            let on_row = caret_in(body_lines[c_crow])
+                .expect("caret on the reported row")
+                .0;
+            assert_eq!(on_row, c_ccol, "cursor={cursor}: caret column matches");
+            let body: String = body_lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            bases.push(body);
+        }
+        assert!(
+            bases.iter().all(|b| *b == bases[0]),
+            "the wrapped body is stable across cursor moves:\n{:?}",
+            bases
+        );
+    }
+
+    #[test]
+    fn composer_caret_follows_the_cursor() {
+        // The block caret covers the character at the insertion point.
         let lines = composer_lines("abc", 1, 0, 0, 80, false);
-        let row: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(row, "a▏bc");
+        assert_eq!(caret_in(&lines[1]), Some((1, "b".to_string())));
+        // End of text: a filled block cell after the last character.
+        let lines = composer_lines("abc", 3, 0, 0, 80, false);
+        assert_eq!(caret_in(&lines[1]), Some((3, " ".to_string())));
         assert_eq!(composer_cursor_pos("abc", 1, 80), (0, 1));
-        // Multi-line: the glyph (and the IME anchor) lands on the second
+        // Multi-line: the caret (and the IME anchor) lands on the second
         // logical line's row.
         assert_eq!(composer_cursor_pos("ab\ncd", 4, 80), (1, 1));
         // CJK before the cursor counts display width, not chars.
         assert_eq!(composer_cursor_pos("あい", 3, 80), (0, 2));
-        // A user `▏` in the text must not displace the cursor anchor:
-        // with the cursor past it the rendered glyph is the LAST `▏`;
-        // with the cursor before it (arrows can move there) it is the
-        // FIRST — the anchor follows the cursor either way.
+        // A user `▏` in the text is just a width-1 character: the caret
+        // sits before/after it exactly where the cursor is, with no
+        // glyph-counting ambiguity.
         assert_eq!(composer_cursor_pos("x▏y", 5, 80), (0, 3));
         assert_eq!(composer_cursor_pos("x▏y", 1, 80), (0, 1));
         assert_eq!(composer_cursor_pos("x▏y", 4, 80), (0, 2));
@@ -4529,12 +4869,13 @@ mod bar_tests {
 
     #[test]
     fn composer_tabs_expand_so_the_cursor_column_matches() {
-        // The ▏ column is measured on the wrapped text; a pasted tab
+        // The caret column is measured on the wrapped text; a pasted tab
         // expands to the terminal's 8-column stop, so the cursor lands
         // after the visible text instead of after a 0-width tab.
         let lines = composer_lines("a\tb", 3, 0, 0, 80, false);
         let text_row: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text_row, "a       b▏");
+        assert_eq!(text_row, "a       b ", "tab expanded + end caret cell");
+        assert_eq!(caret_in(&lines[1]), Some((9, " ".to_string())));
     }
 
     #[test]

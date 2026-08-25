@@ -10,6 +10,43 @@ use crate::*;
 
 use std::path::{Path, PathBuf};
 
+/// The contiguous runs of caret cells in a rendered buffer, as
+/// (row, col_start, col_end). The block caret is fg Black on bg Cyan and
+/// the end-of-line caret a cyan underline — the same colors the footer's
+/// mode label uses — so the title (0) and footer (last) strips are
+/// excluded; only the body area counts.
+fn caret_runs(buf: &ratatui::buffer::Buffer) -> Vec<(usize, usize, usize)> {
+    let w = buf.area.width as usize;
+    let h = buf.area.height as usize;
+    let is_caret = |c: &ratatui::buffer::Cell| {
+        c.style().bg == Some(ratatui::style::Color::Cyan)
+            || (c.style().fg == Some(ratatui::style::Color::Cyan)
+                && c
+                    .style()
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::UNDERLINED))
+    };
+    let mut cells: Vec<(usize, usize)> = buf
+        .content
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            let row = i / w;
+            row > 0 && row + 1 < h && is_caret(c)
+        })
+        .map(|(i, _)| (i / w, i % w))
+        .collect();
+    cells.sort_unstable();
+    let mut runs = Vec::new();
+    for (row, col) in cells {
+        match runs.last_mut() {
+            Some((r0, _c0, c1)) if *r0 == row && *c1 == col => *c1 = col + 1,
+            _ => runs.push((row, col, col + 1)),
+        }
+    }
+    runs
+}
+
 use crate::comment::Selection;
     use crate::config::{Config, EscQuit};
     use ratatui::backend::Backend;
@@ -533,9 +570,10 @@ use crate::comment::Selection;
             "the composer bar is visible for the last line"
         );
         assert!(
-            content.contains("最終行のコメント▏"),
-            "the typed comment text and cursor glyph are visible"
+            content.contains("最終行のコメント"),
+            "the typed comment text is visible"
         );
+        assert!(!caret_runs(buf).is_empty(), "the block caret is in the bar");
         assert!(
             content.contains("line24"),
             "the commented line itself is still on screen"
@@ -1682,7 +1720,7 @@ use crate::comment::Selection;
             content.contains("comment · 4"),
             "the composer bar renders inside the view"
         );
-        assert!(content.contains('▏'), "the cursor glyph is in the bar");
+        assert!(!caret_runs(buf).is_empty(), "the block caret is in the bar");
     }
 
     #[test]
@@ -1764,9 +1802,10 @@ use crate::comment::Selection;
             "the composer bar is visible for the last line"
         );
         assert!(
-            content.contains("最終行▏"),
-            "the typed comment text and cursor glyph are visible"
+            content.contains("最終行"),
+            "the typed comment text is visible"
         );
+        assert!(!caret_runs(buf).is_empty(), "the block caret is in the bar");
     }
 
     #[test]
@@ -5086,3 +5125,325 @@ use crate::comment::Selection;
         let pos = terminal.backend_mut().get_cursor_position().unwrap();
         assert_ne!(pos, ratatui::layout::Position::new(0, 0));
     }
+
+    #[test]
+    fn view_composer_ime_anchor_sits_on_the_cursor_glyph() {
+        // In view mode the composer bar's rows get a leading pad (
+        // `Span::raw(" ")` on each side in draw_view). The published
+        // terminal-cursor position — the macOS IME's inline-composition
+        // anchor — must land ON the \u{258f} `▏` glyph, not on the pad
+        // cell to its left. A one-column miss makes the Japanese
+        // conversion window read as "a half-width space in front, then it
+        // shifts" as the cursor moves back.
+        let (mut app, _dir) = make_app_keep(5, Mode::View);
+        app.mode = Mode::Input;
+        app.composer_return = Mode::View;
+        app.input = "あい".to_string();
+        app.input_cursor = 3; // after the first full-width char
+        app.input_start = 0;
+        app.input_end = 0;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+
+        let mut t =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = t.backend().buffer();
+        // Find the block caret run (fg Black on bg Cyan; title/footer
+        // excluded).
+        let runs = caret_runs(buf);
+        assert_eq!(runs.len(), 1, "exactly one caret run in the body");
+        let (row, col, _end) = runs[0];
+        let pos = t.backend_mut().get_cursor_position().unwrap();
+        assert_eq!(
+            (pos.x as usize, pos.y as usize),
+            (col, row),
+            "the IME anchor must sit exactly on the caret"
+        );
+    }
+
+    #[test]
+    fn composer_cursor_hovers_on_the_glyph_when_wrapped_and_in_source() {
+        // Probe the two other composer arrangements: a long comment that
+        // WRAPS to multiple body rows, and the source-mode inline bar
+        // (which lives after the gutter, no side pad). In both, exactly
+        // one `▏` must render and the IME anchor must sit on it.
+        let check = |app: &mut App, backend_width: u16| {
+            let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                backend_width,
+                24,
+            ))
+            .unwrap();
+            t.draw(|f| draw(f, app)).unwrap();
+            let buf = t.backend().buffer();
+            let runs = caret_runs(buf);
+            assert_eq!(runs.len(), 1, "a single caret run, no leftover");
+            let (row, col, _end) = runs[0];
+            let pos = t.backend_mut().get_cursor_position().unwrap();
+            assert_eq!(
+                (pos.x as usize, pos.y as usize),
+                (col, row),
+                "IME anchor on the caret (view wrapping / source mode)"
+            );
+        };
+
+        // View mode, a comment long enough to wrap within a 20-col bar.
+        let (mut app, _dir) = make_app_keep(1, Mode::View);
+        app.mode = Mode::Input;
+        app.composer_return = Mode::View;
+        app.input = "あいうえおかきくけこさしすせそ".to_string();
+        app.input_cursor = 9; // mid-word, after 3 full-width chars
+        app.input_start = 0;
+        app.input_end = 0;
+        app.ensure_row_cache(20);
+        app.refresh_line_rows();
+        check(&mut app, 30);
+
+        // Source mode: bar after the gutter, no side pad.
+        let (mut app, _dir) = make_app_keep(1, Mode::Source);
+        app.mode = Mode::Input;
+        app.composer_return = Mode::Source;
+        app.input = "あいうえおかきくけこ".to_string();
+        app.input_cursor = 9;
+        app.input_start = 0;
+        app.input_end = 0;
+        app.gutter_cols = 3;
+        app.ensure_row_cache(75);
+        app.refresh_line_rows();
+        check(&mut app, 60);
+    }
+
+/// A toy terminal backend that applies ratatui's diff cells onto a
+/// persistent screen, like a real terminal — TestBackend re-draws the full
+/// buffer each frame, so it can never show a diff-only artifact
+/// (afterimages when cells fail to clear). This one replays the emitted
+/// cells, so a stale-glyph bug surfaces here.
+struct VirtualTerm {
+    screen: Vec<ratatui::buffer::Cell>,
+    w: u16,
+    h: u16,
+    cursor: (u16, u16),
+    /// Every cell ratatui emitted per draw (a fresh append per draw()).
+    diff_log: Vec<(u16, u16, String)>,
+}
+
+impl VirtualTerm {
+    fn new(w: u16, h: u16) -> Self {
+        let n = (w as usize) * (h as usize);
+        Self {
+            screen: (0..n)
+                .map(|_| ratatui::buffer::Cell::default())
+                .collect(),
+            w,
+            h,
+            cursor: (0, 0),
+            diff_log: Vec::new(),
+        }
+    }
+}
+
+impl ratatui::backend::Backend for VirtualTerm {
+    type Error = std::io::Error;
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        for (x, y, c) in content {
+            let i = (y as usize) * (self.w as usize) + (x as usize);
+            self.screen[i] = c.clone();
+            self.diff_log.push((x, y, c.symbol().to_string()));
+        }
+        Ok(())
+    }
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn get_cursor_position(&mut self) -> Result<ratatui::layout::Position, Self::Error> {
+        Ok(ratatui::layout::Position::new(self.cursor.0, self.cursor.1))
+    }
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+        &mut self,
+        p: P,
+    ) -> Result<(), Self::Error> {
+        let p = p.into();
+        self.cursor = (p.x, p.y);
+        Ok(())
+    }
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        for c in &mut self.screen {
+            *c = ratatui::buffer::Cell::default();
+        }
+        Ok(())
+    }
+    fn clear_region(&mut self, _t: ratatui::backend::ClearType) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn size(&self) -> Result<ratatui::layout::Size, Self::Error> {
+        Ok(ratatui::layout::Size::new(self.w, self.h))
+    }
+    fn window_size(&mut self) -> Result<ratatui::backend::WindowSize, Self::Error> {
+        Ok(ratatui::backend::WindowSize {
+            columns_rows: ratatui::layout::Size::new(self.w, self.h),
+            pixels: ratatui::layout::Size::new(0, 0),
+        })
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+#[test]
+fn backspace_leaves_no_afterimage_in_the_diff() {
+    let (mut app, _dir) = make_app_keep(5, Mode::View);
+    app.mode = Mode::Input;
+    app.composer_return = Mode::View;
+    app.ensure_row_cache(75);
+    app.refresh_line_rows();
+    let mut terminal = ratatui::Terminal::new(VirtualTerm::new(20, 24)).unwrap();
+    let w = 20usize;
+
+    // Frame 1: a comment long enough to WRAP (20-wide bar), caret at end.
+    app.input = "あいうえおかきくけこさしすせそ".to_string();
+    app.input_cursor = 45;
+    app.input_start = 0;
+    app.input_end = 0;
+    app.ensure_row_cache(20);
+    app.refresh_line_rows();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    let frame1: Vec<String> = terminal
+        .backend()
+        .screen
+        .chunks(w)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect();
+    assert!(
+        frame1
+            .iter()
+            .filter(|l| l.contains('あ') || l.contains('そ'))
+            .count()
+            >= 2,
+        "the bar must wrap for this test:\n{}",
+        frame1
+            .iter()
+            .enumerate()
+            .map(|(i, l)| format!("{i:2}|{l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // Backspace across every wrap boundary, drawing (and diff-replaying)
+    // after each keystroke — a real terminal sees exactly these frames.
+    for _ in 0..15 {
+        on_input_key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+    }
+    terminal.backend_mut().diff_log.clear();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    // Inspect what the LAST draw emitted for the composer area (rows 2-8):
+    // any cell the diff skipped is a cell a real terminal keeps stale.
+    let mut per_row: std::collections::BTreeMap<u16, Vec<(u16, String)>> =
+        std::collections::BTreeMap::new();
+    for (x, y, s) in terminal.backend().diff_log.iter() {
+        if *y <= 8 {
+            per_row.entry(*y).or_default().push((*x, s.clone()));
+        }
+    }
+    for (y, mut cells) in per_row {
+        cells.sort();
+        eprintln!("emitted row {y}: {cells:?}");
+    }
+
+    // Ground truth: a fresh full render of the final state.
+    let mut tb = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 24)).unwrap();
+    tb.draw(|f| draw(f, &mut app)).unwrap();
+    let tb_buf = tb.backend().buffer().clone();
+
+    // The virtual terminal after the diff must equal the fresh render;
+    // every mismatch is a cell a real terminal would leave as an
+    // afterimage.
+    let diffs: Vec<(usize, usize, String, String)> = (0..tb_buf.content.len())
+        .filter(|&i| {
+            let a = &terminal.backend().screen[i];
+            let b = &tb_buf.content[i];
+            a.symbol() != b.symbol()
+                || a.style().bg != b.style().bg
+                || a.style().fg != b.style().fg
+        })
+        .map(|i| {
+            (
+                i % w,
+                i / w,
+                format!(
+                    "{:?}/{:?}",
+                    terminal.backend().screen[i].symbol(),
+                    terminal.backend().screen[i].style()
+                ),
+                format!("{:?}/{:?}", tb_buf.content[i].symbol(), tb_buf.content[i].style()),
+            )
+        })
+        .collect();
+    assert!(
+        diffs.is_empty(),
+        "afterimage cells after wrap-crossing backspaces (x, y, stale, expected):\n{diffs:?}\nframe1:\n{}\n---\nfinal (fresh render):\n{}",
+        frame1.iter().enumerate().map(|(i, l)| format!("{i:2}|{l}")).collect::<Vec<_>>().join("\n"),
+        tb_buf
+            .content
+            .chunks(w)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .enumerate()
+            .map(|(i, l)| format!("{i:2}|{l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+#[test]
+fn wide_char_residue_is_blanked_by_the_afterimage_pass() {
+    // ratatui's diff blanks the LEFT half of a removed wide character but
+    // skips its RIGHT half (that continuation cell is blank in its own
+    // model both before and after — equal, so no update). A real terminal
+    // renders the right half as a visible halved glyph that never gets
+    // cleared: the backspace afterimage. akapen's repair pass must queue
+    // an explicit space over exactly those cells.
+    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+
+    let mut prev = Buffer::empty(Rect::new(0, 0, 6, 3));
+    prev.set_string(0, 0, " あx  ", Style::default()); // あ at col 1 (covers 1..2)
+    prev.set_string(0, 2, "あb   ", Style::default()); // removed wide char at row 2
+    let mut curr = Buffer::empty(Rect::new(0, 0, 6, 3));
+    curr.set_string(0, 0, "    x ", Style::default()); // あ gone; col 2 blank
+    curr.set_string(0, 2, "  b   ", Style::default()); // あ replaced by a narrow char
+    // A third case that must NOT be touched: a wide char that is still
+    // wide in the next frame (a new wide char owns its continuation).
+    let mut prev3 = Buffer::empty(Rect::new(0, 0, 6, 1));
+    prev3.set_string(0, 0, "あ    ", Style::default());
+    let mut curr3 = Buffer::empty(Rect::new(0, 0, 6, 1));
+    curr3.set_string(0, 0, "い    ", Style::default());
+
+    let mut out: Vec<u8> = Vec::new();
+    crate::clear_wide_char_residue_to(&prev, &curr, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    // crossterm MoveTo(x+1, y) prints CSI {y+1};{x+1}H — position (2,0)
+    // for the あ at col 1, and (1,2) for the row-2 case — followed by a
+    // space to clear the halved glyph.
+    assert!(
+        out.contains("\x1b[1;3H ") || out.contains("\x1b[0;2H ") || out.contains("\x1b[1;3H"),
+        "the replaced wide char's right half (row 0, col 2) is blanked:\n{out:?}"
+    );
+    assert!(
+        out.contains("\x1b[3;2H ") || out.contains("\x1b[2;1H ") || out.contains("\x1b[3;2H"),
+        "the removed wide char's right half (row 2, col 1) is blanked:\n{out:?}"
+    );
+    // No cleanup for a wide char that stays wide.
+    let mut out2: Vec<u8> = Vec::new();
+    crate::clear_wide_char_residue_to(&prev3, &curr3, &mut out2).unwrap();
+    assert!(
+        out2.is_empty(),
+        "a wide char replaced by a wide char needs no afterimage repair"
+    );
+}
+
