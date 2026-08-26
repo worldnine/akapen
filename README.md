@@ -8,6 +8,8 @@ Your agent just wrote you a 2,000-line design document. Three sections are wrong
 
 Teachers don't rewrite the student's essay — they mark it up with a red pen and hand it back. akapen is the red pen for your agent's homework, right in the terminal where the agent lives.
 
+A red pen doesn't fix the essay — it gets the essay fixed. Writing a comment on the line: the most direct indirect edit there is.
+
 ![akapen demo — comment, send, the agent revises, walk the marks, then time-travel through every draft](docs/demo.gif)
 
 *Two review rounds in 60 seconds: mark → send → ⚡ → check, then `Tab` for the source diff and `←` to travel back through every draft the agent ever produced. Scripted and reproducible — see [examples/demo](examples/demo).*
