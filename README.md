@@ -1,14 +1,14 @@
 # akapen
 
-**akapen**（赤ペン, "red pen") — mark up your agent's homework.
+**akapen**（赤ペン, "red pen") — mark up your agent's documents, right from the terminal.
 
 日本語版 README は [README.ja.md](README.ja.md) にあります。
 
-Your agent just wrote you a 2,000-line design document. Three sections are wrong, one example is misleading, and chapter 5's tone is off. Your options: write a long prompt explaining all of it (the agent will get the gist), or annotate the file by hand in an editor (the line numbers travel, but the editor wasn't built for this).
+Your agent wrote a design document. Three sections are wrong, one example is misleading, and chapter 5's tone is off. Your options: write a long prompt explaining all of it (the agent will get the gist), or annotate the file by hand in an editor (the line numbers travel, but the editor wasn't built for this).
 
-Teachers don't rewrite the student's essay — they mark it up with a red pen and hand it back. akapen is the red pen for your agent's homework, right in the terminal where the agent lives.
+akapen is that annotation, in the terminal: select lines, attach comments, and send them straight to the agent — briskly, without leaving the document.
 
-A red pen doesn't fix the essay — it gets the essay fixed. Writing a comment on the line: the most direct indirect edit there is.
+akapen never fixes the document — it gets it fixed. Writing a comment on the line: the most direct indirect edit there is.
 
 ![akapen demo — comment, send, the agent revises, walk the marks, then time-travel through every draft](docs/demo.gif)
 
@@ -22,9 +22,9 @@ agent writes → you read → you mark → s sends → agent revises → ⚡ →
 
 Read markdown beautifully rendered, select lines, attach comments, and send them to your coding agent — without leaving the document. When the agent edits the file, akapen notices (`⚡`); the new draft arrives with green marks where things changed and red marks where things were deleted. Walk the differences with `n`/`N`, and comment anything still wrong. Your files are never modified: comments leave through the clipboard, stdout, or your send command.
 
-## The gradebook — the document time machine
+## The document time machine
 
-A red pen is only fair if you can check the student actually fixed what you marked. akapen keeps **every draft the agent ever produced** — Git commits and bounded LOCAL snapshots share one timeline — and you can browse them, still rendered, with `Left`/`Right`. The review baseline pins *the version you graded*; green/red marks compare that baseline with whichever draft you're looking at. Comments are pinned to the exact draft they describe, and carry the revision with them. Git is optional.
+A review is only fair if you can check what actually got fixed. akapen keeps **every draft the agent ever produced** — Git commits and bounded LOCAL snapshots share one timeline — and you can browse them, still rendered, with `Left`/`Right`. The review baseline pins *the version you reviewed*; green/red marks compare that baseline with whichever draft you're looking at. Comments are pinned to the exact draft they describe, and carry the revision with them. Git is optional.
 
 Prefer an older version of a section? Walk back, comment — *"this draft was better"* — and the revision plus the historical text arrive with the comment, so the agent can restore precisely that version.
 
@@ -117,7 +117,7 @@ ashiato . --open-cmd "akapen {} --send-agent"
 
 Mouse: wheel scrolls the view without moving the cursor; click moves the cursor; drag selects a line range; click the title-bar path to copy the full path; click `1/3 files` or the `▌ N` counter to open the overlays.
 
-## The gradebook, in detail
+## The time machine, in detail
 
 akapen treats every version as a complete document. Git commits and bounded LOCAL snapshots share one timeline; Git is optional. Browsing feels like the draft is alive: as you hold `Left`/`Right`, each settled generation change plays as two phases — removed lines first backspace away right→left as dim ghosts and the layout folds shut, then changed lines stream in left→right like an LLM, materializing in their final positions so nothing moves after appearing. History effects use neutral brightness, never add/delete colors, and the page frame changes while you are in the past.
 
