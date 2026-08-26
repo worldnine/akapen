@@ -1,3 +1,48 @@
+# HANDOFF: `e` → $EDITOR 復帰後にターミナルを再初期化する（マウスでゴミが出るバグ）
+
+## 問題
+
+akapen で `e` を押して `$EDITOR`（micro 等）を開き、エディタを終了して戻ると
+ターミナルが壊れた状態になる。マウスを動かすと SGR マウスシーケンスの生バイト
+（`^[[<35;10;8M` 等）が画面に文字として流れ、キー入力も効かなくなる。
+ashiato（prefix+m）→ akapen → micro → Ctrl+q の実機フローで確認。
+
+## 原因
+
+`open_editor` はエディタ起動前に `DisableMouseCapture` + `ratatui::restore()` で
+TUI を完全にサスペンドする（raw mode OFF・メイン画面へ）。ところが復帰後の処理は
+コメント上は「no-blink init でターミナルを作り直す」となっているのに、実際には
+`NoBlinkBackend::init()` を呼んでおらず、`EnableMouseCapture, Hide` の送出だけだった。
+結果、復帰後の akapen は **raw mode OFF（canonical + echo）のままマウスキャプチャだけ ON**
+という不正状態になり:
+
+- マウス移動のたびに tty が SGR シーケンスの生バイトを echo して画面にゴミが出る
+- キー入力は行バッファリングされて akapen に届かず、操作不能になる
+
+pty ドライバでの最小再現で確定（修正前は `GARBAGE_ECHOED: True`）。
+
+## 実装内容（src/reload.rs — `open_editor`）
+
+- エディタ終了後、コメントの主張どおり `crate::NoBlinkBackend::init()` を呼んで
+  raw mode + alternate screen を再進入し、`*terminal` を新しい Terminal に差し替える。
+- `EnableMouseCapture` は init の**後**に送る（run() の起動順と同一。canonical 状態で
+  capture を有効化しない）。
+- init 失敗時は `flash_err` で通知し続行（ベストエフォート）。
+- TestBackend 経路では検出できないクラスのバグなので、リグレッションテストは無し
+ （pty 実機確認を検証手順として下記に記録）。
+
+## 検証
+
+- pty 再現スクリプト（python3 + pty.fork, EDITOR=micro, `e` → Ctrl+q → SGR マウス注入）:
+  修正前 = ゴミエコーあり / 修正後 = ゴミ無し・`j` `q` とも正常動作・終了時に
+  DisableMouseCapture + LeaveAlternateScreen が正しく出る。
+- herdr 実ペインでも同フローを再現し、復帰後のマウス移動で `[<35` のゴミが
+  スクロールバックに出ないこと（0 件）を `herdr pane read` で確認。
+- `cargo test --locked`: 422 passed; 0 failed。`cargo clippy --locked --all-targets`: 警告 0。
+- 変更ファイル: `src/reload.rs` / `HANDOFF.md`
+
+---
+
 # HANDOFF: composer のカーソルをブロックキャレット化し、幅文字の残像を抹消（2件）
 
 ## 問題1: カーソルが「半角スペース」のように見える

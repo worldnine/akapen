@@ -174,7 +174,24 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
     // visible) and returns a properly initialised terminal. The old one's
     // Drop is harmless (it only frees buffers, never touches the
     // terminal).
+    //
+    // This re-init is load-bearing: the editor ran on a restored (cooked,
+    // main-screen) terminal, so WITHOUT it akapen would keep reading input
+    // with raw mode OFF while mouse capture is ON — every mouse motion's
+    // SGR bytes get echoed by the tty line discipline as visible garbage
+    // and keystrokes sit in the canonical line buffer (the TUI freezes).
+    // Mouse capture goes back on only AFTER raw mode is restored, mirroring
+    // run()'s startup order.
+    let mut init_error = None;
+    match crate::NoBlinkBackend::init() {
+        Ok(fresh) => *terminal = fresh,
+        Err(e) => init_error = Some(e),
+    }
     let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture, Hide);
+
+    if let Some(e) = init_error {
+        app.flash_err(format!("terminal re-init failed: {e}"));
+    }
 
     match status {
         Ok(s) if s.success() => {
