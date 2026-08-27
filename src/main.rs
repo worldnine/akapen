@@ -517,7 +517,8 @@ pub(crate) fn clear_wide_char_residue_to<W: std::io::Write>(
 ) -> std::io::Result<()> {
     use ratatui::crossterm::queue;
     use ratatui::crossterm::cursor::MoveTo;
-    use ratatui::crossterm::style::Print;
+    use ratatui::crossterm::style::{Print, ResetColor, SetBackgroundColor};
+    use ratatui::backend::IntoCrossterm;
     use unicode_width::UnicodeWidthStr;
 
     let area = prev.area;
@@ -537,11 +538,26 @@ pub(crate) fn clear_wide_char_residue_to<W: std::io::Write>(
             if curr[(x + 1, y)].symbol() != " " {
                 continue; // the diff emitted the content there
             }
-            queue!(out, MoveTo(x + 1, y), Print(" "))?;
+            // The space must carry the cell's own background: a bare
+            // Print(" ") wrote with whatever SGR state the terminal was
+            // left in — over a highlight band (the cursor row's fill in
+            // the other mode) that punched default-background holes into
+            // the band (visible as stripes after a view/source toggle).
+            let bg = curr[(x + 1, y)]
+                .style()
+                .bg
+                .unwrap_or(ratatui::style::Color::Reset);
+            queue!(
+                out,
+                MoveTo(x + 1, y),
+                SetBackgroundColor(bg.into_crossterm()),
+                Print(" ")
+            )?;
             wrote = true;
         }
     }
     if wrote {
+        queue!(out, ResetColor)?;
         out.flush()?;
     }
     Ok(())

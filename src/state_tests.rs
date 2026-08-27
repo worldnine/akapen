@@ -5668,3 +5668,36 @@ fn wide_char_residue_is_blanked_by_the_afterimage_pass() {
     );
 }
 
+#[test]
+fn afterimage_repair_keeps_the_cells_background() {
+    // Regression: the repair pass printed a bare space with whatever SGR
+    // state the terminal was left in. When the repaired cell sits on a
+    // highlight band (the cursor row's fill after a view/source toggle
+    // moved the wide chars around), the bare space punched a default-
+    // background hole into the band — visible as stripes. The space must
+    // carry the current cell's own background.
+    use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Style}};
+
+    let mut prev = Buffer::empty(Rect::new(0, 0, 6, 1));
+    prev.set_string(0, 0, " あ   ", Style::default()); // あ covers cols 1..=2
+    let mut curr = Buffer::empty(Rect::new(0, 0, 6, 1));
+    curr.set_string(
+        0,
+        0,
+        "      ",
+        Style::default().bg(Color::Rgb(88, 91, 112)), // the highlight band
+    );
+
+    let mut out: Vec<u8> = Vec::new();
+    crate::clear_wide_char_residue_to(&prev, &curr, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("\x1b[48;2;88;91;112m"),
+        "the repaired space carries the band's background:\n{out:?}"
+    );
+    assert!(
+        out.ends_with("\x1b[0m"),
+        "the pass leaves the terminal's SGR state clean:\n{out:?}"
+    );
+}
+
