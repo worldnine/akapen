@@ -321,39 +321,74 @@ pub fn wrap_spans(spans: &[Span], width: usize) -> Vec<Vec<Span>> {
 }
 
 
+/// The narrowest continuation row a hanging indent may leave: below this
+/// many columns the indent is dropped and the line wraps from column 0
+/// (a sliver of one-or-two-column rows would be unreadable, and the wrap
+/// loop needs room to always make progress).
+const MIN_HANGING_BODY: usize = 8;
+
 /// Width-aware wrapping that keeps a parallel source-line attribution.
 /// Takes one `Option<usize>` per input span and returns, per display row,
 /// the row's spans plus one attribution per span; a fragment split off a
 /// wrapped span inherits the span's line. Source mode uses [`wrap_spans`]
 /// (this algorithm is shared); the tagged variant is used only by the view
 /// pipeline, where the attribution drives the exact source-line mapping.
+///
+/// `hang` is the hanging indent: continuation rows (the second and later
+/// display rows of a wrapped line) start with `hang` columns of spaces,
+/// so a list item's continuation aligns under its text instead of under
+/// the marker. The pad span inherits the attribution of the text that
+/// follows it, so selection highlighting and mouse mapping treat the pad
+/// as part of the line. A `hang` that would leave the continuation body
+/// narrower than [`MIN_HANGING_BODY`] falls back to 0 (plain wrapping).
 pub fn wrap_spans_tagged(
     spans: &[Span],
     lines: &[Option<usize>],
     width: usize,
+    hang: usize,
 ) -> Vec<(Vec<Span>, Vec<Option<usize>>)> {
     debug_assert_eq!(spans.len(), lines.len(), "attribution parallels spans");
     let width = width.max(1);
+    let hang = if width.saturating_sub(hang) < MIN_HANGING_BODY {
+        0
+    } else {
+        hang
+    };
     let mut rows: Vec<(Vec<Span>, Vec<Option<usize>>)> = Vec::new();
     let mut row: Vec<Span> = Vec::new();
     let mut row_lines: Vec<Option<usize>> = Vec::new();
     let mut col = 0usize; // display column where the next character lands
+    // A continuation row owes its hanging pad; materialized lazily when
+    // the first content lands (so a line ending exactly at a row boundary
+    // never leaves a trailing pad-only row).
+    let mut pad_due = false;
     for (span, line) in spans.iter().zip(lines) {
         let mut rest = span.text.as_str();
         while !rest.is_empty() {
             // The current row is full: flush it and start the next.
             if col >= width {
                 rows.push((std::mem::take(&mut row), std::mem::take(&mut row_lines)));
-                col = 0;
+                col = hang;
+                pad_due = hang > 0;
             }
             let (take, take_w) = take_fit(rest, col, width - col);
             if take.is_empty() {
                 // The next character cannot fit in the rest of this row
                 // (a wide char at the row's last column, or a tab): flush
-                // and retry from column 0, where it fits.
+                // and retry from the continuation column, where it fits
+                // (MIN_HANGING_BODY guarantees at least 8 free columns).
                 rows.push((std::mem::take(&mut row), std::mem::take(&mut row_lines)));
-                col = 0;
+                col = hang;
+                pad_due = hang > 0;
                 continue;
+            }
+            if pad_due {
+                row.push(Span {
+                    text: " ".repeat(hang),
+                    style: Style::default(),
+                });
+                row_lines.push(*line);
+                pad_due = false;
             }
             row.push(Span {
                 text: expand_tabs(take, col),
@@ -364,7 +399,8 @@ pub fn wrap_spans_tagged(
             rest = &rest[take.len()..];
             if col >= width {
                 rows.push((std::mem::take(&mut row), std::mem::take(&mut row_lines)));
-                col = 0;
+                col = hang;
+                pad_due = hang > 0;
             }
         }
     }
@@ -459,7 +495,7 @@ fn expand_tabs(s: &str, col: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_THEME, Highlighter, Span, syntax_for, wrap_spans};
+    use super::{DEFAULT_THEME, Highlighter, Span, syntax_for, wrap_spans, wrap_spans_tagged};
     use std::path::Path;
     use ratatui::style::{Color, Style};
     use unicode_width::UnicodeWidthStr;
@@ -762,5 +798,67 @@ mod tests {
         );
         let rows = wrap_spans(&[span("あ")], 1);
         assert_eq!(rows.len(), 1, "a wide char still fits a width-1 pane");
+    }
+
+    /// Text of one tagged row, pad included.
+    fn row_text(row: &(Vec<Span>, Vec<Option<usize>>)) -> String {
+        row.0.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn hanging_wrap_indents_continuation_rows() {
+        let rows = wrap_spans_tagged(&[span("- abcdefghijklmn")], &[Some(3)], 10, 2);
+        assert_eq!(
+            rows.iter().map(row_text).collect::<Vec<_>>(),
+            vec!["- abcdefgh", "  ijklmn"]
+        );
+        // The pad inherits the line: selection highlighting and mouse
+        // mapping treat it as part of the item.
+        assert_eq!(rows[1].1, vec![Some(3), Some(3)]);
+    }
+
+    #[test]
+    fn hanging_wrap_measures_cjk_by_display_width() {
+        let rows = wrap_spans_tagged(&[span("- あいうえおかきくけこ")], &[Some(0)], 10, 2);
+        let texts: Vec<String> = rows.iter().map(row_text).collect();
+        assert_eq!(texts, vec!["- あいうえ", "  おかきく", "  けこ"]);
+        assert!(texts.iter().all(|t| width(t) <= 10));
+        // Stripping the pads reassembles the original text.
+        let joined: String = std::iter::once(texts[0].as_str())
+            .chain(texts[1..].iter().map(|t| &t[2..]))
+            .collect();
+        assert_eq!(joined, "- あいうえおかきくけこ");
+    }
+
+    #[test]
+    fn hanging_wrap_falls_back_when_the_body_would_be_too_narrow() {
+        // width 12, hang 6 leaves 6 < MIN_HANGING_BODY columns: plain wrap.
+        let rows = wrap_spans_tagged(&[span("- [x] abcdefghijkl")], &[Some(0)], 12, 6);
+        assert_eq!(
+            rows.iter().map(row_text).collect::<Vec<_>>(),
+            vec!["- [x] abcdef", "ghijkl"]
+        );
+    }
+
+    #[test]
+    fn hanging_wrap_leaves_no_trailing_pad_only_row() {
+        // The text ends exactly at the row boundary: the owed pad must
+        // never materialize as a spurious empty continuation row.
+        let rows = wrap_spans_tagged(&[span("- abcdefgh")], &[Some(0)], 10, 2);
+        assert_eq!(rows.iter().map(row_text).collect::<Vec<_>>(), vec!["- abcdefgh"]);
+    }
+
+    #[test]
+    fn hanging_wrap_with_zero_hang_matches_plain_wrap() {
+        let spans = [span("abcde"), span("fgh")];
+        let tagged = wrap_spans_tagged(&spans, &[Some(0), Some(1)], 4, 0);
+        let plain = wrap_spans(&spans, 4);
+        assert_eq!(
+            tagged.iter().map(row_text).collect::<Vec<_>>(),
+            plain
+                .iter()
+                .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
+                .collect::<Vec<_>>()
+        );
     }
 }

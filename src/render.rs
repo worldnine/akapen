@@ -254,7 +254,7 @@ pub fn render(source: &Source, width: usize, highlighter: &Highlighter) -> Rende
                 style: base.patch(s.style),
             })
             .collect();
-        for (r_spans, r_lines) in wrap_spans_tagged(&spans, attrs, width) {
+        for (r_spans, r_lines) in wrap_spans_tagged(&spans, attrs, width, hanging_indent(&spans)) {
             rows.push(r_spans);
             row_lines.push(r_lines);
         }
@@ -287,6 +287,55 @@ pub fn render(source: &Source, width: usize, highlighter: &Highlighter) -> Rende
     let (rows, source_starts, row_segments) =
         insert_missing_blank_rows(rows, source_starts, row_segments, &source.lines, &rendered);
     Rendered { rows, source_starts, row_segments, ghost }
+}
+
+/// The hanging indent of one rendered logical line: the display width of
+/// its leading indent plus any blockquote prefixes and list marker.
+/// Continuation rows of a wrapped line are indented by this many columns
+/// (see [`wrap_spans_tagged`]), so a list item's wrapped text aligns
+/// under its first row's text instead of sliding back under the marker.
+///
+/// The prefixes are matched on the rendered text, which the renderer
+/// copies verbatim from the source:
+/// - leading spaces (nested lists, indented/fenced code) hang by
+///   themselves;
+/// - blockquote prefixes `> ` (repeated when nested);
+/// - bullet markers `- ` / `* ` / `+ `, with an optional task checkbox
+///   `[x] ` / `[X] ` / `[ ] ` after them;
+/// - ordered markers as written — digits followed by `. ` or `) `, so
+///   `12. ` hangs 4 columns.
+///
+/// Everything after the marker is the item's text; a line with none of
+/// the prefixes (a plain paragraph, a table row) hangs 0 and wraps as
+/// before. All prefix characters are ASCII, so byte counts are display
+/// widths.
+fn hanging_indent(spans: &[Span]) -> usize {
+    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+    let mut rest = text.as_str();
+    let mut hang = 0usize;
+    let indent = rest.len() - rest.trim_start_matches(' ').len();
+    hang += indent;
+    rest = &rest[indent..];
+    while let Some(r) = rest.strip_prefix("> ") {
+        hang += 2;
+        rest = r;
+    }
+    if let Some(r) = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "))
+    {
+        hang += 2;
+        if ["[x] ", "[X] ", "[ ] "].iter().any(|cb| r.starts_with(cb)) {
+            hang += 4;
+        }
+    } else {
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && (rest[digits..].starts_with(". ") || rest[digits..].starts_with(") ")) {
+            hang += digits + 2;
+        }
+    }
+    hang
 }
 
 /// The first display row of each source line, derived from the renderer's
@@ -894,6 +943,86 @@ mod tests {
                 r.iter().map(|s| s.text.as_str()).collect::<String>() == "- literal dash line"
             }),
             "code line is not treated as a list item"
+        );
+    }
+
+    #[test]
+    fn hanging_indent_measures_markers_quotes_and_indent() {
+        let hang = |text: &str| {
+            super::hanging_indent(&[Span {
+                text: text.to_string(),
+                style: ratatui::style::Style::default(),
+            }])
+        };
+        assert_eq!(hang("plain paragraph"), 0);
+        assert_eq!(hang("- item"), 2);
+        assert_eq!(hang("* item"), 2);
+        assert_eq!(hang("+ item"), 2);
+        assert_eq!(hang("    - nested"), 6);
+        assert_eq!(hang("1. numbered"), 3);
+        assert_eq!(hang("12. numbered"), 4);
+        assert_eq!(hang("7) numbered"), 3);
+        assert_eq!(hang("- [x] done"), 6);
+        assert_eq!(hang("- [ ] open"), 6);
+        assert_eq!(hang("> quoted"), 2);
+        assert_eq!(hang("> - quote item"), 4);
+        assert_eq!(hang("> > nested quote"), 4);
+        assert_eq!(hang("    indented code"), 4);
+        assert_eq!(hang("-no space after marker"), 0);
+        assert_eq!(hang("1.no space after number"), 0);
+    }
+
+    #[test]
+    fn wrapped_list_items_hang_under_their_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(
+            &path,
+            "- TAOのIDが重複していないかのチェック文字列の抽出機能\n",
+        )
+        .unwrap();
+        let source = Source::load(path).unwrap();
+        let Rendered { rows, row_segments, .. } =
+            render(&source, 20, &Highlighter::new(None, false));
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        assert!(texts[0].starts_with("- "), "first row keeps the marker: {texts:?}");
+        assert!(texts.len() >= 2, "the item wraps: {texts:?}");
+        for t in &texts[1..] {
+            assert!(t.starts_with("  "), "continuation hangs under the text: {t:?}");
+            assert!(!t.starts_with("   "), "exactly the marker's width: {t:?}");
+        }
+        // The pad is attributed to the item's line: the segment covers the
+        // row from byte 0, so selection highlighting and mouse clicks on
+        // the pad hit the item.
+        for segs in &row_segments[1..texts.len()] {
+            assert_eq!(segs.len(), 1);
+            assert_eq!(segs[0].line, 0);
+            assert_eq!(segs[0].start, 0, "segment covers the pad");
+        }
+    }
+
+    #[test]
+    fn narrow_panes_drop_the_hanging_indent() {
+        // Nested deep enough that the continuation body would fall under
+        // MIN_HANGING_BODY: the item wraps from column 0 instead of
+        // leaving an unreadable sliver.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "- あいうえおかきくけこさしすせそ\n").unwrap();
+        let source = Source::load(path).unwrap();
+        let Rendered { rows, .. } = render(&source, 9, &Highlighter::new(None, false));
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        assert!(texts.len() >= 2);
+        assert!(
+            texts[1..].iter().all(|t| !t.starts_with(' ')),
+            "width 9 leaves under {} body columns: no hang: {texts:?}",
+            9 - 2
         );
     }
 

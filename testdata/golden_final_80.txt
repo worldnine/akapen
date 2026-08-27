@@ -302,7 +302,7 @@
 "    2. "|Style::new().light_blue();;"ネスト b"|Style::new()
 "3. "|Style::new().light_blue();;"三番目の項目"|Style::new()
 "4. "|Style::new().light_blue();;"四番目の項目。この項目のテキストは意図的に少し長くして、折り返しがどうなるか"|Style::new()
-"を確認するためのものです。"|Style::new()
+"   "|Style::new();;"を確認するためのものです。"|Style::new()
 "5. "|Style::new().light_blue();;"五番目の項目"|Style::new()
 
 "タスクリスト"|Style::new().fg(Color::Rgb(249, 226, 175)).bold().italic()
