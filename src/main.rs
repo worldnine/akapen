@@ -2570,6 +2570,21 @@ fn select_and_move_source(app: &mut App, dir: isize, height: u16) {
     extend_selection(app, dir, height);
 }
 
+/// The source lines that share the view cursor's row: with no selection
+/// the cursor band covers the WHOLE row, and a merged paragraph row holds
+/// several source lines, so "copy what I see" means all of them. A row
+/// with no attribution (a rule, a border) falls back to the cursor line.
+pub(crate) fn view_cursor_row_lines(view: &ViewState) -> (usize, usize) {
+    let row = view.cursor_row();
+    let segs = view.row_segments.get(row).map(|s| s.as_slice()).unwrap_or(&[]);
+    let lo = segs.iter().map(|s| s.line).min();
+    let hi = segs.iter().map(|s| s.line).max();
+    match (lo, hi) {
+        (Some(lo), Some(hi)) => (lo.min(view.cursor), hi.max(view.cursor)),
+        _ => (view.cursor, view.cursor),
+    }
+}
+
 /// `y`: copy the selection — or the cursor line — as displayed. Source
 /// mode copies the raw Markdown lines; view mode copies the rendered text
 /// (Tab to source mode first for the Markdown). Copying the *comments*
@@ -2579,12 +2594,24 @@ fn yank_visible(app: &mut App) {
         app.flash_err("nothing to copy");
         return;
     }
+    // A live deletion focus (source mode, after `n` landed on a pure
+    // deletion) shows the deleted baseline rows, so that is what `y`
+    // copies — the same snippet `c` quotes there, not the untouched
+    // anchor line the cursor technically sits on.
+    if app.mode == Mode::Source
+        && let Some(deleted) = app.focused_deletion_content()
+    {
+        let lines = deleted.lines().count().max(1);
+        match export::copy_to_clipboard(&deleted) {
+            Ok(()) => app.flash(format!("copied {lines} deleted line(s)")),
+            Err(e) => app.flash_err(format!("clipboard failed: {e:#}")),
+        }
+        return;
+    }
     let (start, end) = match app.selection {
         Some(sel) => sel.range(),
-        None => {
-            let line = if app.mode == Mode::View { app.view.cursor } else { app.cursor };
-            (line, line)
-        }
+        None if app.mode == Mode::View => view_cursor_row_lines(&app.view),
+        None => (app.cursor, app.cursor),
     };
     let text = if app.mode == Mode::View {
         yank::view_text(&app.source, &app.highlight, start, end)

@@ -425,11 +425,11 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
 pub(crate) fn help_rows(esc_quit: bool, reply: bool, _in_git: bool) -> Vec<(&'static str, &'static str)> {
     let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
-        ("select", "v anchor · J/K · Shift+↓↑ · Esc cancel"),
+        ("select", "v · J/K · Shift+↓↑ · Esc cancel"),
         ("comment", "c add · d delete · ^n/^p jump"),
         ("mode", "Tab view⇄source"),
-        ("output", "y copy line/selection as shown · s send"),
-        ("list", "l comments (y copy · s send · d delete) · ? help"),
+        ("output", "y copy as shown · s send"),
+        ("list", "l comments (y/s/d inside) · ? help"),
     ];
     if reply {
         // Reply mode: a single message document — no file navigation, no

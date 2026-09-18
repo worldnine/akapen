@@ -4524,6 +4524,18 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn view_y_without_selection_targets_the_whole_cursor_row() {
+        // make_app's lines form ONE paragraph, rendered as one merged row;
+        // the cursor band covers that whole row, so `y` must copy every
+        // line in it — not just the cursor's own phrase.
+        let app = make_app(3, Mode::View);
+        assert_eq!(view_cursor_row_lines(&app.view), (0, 2));
+        let mut app = make_app(3, Mode::View);
+        app.view.goto_source_line(1);
+        assert_eq!(view_cursor_row_lines(&app.view), (0, 2), "any line of the row → the row");
+    }
+
+    #[test]
     fn plain_arrows_still_move_without_selecting() {
         let mut app = make_app(6, Mode::Source);
         on_source_key(&mut app, KeyCode::Down, KeyModifiers::NONE, None);
