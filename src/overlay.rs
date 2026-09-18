@@ -18,6 +18,7 @@ use crate::comment::{Comment, Selection};
 use crate::reload::file_externally_changed;
 use crate::render_pending_history;
 use crate::replace_view_preserving_cursor;
+use crate::export_all;
 
 /// The kind of overlay currently open (Ctrl+p = files, `l` = comments,
 /// `t` = timeline, `?` = help).
@@ -388,6 +389,17 @@ pub(crate) fn on_comments_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
                 replace_view_preserving_cursor(app);
             }
         }
+        // The comments' own export lives here, next to the comments: `y`
+        // copies them all (kept), `s` sends them (cleared on success —
+        // an emptied list closes itself, like `d` deleting the last one).
+        KeyCode::Char('y') => export_all(app, false),
+        KeyCode::Char('s') => {
+            let had_comments = !app.comments.is_empty();
+            export_all(app, true);
+            if had_comments && app.comments.is_empty() {
+                app.overlay = None;
+            }
+        }
         // Esc or q closes the list; `l` toggles it closed again.
         KeyCode::Esc | KeyCode::Char('q') => app.overlay = None,
         KeyCode::Char('l') => app.overlay = None,
@@ -413,10 +425,11 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
 pub(crate) fn help_rows(esc_quit: bool, reply: bool, _in_git: bool) -> Vec<(&'static str, &'static str)> {
     let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
-        ("comment", "v select · Esc cancel · c add · d delete · ^n/^p jump"),
+        ("select", "v anchor · J/K · Shift+↓↑ · Esc cancel"),
+        ("comment", "c add · d delete · ^n/^p jump"),
         ("mode", "Tab view⇄source"),
-        ("output", "y copy · s send"),
-        ("list", "l comments · ? help"),
+        ("output", "y copy line/selection as shown · s send"),
+        ("list", "l comments (y copy · s send · d delete) · ? help"),
     ];
     if reply {
         // Reply mode: a single message document — no file navigation, no

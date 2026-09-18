@@ -26,6 +26,7 @@ mod source;
 mod theme;
 mod timeline;
 mod view;
+mod yank;
 
 
 
@@ -2339,6 +2340,14 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // keys, so Alt+move is the bigger step, like Ctrl+d/Ctrl+u).
         KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, 1),
         KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, -1),
+        // Shift+↓/↑ and J/K: select-and-move in one key (no `v` first).
+        // The Shift+arrow arms must precede the plain arrow arms, which
+        // carry no modifier guard. `J`/`K` are matched by character only:
+        // some terminals report them with SHIFT set, others do not.
+        KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) => select_and_move_view(app, 1),
+        KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) => select_and_move_view(app, -1),
+        KeyCode::Char('J') => select_and_move_view(app, 1),
+        KeyCode::Char('K') => select_and_move_view(app, -1),
         KeyCode::Char('j') | KeyCode::Down => {
             if app.selection.is_some() {
                 extend_view_selection(app, 1);
@@ -2431,7 +2440,7 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // Comment management works from the view too (the parallel model:
         // d/y/s need no mode switch).
         KeyCode::Char('d') => delete_comment_at_cursor(app),
-        KeyCode::Char('y') => export_all(app, false),
+        KeyCode::Char('y') => yank_visible(app),
         KeyCode::Char('s') => export_all(app, true),
         KeyCode::Char('q') => request_quit(app),
         KeyCode::Char('r') => {
@@ -2535,6 +2544,62 @@ fn extend_view_selection(app: &mut App, dir: isize) {
     sel.cursor = next;
     app.view.goto_source_line(next);
     app.view.keep_cursor_visible(app.view_viewport_rows());
+}
+
+/// `J`/`K` / Shift+↓↑ in view mode: anchor a selection on the cursor line
+/// if none is active, then extend it one line — the state `v` `j` would
+/// reach, in one key. From here `j`/`k` keep extending and Esc cancels.
+fn select_and_move_view(app: &mut App, dir: isize) {
+    if app.source.is_empty() {
+        return;
+    }
+    if app.selection.is_none() {
+        app.selection = Some(Selection::new(app.view.cursor));
+    }
+    extend_view_selection(app, dir);
+}
+
+/// `J`/`K` / Shift+↓↑ in source mode (see [`select_and_move_view`]).
+fn select_and_move_source(app: &mut App, dir: isize, height: u16) {
+    if app.source.is_empty() {
+        return;
+    }
+    if app.selection.is_none() {
+        app.selection = Some(Selection::new(app.cursor));
+    }
+    extend_selection(app, dir, height);
+}
+
+/// `y`: copy the selection — or the cursor line — as displayed. Source
+/// mode copies the raw Markdown lines; view mode copies the rendered text
+/// (Tab to source mode first for the Markdown). Copying the *comments*
+/// lives in the comments overlay (`l`, then `y`), where the comments are.
+fn yank_visible(app: &mut App) {
+    if app.source.is_empty() {
+        app.flash_err("nothing to copy");
+        return;
+    }
+    let (start, end) = match app.selection {
+        Some(sel) => sel.range(),
+        None => {
+            let line = if app.mode == Mode::View { app.view.cursor } else { app.cursor };
+            (line, line)
+        }
+    };
+    let text = if app.mode == Mode::View {
+        yank::view_text(&app.source, &app.highlight, start, end)
+    } else {
+        yank::source_text(&app.source, start, end)
+    };
+    let Some(text) = text else {
+        app.flash_err("nothing to copy on this line");
+        return;
+    };
+    let lines = end - start + 1;
+    match export::copy_to_clipboard(&text) {
+        Ok(()) => app.flash(format!("copied {lines} line(s)")),
+        Err(e) => app.flash_err(format!("clipboard failed: {e:#}")),
+    }
 }
 /// Move the cursor to the next (`n`) or previous (`N`) comment — the same
 /// comment landing in both modes. Each comment is its own target:
@@ -2887,6 +2952,11 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         // `[`/`]` sit on the base layer.
         KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, 1),
         KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, -1),
+        // Shift+↓/↑ and J/K: select-and-move (see on_view_key).
+        KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) => select_and_move_source(app, 1, viewport),
+        KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) => select_and_move_source(app, -1, viewport),
+        KeyCode::Char('J') => select_and_move_source(app, 1, viewport),
+        KeyCode::Char('K') => select_and_move_source(app, -1, viewport),
         KeyCode::Char('j') | KeyCode::Down => {
             if app.selection.is_some() {
                 extend_selection(app, 1, viewport);
@@ -2915,7 +2985,7 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         KeyCode::Char('c') => open_composer(app, Mode::Source),
         KeyCode::Char('d') => delete_comment_at_cursor(app),
         KeyCode::Char('s') => export_all(app, true),
-        KeyCode::Char('y') => export_all(app, false),
+        KeyCode::Char('y') => yank_visible(app),
         KeyCode::Tab => {
             // Non-Markdown files are source-only: Tab is a no-op with a
             // toast instead of rendering raw source as fake markdown.
@@ -3363,13 +3433,14 @@ fn request_quit(app: &mut App) {
     }
 }
 
-/// Export all comments. `y` copies to the clipboard; `s` additionally
+/// Export all comments. `y` in the comments overlay copies to the
+/// clipboard; `s` (body or overlay) additionally
 /// delivers via `--send-cmd` (e.g. a herdr pane) and clears the slate —
 /// but ONLY on success: a
 /// failed send keeps the comments for a retry, and nothing is queued for
 /// stdout (terminal output after quit was confusing; pipe via the send
 /// command instead, e.g. `--send-cmd "cat >> review.txt"`).
-fn export_all(app: &mut App, send: bool) {
+pub(crate) fn export_all(app: &mut App, send: bool) {
     if app.comments.is_empty() {
         app.flash_err("no comments yet");
         return;

@@ -96,8 +96,9 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `t` | open the timeline generation list (browsing also shows a bottom timeline bar: ◆ current `HERE` / ▮ baseline / ● LOCAL / ◼ COMMIT) |
 | `Tab` | toggle view ⇄ source (selection carries over; non-markdown files are source-only) |
 | `j` / `k` | move cursor (extends the range while selecting) |
+| `J` / `K`, `Shift+↓` / `Shift+↑` | select and move in one key: anchor on the cursor line if nothing is selected, then extend (Shift+arrows need a terminal that reports them) |
 | `g` / `G`, `PgUp` / `PgDn`, `Ctrl+u` / `Ctrl+d` | jump / half-page moves |
-| `v` | start selecting lines |
+| `v` | start selecting lines (anchor; `j`/`k` then extend) |
 | `c` | comment the selection (or the cursor line); re-selecting an existing comment's exact range edits it |
 | `n` / `N` | center the next / previous difference from the review baseline |
 | `]` / `[` | next / previous file in the session |
@@ -107,9 +108,9 @@ ashiato . --open-cmd "akapen {} --send-agent"
 | `F7` / `Shift+F7` | alternate next / previous review-mark keys (`]c` / `[c`, `Alt+j` / `Alt+k` also work) |
 | `Ctrl+n` / `Ctrl+p` | jump to the next / previous comment (moved from `n` / `N`) |
 | `Ctrl+o` | file picker (moved from `Ctrl+p`) |
-| `l` | all-comments overlay |
+| `l` | all-comments overlay (`y` copies all comments, `s` sends them, `d` deletes one) |
 | `e` | edit the file in `$EDITOR` (suspends the TUI, reloads and acknowledges your own edit on return; blocked while a file change is pending — `r` first). Opens at the cursor line — or the selection's start — via the `+N FILE` convention for editors that support it (vi/vim/nvim, nano, emacs, micro) |
-| `y` | copy all comments to the clipboard (comments are kept) |
+| `y` | copy the selection (or the cursor line) **as displayed**: rendered text in view mode, raw Markdown in source mode — Tab first for the Markdown. Wrapped rows are unwrapped. Copying the comments moved to the comments overlay (`l`, then `y`) |
 | `s` | send via `--send-cmd` / `--send-agent` (comments are cleared only on success) |
 | `d` | delete the comment under the cursor |
 | `q` | quit (confirms if there are unsent comments) |
@@ -185,7 +186,7 @@ akapen ... --send-agent --reply
 
 - **Export format**: the file/line references are dropped and the selected snippet is quoted GitHub-style (`> ` lines); the comment sits on its own line after a blank line (the blank line keeps the comment out of the blockquote — CommonMark lazy continuation). Batches of comments are numbered (`1. > quote` + indented comment), so the receiving agent reads them as a list of distinct points to address in order. The number sits before the `> ` marker, so quoted content that itself contains list markers can never collide.
 - **Auto-reload, no diff**: the document reloads automatically when it changes on disk, and the reload skips the diff — in reply mode the doc is a single agent message, so every refresh replaces the whole content.
-- **Reply-mode UI**: the title shows `reply` (not the temp path), `]`/`[` moves between the recent messages, `e` (edit) and the file picker are disabled.
+- **Reply-mode UI**: the title shows `reply` (not the temp path), `]`/`[` moves between the recent messages, `e` (edit) and the file picker are disabled. `y` copies the selected part of the agent's message as displayed (plain text); copying your comments is `l`, then `y`.
 
 The companion script [`plugins/akp/scripts/akp`](plugins/akp/scripts/akp) builds the document set: it resolves the sole agent in the current herdr tab, extracts the most recent text-bearing assistant messages from the session transcript (pi/claude/codex JSONL located by session id, hermes SQLite), and opens akapen on them. Codex timestamp-prefixed rollout files and its `response_item` / `output_text` records are supported. Re-invoking refreshes the documents in place.
 

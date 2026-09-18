@@ -2158,9 +2158,6 @@ use crate::comment::Selection;
         on_view_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, None);
         assert!(app.status.is_some(), "s flashes 'no comments yet'");
         app.status = None;
-        on_view_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, None);
-        assert!(app.status.is_some(), "y flashes 'no comments yet'");
-        app.status = None;
         on_view_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE, None);
         assert!(app.status.is_some(), "d flashes 'no comment on this line'");
     }
@@ -4456,14 +4453,82 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn y_copies_without_sending() {
-        // `y` is copy-only: even with --send-cmd configured it must not
-        // deliver, and the comments stay.
+    fn overlay_y_copies_comments_without_sending() {
+        // Copying the comments moved into the comments overlay (`l` then
+        // `y`). It is copy-only: even with --send-cmd configured it must
+        // not deliver, and the comments stay. (No comments → the early
+        // return keeps the test off the real clipboard.)
         let mut app = make_app(5, Mode::Source);
         app.config.send_cmd = Some("cat > /dev/null".to_string());
-        add_comment(&mut app, 1, 1, "c");
+        app.overlay = Some(Overlay::Comments);
+        on_comments_overlay_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(app.status.is_some(), "y flashes 'no comments yet'");
+        assert!(app.comments.is_empty());
+        assert_eq!(app.overlay, Some(Overlay::Comments), "the list stays open");
+    }
+
+    #[test]
+    fn overlay_s_with_nothing_flashes_and_stays() {
+        // Only a SUCCESSFUL send (comments cleared) closes the list; a
+        // flashed "no comments yet" leaves it where it was.
+        let mut app = make_app(5, Mode::Source);
+        app.overlay = Some(Overlay::Comments);
+        on_comments_overlay_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.status.is_some(), "s flashes 'no comments yet'");
+        assert_eq!(app.overlay, Some(Overlay::Comments));
+    }
+
+    #[test]
+    fn body_y_on_an_empty_document_flashes() {
+        // `y` in the body copies the line/selection as shown. With no
+        // document there is nothing to copy — and the early return keeps
+        // the test off the real clipboard.
+        let mut app = make_app(0, Mode::Source);
         on_source_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, None);
-        assert_eq!(app.comments.len(), 1, "y keeps the comments");
+        assert!(app.status.is_some(), "y flashes 'nothing to copy'");
+        assert_eq!(app.comments.len(), 0);
+        let mut app = make_app(0, Mode::View);
+        on_view_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, None);
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn shift_j_k_select_and_move_in_both_modes() {
+        // J anchors on the cursor line and extends one line down; K from
+        // there shrinks back; a further K past the anchor grows upward.
+        // The plain j then keeps extending, exactly as after `v`.
+        let mut app = make_app(6, Mode::Source);
+        app.cursor = 2;
+        on_source_key(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT, None);
+        assert_eq!(app.selection.map(|s| s.range()), Some((2, 3)));
+        assert_eq!(app.cursor, 3);
+        on_source_key(&mut app, KeyCode::Down, KeyModifiers::SHIFT, None);
+        assert_eq!(app.selection.map(|s| s.range()), Some((2, 4)));
+        on_source_key(&mut app, KeyCode::Char('K'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('K'), KeyModifiers::NONE, None);
+        on_source_key(&mut app, KeyCode::Char('K'), KeyModifiers::NONE, None);
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)), "K past the anchor grows upward");
+        on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
+        assert_eq!(app.selection.map(|s| s.range()), Some((2, 2)), "plain j extends the live selection");
+        on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+        assert!(app.selection.is_none(), "Esc cancels");
+
+        let mut app = make_app(6, Mode::View);
+        app.view.goto_source_line(1);
+        on_view_key(&mut app, KeyCode::Up, KeyModifiers::SHIFT, None);
+        assert_eq!(app.selection.map(|s| s.range()), Some((0, 1)), "Shift+↑ anchors and grows upward");
+        on_view_key(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT, None);
+        on_view_key(&mut app, KeyCode::Char('J'), KeyModifiers::SHIFT, None);
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)));
+        assert_eq!(app.view.cursor, 2);
+    }
+
+    #[test]
+    fn plain_arrows_still_move_without_selecting() {
+        let mut app = make_app(6, Mode::Source);
+        on_source_key(&mut app, KeyCode::Down, KeyModifiers::NONE, None);
+        assert_eq!(app.cursor, 1);
+        assert!(app.selection.is_none(), "an unshifted arrow never starts a selection");
     }
 
     #[test]

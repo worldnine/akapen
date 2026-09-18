@@ -7,7 +7,8 @@
 /// pressed and extended with j/k.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Selection {
-    /// The line where `v` was pressed.
+    /// The line the selection was anchored on (`v`, or the cursor line
+    /// when `J`/`K` / Shift+↓↑ started it).
     pub anchor: usize,
     /// The current extension line (equals the source-mode cursor).
     pub cursor: usize,
