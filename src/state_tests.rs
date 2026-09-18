@@ -4408,6 +4408,42 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn s_with_a_chatty_send_cmd_keeps_its_output_off_the_screen_and_toast() {
+        // A send command that prints (e.g. `herdr agent prompt` echoing
+        // its JSON reply) must not litter the alternate screen: the
+        // child's stdout/stderr are piped, not inherited — that half is
+        // guaranteed by construction in pipe_and_wait and cannot be
+        // observed here. What CAN be asserted: the send counts as
+        // delivered, and the output does not surface in the toast.
+        let mut app = make_app(5, Mode::Source);
+        // The words are assembled at run time so the toast's `sent via
+        // <cmd>` echo of the command line cannot match them by accident.
+        app.config.send_cmd =
+            Some("cat >/dev/null; echo noi''se; echo hi''ss >&2".to_string());
+        add_comment(&mut app, 1, 1, "c");
+        on_source_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, None);
+        assert!(app.comments.is_empty(), "delivered → cleared");
+        let (msg, _, is_err) = app.status.clone().expect("a toast confirms the send");
+        assert!(!is_err, "a chatty success is still a success: {msg}");
+        assert!(!msg.contains("noise") && !msg.contains("hiss"), "{msg}");
+    }
+
+    #[test]
+    fn s_with_failed_send_shows_the_childs_stderr_in_the_toast() {
+        // A failing send command's last stderr line is the reason the
+        // red toast gives, so the user learns *why* nothing was sent.
+        let mut app = make_app(5, Mode::Source);
+        app.config.send_cmd = Some("echo 'agent p9 not found' >&2; exit 1".to_string());
+        add_comment(&mut app, 1, 1, "c");
+        on_source_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, None);
+        assert_eq!(app.comments.len(), 1, "comments kept on send failure");
+        let (msg, _, is_err) = app.status.clone().expect("a toast reports the failure");
+        assert!(is_err, "{msg}");
+        assert!(msg.contains("send failed"), "{msg}");
+        assert!(msg.contains("agent p9 not found"), "{msg}");
+    }
+
+    #[test]
     fn s_without_send_cmd_is_a_no_op() {
         // Without a target, `s` has nothing to send: it copies to the
         // clipboard (y's job) and keeps the comments — no clearing, no

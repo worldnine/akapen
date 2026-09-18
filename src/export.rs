@@ -10,13 +10,13 @@
 //! Export is non-destructive: comments stay in the list after a copy so the
 //! user can re-output or send them again (delete is explicit, `d`).
 
-use std::io::{ErrorKind, Write};
-use std::os::fd::AsRawFd;
+use std::io::{ErrorKind, Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::process::{ChildStdin, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::comment::Comment;
 
@@ -258,6 +258,17 @@ const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 /// write: stdin is dropped without waiting for the pipe to drain,
 /// since a grandchild inheriting the read end could hold it open
 /// forever.
+///
+/// The child's stdout and stderr are captured too: inherited, they
+/// would be written straight onto the TUI's alternate screen (a
+/// `herdr agent prompt` JSON reply, a chatty wrapper script) and sit
+/// there as garbage until the next full redraw. Both pipes are drained
+/// non-blockingly on every loop turn — so a child that reads its stdin
+/// and then prints more than a pipe buffer cannot deadlock against us
+/// — and never read to EOF, for the same grandchild reason as stdin.
+/// On success the output is discarded; on a non-zero exit its tail
+/// (stderr, else stdout) rides along in the error so the toast can say
+/// *why*, mirroring `send_to_agent`.
 fn pipe_and_wait(
     label: &str,
     cmd: &str,
@@ -268,19 +279,31 @@ fn pipe_and_wait(
     let mut child = Command::new(cmd)
         .args(args)
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("spawning {label}"))?;
     let stdin = child
         .stdin
         .take()
         .with_context(|| format!("{label} stdin unavailable"))?;
-    // The pipe fd must be non-blocking: a blocking write on a full
-    // pipe would freeze the TUI's only thread. SAFETY: `stdin` is a
-    // valid open fd; F_SETFL/O_NONBLOCK is the standard flag write.
-    unsafe {
-        libc::fcntl(stdin.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
-    }
+    let stdout = child
+        .stdout
+        .take()
+        .with_context(|| format!("{label} stdout unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .with_context(|| format!("{label} stderr unavailable"))?;
+    // Every pipe fd must be non-blocking: a blocking write on a full
+    // stdin pipe — or a blocking read on an empty stdout — would freeze
+    // the TUI's only thread.
+    set_nonblocking(stdin.as_raw_fd());
+    set_nonblocking(stdout.as_raw_fd());
+    set_nonblocking(stderr.as_raw_fd());
     let mut stdin = Some(stdin);
+    let mut out = Capture::new(stdout);
+    let mut err = Capture::new(stderr);
     let mut bytes = text.as_bytes();
     let deadline = Instant::now() + timeout;
     loop {
@@ -295,8 +318,16 @@ fn pipe_and_wait(
                 // hold it open indefinitely. There is no writer thread
                 // to leak; dropping the handle is the whole cleanup.
                 drop(stdin.take());
+                // Pick up whatever the child left in the pipes before
+                // exiting (without waiting for EOF — see above).
+                out.drain();
+                err.drain();
                 if !status.success() {
-                    bail!("{label} exited non-zero");
+                    let tail = err.tail().or_else(|| out.tail());
+                    return Err(match tail {
+                        Some(tail) => anyhow!("{label} exited non-zero: {tail}"),
+                        None => anyhow!("{label} exited non-zero"),
+                    });
                 }
                 return Ok(());
             }
@@ -311,6 +342,10 @@ fn pipe_and_wait(
             }
             None => {}
         }
+        // Keep the output pipes from filling up: a child blocked on a
+        // full stdout would never exit, and we would never see it.
+        out.drain();
+        err.drain();
         if bytes.is_empty() {
             // Everything is written: close our write end so the child
             // sees EOF and can exit, then just keep reaping it.
@@ -330,6 +365,84 @@ fn pipe_and_wait(
             // own pause paces the loop until the next try_wait check.
             Some(WriteOutcome::Retry) | None => thread::sleep(Duration::from_millis(10)),
         }
+    }
+}
+
+/// Put a pipe fd into `O_NONBLOCK` mode.
+fn set_nonblocking(fd: RawFd) {
+    // SAFETY: `fd` is a valid open pipe fd owned by the caller;
+    // F_SETFL/O_NONBLOCK is the standard flag write.
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+    }
+}
+
+/// How much of a child's stdout/stderr to keep — only the tail matters
+/// (it becomes one toast line), so anything beyond this is dropped
+/// from the front. A herdr JSON reply can run to many KiB.
+const CAPTURE_LIMIT: usize = 64 * 1024;
+
+/// The longest tail the toast gets; a full-width row is far shorter
+/// than a JSON dump.
+const TAIL_LIMIT: usize = 160;
+
+/// A child's stdout or stderr, read non-blockingly as it arrives and
+/// bounded to the last `CAPTURE_LIMIT` bytes.
+struct Capture<R: Read> {
+    pipe: Option<R>,
+    buf: Vec<u8>,
+}
+
+impl<R: Read> Capture<R> {
+    fn new(pipe: R) -> Self {
+        Self {
+            pipe: Some(pipe),
+            buf: Vec::new(),
+        }
+    }
+
+    /// Read everything currently buffered in the pipe and stop at the
+    /// first would-block — never wait for EOF, which a grandchild
+    /// holding the write end could postpone forever. EOF or a hard
+    /// error retires the pipe.
+    fn drain(&mut self) {
+        let Some(pipe) = self.pipe.as_mut() else {
+            return;
+        };
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => {
+                    self.pipe = None;
+                    return;
+                }
+                Ok(n) => {
+                    self.buf.extend_from_slice(&chunk[..n]);
+                    if self.buf.len() > CAPTURE_LIMIT {
+                        let excess = self.buf.len() - CAPTURE_LIMIT;
+                        self.buf.drain(..excess);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(_) => {
+                    self.pipe = None;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The last non-empty line, trimmed and clipped to `TAIL_LIMIT`
+    /// characters — one toast-sized reason.
+    fn tail(&self) -> Option<String> {
+        let text = String::from_utf8_lossy(&self.buf);
+        let line = text.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
+        let mut clipped: String = line.chars().take(TAIL_LIMIT).collect();
+        if clipped.chars().count() < line.chars().count() {
+            clipped.push('…');
+        }
+        Some(clipped)
     }
 }
 
@@ -694,6 +807,97 @@ mod tests {
             start.elapsed() < Duration::from_secs(5),
             "the child must be killed, not waited for"
         );
+    }
+
+    #[test]
+    fn pipe_and_wait_swallows_a_successful_childs_output() {
+        // A chatty child (`herdr agent prompt` echoes a JSON reply) must
+        // neither leak onto the alternate screen — its stdout/stderr
+        // are piped, never inherited — nor turn a success into an
+        // error. Nothing is surfaced on success.
+        super::pipe_and_wait(
+            "send command",
+            "sh",
+            &["-c", "cat >/dev/null; echo noise; echo hiss >&2"],
+            "hello",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn pipe_and_wait_does_not_deadlock_on_a_flood_of_output() {
+        // A child that prints far more than a pipe buffer (64 KiB)
+        // after reading its stdin would block on write forever if we
+        // only read its output after exit; the in-loop drain keeps it
+        // flowing. Must finish well inside the timeout.
+        let start = Instant::now();
+        super::pipe_and_wait(
+            "send command",
+            "sh",
+            &[
+                "-c",
+                "cat >/dev/null; head -c 300000 /dev/zero | tr '\\0' x; head -c 300000 /dev/zero | tr '\\0' y >&2",
+            ],
+            "hello",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "output must be drained as it arrives"
+        );
+    }
+
+    #[test]
+    fn pipe_and_wait_puts_the_stderr_tail_in_the_error() {
+        // On failure the toast needs a reason: the last non-empty line
+        // of stderr rides along in the error message.
+        let err = super::pipe_and_wait(
+            "send command",
+            "sh",
+            &[
+                "-c",
+                "echo 'first line' >&2; echo 'no such agent: p9' >&2; echo ignored; exit 2",
+            ],
+            "",
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exited non-zero"), "{msg}");
+        assert!(msg.contains("no such agent: p9"), "{msg}");
+        assert!(!msg.contains("first line"), "only the tail is shown: {msg}");
+        assert!(!msg.contains("ignored"), "stderr wins over stdout: {msg}");
+    }
+
+    #[test]
+    fn pipe_and_wait_falls_back_to_the_stdout_tail_when_stderr_is_silent() {
+        let err = super::pipe_and_wait(
+            "send command",
+            "sh",
+            &["-c", "echo 'rejected by server'; exit 1"],
+            "",
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("rejected by server"), "{err}");
+    }
+
+    #[test]
+    fn pipe_and_wait_clips_a_long_tail() {
+        // A JSON dump on one line must not become a screen-wide toast.
+        let err = super::pipe_and_wait(
+            "send command",
+            "sh",
+            &["-c", "head -c 5000 /dev/zero | tr '\\0' j >&2; exit 1"],
+            "",
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.ends_with('…'), "{msg}");
+        assert!(msg.chars().count() < 250, "{}", msg.chars().count());
     }
 
     fn agent(pane: &str, tab: &str, ws: &str, is_agent: bool) -> serde_json::Value {
