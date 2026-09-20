@@ -371,7 +371,7 @@ pub(crate) struct App {
     /// the cursor keeps its absolute position).
     pub(crate) scrollbar_drag: Option<(usize, usize)>,
 
-    // ---- Semantic Reading Layer (docs/semantic-reading-layer.md) ----
+    // ---- Semantic Reading Layer (docs/design/semantic-reading-layer.md) ----
     /// Where semantic annotation comes from: `--semantic` installs a
     /// fixture provider, `--semantic-cmd` an external command, and a
     /// future in-process Jev provider drops in beside them unchanged.

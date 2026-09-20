@@ -1,6 +1,6 @@
 # HANDOFF: 整合性チェックで残った未解決（設計判断が要るもの）
 
-設計書（`docs/semantic-reading-layer.md` / `docs/range-attribution-plan.md`）と
+設計書（`docs/design/semantic-reading-layer.md` / `docs/design/range-attribution-plan.md`）と
 実装・HANDOFF を突き合わせた結果、**誤記ではなく設計判断が要る**ため直さずに
 残した項目。ここは記録であって決定ではない。
 
@@ -24,7 +24,7 @@ debounce であって解析結果の cache ではない。設計書「編集時:
 
 ## 2. Phase 番号が 2 つの意味で使われている
 
-`docs/range-attribution-plan.md` の Phase 3 は **Render Mapping 強化**である。
+`docs/design/range-attribution-plan.md` の Phase 3 は **Render Mapping 強化**である。
 一方このファイルの「HANDOFF: Semantic Reading Layer を akapen へ配線（**Phase 3**
 / Reading Budget）」は別物を指している。さらに同じファイル内の「それは Phase 3 の
 領分」（DIM にしたリスト項目のマーカーの話）は設計書どおりの意味で使っている。
@@ -33,7 +33,7 @@ debounce であって解析結果の cache ではない。設計書「編集時:
 ## 3. `--semantic-cmd` が `confidence` / `probabilities` を捨てている
 
 Jev の 3 つの primitive のうち Choice と Score は `probabilities` と
-`confidence` を返す（`docs/jev.md`）。現行プロトコルは `units` しか受け取らず、
+`confidence` を返す（`docs/design/jev.md`）。現行プロトコルは `units` しか受け取らず、
 Jev の最大の特徴である校正済み確率を使っていない。
 
 `protocol.rs` は「未知のフィールドは拒否していない」ので**拡張は可能**であり、
@@ -43,7 +43,7 @@ Jev の最大の特徴である校正済み確率を使っていない。
 document position` がまさに Tier 内の順位付けで、`policy::keep_order` も
 バイト長という連続値を既に使っている。駄目なのは離散 Tier を連続値で置き換える
 ことで、そこは「0〜100のimportance scoreは使用しない」に直接反する。
-`docs/jev.md` に未解決として記録済み。
+`docs/design/jev.md` に未解決として記録済み。
 
 ## 4. 文書化済みの逸脱（確認のみ、対応不要）
 
@@ -71,14 +71,14 @@ akapen doc.md --semantic-cmd 'python3 examples/semantic/annotate-doc.py'
 ```
 
 意味判断だけを外部プロセスへ委譲する経路。**将来 Jev を繋ぐ口**で、
-このタスクでは Jev を呼んでいない（Jev は LLM ではない。`docs/jev.md` 参照）。
+このタスクでは Jev を呼んでいない（Jev は LLM ではない。`docs/design/jev.md` 参照）。
 
 akapen に HTTP クライアントも async ランタイムも**入れていない**。
 reqwest / tokio を足すと、この機能を使わない全ユーザーにコンパイル時間・
 バイナリサイズ・依存監査のコストが乗る。代わりに `--send-cmd` と同じ作法で
 外部コマンドへ渡す — API キー管理が akapen の責務から外れ、Jev を呼ぶ
 アダプタスクリプト（`atoms` を question 群へ変換し、typed answer を `units`
-へ戻すもの。`docs/jev.md`）を akapen の外に置ける。
+へ戻すもの。`docs/design/jev.md`）を akapen の外に置ける。
 
 ## 1. プロトコル — Atom を渡して Unit を受け取る
 
@@ -1437,13 +1437,13 @@ line 42
 [この部分だけ重要][この部分は通常][ここは重複]
 ```
 
-上に載る予定の Semantic Reading Layer（`docs/semantic-reading-layer.md`）は、
+上に載る予定の Semantic Reading Layer（`docs/design/semantic-reading-layer.md`）は、
 Atom 単位の MARKED / NORMAL / DIM を「同じ行の途中で切り替える」ことを前提に
 設計されている。行単位の attribution では静かに実現できない。
 
 renderer は `Parser::into_offset_iter()` を使っており、内部には `Event + Range<usize>`
 がすでに存在する。**新しく位置情報を取る必要はなく、すでにある byte range を
-途中で捨てずに rendered output まで運ぶ** のが本改修（`docs/range-attribution-plan.md`
+途中で捨てずに rendered output まで運ぶ** のが本改修（`docs/design/range-attribution-plan.md`
 の Phase 1）。
 
 ## exactness contract（この改修の中核）

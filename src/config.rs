@@ -122,7 +122,7 @@ pub struct Config {
     /// akapen's own (see [`crate::semantic::CommandProvider`]).
     ///
     /// This is where a Jev adapter plugs in — Jev is a System One model,
-    /// NOT an LLM; see `docs/jev.md`. akapen itself gains no HTTP client
+    /// NOT an LLM; see `docs/design/jev.md`. akapen itself gains no HTTP client
     /// and no async runtime for it: `--send-cmd`'s arrangement — a shell
     /// command on stdin/stdout — keeps API-key handling out of akapen and
     /// leaves the adapter (atoms in, typed answers back out as units) a

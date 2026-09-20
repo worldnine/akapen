@@ -77,7 +77,7 @@ API キー無しでパイプライン全体を端から端まで動かせるこ�
 ```
 
 という素朴なヒューリスティクスでしかない。実際の Jev（LLM ではなく
-System One モデル。`docs/jev.md` 参照）への question 設計はここには無い。
+System One モデル。`docs/design/jev.md` 参照）への question 設計はここには無い。
 
 ### プロトコル
 
@@ -141,7 +141,7 @@ atoms → Jev の question 群 → Jev の typed answer → units
 
 で、Jev は TypeSafe の System One モデル（**LLM ではない** — typed な
 question を state に対して並列評価して構造化された値を返す）である。
-primitive と呼び出し方は `docs/jev.md` を参照。
+primitive と呼び出し方は `docs/design/jev.md` を参照。
 
 API キーの管理は akapen の責務ではない — コマンドが自分の環境で解決する
 （Jev なら `TYPESAFE_API_KEY`）。

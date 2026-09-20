@@ -6173,7 +6173,7 @@ mod history_animation_tests {
     }
 }
 
-/// Range decoration in SOURCE mode: `docs/range-attribution-plan.md`'s
+/// Range decoration in SOURCE mode: `docs/design/range-attribution-plan.md`'s
 /// Phase 1 (attribution) and Phase 2 (decoration) applied to the
 /// raw-Markdown screen, where the rendered view had them already. The
 /// tests here run [`build_rows`] — the real source-mode drawer — and read
@@ -6399,7 +6399,7 @@ mod source_decoration_tests {
 
     /// Japanese, emoji and full-width characters: a decoration is cut at
     /// BYTE offsets while the wrap measures COLUMNS, and confusing the
-    /// two is the trap `docs/range-attribution-plan.md` names by name.
+    /// two is the trap `docs/design/range-attribution-plan.md` names by name.
     /// The marked text is compared against the source slice, so an
     /// off-by-one in either space fails here.
     #[test]
@@ -6461,7 +6461,7 @@ mod source_decoration_tests {
     /// rows, their spans and their styles are unchanged. (The mechanical
     /// version of this — every testdata file × three widths × cursors ×
     /// offsets, dumped and `cmp`-ed against the pre-change HEAD — is in
-    /// HANDOFF.md.)
+    /// docs/handoff-archive.md.)
     #[test]
     fn no_decorations_leaves_the_source_rows_alone() {
         let content = "# 見出し\n\n本文と `code` と **強調**\n\n- 項目1\n- 項目2\n\tタブ\n";
