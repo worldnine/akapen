@@ -759,11 +759,12 @@ mod footer_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         app.mode = Mode::Source;
         app

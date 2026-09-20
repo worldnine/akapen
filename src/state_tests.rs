@@ -77,11 +77,12 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.
@@ -121,11 +122,12 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.
@@ -820,11 +822,12 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         app.mode = Mode::View;
         assert_eq!(
@@ -870,11 +873,12 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         app.mode = Mode::View;
         app.view.cursor = 0;
@@ -907,11 +911,12 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         app.mode = Mode::View;
         // Deterministic 1:1 row mapping (headings etc. render with extra
@@ -1883,6 +1888,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -1897,10 +1903,10 @@ use crate::comment::Selection;
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         let width = view_render_width(w);
-        let view = render_view_with_cards(&source, width, &highlight, &comments);
+        let view = render_view_with_cards(&source, width, &highlight, &comments, Default::default());
         let card_h = view.card_rows.iter().filter(|&&b| b).count();
         assert!(card_h >= 3, "title + body + rule rows");
-        let base = ViewState::render(&source, width, &highlight);
+        let base = ViewState::render(&source, width, &highlight, Default::default());
         assert_eq!(
             view.source_starts[3],
             base.source_starts[3] + card_h,
@@ -1997,6 +2003,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -2012,7 +2019,7 @@ use crate::comment::Selection;
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
         let width = view_render_width(w);
-        let mut view = render_view_with_cards(&source, width, &highlight, &comments);
+        let mut view = render_view_with_cards(&source, width, &highlight, &comments, Default::default());
         let card_h = view.card_rows.iter().filter(|&&b| b).count();
         assert!(card_h >= 3);
         // The paragraph (lines 0-3) shares row 0; the card follows it;
@@ -2087,8 +2094,8 @@ use crate::comment::Selection;
             revision: None,
             text: "mid-block".into(),
         }];
-        let base = ViewState::render(&source, 60, &highlight);
-        let view = render_view_with_cards(&source, 60, &highlight, &comments);
+        let base = ViewState::render(&source, 60, &highlight, Default::default());
+        let view = render_view_with_cards(&source, 60, &highlight, &comments, Default::default());
         let first_card = view.card_rows.iter().position(|&b| b).unwrap();
         assert_eq!(
             first_card,
@@ -2296,11 +2303,12 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(config.files[0].clone()).unwrap();
         let highlight = Highlighter::new(None, false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.
@@ -5853,7 +5861,7 @@ fn a_comment_card_keeps_row_attrs_parallel_to_the_rows() {
         revision: None,
         text: "カード".into(),
     }];
-    let view = render_view_with_cards(&source, 60, &highlight, &comments);
+    let view = render_view_with_cards(&source, 60, &highlight, &comments, Default::default());
     assert!(view.card_rows.iter().any(|&b| b), "the card was inserted");
     assert_eq!(
         view.row_attrs.len(),
@@ -5891,9 +5899,9 @@ fn a_decoration_below_a_comment_card_still_lands_on_its_own_row() {
         revision: None,
         text: "カード".into(),
     }];
-    let view = render_view_with_cards(&source, 60, &highlight, &comments);
-    let mark_bg = DecorationStyles::from_theme(&highlight)
-        .of(DecorationKind::SemanticMark)
+    let view = render_view_with_cards(&source, 60, &highlight, &comments, Default::default());
+    let mark_bg = DecorationStyles::from_theme(&highlight, Default::default())
+        .mark_style()
         .bg;
     let start = text.find("重要").unwrap();
     let decorations = vec![Decoration {
@@ -5962,6 +5970,7 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         cursor_anchor: true,
         fx: false,
         semantic: None,
+        decoration_blend: Default::default(),
         decorations: vec![
             mark_at("重要", DecorationKind::SemanticMark),
             mark_at(" 後", DecorationKind::Dim),
@@ -5969,10 +5978,12 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
     };
     let source = Source::load(path).unwrap();
     let highlight = Highlighter::new(config.theme.as_deref(), false);
-    let view = ViewState::render(&source, crate::view_render_width(60), &highlight);
-    let mark_bg = DecorationStyles::from_theme(&highlight)
-        .of(DecorationKind::SemanticMark)
-        .bg;
+    let view = ViewState::render(&source, crate::view_render_width(60), &highlight, Default::default());
+    let styles = DecorationStyles::from_theme(&highlight, Default::default());
+    let mark_bg = styles.mark_style().bg;
+    // The paragraph's plain text carries the theme's default foreground,
+    // so that is what the dim resolves from.
+    let dim_fg = styles.dim_fg(None);
     let mut app = App::new(config, source, highlight, view, false);
     app.mode = Mode::View;
     app.gutter_cols = 3;
@@ -6004,21 +6015,25 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
 
     assert_eq!(marked.bg, mark_bg, "the marked region has the mark background");
     assert_ne!(plain.bg, mark_bg, "the plain region does not");
-    assert!(
-        dimmed.add_modifier.contains(ratatui::style::Modifier::DIM),
-        "the dimmed region is dim"
-    );
-    assert!(!plain.add_modifier.contains(ratatui::style::Modifier::DIM));
-    assert!(!marked.add_modifier.contains(ratatui::style::Modifier::DIM));
+    // The dim is a real COLOR, not `Modifier::DIM` — SGR 2 is too widely
+    // ignored for the layer to rely on (that is what made MARKED and DIM
+    // indistinguishable on a real terminal).
+    assert_eq!(dimmed.fg, Some(dim_fg), "the dimmed region has the dim color");
+    assert_ne!(dimmed.fg, plain.fg);
+    assert_eq!(dimmed.bg, plain.bg, "dim does not touch the background");
+    for style in [plain, marked, dimmed] {
+        assert!(!style.add_modifier.contains(ratatui::style::Modifier::DIM));
+    }
     // Three distinct styles on one terminal line.
     assert_ne!(plain, marked);
     assert_ne!(plain, dimmed);
     assert_ne!(marked, dimmed);
     // Syntax highlighting survived: the strong span keeps BOLD and its
-    // color under the mark.
+    // color under the mark, and the dimmed text keeps its hue (it is the
+    // plain color moved toward the page, not a flat gray).
     assert!(marked.add_modifier.contains(ratatui::style::Modifier::BOLD));
     assert_eq!(marked.fg, plain.fg);
-    assert_eq!(dimmed.fg, plain.fg);
+    assert_eq!(dimmed.add_modifier, plain.add_modifier);
 }
 
 
@@ -6029,7 +6044,7 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
 /// the READ budget** — seen the way the terminal sees it.
 #[test]
 fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
-    use crate::decoration::{DecorationKind, DecorationStyles};
+    use crate::decoration::DecorationStyles;
 
     let path = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -6052,14 +6067,14 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
         cursor_anchor: true,
         fx: false,
         semantic: Some(fixture.clone()),
+        decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
     let source = Source::load(path).unwrap();
     let highlight = Highlighter::new(config.theme.as_deref(), false);
-    let view = ViewState::render(&source, crate::view_render_width(80), &highlight);
-    let mark_bg = DecorationStyles::from_theme(&highlight)
-        .of(DecorationKind::SemanticMark)
-        .bg;
+    let view = ViewState::render(&source, crate::view_render_width(80), &highlight, Default::default());
+    let styles = DecorationStyles::from_theme(&highlight, Default::default());
+    let mark_bg = styles.mark_style().bg;
     let mut app = App::new(config, source, highlight, view, false);
     // Config → provider の分岐 → App という実経路を通す。provider を
     // 増やすときに触るのはこの関数の match 1 つだけ、という約束の固定。
@@ -6102,19 +6117,21 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
     assert!(!detail.add_modifier.contains(ratatui::style::Modifier::DIM));
     assert_ne!(essential, detail, "100 % でもう行の途中で切り替わっている");
 
-    // READ 30 % — the same line, now MARKED against DIM.
+    // READ 30 % — the same line, now MARKED against DIM. The dim is a
+    // real foreground COLOR (SGR 2 is too widely ignored to rely on), so
+    // the two halves differ in a way every terminal renders.
+    let bright = detail.fg;
     assert!(app.nudge_reading_budget(-70));
     assert_eq!(app.reading_budget, 30);
     let (essential, detail) = halves(&mut app, &mut terminal);
     assert_eq!(essential.bg, mark_bg, "ESSENTIAL は Budget を下げても MARKED");
-    assert!(
-        detail.add_modifier.contains(ratatui::style::Modifier::DIM),
-        "DETAIL は DIM に落ちる"
-    );
-    assert!(!essential.add_modifier.contains(ratatui::style::Modifier::DIM));
+    assert_eq!(detail.fg, Some(styles.dim_fg(bright)), "DETAIL は DIM に落ちる");
+    assert_ne!(detail.fg, bright);
+    assert_eq!(essential.fg, bright, "MARKED 側の前景は動かない");
+    for style in [essential, detail] {
+        assert!(!style.add_modifier.contains(ratatui::style::Modifier::DIM));
+    }
     assert_ne!(essential, detail);
-    // 装飾は fg を触らない（syntax highlight は生きたまま）。
-    assert_eq!(essential.fg, detail.fg);
 }
 
 /// 設計書「Budget 変更では Jev を呼ばない」を、呼び出し回数と

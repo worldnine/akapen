@@ -390,6 +390,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
         view_render_width(w),
         &app.highlight,
         &file_comments,
+        app.config.decoration_blend,
     );
     view.goto_fraction(fraction);
     view.keep_cursor_visible(app.view_viewport_rows());
@@ -461,11 +462,12 @@ mod handoff_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path.into()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.
@@ -520,11 +522,12 @@ mod handoff_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.

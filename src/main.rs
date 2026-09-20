@@ -107,6 +107,11 @@ fn main() -> Result<()> {
                  \x20 --semantic <file> paint the Semantic Reading Layer from a\n\
                  \x20                   semantic-reading annotation (JSON); the READ\n\
                  \x20                   budget is -/+ by 1 and </> by 10 in the view\n\
+                 \x20 --mark-blend <f>  how far the MARKED background is lifted off\n\
+                 \x20                   the page, 0.0..1.0 (default 0.22)\n\
+                 \x20 --dim-blend <f>   how far a DIM foreground is moved toward the\n\
+                 \x20                   page, 0.0..1.0 (default 0.60; 1.0 is the page\n\
+                 \x20                   itself, i.e. invisible)\n\
                  \x20 --callback <cmd>  shell command to spawn on exit\n\
                  \x20                   (e.g. return to a file-picker after quit)\n\
                  \x20 --esc-quit <auto|always|never> whether Esc may quit\n\
@@ -364,7 +369,7 @@ fn run(config: Config) -> Result<()> {
         // shown; rendering it here would be discarded work at startup
         // (a session of many large .rs files pays for it).
         let view = if supports_view(f) {
-            render_view_with_cards(&source, view_render_width(size.width), &highlight, &[])
+            render_view_with_cards(&source, view_render_width(size.width), &highlight, &[], config.decoration_blend)
         } else {
             ViewState::default()
         };
@@ -1169,8 +1174,9 @@ pub(crate) fn render_view_with_cards(
     columns: u16,
     highlighter: &Highlighter,
     comments: &[Comment],
+    blend: crate::decoration::DecorationBlend,
 ) -> ViewState {
-    let mut view = ViewState::render(source, columns, highlighter);
+    let mut view = ViewState::render(source, columns, highlighter, blend);
     insert_cards(&mut view, comments, columns as usize);
     view
 }
@@ -1235,7 +1241,7 @@ fn insert_cards(view: &mut ViewState, comments: &[Comment], columns: usize) {
 pub(crate) fn render_current_view(app: &App, comments: &[Comment]) -> ViewState {
     let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     let width = view_render_width(w);
-    render_view_with_cards(&app.source, width, &app.highlight, comments)
+    render_view_with_cards(&app.source, width, &app.highlight, comments, app.config.decoration_blend)
 }
 
 
@@ -1731,7 +1737,7 @@ fn appear_effects(
             Vec::new()
         } else {
             let old_source = Source::from_content(path.to_path_buf(), old_block);
-            ViewState::render(&old_source, view.width.max(1) as u16, highlighter).rows
+            ViewState::render(&old_source, view.width.max(1) as u16, highlighter, Default::default()).rows
         };
         let mask = appear_mask(view, row0, height, &old_rows);
         out.push((
@@ -2133,7 +2139,7 @@ fn insert_history_ghosts(
     ordered.sort_by_key(|block| std::cmp::Reverse(block.anchor));
     for block in ordered {
         let source = Source::from_content(path.to_path_buf(), block.content);
-        let ghost = ViewState::render(&source, view.width.max(1) as u16, highlighter);
+        let ghost = ViewState::render(&source, view.width.max(1) as u16, highlighter, Default::default());
         if ghost.rows.is_empty() {
             continue;
         }
@@ -5387,11 +5393,12 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.
@@ -5436,11 +5443,12 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 57, &highlight);
+        let view = ViewState::render(&source, 57, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.
@@ -5499,11 +5507,12 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 57, &highlight);
+        let view = ViewState::render(&source, 57, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         app.spans = app
             .highlight
@@ -5645,11 +5654,12 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.
@@ -5686,11 +5696,12 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(config.files[0].clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         App::new(config, source, highlight, view, false)
     }
 
@@ -5823,11 +5834,12 @@ mod mouse_view_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
         let source = Source::load(path.into()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
-        let view = ViewState::render(&source, 75, &highlight);
+        let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
         // fill them here exactly like run() does.
@@ -5981,7 +5993,7 @@ mod history_animation_tests {
     fn deleted_block_is_inserted_dimly_then_can_be_rebuilt_away() {
         let highlight = Highlighter::new(None, false);
         let source = Source::from_content("doc.md".into(), "# Next\n\ntext\n".into());
-        let mut view = ViewState::render(&source, 60, &highlight);
+        let mut view = ViewState::render(&source, 60, &highlight, Default::default());
         let original_rows = view.rows.len();
         let original_start = view.source_starts[0];
         let rects = insert_history_ghosts(
@@ -6023,7 +6035,7 @@ mod history_animation_tests {
         // mapping, so wrapped/merged rows are covered as one block.
         let highlight = Highlighter::new(None, false);
         let source = Source::from_content("doc.md".into(), "a\n\nb\n\nc\n\nd\n\ne\n\nf\n".into());
-        let view = ViewState::render(&source, 60, &highlight);
+        let view = ViewState::render(&source, 60, &highlight, Default::default());
         let changed = HashSet::from([0usize, 1, 4]);
         let old_lines: Vec<String> =
             vec!["x".into(), "".into(), "b".into(), "".into(), "e".into(), "".into()];
@@ -6062,11 +6074,13 @@ mod history_animation_tests {
             &Source::from_content("doc.md".into(), format!("{old}\n")),
             20,
             &highlight,
+            Default::default(),
         );
         let new_view = ViewState::render(
             &Source::from_content("doc.md".into(), format!("{new}\n")),
             20,
             &highlight,
+            Default::default(),
         );
         assert_eq!(new_view.rows.len(), 2, "the new block wraps to two rows");
         let row0 = new_view.source_starts[0];

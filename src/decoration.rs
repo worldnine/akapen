@@ -34,16 +34,40 @@
 //!
 //! # Style is patched, never replaced
 //!
-//! Syntax highlighting must survive decoration, so every kind touches the
-//! narrowest possible part of the style ([`DecorationStyles`]):
-//! [`DecorationKind::SemanticMark`] sets a background only,
-//! [`DecorationKind::Dim`] adds [`Modifier::DIM`] only. The foreground is
-//! never touched — it carries the syntax color.
+//! Syntax highlighting must survive decoration, so each kind touches the
+//! narrowest part of the style it can afford to:
+//! [`DecorationKind::SemanticMark`] sets a **background** only, and
+//! [`DecorationKind::Dim`] sets a **foreground** only.
 //!
-//! The view's own layers (selection, cursor band, comment focus) are
-//! applied AFTER this one in `view.rs`, so they win by construction; the
-//! selection band additionally clears `DIM`, or a dimmed row would read as
-//! a hole in the band.
+//! # Why Dim writes the foreground (Phase 2 said it never would)
+//!
+//! Phase 2 shipped `Dim` as [`Modifier::DIM`] with the foreground
+//! untouched, on the reasoning that a theme-derived gray would flatten
+//! every color in the dimmed range into one. That was right about the
+//! gray and wrong about the modifier: **SGR `2` is widely ignored.** On
+//! the terminal this was tried on it did nothing at all, so MARKED and
+//! DIM were indistinguishable — the layer's whole point.
+//!
+//! So `Dim` now blends the span's EFFECTIVE foreground
+//! ([`DecorationStyles::dim_fg`]) toward the theme background by
+//! [`DIM_BLEND`]. It is a real color, so every terminal renders it. The
+//! objection about flattening does not apply: each span keeps its own
+//! hue, merely moved toward the page — a dimmed heading is still a
+//! dimmed HEADING. `Modifier::DIM` is deliberately NOT set as well;
+//! a terminal that honours it would darken twice.
+//!
+//! "Effective" foreground means the span's own `fg`, or the theme's
+//! default foreground when the span has none. Leaving it `None` would
+//! dim nothing, which is how the bug looked in the first place.
+//!
+//! The view's own layers (selection, cursor band, history glow) are
+//! applied AFTER this one in `view.rs`, so they win by construction —
+//! except that they can no longer win over `Dim`, because a foreground
+//! is not a background. A band laid over a dimmed foreground would read
+//! as "I selected it and the text went pale". `view.rs` therefore
+//! **drops `Dim` decorations for rows under a band** before decorating,
+//! which is the same intent Phase 2's `remove_modifier(Modifier::DIM)`
+//! carried, expressed in the only way the new mechanism allows.
 //!
 //! # Purity
 //!
@@ -61,7 +85,7 @@
 
 use std::ops::Range;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use tui_markdown::Attr;
 
 use crate::highlight::{Highlighter, Span};
@@ -83,7 +107,7 @@ pub struct Decoration {
 pub enum DecorationKind {
     /// "This is worth reading": a subdued background, theme-derived.
     SemanticMark,
-    /// "This can be skimmed": dimmed, foreground untouched.
+    /// "This can be skimmed": the foreground moved toward the page.
     Dim,
 }
 
@@ -93,11 +117,58 @@ pub enum DecorationKind {
 const MARK_BG_DARK: Color = Color::Rgb(0x36, 0x37, 0x49);
 const MARK_BG_LIGHT: Color = Color::Rgb(0xe7, 0xe5, 0xd5);
 
+/// The theme background a [`DecorationKind::Dim`] foreground is blended
+/// toward when the theme declares none of its own. Same split as
+/// [`MARK_BG_DARK`]/[`MARK_BG_LIGHT`], picked by the foreground's
+/// brightness.
+const DIM_TARGET_DARK: Color = Color::Rgb(0x1e, 0x1e, 0x2e);
+const DIM_TARGET_LIGHT: Color = Color::Rgb(0xfd, 0xf6, 0xe3);
+
 /// How far the mark background is lifted from the theme background toward
-/// the theme foreground when no scope supplies one. Small on purpose: the
-/// mark sits BELOW the selection band in the priority order, so it must
-/// stay quieter than it.
-const MARK_BG_BLEND: f32 = 0.14;
+/// the theme foreground when no scope supplies one.
+///
+/// The mark sits BELOW the selection band in the priority order, so it
+/// must stay clearly quieter than it — see [`MARK_BG_BLEND_CEILING`].
+/// 0.14 was tried first and read as "nothing happened" on a real
+/// terminal; 0.22 was picked by eye against four alternatives.
+pub const MARK_BG_BLEND: f32 = 0.22;
+
+/// The highest default [`MARK_BG_BLEND`] may take before the mark starts
+/// to be mistakable for the selection band (dark: the band is
+/// `rgb(88,91,112)`, and 0.30 already lands on `rgb(82,85,105)`).
+///
+/// A ceiling on the SHIPPED default, not on `--mark-blend`: the flag is a
+/// knob for looking at alternatives, and silently clamping what the user
+/// typed would make it a useless one. A test holds the default under it.
+pub const MARK_BG_BLEND_CEILING: f32 = 0.25;
+
+/// The ceiling is not advice: raising [`MARK_BG_BLEND`] past it stops the
+/// build, not a test run.
+const _: () = assert!(MARK_BG_BLEND <= MARK_BG_BLEND_CEILING);
+
+/// How far a [`DecorationKind::Dim`] foreground is moved from its own
+/// color toward the theme background. 0.60 was picked by eye on a real
+/// terminal: far enough to recede, near enough to stay readable and keep
+/// its hue.
+pub const DIM_BLEND: f32 = 0.60;
+
+/// The two blend factors, together. **The defaults live here and nowhere
+/// else**; the command line overrides them (`--mark-blend` /
+/// `--dim-blend`) and any future configuration file would slot in
+/// between, as the middle layer of `CLI > config file > default`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecorationBlend {
+    /// [`MARK_BG_BLEND`].
+    pub mark: f32,
+    /// [`DIM_BLEND`].
+    pub dim: f32,
+}
+
+impl Default for DecorationBlend {
+    fn default() -> Self {
+        Self { mark: MARK_BG_BLEND, dim: DIM_BLEND }
+    }
+}
 
 /// The scopes a theme may use for a "marked passage" background, best
 /// first. Resolved through the very same [`Highlighter::scope_style`] path
@@ -116,48 +187,90 @@ const MARK_SCOPES: &[&str] = &[
 /// The resolved per-kind styles for one theme. Built once per render (the
 /// theme cannot change without a re-render) and applied by patching, so a
 /// decorated span keeps its syntax color and its font style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecorationStyles {
+    /// The mark's patch: a background and nothing else.
     mark: Style,
-    dim: Style,
+    /// Where a dimmed foreground travels toward — the theme's background.
+    dim_target: Color,
+    /// The foreground a span that declares none actually renders with.
+    default_fg: Color,
+    /// How far along `fg -> dim_target` a dimmed span lands.
+    dim_blend: f32,
 }
 
 impl Default for DecorationStyles {
-    /// The dark-theme styles. Only reachable through a `ViewState` built
-    /// without a render (`std::mem::take`), which is never painted.
+    /// The dark-theme styles at the default blends. Only reachable
+    /// through a `ViewState` built without a render (`std::mem::take`),
+    /// which is never painted.
     fn default() -> Self {
         Self {
             mark: Style::default().bg(MARK_BG_DARK),
-            dim: Style::default().add_modifier(Modifier::DIM),
+            dim_target: DIM_TARGET_DARK,
+            default_fg: Color::Rgb(0xcd, 0xd6, 0xf4),
+            dim_blend: DIM_BLEND,
         }
     }
 }
 
 impl DecorationStyles {
-    /// Resolve both kinds against `highlighter`'s theme.
-    pub fn from_theme(highlighter: &Highlighter) -> Self {
+    /// Resolve both kinds against `highlighter`'s theme at `blend`.
+    pub fn from_theme(highlighter: &Highlighter, blend: DecorationBlend) -> Self {
+        let default_fg = highlighter.default_fg();
         Self {
-            mark: Style::default().bg(mark_background(highlighter)),
-            // DIM is the modifier every terminal understands, and it
-            // leaves the syntax foreground in place (a theme-derived gray
-            // would flatten every color in the dimmed range to one).
-            dim: Style::default().add_modifier(Modifier::DIM),
+            mark: Style::default().bg(mark_background(highlighter, blend.mark)),
+            dim_target: match highlighter.theme().settings.background {
+                Some(bg) => Color::Rgb(bg.r, bg.g, bg.b),
+                // No theme background at all: pick the side from the text
+                // color, exactly as `mark_background` does.
+                None => match default_fg {
+                    Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => {
+                        DIM_TARGET_DARK
+                    }
+                    _ => DIM_TARGET_LIGHT,
+                },
+            },
+            default_fg,
+            dim_blend: blend.dim,
         }
     }
 
-    /// The patch for `kind` — a style that sets only what the kind owns.
-    pub fn of(&self, kind: DecorationKind) -> Style {
-        match kind {
-            DecorationKind::SemanticMark => self.mark,
-            DecorationKind::Dim => self.dim,
-        }
+    /// The mark's patch: a background, no foreground, no modifier.
+    pub fn mark_style(&self) -> Style {
+        self.mark
     }
 
-    /// `base` with `kind` applied. Patching, not replacing: the
-    /// foreground, the background the kind does not own, and every
-    /// modifier already on `base` survive.
+    /// The foreground a span whose own foreground is `base` renders with
+    /// once dimmed.
+    ///
+    /// `None` — a span that inherits the theme's text color — resolves to
+    /// that color first, so it dims like everything else instead of
+    /// staying bright. A NAMED color (a terminal-palette entry) has no
+    /// RGB to interpolate, so it falls back to the theme default too: the
+    /// hue is lost, but "this text recedes" is the point of the kind, and
+    /// content spans in the rendered view carry RGB from the theme.
+    pub fn dim_fg(&self, base: Option<Color>) -> Color {
+        let fg = match base {
+            Some(rgb @ Color::Rgb(..)) => rgb,
+            Some(_) | None => self.default_fg,
+        };
+        crate::view::lerp_color(fg, self.dim_target, self.dim_blend)
+    }
+
+    /// `base` with `kind` applied. Patching, not replacing: everything
+    /// the kind does not own — the other of fg/bg, and every modifier
+    /// already on `base` — survives.
+    ///
+    /// Applying both kinds to one span composes in either order: the mark
+    /// only writes a background, and the dim reads `base.fg` before
+    /// writing it. Applying the SAME `Dim` twice would darken twice; the
+    /// producers here emit one decoration per Atom, and `--decorations`
+    /// is a development flag.
     pub fn patch(&self, base: Style, kind: DecorationKind) -> Style {
-        base.patch(self.of(kind))
+        match kind {
+            DecorationKind::SemanticMark => base.patch(self.mark_style()),
+            DecorationKind::Dim => base.fg(self.dim_fg(base.fg)),
+        }
     }
 }
 
@@ -166,7 +279,7 @@ impl DecorationStyles {
 /// toward its foreground (so it reads as "slightly raised paper" in a dark
 /// AND a light theme), else a fixed pair picked by the foreground's
 /// brightness.
-fn mark_background(highlighter: &Highlighter) -> Color {
+fn mark_background(highlighter: &Highlighter, blend: f32) -> Color {
     for scope in MARK_SCOPES {
         if let Some(bg) = highlighter.scope_style(scope).and_then(|s| s.bg) {
             return bg;
@@ -175,11 +288,7 @@ fn mark_background(highlighter: &Highlighter) -> Color {
     let settings = &highlighter.theme().settings;
     let fg = highlighter.default_fg();
     match settings.background {
-        Some(bg) => crate::view::lerp_color(
-            Color::Rgb(bg.r, bg.g, bg.b),
-            fg,
-            MARK_BG_BLEND,
-        ),
+        Some(bg) => crate::view::lerp_color(Color::Rgb(bg.r, bg.g, bg.b), fg, blend),
         // No theme background at all: pick the side from the text color.
         None => match fg {
             Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => MARK_BG_DARK,
@@ -355,6 +464,7 @@ fn push_exact(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
     use crate::render::{Rendered, render};
     use crate::source::Source;
 
@@ -364,7 +474,7 @@ mod tests {
         let source = Source::from_content("doc.md".into(), text.to_string());
         let highlighter = Highlighter::new(None, false);
         let rendered = render(&source, width, &highlighter);
-        let styles = DecorationStyles::from_theme(&highlighter);
+        let styles = DecorationStyles::from_theme(&highlighter, Default::default());
         (source, rendered, styles)
     }
 
@@ -455,16 +565,16 @@ mod tests {
         assert!(before[1].1.add_modifier.contains(Modifier::BOLD));
         assert_eq!(marked.fg, before[1].1.fg);
         assert_eq!(marked.add_modifier, before[1].1.add_modifier);
-        assert_eq!(marked.bg, styles.of(DecorationKind::SemanticMark).bg);
+        assert_eq!(marked.bg, styles.mark_style().bg);
         assert!(marked.bg.is_some());
-        // DIM: only the modifier is new — the foreground still carries
-        // the syntax color.
-        assert_eq!(dimmed.fg, before[2].1.fg);
+        // DIM: only the foreground is new — the background and every
+        // modifier are the undecorated ones, and the new color is the
+        // old one moved toward the page (not a flat gray).
         assert_eq!(dimmed.bg, before[2].1.bg);
-        assert_eq!(
-            dimmed.add_modifier,
-            before[2].1.add_modifier | Modifier::DIM
-        );
+        assert_eq!(dimmed.add_modifier, before[2].1.add_modifier);
+        assert!(!dimmed.add_modifier.contains(Modifier::DIM), "SGR 2 は使わない");
+        assert_ne!(dimmed.fg, before[2].1.fg);
+        assert_eq!(dimmed.fg, Some(styles.dim_fg(before[2].1.fg)));
     }
 
     /// The intersection rule for an EXACT span: a decoration ending
@@ -482,7 +592,7 @@ mod tests {
         assert_eq!(joined(&after), "前重要後");
         assert_eq!(after[0].1, before[0].1);
         assert_eq!(after[2].1, before[0].1);
-        assert_eq!(after[1].1.bg, styles.of(DecorationKind::SemanticMark).bg);
+        assert_eq!(after[1].1.bg, styles.mark_style().bg);
         assert_eq!(after[1].1.fg, before[0].1.fg);
     }
 
@@ -509,7 +619,7 @@ mod tests {
     fn a_decoration_crosses_a_soft_wrap() {
         let (source, r, styles) = doc("あいうえおかきくけこさしすせそたちつてと\n", 12);
         let decorations = vec![mark(at(&source, "かきくけこ"))];
-        let mark_bg = styles.of(DecorationKind::SemanticMark).bg;
+        let mark_bg = styles.mark_style().bg;
         let first = row(&r, &styles, &decorations, 0);
         let second = row(&r, &styles, &decorations, 1);
         assert_eq!(texts(&first), ["あいうえお", "か"]);
@@ -527,7 +637,7 @@ mod tests {
     #[test]
     fn a_decoration_on_a_link_label_does_not_bleed_into_the_url() {
         let (source, r, styles) = doc("前 [ラベル](https://example.com) 後\n", 80);
-        let mark_bg = styles.of(DecorationKind::SemanticMark).bg;
+        let mark_bg = styles.mark_style().bg;
         let after = row(&r, &styles, &[mark(at(&source, "ラベル"))], 0);
         assert_eq!(
             texts(&after),
@@ -546,7 +656,7 @@ mod tests {
     #[test]
     fn a_decoration_covering_the_whole_link_reaches_its_url() {
         let (source, r, styles) = doc("前 [ラベル](https://example.com) 後\n", 80);
-        let mark_bg = styles.of(DecorationKind::SemanticMark).bg;
+        let mark_bg = styles.mark_style().bg;
         let link = at(&source, "[ラベル](https://example.com)");
         let after = row(&r, &styles, &[mark(link)], 0);
         let decorated: Vec<&str> = after
@@ -565,7 +675,7 @@ mod tests {
     fn a_partial_overlap_of_a_superset_span_is_not_decorated() {
         let table = "| あ | い |\n|---|---|\n| cell one | cell two |\n";
         let (source, r, styles) = doc(table, 40);
-        let mark_bg = styles.of(DecorationKind::SemanticMark).bg;
+        let mark_bg = styles.mark_style().bg;
         let i = row_with(&r, "cell one");
         // The cell's attribution is a superset by construction.
         let cell = r.rows[i]
@@ -599,7 +709,7 @@ mod tests {
     fn synthesized_spans_are_never_decorated() {
         let table = "| あ | い |\n|---|---|\n| cell one | cell two |\n";
         let (source, r, styles) = doc(table, 40);
-        let mark_bg = styles.of(DecorationKind::SemanticMark).bg;
+        let mark_bg = styles.mark_style().bg;
         let everything = vec![mark(0..source.content.len())];
         let mut frame_spans = 0usize;
         for i in 0..r.rows.len() {
@@ -622,13 +732,14 @@ mod tests {
     #[test]
     fn a_list_marker_follows_the_whole_item_not_its_text() {
         let (source, r, styles) = doc("- 項目ひとつ\n", 40);
+        let plain = row(&r, &styles, &[], 0);
         let text_only = row(&r, &styles, &[dim(at(&source, "項目ひとつ"))], 0);
         assert_eq!(texts(&text_only), ["- ", "項目ひとつ"]);
-        assert!(!text_only[0].1.add_modifier.contains(Modifier::DIM));
-        assert!(text_only[1].1.add_modifier.contains(Modifier::DIM));
+        assert_eq!(text_only[0].1.fg, plain[0].1.fg, "marker stays bright");
+        assert_ne!(text_only[1].1.fg, plain[1].1.fg, "the body dims");
 
         let whole_item = row(&r, &styles, &[dim(0..source.content.len())], 0);
-        assert!(whole_item[0].1.add_modifier.contains(Modifier::DIM));
+        assert_ne!(whole_item[0].1.fg, plain[0].1.fg, "the marker dims too");
     }
 
     /// Multi-byte text: the cut points are byte offsets, and they land on
@@ -637,7 +748,7 @@ mod tests {
     #[test]
     fn decorations_land_on_multibyte_characters() {
         let (source, r, styles) = doc("あい🎉うえＡＢ\n", 80);
-        let mark_bg = styles.of(DecorationKind::SemanticMark).bg;
+        let mark_bg = styles.mark_style().bg;
         for needle in ["🎉", "あい", "Ａ", "うえＡ"] {
             let after = row(&r, &styles, &[mark(at(&source, needle))], 0);
             assert_eq!(joined(&after), "あい🎉うえＡＢ", "{needle}");
@@ -651,20 +762,16 @@ mod tests {
     }
 
     /// Two kinds over the same range compose instead of replacing each
-    /// other: the background from one, the modifier from the other.
+    /// other: the background from one, the foreground from the other.
     #[test]
     fn two_kinds_over_the_same_range_compose() {
         let (source, r, styles) = doc("前重要後\n", 80);
         let range = at(&source, "重要");
-        let after = row(
-            &r,
-            &styles,
-            &[mark(range.clone()), dim(range)],
-            0,
-        );
+        let plain = row(&r, &styles, &[], 0);
+        let after = row(&r, &styles, &[mark(range.clone()), dim(range)], 0);
         assert_eq!(texts(&after), ["前", "重要", "後"]);
-        assert_eq!(after[1].1.bg, styles.of(DecorationKind::SemanticMark).bg);
-        assert!(after[1].1.add_modifier.contains(Modifier::DIM));
+        assert_eq!(after[1].1.bg, styles.mark_style().bg);
+        assert_eq!(after[1].1.fg, Some(styles.dim_fg(plain[0].1.fg)));
     }
 
     /// Junk ranges (past the end of the document, backwards, empty) are
@@ -702,7 +809,7 @@ mod tests {
     fn no_decorations_is_the_identity() {
         let root = env!("CARGO_MANIFEST_DIR");
         let highlighter = Highlighter::new(None, false);
-        let styles = DecorationStyles::from_theme(&highlighter);
+        let styles = DecorationStyles::from_theme(&highlighter, Default::default());
         for name in ["full.md", "a-readme.md", "b-design.md", "c-impl.rs"] {
             let source =
                 Source::load(std::path::Path::new(root).join("testdata").join(name)).unwrap();
@@ -738,8 +845,8 @@ mod tests {
     fn the_mark_background_is_theme_derived_in_both_themes() {
         for light in [false, true] {
             let highlighter = Highlighter::new(None, light);
-            let styles = DecorationStyles::from_theme(&highlighter);
-            let bg = styles.of(DecorationKind::SemanticMark).bg.expect("a background");
+            let styles = DecorationStyles::from_theme(&highlighter, Default::default());
+            let bg = styles.mark_style().bg.expect("a background");
             let page = highlighter.theme().settings.background.expect("a theme background");
             assert_ne!(bg, Color::Rgb(page.r, page.g, page.b), "light={light}");
             // Subdued: closer to the page than to the text.
@@ -757,17 +864,157 @@ mod tests {
         }
     }
 
-    /// Foregrounds are never touched: that is what keeps syntax
-    /// highlighting alive under a decoration.
+    /// Each kind owns exactly one channel: the mark a background, the dim
+    /// a foreground. Neither touches the other, and neither sets a
+    /// modifier — that is what keeps BOLD/ITALIC and the syntax color's
+    /// HUE alive under a decoration.
     #[test]
-    fn no_kind_touches_the_foreground() {
+    fn each_kind_owns_one_channel_and_no_modifier() {
         let highlighter = Highlighter::new(None, false);
-        let styles = DecorationStyles::from_theme(&highlighter);
-        for kind in [DecorationKind::SemanticMark, DecorationKind::Dim] {
-            assert_eq!(styles.of(kind).fg, None, "{kind:?}");
-            let base = Style::default().fg(Color::Rgb(1, 2, 3));
-            assert_eq!(styles.patch(base, kind).fg, Some(Color::Rgb(1, 2, 3)));
+        let styles = DecorationStyles::from_theme(&highlighter, Default::default());
+        let base = Style::default()
+            .fg(Color::Rgb(200, 100, 50))
+            .bg(Color::Rgb(9, 9, 9))
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+
+        // MARK: background only.
+        let marked = styles.patch(base, DecorationKind::SemanticMark);
+        assert_eq!(marked.fg, base.fg, "mark leaves the foreground alone");
+        assert_ne!(marked.bg, base.bg);
+        assert_eq!(marked.add_modifier, base.add_modifier);
+
+        // DIM: foreground only, and NOT `Modifier::DIM` as well (a
+        // terminal that honours it would darken twice).
+        let dimmed = styles.patch(base, DecorationKind::Dim);
+        assert_eq!(dimmed.bg, base.bg, "dim leaves the background alone");
+        assert_eq!(dimmed.add_modifier, base.add_modifier);
+        assert!(!dimmed.add_modifier.contains(Modifier::DIM));
+        assert_eq!(dimmed.fg, Some(styles.dim_fg(base.fg)));
+        assert_ne!(dimmed.fg, base.fg);
+
+        // The hue survives: the dimmed color is the base moved toward the
+        // page, so the channel ORDER (r > g > b here) is preserved and a
+        // differently-colored span stays differently colored.
+        let Some(Color::Rgb(r, g, b)) = dimmed.fg else {
+            panic!("an RGB foreground")
+        };
+        assert!(r > g && g > b, "dimmed to rgb({r},{g},{b})");
+        let other = styles.patch(Style::default().fg(Color::Rgb(50, 100, 200)), DecorationKind::Dim);
+        assert_ne!(other.fg, dimmed.fg, "two colors do not flatten into one");
+
+        // 両方を当てても、順序によらず同じところに落ち着く。
+        let both = styles.patch(
+            styles.patch(base, DecorationKind::SemanticMark),
+            DecorationKind::Dim,
+        );
+        let reversed = styles.patch(
+            styles.patch(base, DecorationKind::Dim),
+            DecorationKind::SemanticMark,
+        );
+        assert_eq!(both, reversed);
+        assert_eq!(both.fg, dimmed.fg);
+        assert_eq!(both.bg, marked.bg);
+    }
+
+    /// 前景色を持たない span（テーマ既定前景を継ぐもの）も暗くなる。
+    /// `None` のまま放置すると、その範囲だけ明るいままになる — DIM が
+    /// 効いていないように見えた元の症状と同じ形のバグ。
+    #[test]
+    fn a_span_without_a_foreground_still_dims() {
+        for light in [false, true] {
+            let highlighter = Highlighter::new(None, light);
+            let styles = DecorationStyles::from_theme(&highlighter, Default::default());
+            let bare = styles.patch(Style::default(), DecorationKind::Dim);
+            assert_eq!(
+                bare.fg,
+                Some(styles.dim_fg(None)),
+                "light={light}: 既定前景を解決してからブレンドする"
+            );
+            // テーマの既定前景そのものではない（ちゃんと動いている）。
+            assert_ne!(bare.fg, Some(highlighter.default_fg()), "light={light}");
+            // ページ背景に向かって動いている。
+            let page = highlighter.theme().settings.background.expect("a background");
+            let (Some(Color::Rgb(r, g, b)), Color::Rgb(fr, fg_, fb)) =
+                (bare.fg, highlighter.default_fg())
+            else {
+                panic!("RGB")
+            };
+            let near = |x: u8, a: u8, p: u8| {
+                (x as i32 - p as i32).abs() < (a as i32 - p as i32).abs()
+            };
+            assert!(near(r, fr, page.r) && near(g, fg_, page.g) && near(b, fb, page.b));
         }
+    }
+
+    /// 既定のブレンド率で実際に出る色。ユーザーが実機で選んだ値なので、
+    /// 黙って動かないように値そのものを固定する。
+    #[test]
+    fn the_default_blends_produce_the_colors_that_were_chosen() {
+        // Catppuccin Mocha: 背景 rgb(30,30,46) / 前景 rgb(205,214,244)。
+        let dark = DecorationStyles::from_theme(&Highlighter::new(None, false), Default::default());
+        assert_eq!(dark.mark_style().bg, Some(Color::Rgb(68, 70, 89)));
+        assert_eq!(dark.dim_fg(None), Color::Rgb(99, 103, 125));
+        // Solarized (light): 背景 rgb(253,246,227) / 前景 rgb(101,123,131)。
+        let light = DecorationStyles::from_theme(&Highlighter::new(None, true), Default::default());
+        assert_eq!(light.mark_style().bg, Some(Color::Rgb(219, 218, 205)));
+        assert_eq!(light.dim_fg(None), Color::Rgb(192, 196, 188));
+    }
+
+    /// MARK の背景は selection 帯とはっきり別物であること。
+    ///
+    /// 帯（dark `rgb(88,91,112)`）に寄りすぎると「選択されている」と
+    /// 読み違える。0.22 は `rgb(68,70,90)` で十分離れているが、0.30 は
+    /// `rgb(82,85,105)` で危険域なので、既定値には天井を置いてある。
+    #[test]
+    fn the_mark_background_stays_clear_of_the_selection_band() {
+        // 天井そのものは `const _: () = assert!(..)` がコンパイル時に
+        // 押さえている。ここで見るのは、その天井が実際の色として意味を
+        // 持っているか。
+        let band = crate::view::selected_bg(false);
+        let Color::Rgb(sr, sg, sb) = band else { panic!("RGB") };
+        assert_eq!((sr, sg, sb), (88, 91, 112), "selection 帯の色が変わった");
+
+        let styles = DecorationStyles::from_theme(&Highlighter::new(None, false), Default::default());
+        let Some(Color::Rgb(r, g, b)) = styles.mark_style().bg else { panic!("RGB") };
+        assert_ne!((r, g, b), (sr, sg, sb));
+        let distance = (r as i32 - sr as i32).abs()
+            + (g as i32 - sg as i32).abs()
+            + (b as i32 - sb as i32).abs();
+        assert!(distance >= 60, "mark rgb({r},{g},{b}) は帯に近すぎる（{distance}）");
+        // 天井ちょうどでもまだ離れている。
+        let ceiling = DecorationStyles::from_theme(
+            &Highlighter::new(None, false),
+            DecorationBlend { mark: MARK_BG_BLEND_CEILING, ..Default::default() },
+        );
+        let Some(Color::Rgb(cr, cg, cb)) = ceiling.mark_style().bg else { panic!("RGB") };
+        let ceiling_distance = (cr as i32 - sr as i32).abs()
+            + (cg as i32 - sg as i32).abs()
+            + (cb as i32 - sb as i32).abs();
+        assert!(ceiling_distance >= 40, "天井 rgb({cr},{cg},{cb}) が帯に近すぎる");
+    }
+
+    /// ブレンド率はつまみとして効く。
+    #[test]
+    fn the_blend_factors_move_the_colors() {
+        let highlighter = Highlighter::new(None, false);
+        let weak = DecorationStyles::from_theme(
+            &highlighter,
+            DecorationBlend { mark: 0.0, dim: 0.0 },
+        );
+        let strong = DecorationStyles::from_theme(
+            &highlighter,
+            DecorationBlend { mark: 1.0, dim: 1.0 },
+        );
+        let page = highlighter.theme().settings.background.unwrap();
+        // 0 は「何もしない」— ページ背景そのもの / 前景そのもの。
+        assert_eq!(weak.mark_style().bg, Some(Color::Rgb(page.r, page.g, page.b)));
+        assert_eq!(weak.dim_fg(Some(Color::Rgb(1, 2, 3))), Color::Rgb(1, 2, 3));
+        // 1 は振り切り — 前景そのもの / ページ背景そのもの。
+        assert_eq!(strong.mark_style().bg, Some(highlighter.default_fg()));
+        assert_eq!(
+            strong.dim_fg(Some(Color::Rgb(1, 2, 3))),
+            Color::Rgb(page.r, page.g, page.b)
+        );
     }
 }
 
@@ -807,7 +1054,7 @@ mod sanitize_tests {
         let source = Source::from_content("doc.md".into(), text.to_string());
         let highlighter = Highlighter::new(None, false);
         let r = render(&source, 40, &highlighter);
-        let styles = DecorationStyles::from_theme(&highlighter);
+        let styles = DecorationStyles::from_theme(&highlighter, Default::default());
         // Every offset, boundary or not — only the usable ones survive.
         let all: Vec<Decoration> = (0..text.len())
             .flat_map(|a| {

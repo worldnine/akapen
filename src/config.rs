@@ -2,7 +2,7 @@
 //!
 //! `akapen <file...> [--send-cmd <cmd>] [--theme <syntect-theme>]
 //!              [--ime <off|ascii|jp>] [--light|--dark] [--esc-quit <auto|always|never>]
-//!              [--semantic <fixture.json>]`
+//!              [--semantic <fixture.json>] [--mark-blend <f>] [--dim-blend <f>]`
 //! Positional arguments are the files to open (one or more). Unknown flags
 //! are ignored (reviewr-style). `--help`/`--version` short-circuit before parsing.
 
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
-use crate::decoration::{Decoration, DecorationKind};
+use crate::decoration::{Decoration, DecorationBlend, DecorationKind};
 use crate::ime::ImeMode;
 
 /// Whether `Esc` may quit the app (in normal mode, when nothing more
@@ -113,6 +113,17 @@ pub struct Config {
     ///
     /// [`SemanticDocument`]: semantic_reading::SemanticDocument
     pub semantic: Option<PathBuf>,
+    /// `--mark-blend <0.0..1.0>` / `--dim-blend <0.0..1.0>`: how strong
+    /// the two range-decoration kinds are. `mark` lifts the mark
+    /// background off the page toward the text color; `dim` moves a
+    /// dimmed foreground toward the page.
+    ///
+    /// The defaults live on [`DecorationBlend`], not here: a
+    /// configuration file, if akapen ever grows one, belongs BETWEEN the
+    /// default and this field (`CLI > config file > default`), and that
+    /// only works if the default is a value the layers overwrite rather
+    /// than an `Option` each layer re-invents.
+    pub decoration_blend: DecorationBlend,
     /// `--decorations <json>`: a hidden development flag that paints
     /// range decorations onto the rendered view, so the layer can be seen
     /// on real documents before a producer (the Semantic Reading Layer)
@@ -130,6 +141,24 @@ pub struct Config {
 struct DecorationSpec {
     range: (usize, usize),
     kind: String,
+}
+
+/// Parse a blend factor (`--mark-blend` / `--dim-blend`): a fraction in
+/// `0.0..=1.0`.
+///
+/// Out of range is an ERROR, not a clamp — the same contract
+/// `--decorations` has. A silently clamped 1.5 looks exactly like a
+/// working 1.0, and the next thing the user does is conclude the flag
+/// has no effect.
+fn parse_blend(flag: &str, value: &str) -> Result<f32> {
+    let n: f32 = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{flag}: {value:?} is not a number (0.0..1.0)"))?;
+    if !(0.0..=1.0).contains(&n) {
+        // NaN fails this too: it compares false against everything.
+        bail!("{flag}: {n} is out of range (0.0..1.0)");
+    }
+    Ok(n)
 }
 
 /// Parse the `--decorations` value. Byte offsets that do not land on a
@@ -176,6 +205,7 @@ impl Config {
         let mut cursor_anchor = true;
         let mut decorations: Vec<Decoration> = Vec::new();
         let mut semantic: Option<PathBuf> = None;
+        let mut decoration_blend = DecorationBlend::default();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -201,6 +231,16 @@ impl Config {
                     }
                 }
                 "--semantic" => semantic = it.next().map(PathBuf::from),
+                "--mark-blend" => {
+                    if let Some(v) = it.next() {
+                        decoration_blend.mark = parse_blend("--mark-blend", &v)?;
+                    }
+                }
+                "--dim-blend" => {
+                    if let Some(v) = it.next() {
+                        decoration_blend.dim = parse_blend("--dim-blend", &v)?;
+                    }
+                }
                 "--ime" => {
                     if let Some(v) = it.next() {
                         ime = ImeMode::parse(&v);
@@ -233,6 +273,7 @@ impl Config {
             fx,
             cursor_anchor,
             semantic,
+            decoration_blend,
             decorations,
         }))
     }
@@ -246,7 +287,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{Action, Config, EscQuit};
-    use crate::decoration::{Decoration, DecorationKind};
+    use crate::decoration::{Decoration, DecorationBlend, DecorationKind};
 
     fn parse(args: &[&str]) -> Action {
         Config::parse(args.iter().map(|s| (*s).to_string())).unwrap()
@@ -436,6 +477,53 @@ mod tests {
         assert!(
             cfg(&parse(&["x.md", "--semantic", "nope.json"])).semantic.is_some()
         );
+    }
+
+    #[test]
+    fn blend_factors_default_to_the_shipped_constants() {
+        use crate::decoration::{DIM_BLEND, MARK_BG_BLEND};
+        // The defaults live on DecorationBlend, not in the parser: a
+        // config file would slot in between, and that only works if
+        // there is one value to overwrite.
+        let action = parse(&["x.md"]);
+        let c = cfg(&action);
+        assert_eq!(c.decoration_blend, DecorationBlend::default());
+        assert_eq!(c.decoration_blend.mark, MARK_BG_BLEND);
+        assert_eq!(c.decoration_blend.dim, DIM_BLEND);
+    }
+
+    #[test]
+    fn blend_factors_parse_and_are_independent() {
+        let action = parse(&["x.md", "--mark-blend", "0.4"]);
+        let c = cfg(&action);
+        assert_eq!(c.decoration_blend.mark, 0.4);
+        assert_eq!(
+            c.decoration_blend.dim,
+            DecorationBlend::default().dim,
+            "--mark-blend leaves the other alone"
+        );
+        let action = parse(&["x.md", "--dim-blend", "0.85"]);
+        let c = cfg(&action);
+        assert_eq!(c.decoration_blend.dim, 0.85);
+        assert_eq!(c.decoration_blend.mark, DecorationBlend::default().mark);
+        let action = parse(&["x.md", "--mark-blend", "0", "--dim-blend", "1"]);
+        let c = cfg(&action);
+        assert_eq!((c.decoration_blend.mark, c.decoration_blend.dim), (0.0, 1.0));
+    }
+
+    #[test]
+    fn an_out_of_range_blend_is_an_error_not_a_clamp() {
+        // A silently clamped 1.5 looks exactly like a working 1.0, and
+        // the next thing the user concludes is that the flag does
+        // nothing. Same contract as --decorations.
+        for flag in ["--mark-blend", "--dim-blend"] {
+            for bad in ["1.5", "-0.1", "2", "NaN", "", "half", "0.5x"] {
+                assert!(
+                    Config::parse(["x.md", flag, bad].iter().map(|s| s.to_string())).is_err(),
+                    "{flag} {bad:?} should be rejected"
+                );
+            }
+        }
     }
 
     #[test]

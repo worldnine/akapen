@@ -11,6 +11,21 @@ view モードで `-` / `+`（`=` も可）が Reading Budget ±1、`<` / `>` �
 読み出しも `?` ヘルプの行も出ず、akapen はこの層が無かったときと完全に
 同じ動きをする。
 
+見え方の強さは 2 つのフラグで調整できる（既定は実機で選んだ値）。
+
+```sh
+akapen examples/semantic/demo.md --semantic examples/semantic/demo.json \
+  --mark-blend 0.22 --dim-blend 0.60
+```
+
+- `--mark-blend` — MARKED の背景をページからテキスト色の方へどれだけ
+  持ち上げるか。既定 0.22（dark で `rgb(68,70,89)`）
+- `--dim-blend` — DIM の前景をページの方へどれだけ寄せるか。既定 0.60
+  （dark の本文なら `rgb(205,214,244)` → `rgb(99,103,125)`）
+
+DIM は `Modifier::DIM`（SGR `2`）ではなく**実際の色**である。SGR `2` は
+無視する端末が多く、MARKED と見分けがつかなかったため。
+
 ## 見どころ
 
 `## 結論` の下の 1 行:

@@ -1,3 +1,240 @@
+# HANDOFF: MARKED と DIM を実機で見分けられるようにする（見た目の調整）
+
+## 何が起きていたか
+
+実機でユーザーに見てもらったら、**MARKED と DIM の区別がつかなかった**。
+
+原因は 2 つ。
+
+1. **`Modifier::DIM`（SGR `2`）を無視する端末がある。** 実測でほぼ効いて
+   いなかった。これが主因
+2. MARK の背景持ち上げ 14 % が控えめすぎた
+
+5 案を実機で見比べた結果、**MARK 22 % / DIM は前景を背景方向へ 60 %
+ブレンド**が採用になった。
+
+## 1. DIM は modifier ではなく実色になった
+
+Phase 2 は `Dim` を `Modifier::DIM` だけにして、「DIM は前景不可侵」を
+不変条件として固定していた（理由: テーマ由来のグレーにすると dim 範囲の色が
+全部同じに潰れる）。**この不変条件を意図的に破った。**
+
+グレーの話は正しかったが、modifier の話が間違っていた。SGR `2` は端末依存が
+激しく、効かない環境では DIM が「何も起きていない」になる。これは装飾の
+目的そのものを失う。
+
+新しい `Dim` は **span の実効前景色をテーマ背景の方向へ `DIM_BLEND` だけ
+ブレンドした色**を前景に置く。
+
+- 実効前景色 = span 自身の `fg`、無ければテーマの既定前景
+  （`theme.settings.foreground`）。`None` のまま放置すると**その範囲だけ
+  明るいまま残る** — 元のバグと同じ形なので、テストで固定してある
+  （`a_span_without_a_foreground_still_dims`）
+- **`Modifier::DIM` は付けない。** 解釈する端末で二重に暗くなる
+- 潰れの心配は当たらない: 各 span は自分の色をページ方向へ動かすだけなので
+  色相が残る。dim した見出しは「dim した見出し」のまま見える。テストで
+  「2 色が 1 色に潰れないこと」と「チャネルの大小関係が保たれること」を
+  固定した
+- RGB でない前景（端末パレットの名前付き色）は補間できないので、テーマ既定
+  前景にフォールバックして dim する。色相は失うが「退く」は果たす。描画本文の
+  span はテーマ由来の RGB なので実際には通らない経路
+
+`decoration.rs` のモジュールドキュメントに、破った理由込みで書いてある。
+
+## 2. MARK は 22 %、ただし天井つき
+
+`MARK_BG_BLEND` を 0.14 → **0.22**。テーマが `MARK_SCOPES` のいずれかに
+背景を持つ場合はそちらが勝つ経路はそのまま。
+
+**制約: selection 帯 `rgb(88,91,112)` と明確に区別できること。**
+
+| | dark (Catppuccin Mocha) | light (Solarized) |
+|---|---|---|
+| MARK 背景 | `rgb(68,70,89)` | `rgb(219,218,205)` |
+| DIM 前景（本文） | `rgb(99,103,125)` | `rgb(192,196,188)` |
+| selection 帯 | `rgb(88,91,112)` | — |
+
+MARK と帯のマンハッタン距離は **64**（20+21+23）。0.30 だと
+`rgb(82,85,105)` で距離 16 まで縮んで危険域に入る。
+
+そこで `MARK_BG_BLEND_CEILING = 0.25` を置き、
+
+```rust
+const _: () = assert!(MARK_BG_BLEND <= MARK_BG_BLEND_CEILING);
+```
+
+で**コンパイル時に**押さえた（テストではなくビルドが止まる）。天井は
+**出荷する既定値**に対するもので、`--mark-blend` は縛っていない — 見比べる
+ための knob を黙って clamp したら knob ではなくなる。
+
+## 3. selection との相互作用（ここが地雷だった）
+
+Phase 2 は「選択は DIM を打ち消す」を `remove_modifier(Modifier::DIM)` で
+表現していた。**DIM が前景色になった時点でこれは意味を失う** — 背景の帯は
+前景を元に戻せないので、選択しても文字が沈んだままになる（「選択したのに
+文字が霞んでいる」）。
+
+対処: **帯が乗る行では、装飾する前に `Dim` を落とす。**
+
+`view.rs` の `visible_text_with_glow`、`decorate_row` を呼ぶ直前:
+
+```rust
+let banded = glowing_row || gutter_hl;   // gutter_hl = cursor_row || in_sel_row
+let effective = if banded { Dim を除いたもの } else { decorations };
+```
+
+- 帯は **selection / カーソル帯 / history glow** の 3 つ。rendered view に
+  コメントフォーカスの帯は無い（`focused_deletion` は source モード専用、
+  コメントカバー行は marker 列の `▌` だけで背景を持たない）
+- `remove_modifier(Modifier::DIM)` は 2 箇所とも**削除した**。もう誰も
+  その modifier を立てないので、残しても Phase 2 が書いていた
+  「選択帯の span に `sub_modifier: DIM` が載る」という副作用が残るだけ
+- **粒度が行単位になった。** 旧方式は span 単位だったので、soft line break で
+  複数 source 行が 1 行に繋がっているとき、片方だけを選択すると選択部分だけが
+  un-dim されていた。いまは行ごと un-dim される。帯は一時的な状態でユーザーが
+  いま見ている場所なので、丸ごと勝たせた
+- `Mark` は帯の下でも当たる（span も割れる）。帯と同じチャネル（背景）を
+  争うが、帯が後から上書きするので優先順位どおりになる。テストで
+  `the_band_suppresses_only_dim_not_the_mark` として固定
+
+### 実機 pty で確認済み
+
+READ 30 %、`## 結論` の行（`examples/semantic/demo.md` 7 行目）:
+
+```
+帯なし:
+\x1b[10;4H\x1b[39;48;2;68;70;89m採用する方式は差分配信である。   ← MARKED
+\x1b[10;34H\x1b[38;2;99;103;125;49m詳細は付録にまとめた。         ← DIM（実色。SGR 2 は出ない）
+
+カーソル帯を乗せる（j×3）/ さらに v で選択:
+\x1b[39;48;2;88;91;112m 採用する方式は差分配信である。詳細は付録にまとめた。
+                        ^ 行が分割すらされず、前景は既定色（39）のまま
+```
+
+**帯の下で文字が霞まないことを実機で確認した。**
+
+## 4. CLI フラグ
+
+```
+--mark-blend <0.0..1.0>   既定 0.22
+--dim-blend  <0.0..1.0>   既定 0.60
+```
+
+範囲外・数値でない値は**明示的なエラー**（`--decorations` と同じ扱い）。
+黙って clamp した 1.5 は動いている 1.0 と見分けがつかず、次にユーザーが
+出す結論は「このフラグは効かない」になる。`NaN` も比較が全部 false に
+なるので同じ経路で弾かれる。
+
+### 既定値の置き場（将来の設定ファイル用）
+
+akapen には設定ファイルの仕組みが無い。今回は CLI まで。将来入れるときに
+`CLI > 設定ファイル > 既定値` の層になるよう、
+
+```rust
+pub struct DecorationBlend { pub mark: f32, pub dim: f32 }
+impl Default for DecorationBlend { /* MARK_BG_BLEND / DIM_BLEND */ }
+```
+
+を `decoration.rs` に置き、`Config.decoration_blend` は `Option` ではなく
+**値**にした。各層が `Option` を持ち回るのではなく、下の層の値を上の層が
+上書きする形。設定ファイルは `Config::parse` の前に既定を差し替えるだけで
+入る。
+
+## 配線（`DecorationStyles` の作り直し）
+
+```rust
+pub struct DecorationStyles {
+    mark: Style,       // 背景だけ
+    dim_target: Color, // テーマ背景（DIM の行き先）
+    default_fg: Color, // fg を持たない span の実効前景
+    dim_blend: f32,
+}
+pub fn from_theme(highlighter: &Highlighter, blend: DecorationBlend) -> Self;
+pub fn mark_style(&self) -> Style;              // 旧 of(SemanticMark)
+pub fn dim_fg(&self, base: Option<Color>) -> Color;
+pub fn patch(&self, base: Style, kind) -> Style;
+```
+
+- `of(kind) -> Style` は**廃止**した。`Dim` はもう span に依存しない
+  static な patch では表せない（`base.fg` を読んでから書く）ので、
+  「kind ごとの Style」という形自体が嘘になる
+- `Eq` derive を外した（f32 を持つため）。`PartialEq` は残っている
+- `patch` は両 kind を**どちらの順で当てても同じ結果**になる（mark は
+  背景しか書かず、dim は `base.fg` を読んでから前景を書く）。テストで固定。
+  ただし**同じ `Dim` を 2 回当てると 2 回暗くなる**。producer は Atom ごとに
+  1 つしか出さず、`--decorations` は開発用フラグなので許容
+
+### blend をどう通したか
+
+`ViewState::render` に `blend: DecorationBlend` を足した（`render_view_with_cards`
+にも）。**入口を 1 つに保つため**で、テスト側の 40 数箇所は
+`Default::default()`（インポート不要）で埋めてある。本番の 4 箇所:
+
+| 場所 | 渡すもの |
+|---|---|
+| `main.rs` run() 起動時 | `config.decoration_blend` |
+| `main.rs` `render_current_view` | `app.config.decoration_blend` |
+| `reload.rs` `render_view_pending` | `app.config.decoration_blend` |
+| `main.rs` の ghost 用 render × 2 | 既定（`.rows` しか使わない。装飾は載らない） |
+
+## テスト
+
+ベースライン akapen 506 → **514**（+8）。内訳:
+
+- `decoration.rs` +4 / 更新 4
+  - `each_kind_owns_one_channel_and_no_modifier`（旧 `no_kind_touches_the_foreground` を作り直し。
+    mark=背景 / dim=前景 / modifier を触らない / 色相が残る / 合成の可換性）
+  - `a_span_without_a_foreground_still_dims`（テーマ既定前景を解決してからブレンド）
+  - `the_default_blends_produce_the_colors_that_were_chosen`（**実際の RGB を固定**）
+  - `the_mark_background_stays_clear_of_the_selection_band`（帯との距離、天井の実効性）
+  - `the_blend_factors_move_the_colors`（0 と 1 の振り切り）
+  - 更新: `marked_normal_dim_on_one_rendered_line` / `a_list_marker_follows_the_whole_item_not_its_text` /
+    `two_kinds_over_the_same_range_compose` / `no_kind_touches_the_foreground`
+- `view.rs` +1 / 更新 2
+  - `the_selection_band_suppresses_dim_entirely`（帯の下は**装飾なしの行と
+    バイト単位で同一**。「打ち消す」ではなく「当たらない」になった）
+  - `the_cursor_band_suppresses_dim_as_well`
+  - `the_band_suppresses_only_dim_not_the_mark`（新規）
+- `config.rs` +3（既定値が定数と一致 / 2 つが独立にパース / 範囲外は 7 種類とも拒否）
+- `state_tests.rs` 更新 2（`decorations_paint_three_regions_on_one_terminal_line` と
+  `the_reading_budget_splits_one_terminal_line_into_two_styles` を、modifier では
+  なく**前景色の実際の値**で検査するように）
+- 恒等性テスト（装飾ゼロなら出力不変）は変更なしで緑（名前は「検証」節）
+
+## 既知の割り切り
+
+- **`--dim-blend 1.0` は文字が消える。** `lerp(fg, bg, 1.0)` はページ背景
+  そのものなので、合法な値で不可視になる。エラーにはしていない（0.0..1.0 は
+  仕様どおりで、端点が「振り切り」を意味するのは knob として自然）。
+  `the_blend_factors_move_the_colors` がその端点を意図として固定している。
+  同様に `--mark-blend 1.0` は本文色べた塗りの帯になる
+- **選択帯の `Style` から `sub_modifier: DIM` が消えた。** Phase 2 は
+  `remove_modifier(Modifier::DIM)` の副作用として「装飾が空でも選択帯の
+  `Style` 構造体に `sub_modifier: DIM` が載る（描画セルは不変）」を
+  申し送っていた。その `remove_modifier` を撤去したので副作用ごと消えた。
+  Phase 2 より素の状態に戻っただけで、描画は変わらない
+- **同じ `Dim` を 2 回当てると 2 回暗くなる**（modifier は冪等だった）。
+  producer は Atom ごとに 1 つしか出さない
+- **帯の un-dim が行単位になった**（旧: span 単位）。上記「3.」のとおり
+
+## 検証
+
+- `cargo test --locked --workspace`: **akapen 514 / tui-markdown 173（+1 ignored）/
+  semantic-reading 51 / doc 7**、全緑（ベースライン 506 / 173 / 51 / 7）
+- 恒等性（装飾ゼロなら出力不変）は名指しでも確認:
+  `decoration::tests::no_decorations_is_the_identity` /
+  `no_decorations_preserves_the_attributions_too` /
+  `view::decoration_tests::painting_with_no_decorations_changes_nothing`
+- `cargo test --locked --release`: 515 passed
+- `cargo clippy --locked --all-targets`: **警告 0**
+- `TUI_MARKDOWN_SRC=… ./scripts/check-vendor-diff.sh`: **OK**
+- 実機 pty: 上記の SGR 列（帯なし / カーソル帯 / 選択帯）
+- 変更ファイル: `src/decoration.rs` / `src/view.rs` / `src/config.rs` /
+  `src/main.rs` / `src/reload.rs` / `src/chrome.rs` / `src/state_tests.rs` /
+  `examples/semantic/README.md` / `HANDOFF.md`
+
+---
+
 # HANDOFF: Semantic Reading Layer を akapen へ配線（Phase 3 / Reading Budget）
 
 ## 何を作ったか

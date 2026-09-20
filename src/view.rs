@@ -14,7 +14,7 @@ use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 use ratatui::text::{Line, Text};
 
-use crate::decoration::{Decoration, DecorationStyles, decorate_row};
+use crate::decoration::{Decoration, DecorationBlend, DecorationKind, DecorationStyles, decorate_row};
 use crate::highlight::{Highlighter, Span};
 use crate::render::{self, Rendered, Segment};
 use crate::source::Source;
@@ -485,7 +485,12 @@ impl ViewState {
     /// Render `source` natively at `columns` wide with the `--theme`
     /// (used for fenced-code highlighting). The native renderer never
     /// fails, so there is no fallback path.
-    pub fn render(source: &Source, columns: u16, highlighter: &Highlighter) -> Self {
+    pub fn render(
+        source: &Source,
+        columns: u16,
+        highlighter: &Highlighter,
+        blend: DecorationBlend,
+    ) -> Self {
         let Rendered {
             rows,
             source_starts,
@@ -504,7 +509,7 @@ impl ViewState {
             source_starts,
             row_segments,
             row_attrs,
-            decoration_styles: DecorationStyles::from_theme(highlighter),
+            decoration_styles: DecorationStyles::from_theme(highlighter, blend),
             card_rows,
             ghost,
             width: columns as usize,
@@ -1049,12 +1054,39 @@ impl ViewState {
             // syntax-colored one. Splitting a span leaves the row's
             // concatenated text unchanged, so the `off` byte offsets the
             // segment lookup uses are the same either way.
-            let row: std::borrow::Cow<'_, [Span]> = if decorations.is_empty() {
+            //
+            // `Dim` is the exception, and the reason is that it writes a
+            // FOREGROUND (see `decoration`'s module docs — `Modifier::DIM`
+            // was too widely ignored to be visible). A band cannot patch a
+            // foreground back to what it was, so a dimmed phrase under the
+            // selection would read as "I selected it and the text went
+            // pale". Dim is therefore dropped for banded rows BEFORE
+            // decorating — the same intent Phase 2 carried with
+            // `remove_modifier(Modifier::DIM)`, expressed the only way the
+            // new mechanism allows.
+            //
+            // This is per ROW, where the old modifier trick was per span:
+            // on a row that merges several source lines, selecting one of
+            // them un-dims the whole row. The band is the transient state
+            // and the one the user is looking at, so it wins wholesale.
+            let banded = glowing_row || gutter_hl;
+            let undimmed: Vec<Decoration>;
+            let effective: &[Decoration] = if !banded {
+                decorations
+            } else {
+                undimmed = decorations
+                    .iter()
+                    .filter(|d| d.kind != DecorationKind::Dim)
+                    .cloned()
+                    .collect();
+                &undimmed
+            };
+            let row: std::borrow::Cow<'_, [Span]> = if effective.is_empty() {
                 std::borrow::Cow::Borrowed(self.rows[abs].as_slice())
             } else {
                 let attrs = self.row_attrs.get(abs).map(|a| a.as_slice()).unwrap_or(&[]);
                 std::borrow::Cow::Owned(
-                    decorate_row(&self.rows[abs], attrs, decorations, &self.decoration_styles).0,
+                    decorate_row(&self.rows[abs], attrs, effective, &self.decoration_styles).0,
                 )
             };
             let mut off = 0usize;
@@ -1063,18 +1095,16 @@ impl ViewState {
                 .map(|s| {
                     let range = (off, off + s.text.len());
                     off = range.1;
-                    // A band always clears DIM: a dimmed phrase inside the
-                    // selection or the cursor row would read as a hole in
-                    // the band. (With no decorations nothing is dim, so
-                    // this only ever sets `sub_modifier` — the drawn cells
-                    // are identical.)
+                    // No `remove_modifier(Modifier::DIM)` here any more:
+                    // nothing sets that modifier since `Dim` became a
+                    // foreground, and the band's own escape from it is the
+                    // filter above. (Removing it also drops the
+                    // `sub_modifier: DIM` that Phase 2 left on every
+                    // selected span — invisible, but noise in the style.)
                     let style = if glowing_row {
-                        s.style
-                            .bg(glow_bg)
-                            .add_modifier(Modifier::BOLD)
-                            .remove_modifier(Modifier::DIM)
+                        s.style.bg(glow_bg).add_modifier(Modifier::BOLD)
                     } else if span_hl(range) {
-                        s.style.bg(selected_bg).remove_modifier(Modifier::DIM)
+                        s.style.bg(selected_bg)
                     } else {
                         s.style
                     };
@@ -1476,7 +1506,7 @@ mod tests {
         let path = dir.path().join("full.md");
         std::fs::copy("testdata/full.md", &path).unwrap();
         let source = Source::load(path).unwrap();
-        let view = ViewState::render(&source, 80, &Highlighter::new(None, false));
+        let view = ViewState::render(&source, 80, &Highlighter::new(None, false), Default::default());
         for (r, segs) in view.row_segments.iter().enumerate() {
             for seg in segs {
                 let text: String = view.rows[r].iter().map(|s| s.text.as_str()).collect();
@@ -1539,7 +1569,7 @@ mod tests {
         )
         .unwrap();
         let source = Source::load(path).unwrap();
-        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false), Default::default());
         let ghost_row = view.source_starts[2];
         // Cursor elsewhere: the blank row stays blank (the view is quiet).
         view.cursor = 0;
@@ -1575,7 +1605,7 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "```rust\nfn main() {}\n```\n\n次の段落\n").unwrap();
         let source = Source::load(path).unwrap();
-        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false), Default::default());
         // The closing fence's own row is the last code row — occupied.
         let code_row = view.source_starts[2];
         let code_text: String = view.rows[code_row].iter().map(|s| s.text.as_str()).collect();
@@ -1612,7 +1642,7 @@ mod tests {
         )
         .unwrap();
         let source = Source::load(path).unwrap();
-        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false), Default::default());
         assert_eq!(view.source_starts[2], view.source_starts[3], "ref-defs share a row");
         view.cursor = 3;
         let text = row_text(&view, Some((2, 3)), view.source_starts[3]);
@@ -1629,7 +1659,7 @@ mod tests {
         let long = format!("[ref]: https://example.com/{}\n\nx\n", "long/".repeat(40));
         std::fs::write(&path, format!("本文\n\n{long}")).unwrap();
         let source = Source::load(path).unwrap();
-        let mut view = ViewState::render(&source, 40, &Highlighter::new(None, false));
+        let mut view = ViewState::render(&source, 40, &Highlighter::new(None, false), Default::default());
         view.cursor = 2;
         let text = row_text(&view, None, view.source_starts[2]);
         // The row carries one pad on each side; strip them before
@@ -1650,7 +1680,7 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "# 見出し\n\n日本語 **太字** [link](https://x.com)\n").unwrap();
         let source = Source::load(path).unwrap();
-        let view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let view = ViewState::render(&source, 60, &Highlighter::new(None, false), Default::default());
         assert!(view.rows.len() >= 3);
         let all: String = view
             .rows
@@ -1859,7 +1889,7 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "| A | B |\n|---|---|\n| a | b |\n").unwrap();
         let source = Source::load(path).unwrap();
-        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let mut view = ViewState::render(&source, 60, &Highlighter::new(None, false), Default::default());
         view.cursor = 2; // the "a | b" body row
         let row = view.source_starts[2];
         let hl = bg_spans(&view, None, row);
@@ -1891,7 +1921,7 @@ mod tests {
         let source = Source::load(path).unwrap();
         // Width 40 constrains the table: columns shrink, cells wrap, and
         // row separators appear between the body rows.
-        let view = ViewState::render(&source, 40, &Highlighter::new(None, false));
+        let view = ViewState::render(&source, 40, &Highlighter::new(None, false), Default::default());
         let sel = Some((0, 3)); // the whole table
         let mut frames = 0;
         for abs in 0..view.rows.len() {
@@ -1976,7 +2006,7 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "```\n|---|\n```\n").unwrap();
         let source = Source::load(path).unwrap();
-        let view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let view = ViewState::render(&source, 60, &Highlighter::new(None, false), Default::default());
         assert!(
             !is_table_delimiter_line(&view.ghost, 1),
             "code-rendered |---| has no ghost and is not a delimiter"
@@ -2383,7 +2413,7 @@ mod tests {
     #[test]
     fn history_glow_paints_the_block_not_only_the_gutter() {
         let source = Source::from_content("doc.md".into(), "# Heading\n\nparagraph\n".into());
-        let view = ViewState::render(&source, 60, &Highlighter::new(None, false));
+        let view = ViewState::render(&source, 60, &Highlighter::new(None, false), Default::default());
         let glow = history_glow_bg(false);
         let glowing = vec![false, false, true];
         let (text, _) = view.visible_text_with_glow(
@@ -2525,8 +2555,8 @@ mod decoration_tests {
     fn view_of(text: &str, width: u16) -> (Source, ViewState, DecorationStyles) {
         let source = Source::from_content("doc.md".into(), text.to_string());
         let highlighter = Highlighter::new(None, false);
-        let view = ViewState::render(&source, width, &highlighter);
-        let styles = DecorationStyles::from_theme(&highlighter);
+        let view = ViewState::render(&source, width, &highlighter, Default::default());
+        let styles = DecorationStyles::from_theme(&highlighter, Default::default());
         (source, view, styles)
     }
 
@@ -2586,7 +2616,7 @@ mod decoration_tests {
             marked.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
             ["前", "重要", "後"]
         );
-        assert_eq!(marked[1].1.bg, styles.of(DecorationKind::SemanticMark).bg);
+        assert_eq!(marked[1].1.bg, styles.mark_style().bg);
         assert_eq!(marked[0].1.bg, None);
         assert_eq!(marked[2].1.bg, None);
     }
@@ -2603,13 +2633,13 @@ mod decoration_tests {
         }];
         let i = row_with(&view, "前重要後");
         let line = view.source_line_at(i).expect("an attributed row");
-        assert_ne!(styles.of(DecorationKind::SemanticMark).bg, Some(SEL_BG));
+        assert_ne!(styles.mark_style().bg, Some(SEL_BG));
         // Unselected, the mark is visible...
         let loose = painted(&view, None, &decorations, i);
         assert!(
             loose
                 .iter()
-                .any(|(_, s)| s.bg == styles.of(DecorationKind::SemanticMark).bg)
+                .any(|(_, s)| s.bg == styles.mark_style().bg)
         );
         // ...and the selection band paints straight over it.
         let row = painted(&view, Some((line, line)), &decorations, i);
@@ -2618,11 +2648,16 @@ mod decoration_tests {
         }
     }
 
-    /// A DIM phrase under the selection band is UN-dimmed: the band must
-    /// read as one continuous highlight, not as a highlight with a hole
-    /// in it.
+    /// A DIM phrase under the selection band is NOT dimmed: the band must
+    /// read as one continuous highlight, not as "I selected it and the
+    /// text went pale".
+    ///
+    /// `Dim` writes a FOREGROUND now, which a background band cannot
+    /// patch back, so the row's Dim decorations are dropped before the
+    /// row is decorated at all. The phrase must come out byte-identical
+    /// to the same row with no decorations, modulo the band's background.
     #[test]
-    fn the_selection_band_clears_dim() {
+    fn the_selection_band_suppresses_dim_entirely() {
         let (source, view, _) = view_of(TWO_PARAGRAPHS, 40);
         let decorations = vec![Decoration {
             range: at(&source, "重要"),
@@ -2633,38 +2668,62 @@ mod decoration_tests {
         // Unselected: the phrase really is dim (or the test below would
         // pass for the wrong reason).
         let loose = painted(&view, None, &decorations, i);
+        let plain = painted(&view, None, &[], i);
         let dimmed = loose.iter().find(|(t, _)| t == "重要").expect("the phrase");
-        assert!(dimmed.1.add_modifier.contains(Modifier::DIM));
+        let bright = plain
+            .iter()
+            .find(|(t, _)| t.contains("重要"))
+            .expect("the undecorated row");
+        assert_ne!(dimmed.1.fg, bright.1.fg, "unselected, the phrase is dim");
+        assert!(!dimmed.1.add_modifier.contains(Modifier::DIM), "SGR 2 は使わない");
 
-        // Selected: nothing in the band is dim any more.
+        // Selected: the row is not split at all, and the foreground is
+        // exactly the undecorated one under the band's background.
         let banded = painted(&view, Some((line, line)), &decorations, i);
+        let banded_plain = painted(&view, Some((line, line)), &[], i);
+        assert_eq!(banded, banded_plain, "帯の下では Dim が無かったことになる");
         for (text, style) in &banded {
-            assert!(
-                !style.add_modifier.contains(Modifier::DIM),
-                "{text:?} must not stay dim under the selection"
-            );
-            assert!(
-                style.sub_modifier.contains(Modifier::DIM),
-                "{text:?} must actively clear DIM"
-            );
+            assert_eq!(style.bg, Some(SEL_BG), "{text:?} sits in the band");
+            assert!(!style.add_modifier.contains(Modifier::DIM));
         }
     }
 
-    /// The cursor band is the same band: a dimmed cursor row un-dims too
-    /// (the cursor row is highlighted without any selection).
+    /// The cursor band is the same band: a dimmed cursor row is not
+    /// dimmed either (the cursor row is highlighted without a selection).
     #[test]
-    fn the_cursor_band_clears_dim_as_well() {
+    fn the_cursor_band_suppresses_dim_as_well() {
         let (source, view, _) = view_of("前重要後\n\n次の段落\n", 40);
         let decorations = vec![Decoration {
             range: at(&source, "重要"),
             kind: DecorationKind::Dim,
         }];
         let row = painted(&view, None, &decorations, view.cursor_row());
-        assert!(
-            row.iter()
-                .all(|(_, s)| !s.add_modifier.contains(Modifier::DIM)),
-            "{row:?}"
+        let plain = painted(&view, None, &[], view.cursor_row());
+        assert_eq!(row, plain, "カーソル帯の下でも Dim は当たらない");
+    }
+
+    /// ...but a MARK under the band still splits the row — only `Dim` is
+    /// suppressed, because only `Dim` fights the band for the same
+    /// channel. (The band then paints over the mark's background, which
+    /// the priority order requires.)
+    #[test]
+    fn the_band_suppresses_only_dim_not_the_mark() {
+        let (source, view, styles) = view_of(TWO_PARAGRAPHS, 40);
+        let decorations = vec![Decoration {
+            range: at(&source, "重要"),
+            kind: DecorationKind::SemanticMark,
+        }];
+        let i = row_with(&view, "前重要後");
+        let line = view.source_line_at(i).expect("an attributed row");
+        let banded = painted(&view, Some((line, line)), &decorations, i);
+        let banded_plain = painted(&view, Some((line, line)), &[], i);
+        assert_ne!(
+            banded.len(),
+            banded_plain.len(),
+            "mark は帯の下でも span を割る"
         );
+        assert!(banded.iter().all(|(_, s)| s.bg == Some(SEL_BG)));
+        assert_ne!(styles.mark_style().bg, Some(SEL_BG));
     }
 
     /// The paint path is the identity when nothing is decorated: the
@@ -2674,7 +2733,7 @@ mod decoration_tests {
         let source = Source::load("testdata/full.md".into()).unwrap();
         let highlighter = Highlighter::new(None, false);
         for width in [40u16, 80] {
-            let mut view = ViewState::render(&source, width, &highlighter);
+            let mut view = ViewState::render(&source, width, &highlighter, Default::default());
             view.cursor = 12;
             let plain =
                 view.visible_text_decorated(60, Some((10, 14)), SEL_BG, &[]);
@@ -2694,7 +2753,7 @@ mod decoration_tests {
         let source = Source::load("testdata/full.md".into()).unwrap();
         let highlighter = Highlighter::new(None, false);
         for width in [40u16, 80] {
-            let view = ViewState::render(&source, width, &highlighter);
+            let view = ViewState::render(&source, width, &highlighter, Default::default());
             assert_eq!(view.row_attrs.len(), view.rows.len(), "width {width}");
             for (r, row) in view.rows.iter().enumerate() {
                 assert_eq!(view.row_attrs[r].len(), row.len(), "width {width} row {r}");
