@@ -74,6 +74,15 @@ API_PATH = "/v1/systemone"
 #: Jev の SDK 既定は 10 秒（`docs/jev.md`）で、実測は 52 question を 1 リクエスト
 #: にまとめて 0.84 秒だった。akapen 側は子プロセスを 60 秒で殺すので、2 ラウンド
 #: と Python の起動コストを 60 秒に収めるためここは 20 秒に留める。
+#:
+#: **大きな文書でもこの 20 秒は余っている**（2026-09-21 の実測）。45,650 バイトの
+#: 実業務文書で 1 ラウンドあたり 0.98〜1.53 秒、2 ラウンド込みのプロセス全体で
+#: 2.42〜2.63 秒（7 回）。いちばん遅かった条件でも 1 ラウンド 1.65 秒で、
+#: 20 秒には 12 倍の余裕がある。
+#:
+#: 大文書で先に当たるのは**時間ではなく context window** である
+#: （[`http_error_message`]）。そこは 400 で即座に返るので、ここを延ばしても
+#: 何も救われない。
 DEFAULT_TIMEOUT = 20.0
 
 #: Noul がこの値以上なら REDUNDANT_WITH を付ける。
@@ -437,6 +446,32 @@ def api_key() -> str:
     return key
 
 
+def http_error_message(code: int, detail: str) -> str:
+    """HTTP エラーを、ステータス行に出して意味が通る 1 行にする。
+
+    とくに `max_tokens_exceeded` は**この経路でいちばん現実的な失敗**なので、
+    生の JSON ではなく原因と対処を出す。実測（2026-09-21）では:
+
+    - 45,650 バイトの実文書は成功し、ラウンド 2 の input が 60,518〜63,152
+      tokens。**天井の 92〜96 %** に載っている
+    - 同じ文書を 1.06 倍にすると `max_tokens_exceeded` で失敗する
+    - 天井は二分探索で input 65,033 tokens が成功・約 65.5k が失敗 —
+      つまり **65,536 (2^16) tokens** と読める（TypeSafe の公式値は未確認）
+
+    `docs/design/jev.md` は「context window は需要に応じて変わりうる」と書いて
+    いるので、**数値を断定せず実測値として**出す。ここで切れるのは時間ではなく
+    大きさなので、akapen 側のタイムアウトを延ばしても何も直らない。
+    """
+    if "max_tokens_exceeded" in detail:
+        return (
+            "文書が大きすぎて Jev の context window に入りません"
+            "（実測では input 約 65,000 tokens が上限で、45KB 程度の文書が"
+            "その 9 割超を使います）。タイムアウトではないので待っても変わり"
+            "ません。文書を分けてください"
+        )
+    return f"Jev が HTTP {code} を返しました: {detail}"
+
+
 def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
     """1 リクエストで questions をまとめて評価させる。
 
@@ -462,7 +497,7 @@ def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
     except urllib.error.HTTPError as e:
         # 本文には鍵は載らない（載せていない）。要点だけ 1 行にする。
         detail = one_line(e.read().decode("utf-8", "replace"))[:200]
-        raise JevError(f"Jev が HTTP {e.code} を返しました: {detail}") from e
+        raise JevError(http_error_message(e.code, detail)) from e
     except urllib.error.URLError as e:
         raise JevError(f"Jev に接続できません: {one_line(str(e.reason))}") from e
     except json.JSONDecodeError as e:

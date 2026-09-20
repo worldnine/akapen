@@ -336,5 +336,35 @@ class MissingKeyTest(unittest.TestCase):
         self.assertIn("プロトコル版", out.stderr)
 
 
+class HttpErrorMessageTest(unittest.TestCase):
+    """HTTP エラーがステータス行で意味を持つか（**API は叩かない**）。
+
+    `max_tokens_exceeded` は実測でこの経路のいちばん現実的な失敗で
+    （45.6KB の実文書が context window の 92〜96 % を使う）、生の JSON が
+    出ると「タイムアウトした」と読み違えられる。
+    """
+
+    MAX_TOKENS = '{"detail":{"error_type":"max_tokens_exceeded"}}'
+
+    def test_max_tokens_says_it_is_size_not_time(self):
+        line = jev.http_error_message(400, self.MAX_TOKENS)
+        self.assertIn("大きすぎ", line)
+        self.assertIn("タイムアウトではない", line)
+        # 生の JSON を出さない（読み手に何も伝えないので）。
+        self.assertNotIn("error_type", line)
+
+    def test_every_message_fits_the_status_line(self):
+        # akapen はステータス行に 160 字まで出す（`src/export.rs` の
+        # `Capture::tail`）。
+        for code, detail in ((400, self.MAX_TOKENS), (401, "unauthorized"), (500, "boom")):
+            with self.subTest(code=code):
+                self.assertLessEqual(len(jev.http_error_message(code, detail)), 160)
+
+    def test_other_errors_keep_the_code_and_the_body(self):
+        line = jev.http_error_message(401, "unauthorized")
+        self.assertIn("401", line)
+        self.assertIn("unauthorized", line)
+
+
 if __name__ == "__main__":
     unittest.main()
