@@ -1,3 +1,279 @@
+# HANDOFF: Semantic Reading Layer を akapen へ配線（Phase 3 / Reading Budget）
+
+## 何を作ったか
+
+`semantic-reading` crate（Atom / SemanticUnit / ReadingTier / FixtureProvider /
+`policy::decorate`）と、Phase 1・2 で出来た byte range attribution + range
+decoration を**繋いだだけ**。どちらの中身も作り直していない。
+
+マイルストーンは実機 pty で確認済み:
+
+```
+akapen examples/semantic/demo.md --semantic examples/semantic/demo.json
+READ 100% → 30%
+同じ source 行の途中で MARKED / NORMAL → MARKED / DIM に切り替わる
+```
+
+## 継ぎ目は `src/semantic.rs` と `App` の 4 フィールド
+
+```rust
+App {
+    semantic_provider: Option<Box<dyn Provider>>,  // ← Jev はここに刺さる
+    semantic_doc: Option<SemanticDocument>,
+    reading_budget: u8,                            // 1..=100、既定 100
+    semantic_decorations: Vec<Decoration>,         // doc × budget のキャッシュ
+}
+```
+
+`src/semantic.rs` が akapen 側の変換層で、置いてあるのは 5 つだけ:
+
+| もの | 役割 |
+|---|---|
+| `provider_from_config(&Config)` | **provider の選択はここだけ**。`--semantic-cmd` を足すときはこの match に腕を 1 本 |
+| `DigestChecked<P>` | `source_sha256` を照合してから通す Provider ラッパー |
+| `decoration_kind(DisplayState)` | `Marked -> SemanticMark` / `Dim -> Dim` / `Normal -> None` |
+| `decorations_for(&doc, budget)` | `policy::decorate` 1 本。**ここから analyze へ到達する経路が無い** |
+| `source_digest(&str)` | sha2 で hex 64 桁 |
+
+依存の向きは akapen → crate の一方向のみ。ルート `Cargo.toml` に
+`semantic-reading = { path = "crates/semantic-reading" }`（`Cargo.lock` も更新済み。
+依存を足した直後は `--locked` が落ちるので、`cargo build` を 1 回挟んでからコミット）。
+
+## 「Budget 変更では Jev を呼ばない」を構造で示した
+
+Phase 2 が「decoration は `render::render` に到達しない」を構造で証明したのと
+同じ水準にしてある。
+
+- **App が provider へ `analyze` を投げるのは 1 箇所**（`App::reanalyze_semantics`）。
+  確認は `grep -rn 'semantic_provider' src/` — フィールドを `.analyze` で触るのは
+  その 1 行だけで、残りは宣言・初期化・代入と `semantic_enabled()` の `is_some()`。
+  （`DigestChecked::analyze` も inner へ委譲するが、それは Provider チェーンの
+  内側であって App からは 1 回の呼び出しに見える。`grep 'analyze('` だと
+  ラッパーとテストの分まで拾うので、確認にはフィールド名の方を使うこと。）
+  呼ぶのは**文書が入れ替わる 4 箇所**だけ:
+  - `main.rs` run()（`activate_first_file` の直後）
+  - `reload.rs` `reload_source`（`app.source = new_source` の直後）
+  - `main.rs` `render_pending_history`（タイムマシン。既に debounce 済みの経路）
+  - `app.rs` `switch_to_file`（ファイル切替）
+- Budget キーの経路は `adjust_reading_budget` → `App::nudge_reading_budget` →
+  `refresh_semantic_decorations` → `semantic::decorations_for` で終わり。
+  clamp と `policy::decorate` しか無い
+- テスト `moving_the_budget_calls_neither_the_provider_nor_the_renderer`:
+  `analyze` の回数を数える provider を挿し、`app.view.rows[0]` に `SENTINEL` を
+  置いてから budget キーを 50 回叩く。**回数は 1 のまま / SENTINEL は生きたまま /
+  それでいて `semantic_decorations` は変わる**
+- 逆向きも固定した（`the_provider_is_re_asked_when_the_document_itself_changes`）。
+  これが無いと「そもそも繋がっていない」でも緑になる
+
+### ミューテーションで検証済み
+
+| 壊した箇所 | 落ちるテスト |
+|---|---|
+| キーの `if app.semantic_enabled()` ガードを外す | `without_semantic_the_budget_keys_are_not_bound_at_all` |
+| `refresh_semantic_decorations` を no-op に | `moving_the_budget_...` と `the_reading_budget_splits_...` の両方 |
+| `reload.rs` の `reanalyze_semantics()` を消す | `the_provider_is_re_asked_...` |
+
+## `--semantic` が無ければ、この改修の前と完全に同一
+
+追加要件（API キーを持たない人への配慮）。すべて `App::semantic_enabled()`
+（= `semantic_provider.is_some()`）1 つにぶら下げてある。
+
+- **キーを束縛しない。** `-` / `+` / `=` / `<` / `>` の match 腕にガードを付けて
+  あるので、provider が無ければ腕ごと無かったことになり末尾の `_ => {}` に落ちる。
+  「使えません」の toast すら出さない
+- ステータス行に `READ %` を出さない（こちらは `semantic_doc.is_some()` 基準 —
+  annotation が無ければ数値に意味が無いため）
+- `?` ヘルプに `read` の行を出さない
+
+判定を **provider** 基準にしたのは意図的で、`--semantic` を渡したのに fixture が
+その文書のものでなかった場合はキーが生きたまま理由を言う（無言で死なない）。
+
+## キーバインド（既存キーマップを監査して決めた）
+
+view / source の両方の `match` と `?` ヘルプを洗った結果、記号キーで使われて
+いたのは `]` `[` `?` だけだった。
+
+| キー | 動き |
+|---|---|
+| `-` | READ −1 |
+| `+` / `=` | READ +1（`=` は shift 無しの別名。ズーム系の慣習） |
+| `<` | READ −10 |
+| `>` | READ +10 |
+
+`modifiers.is_empty()` ガードは**付けていない**。既存の `J` / `K` / `N` と同じ
+理由で、端末によっては shift 付き文字に SHIFT フラグが立ち、ガードが黙って
+握り潰すため。
+
+**view モードのみ**にバインドした。source view は担当範囲外（触っていない）で、
+装飾も出ないので、押すたびに READ % だけ動いて何も変わらないのは嘘になる。
+読み出し自体は source モードでも出る（文書の性質であってモードの性質ではない）。
+
+## `source_sha256`（手順3の落とし穴）
+
+`FixtureProvider::analyze` は渡された source を見ない。`decoration::sanitize` は
+panic を防ぐが、**文字境界に載ってしまう嘘の range は通ってしまう**ので内容の
+ズレは防げない。
+
+crate 側 `SemanticDocument` に**任意フィールド** `source_sha256` を足した
+（`#[serde(default, skip_serializing_if = "Option::is_none")]` なので既存 fixture は
+そのまま読め、書き出しの形も変わらない）。`validate` が見るのは**形だけ**
+（hex 64 桁）で、ハッシュ実装は crate に入れていない。
+
+照合は akapen 側の `DigestChecked<P>` が `analyze` の中で行う。**Provider の
+内側**に置いたのは、拒否が継ぎ目で起きる形にするため — ダイジェストを名乗ら
+ない provider（source を実際に見る Jev）は同じ契約のまま素通りする。
+
+不一致のとき: `semantic_doc = None`（装飾ゼロ・READ 表示なし）＋ `flash_err`。
+拒否と警告の両方をやっている。
+
+## demo fixture（`examples/semantic/`）
+
+`crates/semantic-reading/tests/fixtures/sample.json` ではマイルストーンを実証
+できない（指摘どおり、line 4 の atom 2/3 は同じ Unit `u3` なので常に同じ状態）。
+crate のテスト fixture は**一切触っていない**。
+
+- `demo.md` — 日本語の設計メモ 1664 バイト、Atom 27 / Unit 13
+- `demo.json` — その annotation（`source_sha256` 入り）
+- `build-demo-json.py` — 生成スクリプト。**byte range は手書きしていない**
+- `README.md` — 使い方と見どころ
+
+### 行内で切り替わるのはここ
+
+`## 結論` の下、`demo.md` の **7 行目**:
+
+```
+採用する方式は差分配信である。詳細は付録にまとめた。
+```
+
+前半が Unit `u3`（ESSENTIAL）、後半が `u4`（DETAIL）。attribution は
+`224..302 exact=true` の **1 span** なので、decoration が span を byte 分割する
+経路（Phase 2 の本命）をそのまま通る。
+
+`## 補足` の 29 行目も同じ作りで、`u9`（SUPPORTING + `REDUNDANT_WITH(u3)`）と
+`u10`（DETAIL）。READ 75 % で NORMAL / DIM になる。
+
+### Budget と DIM の対応（スクリプトが出す累積表から取った。勘で選んでいない）
+
+| READ | DIM |
+|---|---|
+| 100 % | なし（ESSENTIAL 3 Unit に MARKED が乗るだけ） |
+| 75 % | DETAIL 4 つ（u4 付録 / u10 念押し / u12 数値 / u13 余談） |
+| 73 % | それに加えて REDUNDANT な u9。CONTEXT（u6/u8/u11）はまだ全部残る |
+| 30 % | ESSENTIAL 3 つといちばん短い SUPPORTING（u5）以外すべて |
+
+REDUNDANT な u9 は元 Tier が SUPPORTING でも実効 CONTEXT へ 1 段落ち、さらに
+同じ実効 Tier の非 REDUNDANT の後ろに回るので、**CONTEXT 3 つより先に DIM に
+なる**。「REDUNDANT は元 Tier にかかわらず優先的に DIM 候補」がそのまま見える。
+
+### Atom の作り方で踏んだところ（renderer の attribution を実測して決めた）
+
+`ViewState::render` の `row_attrs` をダンプして確かめた結果:
+
+- **見出しは `## ` を含めない。** renderer の attribution は marker を除いた
+  見出しテキストそのもの（`## 結論` → `216..222` exact）
+- **リスト項目も本文だけ。** `- ` の span は項目全体（`716..769` 非 exact）に
+  紐づくので、本文だけを指せば本文が装飾され、marker は明るいまま残る
+  （Phase 2 が固定した MVP の割り切り）
+- **段落内の soft line break は改行 1 バイトまで Atom に含める。** renderer は
+  行を半角スペース 1 個で繋ぎ、その合成 span の attribution は改行 1 バイト
+  （非 exact）。覆わないと MARKED の帯に 1 セルの穴が空く
+- **fenced code block は中身全体（末尾改行込み）を 1 つの Atom に。** 4 つの
+  span が同じ非 exact attribution（`1440..1462`）を共有しているので、完全に
+  覆わないと何も装飾されない
+- **blockquote は引用テキストだけ。** `>` と空白の span は attribution を持たない
+
+生成スクリプトの「末尾に足すバイト数」がこの 2 つ目・3 つ目のためのもの。
+
+## 描画経路
+
+`main.rs` の draw_view で `--decorations` と連結してから `sanitize`:
+
+```rust
+let decorations = if app.semantic_decorations.is_empty() {
+    sanitize(&app.config.decorations, &app.source.content)   // 従来どおり
+} else {
+    let mut both = app.config.decorations.clone();
+    both.extend_from_slice(&app.semantic_decorations);
+    sanitize(&both, &app.source.content)
+};
+```
+
+semantic 側を後ろに置いてあるので、同じ range に両方が当たれば patch の後勝ちで
+semantic が勝つ。semantic が空のときは以前と 1 バイトも変わらない。
+
+`policy::decorate` はフレームごとには走らない（`semantic_decorations` が
+doc × budget のキャッシュ）。走るのは budget が動いたときと再解析のときだけ。
+
+## 実機 pty での確認
+
+`examples/semantic/demo.md` を 80 桁で開き、`## 結論` の行の SGR を読んだ。
+
+READ 100 %:
+
+```
+\x1b[10;4H\x1b[39;48;2;54;55;73m採用する方式は差分配信である。   ← MARKED（bg のみ）
+\x1b[10;34H\x1b[39;49m詳細は付録にまとめた。                     ← NORMAL
+```
+
+READ 30 %（`<` を 7 回）:
+
+```
+\x1b[10;4H\x1b[39;48;2;54;55;73m採用する方式は差分配信である。   ← MARKED のまま
+\x1b[10;34H\x1b[2m\x1b[39;49m詳細は付録にまとめた。             ← DIM
+```
+
+READ 75 % では `## 補足` の行が col 54 で `\x1b[2m` に切り替わり（NORMAL → DIM）、
+背景（CONTEXT）は `\x1b[39;49m` のまま、数値の目安（DETAIL）は `\x1b[2m`。
+
+## 範囲外にしたもの
+
+- **source view には手を付けていない。** `view.rs` の source モード経路は未変更
+- **Jev の接続。** provider の継ぎ目まで。`CommandProvider`（`--semantic-cmd` で
+  外部コマンドに委譲。文書を stdin、`SemanticDocument` JSON を stdout）は
+  `provider_from_config` の match に腕を 1 本足すだけで刺さる。akapen に
+  reqwest / tokio は入れない方針
+
+## 既知の割り切り
+
+- Budget は App 単位（読み方の好みなので、ファイルを切り替えても保つ）。
+  annotation の方は文書ごとなので切替時に再解析する
+- タイムマシンで過去を見ると、NOW に紐づいた fixture は `source_sha256` で
+  拒否され、その revision のあいだ装飾が消える（毎回 `flash_err` が出る）。
+  嘘の位置を装飾するよりは正しいが、**拒否メッセージに実 digest の先頭 12 桁が
+  入るので revision ごとに文言が変わり、`is_repeat_error` の抑制が効かず BEL が
+  毎回鳴る**。`demo.md` は revision が 1 つしか無いので今は踏まない。Jev が
+  繋がると「過去を見るたびに解析」にもなるので、そのときは revision 単位の
+  キャッシュと、拒否トーストの抑制（digest を messageから外すか、拒否した
+  digest を覚えて 1 回だけ言う）をまとめて入れること
+- `decorate_row` のコストは Phase 2 の HANDOFF どおり O(可視 span 数 ×
+  decoration 数) / フレーム。demo は Atom 27 個なので効かないが、Jev が
+  数千個持ち込んだら二分探索へ（**今はやらないこと**）
+- source モードでは `READ %` は出るがキーは効かない（上記の理由）
+
+## 検証
+
+- `cargo test --locked --workspace`: **akapen 506 / tui-markdown 173（+1 ignored）/
+  semantic-reading 51 / doc 7**、全緑（ベースライン 488 / 173 / 49 / 7）
+  - 内訳: akapen +18（`semantic.rs` 11 / `state_tests.rs` 6 / `config.rs` 1）、
+    semantic-reading +2（`source_sha256` の後方互換と形の検査）
+- `cargo test --locked --release`: 507 passed（`debug_assert` 無効でも緑）
+- `cargo clippy --locked --all-targets`: **警告 0**
+- `TUI_MARKDOWN_SRC=… ./scripts/check-vendor-diff.sh`: **OK**（上流 0.3.9 /
+  フォーク 0.4.0、28 ファイル、1880 変更行 — `third_party/` は未変更）
+- 実機 pty: 上記の SGR 列
+- 変更ファイル: `src/semantic.rs`（新規）/ `src/app.rs` / `src/main.rs` /
+  `src/chrome.rs` / `src/config.rs` / `src/overlay.rs` / `src/reload.rs` /
+  `src/state_tests.rs` / `Cargo.toml` / `Cargo.lock` /
+  `crates/semantic-reading/src/document.rs` /
+  `crates/semantic-reading/tests/fixtures/README.md` /
+  `examples/semantic/*`（新規 4 点）/ `HANDOFF.md`
+
+補足: Phase 2 の HANDOFF と同じく、このリポジトリは rustfmt を掛けていない。
+`semantic.rs` も既存ファイルと同程度に揃えてあるだけで、自分のファイルだけを
+整形するようなことはしていない。
+
+---
+
 # HANDOFF: Range Decoration 層 — 任意の source byte range に Style を当てる（Phase 2）
 
 ## 何を作ったか

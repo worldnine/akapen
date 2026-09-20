@@ -1,7 +1,8 @@
 //! Command-line configuration.
 //!
 //! `akapen <file...> [--send-cmd <cmd>] [--theme <syntect-theme>]
-//!              [--ime <off|ascii|jp>] [--light|--dark] [--esc-quit <auto|always|never>]`
+//!              [--ime <off|ascii|jp>] [--light|--dark] [--esc-quit <auto|always|never>]
+//!              [--semantic <fixture.json>]`
 //! Positional arguments are the files to open (one or more). Unknown flags
 //! are ignored (reviewr-style). `--help`/`--version` short-circuit before parsing.
 
@@ -97,6 +98,21 @@ pub struct Config {
     /// cursor_blaze etc.) blaze around that motion, so this lets shader
     /// users trade the IME anchor for a calm composer.
     pub cursor_anchor: bool,
+    /// `--semantic <fixture.json>`: the Semantic Reading Layer's
+    /// annotation for the document being opened — a
+    /// `semantic-reading` [`SemanticDocument`] as JSON. With it the
+    /// rendered view paints MARKED / NORMAL / DIM per Atom at the
+    /// current READ budget (`-`/`+`, `<`/`>`); without it the layer is
+    /// entirely absent (no status readout, no keys).
+    ///
+    /// The fixture is read and validated before the TUI starts, so a
+    /// broken file is an ordinary command-line error rather than a
+    /// document that silently paints nothing. Whether it belongs to the
+    /// document actually open is a separate, per-document check (its
+    /// optional `source_sha256`, see [`crate::semantic::DigestChecked`]).
+    ///
+    /// [`SemanticDocument`]: semantic_reading::SemanticDocument
+    pub semantic: Option<PathBuf>,
     /// `--decorations <json>`: a hidden development flag that paints
     /// range decorations onto the rendered view, so the layer can be seen
     /// on real documents before a producer (the Semantic Reading Layer)
@@ -159,6 +175,7 @@ impl Config {
         let mut fx = true;
         let mut cursor_anchor = true;
         let mut decorations: Vec<Decoration> = Vec::new();
+        let mut semantic: Option<PathBuf> = None;
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -183,6 +200,7 @@ impl Config {
                         decorations = parse_decorations(&v)?;
                     }
                 }
+                "--semantic" => semantic = it.next().map(PathBuf::from),
                 "--ime" => {
                     if let Some(v) = it.next() {
                         ime = ImeMode::parse(&v);
@@ -196,7 +214,7 @@ impl Config {
         }
         if files.is_empty() {
             bail!(
-                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark]"
+                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json>]"
             );
         }
         if send_cmd.is_some() && send_agent {
@@ -214,6 +232,7 @@ impl Config {
             esc_quit,
             fx,
             cursor_anchor,
+            semantic,
             decorations,
         }))
     }
@@ -398,6 +417,24 @@ mod tests {
         assert_eq!(
             cfg(&parse(&["x.md", "--ime", "bogus"])).ime,
             ImeMode::Ascii
+        );
+    }
+
+    #[test]
+    fn semantic_defaults_to_off_and_takes_a_path() {
+        assert!(
+            cfg(&parse(&["x.md"])).semantic.is_none(),
+            "the Semantic Reading Layer is opt-in"
+        );
+        let action = parse(&["x.md", "--semantic", "examples/semantic/demo.json"]);
+        assert_eq!(
+            cfg(&action).semantic.as_deref(),
+            Some(std::path::Path::new("examples/semantic/demo.json"))
+        );
+        // The fixture itself is read at startup, not here — a path that
+        // does not exist is not a PARSE error.
+        assert!(
+            cfg(&parse(&["x.md", "--semantic", "nope.json"])).semantic.is_some()
         );
     }
 

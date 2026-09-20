@@ -26,6 +26,7 @@ dependencies = [
  "flate2",
  "libc",
  "ratatui",
+ "semantic-reading",
  "serde",
  "serde_json",
  "sha2",

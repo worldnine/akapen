@@ -21,12 +21,30 @@ pub struct SemanticDocument {
     pub atoms: Vec<Atom>,
     /// Jev が知覚した意味的まとまり。
     pub units: Vec<SemanticUnit>,
+    /// この annotation が作られたときの source テキストの SHA-256
+    /// （小文字 hex 64 桁）。**任意**で、無ければ照合しない。
+    ///
+    /// Atom の範囲は annotation を作った時点の文書に対するバイト位置なので、
+    /// 別の文書に当てると無意味な位置を装飾する。[`crate::FixtureProvider`]
+    /// は渡された source を見ないため、その取り違えをここで検出できるように
+    /// してある。ダイジェストの計算はクライアント側の責務で（この crate は
+    /// ハッシュ実装を持たない）、`validate` は**形だけ**を検査する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
 }
 
 impl SemanticDocument {
     /// Atom 列と Unit 列から文書を作る。検証はしない（[`Self::validate`]）。
     pub fn new(atoms: Vec<Atom>, units: Vec<SemanticUnit>) -> Self {
-        Self { atoms, units }
+        Self { atoms, units, source_sha256: None }
+    }
+
+    /// この annotation が想定している source のダイジェスト。
+    ///
+    /// `None` は「素性を名乗っていない」という意味であって「どの文書にでも
+    /// 当てられる」ではない。照合するかどうかはクライアントが決める。
+    pub fn source_digest(&self) -> Option<&str> {
+        self.source_sha256.as_deref()
     }
 
     /// 添字で Atom を引く。範囲外なら `None`。
@@ -53,10 +71,21 @@ impl SemanticDocument {
     /// - Unit の Atom 添字が範囲内であること
     /// - Unit の識別子が重複していないこと
     /// - `RedundantWith` の参照先が実在し、自分自身でないこと
+    /// - `source_sha256` があるなら hex 64 桁であること
     ///
-    /// の 4 点。Atom がどの Unit にも属さないことは**エラーにしない**
+    /// の 5 点。Atom がどの Unit にも属さないことは**エラーにしない**
     /// （未判断の Atom は NORMAL のまま表示されればよい）。
+    ///
+    /// `source_sha256` は**形だけ**を見る。実際の source と一致するかは
+    /// クライアントの仕事で、ここには source そのものが無い。
     pub fn validate(&self) -> Result<()> {
+        if let Some(digest) = &self.source_sha256
+            && (digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(Error::Invalid(format!(
+                "source_sha256 は hex 64 桁であるべきです: `{digest}`"
+            )));
+        }
         for (i, atom) in self.atoms.iter().enumerate() {
             if atom.range.start > atom.range.end {
                 return Err(Error::Invalid(format!(
@@ -139,6 +168,41 @@ mod tests {
             ReadingTier::Detail
         );
         assert!(doc.unit(&UnitId::from("nope")).is_none());
+    }
+
+    #[test]
+    fn source_sha256_is_optional_and_old_fixtures_still_load() {
+        // 後方互換: フィールドを持たない JSON はそのまま読め、素性を
+        // 名乗っていないだけの文書として扱われる。
+        let json = r#"{"atoms":[],"units":[]}"#;
+        let doc: SemanticDocument = serde_json::from_str(json).unwrap();
+        assert!(doc.source_digest().is_none());
+        assert!(doc.validate().is_ok());
+        // 無いものは書き出されない（既存 fixture の形が変わらない）。
+        assert_eq!(serde_json::to_string(&doc).unwrap(), json);
+    }
+
+    #[test]
+    fn source_sha256_round_trips_and_must_be_hex_64() {
+        let digest = "b".repeat(64);
+        let mut stamped = doc();
+        stamped.source_sha256 = Some(digest.clone());
+        assert!(stamped.validate().is_ok());
+        assert_eq!(stamped.source_digest(), Some(digest.as_str()));
+        let back: SemanticDocument =
+            serde_json::from_str(&serde_json::to_string(&stamped).unwrap()).unwrap();
+        assert_eq!(back, stamped);
+
+        // 形が違えば読み込み時に弾く — 照合そのものはクライアントの仕事だが、
+        // 打ち間違いは「たまたま一致しない」と区別がつかないので早く落とす。
+        for bad in ["", "deadbeef", &"z".repeat(64), &"a".repeat(63)] {
+            let mut broken = doc();
+            broken.source_sha256 = Some(bad.to_owned());
+            assert!(
+                matches!(broken.validate(), Err(Error::Invalid(_))),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     #[test]

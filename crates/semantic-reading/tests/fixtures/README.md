@@ -45,3 +45,15 @@ Unit の合計は 1374 バイト（空行と改行は Atom に含めないので
 ※ 元 Tier は SUPPORTING。
 
 `tests/policy.rs` の budget 100 / 70 / 30 / 10 の期待値はこの表の累積 % から出している。
+
+## `source_sha256`
+
+このファイルには入れていないが、`SemanticDocument` は任意フィールド
+`source_sha256`（source テキストの SHA-256、hex 64 桁）を持てる。Atom の
+範囲は annotation を作った時点の文書に対するバイト位置なので、別の文書に
+当てれば無意味な位置を装飾する。クライアントはこの値で取り違えを検出できる
+（akapen の `src/semantic.rs` の `DigestChecked` がそれ）。
+
+crate 側は**形（hex 64 桁）だけ**を `validate` で見る。実際に一致するかは
+source を持っているクライアントの仕事で、この crate はハッシュ実装を持たない。
+フィールドが無ければ照合しない — この fixture がその後方互換の実例になっている。

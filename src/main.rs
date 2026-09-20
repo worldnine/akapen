@@ -22,6 +22,7 @@ mod ime;
 mod overlay;
 mod reload;
 mod render;
+mod semantic;
 mod snapshot;
 mod source;
 mod theme;
@@ -103,6 +104,9 @@ fn main() -> Result<()> {
                  \x20                   the composer's caret (calms cursor-following\n\
                  \x20                   terminal shaders; the IME composition window\n\
                  \x20                   then loses its anchor)\n\
+                 \x20 --semantic <file> paint the Semantic Reading Layer from a\n\
+                 \x20                   semantic-reading annotation (JSON); the READ\n\
+                 \x20                   budget is -/+ by 1 and </> by 10 in the view\n\
                  \x20 --callback <cmd>  shell command to spawn on exit\n\
                  \x20                   (e.g. return to a file-picker after quit)\n\
                  \x20 --esc-quit <auto|always|never> whether Esc may quit\n\
@@ -330,6 +334,11 @@ fn run(config: Config) -> Result<()> {
         sources.push(Source::load(f.clone())?);
     }
 
+    // The Semantic Reading Layer's provider (`--semantic`). Resolved
+    // BEFORE the terminal enters raw mode, so a broken fixture is an
+    // ordinary command-line error instead of a TUI that paints nothing.
+    let semantic_provider = crate::semantic::provider_from_config(&config)?;
+
     let mut terminal = NoBlinkBackend::init()?;
     // From here on the terminal is in raw mode + alternate screen; the
     // guard's Drop restores it on every return path, early or normal.
@@ -412,7 +421,11 @@ fn run(config: Config) -> Result<()> {
     app.histories = histories;
     app.snapshot_cache = snapshot_cache;
     app.file_states = file_states;
+    app.semantic_provider = semantic_provider;
     activate_first_file(&mut app);
+    // The first document is on screen now: ask the provider about it.
+    // (`activate_first_file` is what puts `app.source` in place.)
+    app.reanalyze_semantics();
     // Command mode always runs in ASCII so j/k etc. are never swallowed by
     // the IME. The first attempt may no-op while the helper compiles on
     // first run; the event loop retries until it sticks.
@@ -802,7 +815,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             }
             MouseEventKind::ScrollDown => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false)
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled())
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = (app.overlay_cursor + 1).min(max);
@@ -825,7 +838,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             },
             MouseEventKind::ScrollUp => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false)
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled())
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = app.overlay_cursor.saturating_sub(1).min(max);
@@ -1566,6 +1579,12 @@ pub(crate) fn render_pending_history(app: &mut App, animate: bool) -> bool {
     app.cursor = anchor;
     app.base_rows.clear();
     app.line_rows.clear();
+    // A different generation of the document is on screen: the previous
+    // annotation described other byte positions. Re-ask the provider
+    // (already debounced — this runs once input settles, not per arrow
+    // press). A fixture pinned to NOW refuses the past and the layer
+    // goes quiet, which is the honest answer.
+    app.reanalyze_semantics();
 
     let file_comments: Vec<Comment> = visible_cards(app).into_iter().cloned().collect();
     let mut view = render_current_view(app, &file_comments);
@@ -2497,6 +2516,27 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         KeyCode::F(7) => jump_review_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
+        // Reading Budget (only with `--semantic`): `-`/`+` move one
+        // point, `<`/`>` ten. `=` is the unshifted alias for `+`, the
+        // convention every zoom control uses. The four keys were free on
+        // BOTH maps (view and source) before this — nothing else in
+        // akapen binds a punctuation key except `]`/`[` and `?`.
+        //
+        // No `modifiers.is_empty()` guard, for the same reason `J`/`K`/`N`
+        // carry none: some terminals report a shifted character WITH the
+        // SHIFT flag set, and the guard would silently drop it.
+        //
+        // ガードが落ちればこれらの腕は無かったことになり、末尾の `_ => {}`
+        // に落ちる — `--semantic` を渡していないセッションでは `-` も `+`
+        // も `<` も `>` も、この層が存在しなかったときと 1 バイトも違わない
+        // 動きをする。「使えない機能があります」という UI を見せないため、
+        // 断りの toast すら出さない。
+        KeyCode::Char('-') if app.semantic_enabled() => adjust_reading_budget(app, -1),
+        KeyCode::Char('+') | KeyCode::Char('=') if app.semantic_enabled() => {
+            adjust_reading_budget(app, 1)
+        }
+        KeyCode::Char('<') if app.semantic_enabled() => adjust_reading_budget(app, -10),
+        KeyCode::Char('>') if app.semantic_enabled() => adjust_reading_budget(app, 10),
         // `l` opens the all-comments list; `t` the document timeline;
         // Ctrl+p opens the file picker; `?` opens the full key reference.
         KeyCode::Char('l') => {
@@ -2733,6 +2773,27 @@ fn active_review_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
         app.comparison_changed.clone(),
         app.comparison_deleted_before.clone(),
     )
+}
+
+/// Move the Reading Budget (`-`/`+`, `<`/`>` in the rendered view).
+///
+/// **The whole of the budget key path.** It reaches
+/// [`App::nudge_reading_budget`] and stops there: no parse, no render,
+/// no `Provider::analyze`. The new percentage is read off the status
+/// line rather than toasted — the point of a 1 % step is that you hold
+/// the key, and a toast per step would strobe.
+fn adjust_reading_budget(app: &mut App, delta: i16) {
+    if app.semantic_doc.is_none() {
+        // Only reachable WITH `--semantic`: the layer was asked for and
+        // the provider refused this document (a fixture belonging to
+        // another file, or a provider error). Same shape as the other
+        // "not here" refusals (`Tab` on a non-Markdown file): say why.
+        // A session without `--semantic` never gets here — the key is
+        // not bound at all.
+        app.flash_err("semantic annotation unavailable for this document");
+        return;
+    }
+    app.nudge_reading_budget(delta);
 }
 
 fn jump_review_mark(app: &mut App, dir: isize) {
@@ -4187,7 +4248,16 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // document that is actually on screen — which the time machine and a
     // reload both change under them. Empty (the normal case) allocates
     // nothing.
-    let decorations = crate::decoration::sanitize(&app.config.decorations, &app.source.content);
+    // `--decorations` は手で置く開発用のレンジ、semantic の方は Budget から
+    // 導かれるレンジ。併用されたら連結する（decoration は patch を重ねる
+    // ので、後ろに置いた semantic 側が同じ range では後勝ちになる）。
+    let decorations = if app.semantic_decorations.is_empty() {
+        crate::decoration::sanitize(&app.config.decorations, &app.source.content)
+    } else {
+        let mut both = app.config.decorations.clone();
+        both.extend_from_slice(&app.semantic_decorations);
+        crate::decoration::sanitize(&both, &app.source.content)
+    };
     let (mut text, mut gutter) = app.view.visible_text_with_glow(
         inner.height as usize,
         &marked,
@@ -5316,6 +5386,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
@@ -5364,6 +5435,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
@@ -5426,6 +5498,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
@@ -5571,6 +5644,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -5611,6 +5685,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(config.files[0].clone()).unwrap();
@@ -5747,6 +5822,7 @@ mod mouse_view_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path.into()).unwrap();

@@ -291,6 +291,10 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
 
     let width = source_content_width(app);
     app.source = new_source;
+    // The document changed under the annotation — the design document's
+    // 「編集時」 chapter: a provider is re-asked when the text settles,
+    // never per keystroke and never on a budget change.
+    app.reanalyze_semantics();
     let history_path = app.current_file_path().to_path_buf();
     let history_content = app.source.content.clone();
     if let Some(cache) = app.snapshot_cache.clone() {
@@ -456,6 +460,7 @@ mod handoff_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path.into()).unwrap();
@@ -514,6 +519,7 @@ mod handoff_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();

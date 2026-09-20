@@ -444,10 +444,18 @@ pub(crate) fn footer_hints(app: &App) -> String {
             format!("L{}/{}", line + 1, total)
         }
     };
+    // `READ 73%` rides beside the position: both describe the document
+    // being read, not the mode. Shown ONLY while a semantic annotation is
+    // actually loaded — without one the budget exists as a number but
+    // means nothing, and advertising it would promise keys that refuse.
+    let read = |p: String| match app.semantic_doc {
+        Some(_) => format!("{p} · READ {}%", app.reading_budget),
+        None => p,
+    };
     let hints = match app.mode {
         Mode::Input => "Enter confirm · ^j newline · ←→↑↓ move · Esc cancel".to_string(),
         Mode::View => {
-            let p = pos(app.view.cursor, app.source.len());
+            let p = read(pos(app.view.cursor, app.source.len()));
             // With a selection active, j/k EXTENDS it (the parallel model —
             // same as source mode); the footer must say so, or "j/k
             // scroll" silently grows the range after a Tab handoff. Esc
@@ -462,7 +470,7 @@ pub(crate) fn footer_hints(app: &App) -> String {
             }
         }
         Mode::Source => {
-            let p = pos(app.cursor, app.source.len());
+            let p = read(pos(app.cursor, app.source.len()));
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
@@ -750,6 +758,7 @@ mod footer_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();

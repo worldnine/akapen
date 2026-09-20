@@ -7,8 +7,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::style::Color;
 
+use semantic_reading::{Provider, SemanticDocument};
+
 use crate::comment::{Comment, Selection};
 use crate::config::{Config, EscQuit};
+use crate::decoration::Decoration;
 use crate::highlight::{Highlighter, Span as HiSpan, wrap_spans};
 use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
@@ -333,6 +336,32 @@ pub(crate) struct App {
     /// set on a thumb press, cleared on release (viewport-only scroll, so
     /// the cursor keeps its absolute position).
     pub(crate) scrollbar_drag: Option<(usize, usize)>,
+
+    // ---- Semantic Reading Layer (docs/semantic-reading-layer.md) ----
+    /// Where semantic annotation comes from: `--semantic` installs a
+    /// fixture provider, and a future Jev provider drops in here
+    /// unchanged. `None` = the layer is absent entirely.
+    ///
+    /// **This is the seam.** Everything slow and non-deterministic lives
+    /// behind it; everything outside is the deterministic local
+    /// calculation the layer exists for.
+    pub(crate) semantic_provider: Option<Box<dyn Provider>>,
+    /// The annotation for the document CURRENTLY on screen, or `None`
+    /// when there is no provider, or the provider refused this document
+    /// (a fixture whose `source_sha256` names another file). Produced
+    /// only by [`App::reanalyze_semantics`] — the one place that asks
+    /// [`App::semantic_provider`] anything.
+    pub(crate) semantic_doc: Option<SemanticDocument>,
+    /// Reading Budget: "how much attention can I spend on this
+    /// document", 1..=100 %, default 100. A pure reading preference, so
+    /// it is NOT per-file state — switching files keeps it.
+    pub(crate) reading_budget: u8,
+    /// [`App::semantic_doc`] projected onto the current budget: the
+    /// decoration list the paint consumes, cached so a frame does no
+    /// policy work. Recomputed by
+    /// [`App::refresh_semantic_decorations`] — from the budget and the
+    /// document only, never from the provider.
+    pub(crate) semantic_decorations: Vec<Decoration>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -460,7 +489,96 @@ impl App {
             ui_scrollbar: scrollbar_thumb(light),
             ui_light: light,
             scrollbar_drag: None,
+            semantic_provider: None,
+            semantic_doc: None,
+            reading_budget: crate::semantic::DEFAULT_BUDGET,
+            semantic_decorations: Vec::new(),
         }
+    }
+
+    /// Whether this session has a Semantic Reading Layer at all — i.e.
+    /// whether a provider was installed from the command line.
+    ///
+    /// **Everything the layer adds to the UI hangs off this.** Without a
+    /// provider akapen behaves exactly as it did before the layer
+    /// existed: the budget keys are not bound (they fall through to the
+    /// same `_ => {}` as any unbound key), the `?` help has no row for
+    /// them, the status line has no `READ %`, and nothing is ever
+    /// flashed about a feature that is not there. A user with no API key
+    /// — and no fixture — must not be shown a disabled feature.
+    ///
+    /// This is deliberately about the PROVIDER, not the annotation: a
+    /// session that asked for the layer and got a document the provider
+    /// refused keeps its keys and is told why.
+    pub(crate) fn semantic_enabled(&self) -> bool {
+        self.semantic_provider.is_some()
+    }
+
+    /// Re-run the provider over the document now on screen.
+    ///
+    /// **The only place akapen asks its provider anything.** It is called
+    /// where `App::source` is REPLACED — startup, `r`/auto reload, a
+    /// time-machine revision, a file switch — which is the position the
+    /// design document's 「編集時」 chapter asks for: a real provider
+    /// (Jev) re-reads the document when the document changes, and at no
+    /// other time. In particular **no budget key reaches this function**.
+    ///
+    /// A provider that refuses the document (the fixture belongs to
+    /// another file) drops the annotation and says so, rather than
+    /// painting confident nonsense at positions that mean nothing here.
+    pub(crate) fn reanalyze_semantics(&mut self) {
+        let analyzed = match self.semantic_provider.as_ref() {
+            Some(provider) => provider.analyze(&self.source.content),
+            None => return,
+        };
+        let refusal = match analyzed {
+            Ok(document) => {
+                self.semantic_doc = Some(document);
+                None
+            }
+            Err(e) => {
+                self.semantic_doc = None;
+                Some(e.to_string())
+            }
+        };
+        self.refresh_semantic_decorations();
+        if let Some(message) = refusal {
+            self.flash_err(message);
+        }
+    }
+
+    /// Project the annotation onto the current budget.
+    ///
+    /// This is the whole cost of moving the budget: `policy::decorate`
+    /// over the units already in hand. No parsing, no rendering, no
+    /// provider.
+    pub(crate) fn refresh_semantic_decorations(&mut self) {
+        self.semantic_decorations = match self.semantic_doc.as_ref() {
+            Some(document) => crate::semantic::decorations_for(document, self.reading_budget),
+            None => Vec::new(),
+        };
+    }
+
+    /// Move the Reading Budget by `delta` percentage points, clamped to
+    /// 1..=100. Returns whether it actually moved (already at an end is
+    /// not an error — the readout simply does not change).
+    ///
+    /// 設計書「Budget 変更では Jev を呼ばない」: the body is a clamp plus
+    /// [`App::refresh_semantic_decorations`], and neither reaches
+    /// `Provider::analyze` or `render::render`. That is the property of
+    /// this layer, and it is held here by the call graph rather than by
+    /// a comment.
+    pub(crate) fn nudge_reading_budget(&mut self, delta: i16) -> bool {
+        let next = (self.reading_budget as i16 + delta).clamp(
+            crate::semantic::MIN_BUDGET as i16,
+            crate::semantic::MAX_BUDGET as i16,
+        ) as u8;
+        if next == self.reading_budget {
+            return false;
+        }
+        self.reading_budget = next;
+        self.refresh_semantic_decorations();
+        true
     }
 
     /// Set a transient footer message.
@@ -787,6 +905,10 @@ impl App {
             std::mem::take(&mut new.comparison_deleted_blocks);
 
         self.current_file_index = new_index;
+        // Another document is live now. The budget is a reading
+        // preference and rides along unchanged; the ANNOTATION does not
+        // — it describes byte positions in the file we just left.
+        self.reanalyze_semantics();
         self.focused_deletion = None;
         self.history_ghost_until = None;
         self.history_render_due = None;

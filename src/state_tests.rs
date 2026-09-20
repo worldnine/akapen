@@ -76,6 +76,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -119,6 +120,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -417,12 +419,12 @@ use crate::comment::Selection;
 
     #[test]
     fn help_rows_reflect_the_esc_binding() {
-        let rows = help_rows(false, false, false);
+        let rows = help_rows(false, false, false, false);
         assert!(
             rows.iter().any(|(l, k)| *l == "quit" && *k == "q quit · Esc cancel"),
             "default help advertises Esc as cancel"
         );
-        let rows = help_rows(true, false, false);
+        let rows = help_rows(true, false, false, false);
         assert!(
             rows.iter().any(|(l, k)| *l == "quit" && *k == "Esc/q quit"),
             "esc-quit help advertises Esc/q as quit"
@@ -431,11 +433,11 @@ use crate::comment::Selection;
 
     #[test]
     fn help_advertises_review_navigation() {
-        let rows = help_rows(false, false, true);
+        let rows = help_rows(false, false, true, false);
         assert!(rows
             .iter()
             .any(|(l, k)| *l == "compare" && k.contains("a acknowledge")));
-        let rows = help_rows(false, true, true);
+        let rows = help_rows(false, true, true, false);
         assert!(!rows.iter().any(|(l, _)| *l == "compare"));
     }
 
@@ -443,7 +445,7 @@ use crate::comment::Selection;
     fn reply_mode_help_hides_file_navigation_and_edit() {
         // Reply mode: messages replace files — no file switching, no
         // edit, and reloads are automatic.
-        let rows = help_rows(false, true, false);
+        let rows = help_rows(false, true, false, false);
         assert!(
             !rows.iter().any(|(l, _)| *l == "file"),
             "no file navigation row in reply mode"
@@ -463,7 +465,7 @@ use crate::comment::Selection;
             "reply help advertises auto-reload"
         );
         // Non-reply mode keeps them.
-        let rows = help_rows(false, false, false);
+        let rows = help_rows(false, false, false, false);
         assert!(rows.iter().any(|(l, _)| *l == "file"));
         assert!(rows.iter().any(|(_, k)| k.contains("e edit")));
     }
@@ -817,6 +819,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -866,6 +869,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -902,6 +906,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -1877,6 +1882,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -1990,6 +1996,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
@@ -2288,6 +2295,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            semantic: None,
             decorations: Vec::new(),
         };
         let source = Source::load(config.files[0].clone()).unwrap();
@@ -5953,6 +5961,7 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         esc_quit: EscQuit::Auto,
         cursor_anchor: true,
         fx: false,
+        semantic: None,
         decorations: vec![
             mark_at("重要", DecorationKind::SemanticMark),
             mark_at(" 後", DecorationKind::Dim),
@@ -6010,4 +6019,365 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
     assert!(marked.add_modifier.contains(ratatui::style::Modifier::BOLD));
     assert_eq!(marked.fg, plain.fg);
     assert_eq!(dimmed.fg, plain.fg);
+}
+
+
+/// The Semantic Reading Layer, drawn into a real (test) terminal:
+/// `--semantic` through `Config` → `App` → `Provider` → `policy::decorate`
+/// → `draw` → cells. The milestone of this phase — **one source line
+/// splits mid-line into two different styles, and which two depends on
+/// the READ budget** — seen the way the terminal sees it.
+#[test]
+fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
+    use crate::decoration::{DecorationKind, DecorationStyles};
+
+    let path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.md"
+    ));
+    let fixture = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.json"
+    ));
+    let config = Config {
+        files: vec![path.clone()],
+        send_cmd: None,
+        send_agent: false,
+        reply: false,
+        theme: None,
+        ime: ImeMode::Off,
+        light: None,
+        callback: None,
+        esc_quit: EscQuit::Auto,
+        cursor_anchor: true,
+        fx: false,
+        semantic: Some(fixture.clone()),
+        decorations: Vec::new(),
+    };
+    let source = Source::load(path).unwrap();
+    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let view = ViewState::render(&source, crate::view_render_width(80), &highlight);
+    let mark_bg = DecorationStyles::from_theme(&highlight)
+        .of(DecorationKind::SemanticMark)
+        .bg;
+    let mut app = App::new(config, source, highlight, view, false);
+    // Config → provider の分岐 → App という実経路を通す。provider を
+    // 増やすときに触るのはこの関数の match 1 つだけ、という約束の固定。
+    app.semantic_provider = crate::semantic::provider_from_config(&app.config).unwrap();
+    assert!(app.semantic_enabled(), "--semantic から provider が立つ");
+    app.reanalyze_semantics();
+    app.mode = Mode::View;
+    app.gutter_cols = 3;
+    assert!(app.semantic_doc.is_some(), "the fixture matches demo.md");
+    // The cursor sits on the title, so the cursor band never touches the
+    // line under test.
+    assert_eq!(app.view.cursor, 0);
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    // `(the style on 採, the style on 詳)` — the two halves of
+    // 「採用する方式は差分配信である。詳細は付録にまとめた。」, which is ONE
+    // source line holding two Atoms of two different Semantic Units.
+    let halves = |app: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        let cell = |y: usize, x: usize| &buf.content[y * w + x];
+        // 「詳」は文書内で 1 度しか出ない。「採」は導入段落にも出るので、
+        // 「詳」の行を先に決めてから同じ行の「採」を探す。
+        let (row, right) = (0..buf.area.height as usize)
+            .find_map(|y| (0..w).find(|&x| cell(y, x).symbol() == "詳").map(|x| (y, x)))
+            .expect("the 結論 paragraph is on screen");
+        let left = (0..right)
+            .find(|&x| cell(row, x).symbol() == "採")
+            .expect("both halves are on the SAME terminal row");
+        (cell(row, left).style(), cell(row, right).style())
+    };
+
+    // READ 100 % — the design document's first demo: the whole document
+    // is shown and the ESSENTIAL half is marked. Nothing is dim.
+    assert_eq!(app.reading_budget, 100);
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, mark_bg, "ESSENTIAL は MARKED");
+    assert_ne!(detail.bg, mark_bg, "DETAIL は NORMAL");
+    assert!(!detail.add_modifier.contains(ratatui::style::Modifier::DIM));
+    assert_ne!(essential, detail, "100 % でもう行の途中で切り替わっている");
+
+    // READ 30 % — the same line, now MARKED against DIM.
+    assert!(app.nudge_reading_budget(-70));
+    assert_eq!(app.reading_budget, 30);
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, mark_bg, "ESSENTIAL は Budget を下げても MARKED");
+    assert!(
+        detail.add_modifier.contains(ratatui::style::Modifier::DIM),
+        "DETAIL は DIM に落ちる"
+    );
+    assert!(!essential.add_modifier.contains(ratatui::style::Modifier::DIM));
+    assert_ne!(essential, detail);
+    // 装飾は fg を触らない（syntax highlight は生きたまま）。
+    assert_eq!(essential.fg, detail.fg);
+}
+
+/// 設計書「Budget 変更では Jev を呼ばない」を、呼び出し回数と
+/// レンダー済み行の同一性で固定する。
+///
+/// Phase 2 は「decoration が `render::render` に到達しない」ことを構造で
+/// 示した。ここはその 1 段上 — Budget キーが `Provider::analyze` にも
+/// `ViewState::render` にも到達しないこと。
+#[test]
+fn moving_the_budget_calls_neither_the_provider_nor_the_renderer() {
+    use semantic_reading::{Provider, SemanticDocument};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// `analyze` が呼ばれた回数を数える provider。
+    struct CountingProvider {
+        document: SemanticDocument,
+        calls: Rc<Cell<usize>>,
+    }
+    impl Provider for CountingProvider {
+        fn analyze(&self, _source: &str) -> semantic_reading::Result<SemanticDocument> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.document.clone())
+        }
+    }
+
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.json");
+    let document: SemanticDocument =
+        serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
+
+    let mut app = make_app(3, Mode::View);
+    let calls = Rc::new(Cell::new(0usize));
+    app.semantic_provider = Some(Box::new(CountingProvider {
+        document,
+        calls: Rc::clone(&calls),
+    }));
+    // 文書が用意された時点で 1 回。以降は文書が変わるまで呼ばれない。
+    app.reanalyze_semantics();
+    assert_eq!(calls.get(), 1);
+    assert!(app.semantic_doc.is_some());
+    let at_100 = app.semantic_decorations.clone();
+    assert!(!at_100.is_empty());
+
+    // 「この行は再レンダーされていない」の目印。`ViewState::render` が
+    // 走れば rows は作り直されて消える。
+    app.view.rows[0] = vec![crate::highlight::Span {
+        text: "SENTINEL".to_string(),
+        style: ratatui::style::Style::default(),
+    }];
+
+    for _ in 0..7 {
+        on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
+    }
+    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
+
+    assert_eq!(app.reading_budget, 29, "7 回の <（-10）と 1 回の -（-1）");
+    assert_eq!(calls.get(), 1, "Budget 操作で analyze は呼ばれない");
+    assert_eq!(
+        app.view.rows[0][0].text, "SENTINEL",
+        "Budget 操作で markdown は再レンダーされない"
+    );
+    // それでいて表示状態はちゃんと変わっている（no-op ではない）。
+    assert_ne!(app.semantic_decorations, at_100);
+
+    // 上限・下限で止まり、そこでも provider には触れない。
+    for _ in 0..40 {
+        on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
+    }
+    assert_eq!(app.reading_budget, crate::semantic::MIN_BUDGET);
+    for _ in 0..40 {
+        on_view_key(&mut app, KeyCode::Char('>'), KeyModifiers::NONE, None);
+    }
+    assert_eq!(app.reading_budget, crate::semantic::MAX_BUDGET);
+    assert_eq!(app.semantic_decorations, at_100, "100 % に戻れば元どおり");
+    assert_eq!(calls.get(), 1);
+
+    // `+` と `=` は同じ 1 段。`-` と対になる。
+    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
+    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
+    assert_eq!(app.reading_budget, 98);
+    on_view_key(&mut app, KeyCode::Char('+'), KeyModifiers::NONE, None);
+    assert_eq!(app.reading_budget, 99);
+    on_view_key(&mut app, KeyCode::Char('='), KeyModifiers::NONE, None);
+    assert_eq!(app.reading_budget, 100);
+    assert_eq!(calls.get(), 1);
+}
+
+/// 継ぎ目の反対側: **文書が入れ替わったら provider は呼ばれる。**
+///
+/// Budget では呼ばれないことを固定したので、呼ばれるべきときに呼ばれる
+/// ことも固定しておく（両方無いと「そもそも繋がっていない」でも緑になる）。
+/// これは設計書「編集時」の位置でもある — idle して文書が落ち着いたら
+/// 再解析する。
+#[test]
+fn the_provider_is_re_asked_when_the_document_itself_changes() {
+    use semantic_reading::{Provider, SemanticDocument};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct CountingProvider {
+        calls: Rc<Cell<usize>>,
+    }
+    impl Provider for CountingProvider {
+        fn analyze(&self, source: &str) -> semantic_reading::Result<SemanticDocument> {
+            self.calls.set(self.calls.get() + 1);
+            // 渡された source を実際に見る provider（Jev 側の形）。
+            Ok(SemanticDocument::new(
+                vec![semantic_reading::Atom::new(
+                    0..source.len(),
+                    semantic_reading::AtomKind::Sentence,
+                )],
+                vec![semantic_reading::SemanticUnit::new(
+                    "u1",
+                    [semantic_reading::AtomIndex(0)],
+                    semantic_reading::ReadingTier::Essential,
+                )],
+            ))
+        }
+    }
+
+    let (mut app, dir) = make_app_keep(4, Mode::View);
+    let calls = Rc::new(Cell::new(0usize));
+    app.semantic_provider = Some(Box::new(CountingProvider { calls: Rc::clone(&calls) }));
+    app.reanalyze_semantics();
+    assert_eq!(calls.get(), 1);
+    let before = app.semantic_decorations.clone();
+
+    // ファイルが外から書き換わった → 再解析。
+    std::fs::write(dir.path().join("doc.md"), "line1
+line2
+line3
+line4
+line5
+").unwrap();
+    reload_source(&mut app, false).unwrap();
+    assert_eq!(calls.get(), 2, "reload では provider を呼び直す");
+    assert_ne!(
+        app.semantic_decorations, before,
+        "新しい文書に対する range になっている"
+    );
+}
+
+/// 手順3の落とし穴を App の高さで: fixture が別の文書のものなら、
+/// 装飾は 1 つも出ないし、READ の表示も出ない。
+#[test]
+fn a_fixture_for_another_document_is_refused_and_leaves_no_decorations() {
+    let fixture = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.json"
+    ));
+    // make_app の文書は "line1..line3" — demo.md ではない。
+    let mut app = make_app(3, Mode::View);
+    app.semantic_provider = Some(crate::semantic::load_fixture(&fixture).unwrap());
+    app.reanalyze_semantics();
+
+    assert!(app.semantic_doc.is_none(), "別文書の fixture は拒否される");
+    assert!(app.semantic_decorations.is_empty());
+    let (message, _, is_error) = app.status.clone().expect("警告が出ていること");
+    assert!(is_error, "黙って何もしないのではなく loud に断る");
+    assert!(message.contains("別の文書のものです"), "{message}");
+    // READ の表示は出ない（Budget は値としては存在するが意味を持たない）。
+    assert!(!crate::chrome::footer_hints(&app).contains("READ"));
+    // キーも断る。
+    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
+    assert_eq!(app.reading_budget, 100);
+    assert!(
+        app.status.as_ref().unwrap().0.contains("unavailable"),
+        "{:?}",
+        app.status
+    );
+    // キーそのものは生きている（`--semantic` は渡されているので）。
+    assert!(app.semantic_enabled());
+}
+
+/// 追加要件: **`--semantic` が無いセッションは、この改修の前と完全に同一**。
+///
+/// API キー（将来の Jev）も fixture も持たない人に、使えない機能の気配を
+/// 見せない。キーは束縛せず、読み出しも出さず、ヘルプにも載せず、断りの
+/// メッセージすら出さない。
+#[test]
+fn without_semantic_the_budget_keys_are_not_bound_at_all() {
+    let mut app = make_app(6, Mode::View);
+    assert!(app.config.semantic.is_none());
+    assert!(
+        crate::semantic::provider_from_config(&app.config)
+            .unwrap()
+            .is_none(),
+        "--semantic が無ければ provider も立たない"
+    );
+    assert!(!app.semantic_enabled(), "provider が無い = 層が無い");
+
+    let before_status = app.status.clone();
+    let before_cursor = app.view.cursor;
+    for key in ['-', '+', '=', '<', '>'] {
+        on_view_key(&mut app, KeyCode::Char(key), KeyModifiers::NONE, None);
+        // 無い層は動かない。
+        assert_eq!(app.reading_budget, crate::semantic::DEFAULT_BUDGET);
+        assert!(app.semantic_decorations.is_empty());
+        // そして「使えません」も言わない — 未束縛のキーとまったく同じ、
+        // 何も起きないという振る舞い。
+        assert_eq!(
+            app.status.as_ref().map(|(m, _, e)| (m.clone(), *e)),
+            before_status.as_ref().map(|(m, _, e)| (m.clone(), *e)),
+            "{key} が toast を出している"
+        );
+        // 他の状態にも触らない（未束縛のキーは素通りするだけ）。
+        assert_eq!(app.view.cursor, before_cursor);
+        assert!(app.selection.is_none());
+        assert!(app.overlay.is_none());
+        assert!(app.running);
+    }
+
+    // ステータス行と `?` ヘルプにも痕跡が無い。
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(!hints.contains("READ"), "{hints}");
+    app.mode = Mode::Source;
+    assert!(!crate::chrome::footer_hints(&app).contains("READ"));
+    assert!(
+        !crate::overlay::help_rows(false, false, false, app.semantic_enabled())
+            .iter()
+            .any(|(label, keys)| *label == "read" || keys.contains("budget")),
+        "? ヘルプに READ の行が出ている"
+    );
+}
+
+/// `READ 73%` はステータス行に出るが、semantic doc が読めているときだけ。
+#[test]
+fn the_read_readout_appears_only_with_a_semantic_document() {
+    let fixture = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.json"
+    ));
+    let mut app = make_app(3, Mode::View);
+    // Budget だけを動かしても、annotation が無ければ何も出ない。
+    app.reading_budget = 73;
+    assert!(!crate::chrome::footer_hints(&app).contains("READ"));
+    assert!(
+        !crate::overlay::help_rows(false, false, false, app.semantic_enabled())
+            .iter()
+            .any(|(label, _)| *label == "read"),
+        "? ヘルプも、使えないキーを宣伝しない"
+    );
+
+    // demo.md の annotation を、demo.md に対して当てる。
+    let path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.md"
+    ));
+    app.source = Source::load(path).unwrap();
+    app.semantic_provider = Some(crate::semantic::load_fixture(&fixture).unwrap());
+    app.reanalyze_semantics();
+    assert!(app.semantic_doc.is_some());
+
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(hints.contains("READ 73%"), "{hints}");
+    // source モードでも同じ読み出しが出る（文書の性質であってモードの
+    // 性質ではない）。キー操作は view だけ。
+    app.mode = Mode::Source;
+    assert!(crate::chrome::footer_hints(&app).contains("READ 73%"));
+    assert!(
+        crate::overlay::help_rows(false, false, false, true)
+            .iter()
+            .any(|(label, keys)| *label == "read" && keys.contains("-/+")),
+        "? ヘルプに READ の行が出る"
+    );
 }

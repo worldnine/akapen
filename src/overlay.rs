@@ -225,7 +225,7 @@ pub(crate) fn on_timeline_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
 /// only when it overflows the panel (content that fits never scrolls).
 /// Esc / q / `?` close it.
 pub(crate) fn on_help_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
-    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false)
+    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled())
         .len()
         .saturating_sub(overlay_visible_rows());
     match key {
@@ -422,7 +422,12 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
 /// scroll clamp, so the list never scrolls past its own end; scrollable
 /// with j/k or the wheel (small screens), closed by Esc / q / `?` or a
 /// click outside the panel. The quit row reflects the active Esc binding.
-pub(crate) fn help_rows(esc_quit: bool, reply: bool, _in_git: bool) -> Vec<(&'static str, &'static str)> {
+pub(crate) fn help_rows(
+    esc_quit: bool,
+    reply: bool,
+    _in_git: bool,
+    semantic: bool,
+) -> Vec<(&'static str, &'static str)> {
     let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
         ("select", "v · J/K · Shift+↓↑ · Esc cancel"),
@@ -443,6 +448,11 @@ pub(crate) fn help_rows(esc_quit: bool, reply: bool, _in_git: bool) -> Vec<(&'st
         rows.push(("reload", "r reload · i ignore · e edit"));
         rows.push(("compare", "n/N next/prev · a acknowledge/set baseline"));
     }
+    if semantic {
+        // Only with `--semantic`: without an annotation these keys refuse,
+        // and the help must not offer what the session cannot do.
+        rows.push(("read", "-/+ budget ±1 · </> ±10 (READ % in the footer)"));
+    }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
 }
@@ -461,7 +471,7 @@ pub(crate) fn draw_help_overlay(f: &mut Frame, app: &App) {
         .fg(Color::LightBlue)
         .add_modifier(Modifier::BOLD);
 
-    let rows = help_rows(app.esc_quit_enabled(), app.config.reply, false);
+    let rows = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled());
     let visible = overlay_visible_rows();
     // Scroll only when the reference overflows the panel; a reference
     // that fits stays put (j/k are no-ops there).
