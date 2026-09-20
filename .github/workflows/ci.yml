@@ -17,7 +17,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
-      - run: cargo test --locked
+      # workspace 全体（akapen / semantic-reading / vendored tui-markdown）を走らせる。
+      # 無印だとルートパッケージのテストしか実行されない。
+      - run: cargo test --locked --workspace
 
   # vendored tui-markdown fork が上流から想定内の差分しか持っていないことを検証
   # （誤った再ベンダリング / 意図しないフォーク変更を検知）。
