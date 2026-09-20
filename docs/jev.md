@@ -62,10 +62,34 @@ LLM が「人間が読むテキストを生成する」のに対し、Jev は
   画像・音声・動画は未対応
 - 呼び出しは 3 通り
   - Playground（<https://console.typesafe.ai/playground>）
-  - HTTP API `POST https://api.typesafe.ai/v1/systemone`（bearer token）
-  - Python SDK `pip install typesafe-sdk`（`TYPESAFE_API_KEY` を自動で読む）
-- 既定モデルは `jev-latest`
+  - HTTP API `POST /v1/systemone`（bearer token）
+  - Python SDK（`TYPESAFE_API_KEY` を自動で読む）
 - レスポンスには token usage が含まれる
+
+SDK の定数（<https://docs.typesafe.ai/sdk/python/api/constants.md> で確認）:
+
+| 定数 | 値 |
+|---|---|
+| `API_KEY_ENV` | `TYPESAFE_API_KEY` |
+| `BASE_URL_ENV` | `TYPESAFE_BASE_URL` |
+| `DEFAULT_MODEL_ENV` | `TYPESAFE_DEFAULT_MODEL` |
+| `DEFAULT_BASE_URL` | `https://api.typesafe.ai` |
+| `DEFAULT_MODEL` | `jev-latest` |
+| **`DEFAULT_TIMEOUT`** | **`10.0`** |
+
+モデルは `jev-1.13.0` が現行で、`jev-latest` と `jev-preview` がどちらもそこを
+指す。全モデルが同一エンドポイント `POST /v1/systemone` を使い、`model`
+フィールドで振り分ける。
+
+**`DEFAULT_TIMEOUT` が 10 秒である**ことは、akapen 側のタイムアウト設計の根拠に
+なる。LLM を前提にした「10〜30 秒かかる」という想定は誤りで、Jev 自身の SDK は
+10 秒で切る。akapen の既定 60 秒はアダプタスクリプトの起動コストまで含めた余裕
+であって、Jev の応答時間の想定ではない。
+
+料金は入力 `$42 / 十億トークン`（= `$0.042 / 百万トークン`）で、**出力トークンは
+無料**。rate limit と context window は需要に応じて変わりうる、とされている。
+
+> 未確認: pip のパッケージ名。`typesafe-sdk` と読めたが原典で確定できていない。
 
 ---
 
