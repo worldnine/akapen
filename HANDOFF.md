@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # HANDOFF: 外部コマンド委譲の Provider（`--semantic-cmd`）
 
 ## 何を作ったか
@@ -205,7 +204,9 @@ doc 7+3（+1）。
 | 世代カウンタ（決定論 + 実スレッド） | 同上 |
 | 失敗で注釈を保持 / 文書が変われば落とす | 同上 |
 | 解析中の Budget キーは「解析中」と言う | 同上 |
-=======
+
+---
+
 # HANDOFF: source view に range decoration を通す（Phase 1+2 の source 側）
 
 ## 何を作ったか
@@ -422,7 +423,6 @@ DIM 行にカーソル帯を乗せる（`j` で 7 行目へ）と、行全体が
 
 補足: このリポジトリは rustfmt を掛けていない。既存ファイルと同程度に
 揃えてあるだけで、自分の触ったファイルだけを整形するようなことはしていない。
->>>>>>> feat/source-view
 
 ---
 
@@ -1180,9 +1180,9 @@ serde free のままにしてある。
 
 > **追補**: この節はもう現状ではない。ここに書いた 3 段はその
 > ままの形で実装され、source view にも range decoration が通っている。
-> 冒頭の「HANDOFF: source view に range decoration を通す（Phase 1+2 の
-> source 側）」を
-> 参照。以下は当時の調査結果として残す（**地図としては正確だった** —
+> このファイル上部の「HANDOFF: source view に range decoration を通す
+> （Phase 1+2 の source 側）」を参照。以下は当時の調査結果として残す
+> （**地図としては正確だった** —
 > 3 段の見立ても、`app.spans` / `line_rows` が `ViewState` とは別構造だと
 > いう指摘も、そのとおりだった）。
 
