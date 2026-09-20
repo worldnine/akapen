@@ -58,7 +58,7 @@
 //! # Budget 変更では Jev を呼ばない
 //!
 //! Jev（意味判断を行う System One モデル。**LLM ではない** —
-//! `docs/jev.md`）が関わるのは [`Provider`] の内側だけで、
+//! `docs/design/jev.md`）が関わるのは [`Provider`] の内側だけで、
 //! 一度 [`SemanticDocument`] が得られたあとの `100% -> 70% -> 30%` という
 //! Budget 操作は [`policy::decorate`] だけで完結する純粋ローカル計算である。
 //! この crate 自体は Jev を呼ばない（[`FixtureProvider`] のみ）。

@@ -1104,7 +1104,7 @@ mod tests {
 
     /// The superset branch of `decorate_row`'s intersection rule is
     /// essentially DEAD CODE for source mode — which is the claim
-    /// `docs/range-attribution-plan.md` makes when it calls source view
+    /// `docs/design/range-attribution-plan.md` makes when it calls source view
     /// "比較的単純". Swept over the real fixtures at several widths:
     /// every wrapped fragment is exact, with the single documented
     /// exception of a line carrying a tab (see

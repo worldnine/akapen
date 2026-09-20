@@ -453,7 +453,7 @@ hunk の watch モードと akapen の `⚡` 再読込は同じエージェン�
 
 ## 設計
 
-設計上の不変条件とその理由は [docs/internals.md](docs/internals.md) に集約しています。
+設計上の不変条件とその理由は [docs/internals.md](docs/internals.md) に集約しています。どの文書を読めばよいか（誰向けで、現行かどうか）は [docs/README.md](docs/README.md) が索引です。コードに手を入れる前に [docs/gotchas.md](docs/gotchas.md) — 知らずに触ると静かに壊れるところ — に目を通してください。
 
 - Rust + [ratatui](https://ratatui.rs) 0.30（reviewr と同じバージョン）
 - view mode は `tui-markdown`（pulldown-cmark）で markdown を ratatui Text に変換し、source モードと同じ幅対応折返しで表示行に展開。サブプロセスなし・リサイズはデバウンス後すぐ再レンダリング

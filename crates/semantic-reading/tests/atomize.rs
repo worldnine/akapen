@@ -11,7 +11,7 @@ const SAMPLE_JSON: &str = include_str!("fixtures/sample.json");
 /// crate の外のファイルだが、`include_str!` はテストソースからの相対パスで
 /// 解決されるのでビルド時に取り込める（`publish = false` なので配布物の
 /// 完結性は問題にならない）。`sample.md` より雑で長い実文書として食わせる。
-const DESIGN_DOC: &str = include_str!("../../../docs/semantic-reading-layer.md");
+const DESIGN_DOC: &str = include_str!("../../../docs/design/semantic-reading-layer.md");
 
 /// 設計書が Atom に求める性質を全部検査する。
 fn assert_invariants(source: &str, atoms: &[Atom]) {

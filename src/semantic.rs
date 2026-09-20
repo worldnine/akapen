@@ -1,5 +1,5 @@
 //! Semantic Reading Layer をこのクライアントへ繋ぐ継ぎ目
-//! （`docs/semantic-reading-layer.md`）。
+//! （`docs/design/semantic-reading-layer.md`）。
 //!
 //! `semantic-reading` crate は「どの source range がどの semantic state か」
 //! までを決め、色・背景・modifier の決定はクライアント側の責務だと言っている。
@@ -142,8 +142,8 @@ pub(crate) fn load_fixture(path: &Path) -> Result<Box<dyn Provider>> {
 /// 寛容に取ってある。この先に繋がるのは Jev のアダプタスクリプトである。
 /// Jev 自体は多数の question を 1 リクエストで並列評価する判定器で、
 /// TypeSafe 自身の Python SDK は `DEFAULT_TIMEOUT = 10.0`（秒）を既定に
-/// している（`docs/jev.md`）。つまり Jev の応答そのものは 10 秒スケールで、
-/// ここの 60 秒はその想定ではない。**実測していないのは合計の方**である —
+/// している（`docs/design/jev.md`）。つまり Jev の応答そのものは 10 秒
+/// スケールで、ここの 60 秒はその想定ではない。**実測していないのは合計の方**である —
 /// プロセス起動 + ネットワーク往復 + 文書サイズ。短く切ると「動いているのに
 /// 切られる」になり、ユーザーには「壊れている」と区別がつかない。寛容な既定の
 /// 害は小さいので、実測するまで 60 秒のままにしてある。UI が固まらないのは
@@ -164,7 +164,7 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 /// バイナリサイズ・依存監査のコストが乗る。代わりに `--send-cmd` と同じ
 /// 作法で外部コマンドへ渡す — API キー管理が akapen の責務から外れ、
 /// Jev を呼ぶアダプタスクリプト（`atoms` を question 群へ変換し、
-/// typed answer を `units` へ戻すもの。`docs/jev.md`）を akapen の外に
+/// typed answer を `units` へ戻すもの。`docs/design/jev.md`）を akapen の外に
 /// 置ける。
 ///
 /// ```text

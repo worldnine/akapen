@@ -52,8 +52,8 @@ impl std::fmt::Display for UnitId {
 ///
 /// これは Jev の**能力の制約ではなく設計判断**である。Jev は rubric に沿って
 /// 採点する Score primitive を持っているので、0〜100 の importance score を
-/// 出させること自体はできる（`docs/jev.md`）。それをやらず粗い 4 段に倒し、
-/// 同一 Tier 内の順序は redundancy / length / document position といった
+/// 出させること自体はできる（`docs/design/jev.md`）。それをやらず粗い 4 段に
+/// 倒し、同一 Tier 内の順序は redundancy / length / document position といった
 /// 決定論的なローカル rule（[`crate::policy`]）で決める、というのが設計書の
 /// 選択である。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

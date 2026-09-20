@@ -1,5 +1,5 @@
 //! Range decoration: styling an arbitrary SOURCE byte range on top of a
-//! rendered document (Phase 2 of `docs/range-attribution-plan.md`).
+//! rendered document (Phase 2 of `docs/design/range-attribution-plan.md`).
 //!
 //! Phase 1 gave every rendered span an [`Attr`] — the source byte range it
 //! came from, plus whether that range is *exact* (`span.text ==
