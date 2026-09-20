@@ -12,8 +12,8 @@ use semantic_reading::{Provider, SemanticDocument};
 
 use crate::comment::{Comment, Selection};
 use crate::config::{Config, EscQuit};
-use crate::decoration::Decoration;
-use crate::highlight::{Highlighter, Span as HiSpan, wrap_spans};
+use crate::decoration::{Decoration, DecorationStyles};
+use crate::highlight::{Highlighter, Span as HiSpan, TaggedLine, wrap_spans};
 use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
 use crate::overlay::Overlay;
@@ -69,7 +69,7 @@ pub(crate) const CHORD_MS: Duration = Duration::from_millis(400);
 #[derive(Default)]
 pub(crate) struct FileState {
     pub(crate) source: Source,
-    pub(crate) spans: Vec<Vec<HiSpan>>,
+    pub(crate) spans: Vec<TaggedLine>,
     pub(crate) view: ViewState,
     pub(crate) mode: Mode,
     pub(crate) offset: usize,
@@ -263,8 +263,11 @@ pub(crate) struct App {
     /// between two clicks.
     pub(crate) double_click_ms: Duration,
     pub(crate) source: Source,
-    /// Pre-tokenized spans, one vec per source line.
-    pub(crate) spans: Vec<Vec<HiSpan>>,
+    /// Pre-tokenized spans, one entry per source line, each carrying the
+    /// source byte range every span came from (see [`TaggedLine`]). The
+    /// attribution is what lets source mode run the same range-decoration
+    /// layer the rendered view does.
+    pub(crate) spans: Vec<TaggedLine>,
     /// The theme (re-rendering and view styles resolve colors from it).
     pub(crate) highlight: Highlighter,
     /// Rendered view-mode rows.
@@ -418,6 +421,14 @@ pub(crate) struct App {
     /// [`App::refresh_semantic_decorations`] — from the budget and the
     /// document only, never from the provider.
     pub(crate) semantic_decorations: Vec<Decoration>,
+    /// The decoration styles resolved from the session's theme, for the
+    /// SOURCE-mode paint. The rendered view carries its own copy on
+    /// [`ViewState`]; source mode has no `ViewState` of its own to hang
+    /// them on, and `app.view` is not a safe stand-in — a file that has
+    /// never been shown in view mode holds a `ViewState::default()`,
+    /// whose styles are the dark-theme fallbacks. Theme-independent of
+    /// the file, so it is resolved once in [`App::new`].
+    pub(crate) decoration_styles: DecorationStyles,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -462,6 +473,8 @@ impl App {
             .fx
             .then(|| crate::effects::time_machine_border_effect(light));
         let starfield_fx = config.fx.then(|| crate::effects::starfield_effect(light));
+        let decoration_styles =
+            DecorationStyles::from_theme(&highlight, config.decoration_blend);
         Self {
             config,
             files,
@@ -552,6 +565,7 @@ impl App {
             semantic_results: None,
             reading_budget: crate::semantic::DEFAULT_BUDGET,
             semantic_decorations: Vec::new(),
+            decoration_styles,
         }
     }
 
@@ -802,13 +816,38 @@ impl App {
         self.rebuild_base_rows();
     }
 
+    /// The range decorations that apply to the document currently on
+    /// screen, ready to hand to [`crate::decoration::decorate_row`].
+    ///
+    /// `--decorations` は手で置く開発用のレンジ、semantic の方は Budget から
+    /// 導かれるレンジ。併用されたら連結する（decoration は patch を重ねる
+    /// ので、後ろに置いた semantic 側が同じ range では後勝ちになる）。
+    ///
+    /// The `--decorations` ranges come from OUTSIDE, so they are checked
+    /// against the document that is actually on screen — which the time
+    /// machine and a reload both change under them. Empty (the normal
+    /// case) allocates nothing.
+    ///
+    /// **Both paint paths call this**: the rendered view and source mode
+    /// decorate the same ranges, so they cannot disagree about which
+    /// bytes are MARKED or DIM.
+    pub(crate) fn active_decorations(&self) -> Vec<Decoration> {
+        if self.semantic_decorations.is_empty() {
+            crate::decoration::sanitize(&self.config.decorations, &self.source.content)
+        } else {
+            let mut both = self.config.decorations.clone();
+            both.extend_from_slice(&self.semantic_decorations);
+            crate::decoration::sanitize(&both, &self.source.content)
+        }
+    }
+
     /// Recompute `base_rows` from the tokenized source spans.
     pub(crate) fn rebuild_base_rows(&mut self) {
         let width = self.content_width.max(1) as usize;
         self.base_rows = self
             .spans
             .iter()
-            .map(|spans| wrap_spans(spans, width).len())
+            .map(|line| wrap_spans(&line.spans, width).len())
             .collect();
     }
 
