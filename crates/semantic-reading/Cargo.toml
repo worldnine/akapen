@@ -1,0 +1,12 @@
+[package]
+name = "semantic-reading"
+version = "0.1.0"
+edition = "2024"
+description = "Semantic Reading Layer: どの source range がどの semantic state かだけを決める、表示に依存しないエンジン。"
+license = "MIT"
+repository = "https://github.com/worldnine/akapen"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

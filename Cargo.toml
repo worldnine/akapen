@@ -27,7 +27,7 @@ unicode-width = "0.2"
 tempfile = "3"
 
 [workspace]
-members = ["third_party/tui-markdown"]
+members = ["crates/semantic-reading", "third_party/tui-markdown"]
 
 [profile.release]
 strip = true

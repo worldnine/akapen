@@ -1,0 +1,248 @@
+{
+  "atoms": [
+    {
+      "range": {
+        "start": 0,
+        "end": 35
+      },
+      "kind": "heading"
+    },
+    {
+      "range": {
+        "start": 37,
+        "end": 148
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 150,
+        "end": 213
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 213,
+        "end": 243
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 245,
+        "end": 254
+      },
+      "kind": "heading"
+    },
+    {
+      "range": {
+        "start": 256,
+        "end": 340
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 341,
+        "end": 422
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 423,
+        "end": 514
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 516,
+        "end": 525
+      },
+      "kind": "heading"
+    },
+    {
+      "range": {
+        "start": 527,
+        "end": 579
+      },
+      "kind": "list_item"
+    },
+    {
+      "range": {
+        "start": 580,
+        "end": 642
+      },
+      "kind": "list_item"
+    },
+    {
+      "range": {
+        "start": 644,
+        "end": 659
+      },
+      "kind": "heading"
+    },
+    {
+      "range": {
+        "start": 661,
+        "end": 781
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 782,
+        "end": 902
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 904,
+        "end": 913
+      },
+      "kind": "heading"
+    },
+    {
+      "range": {
+        "start": 915,
+        "end": 993
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 995,
+        "end": 1090
+      },
+      "kind": "block_quote"
+    },
+    {
+      "range": {
+        "start": 1092,
+        "end": 1163
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 1165,
+        "end": 1210
+      },
+      "kind": "code_block"
+    },
+    {
+      "range": {
+        "start": 1212,
+        "end": 1311
+      },
+      "kind": "sentence"
+    },
+    {
+      "range": {
+        "start": 1312,
+        "end": 1407
+      },
+      "kind": "sentence"
+    }
+  ],
+  "units": [
+    {
+      "id": "u1",
+      "atoms": [
+        0
+      ],
+      "reading_tier": "essential",
+      "relations": []
+    },
+    {
+      "id": "u2",
+      "atoms": [
+        1
+      ],
+      "reading_tier": "supporting",
+      "relations": []
+    },
+    {
+      "id": "u3",
+      "atoms": [
+        2,
+        3
+      ],
+      "reading_tier": "essential",
+      "relations": []
+    },
+    {
+      "id": "u4",
+      "atoms": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "reading_tier": "context",
+      "relations": []
+    },
+    {
+      "id": "u5",
+      "atoms": [
+        8,
+        9,
+        10
+      ],
+      "reading_tier": "essential",
+      "relations": []
+    },
+    {
+      "id": "u6",
+      "atoms": [
+        11,
+        12,
+        13
+      ],
+      "reading_tier": "context",
+      "relations": []
+    },
+    {
+      "id": "u7",
+      "atoms": [
+        14,
+        15
+      ],
+      "reading_tier": "supporting",
+      "relations": [
+        {
+          "redundant_with": "u3"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "atoms": [
+        16
+      ],
+      "reading_tier": "context",
+      "relations": []
+    },
+    {
+      "id": "u9",
+      "atoms": [
+        17,
+        18
+      ],
+      "reading_tier": "detail",
+      "relations": []
+    },
+    {
+      "id": "u10",
+      "atoms": [
+        19,
+        20
+      ],
+      "reading_tier": "detail",
+      "relations": []
+    }
+  ]
+}
