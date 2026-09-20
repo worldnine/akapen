@@ -545,7 +545,8 @@ pub fn send_command(cmd: &str, text: &str) -> Result<()> {
 /// child that never reads its stdin, a grandchild holding a pipe open
 /// past the child's exit, an output flood larger than a pipe buffer,
 /// and a child that simply never returns — all four are already solved
-/// in [`run_child`], and all four are things an LLM wrapper script does.
+/// in [`run_child`], and all four are things any script wrapped around a
+/// child process runs into, whatever it is a wrapper FOR.
 ///
 /// A non-zero exit carries the last non-empty line of stderr (else
 /// stdout) in the error, so the caller's toast can say *why*.

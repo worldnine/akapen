@@ -45,7 +45,7 @@
 //! # Atom 生成に Jev は要らない
 //!
 //! [`atomize`] は source を Markdown として解析し、[`Atom`] 列だけを返す。
-//! Tier も Unit も付けない。LLM を呼ばずネットワークも使わない、完全に
+//! Tier も Unit も付けない。Jev を呼ばずネットワークも使わない、完全に
 //! 決定論的な処理なので、API キーを持たないユーザーにもこの層までは
 //! 値が届く。意味の境界（どの Atom が同じ Unit か）は Jev の仕事である。
 //!
@@ -57,7 +57,8 @@
 //!
 //! # Budget 変更では Jev を呼ばない
 //!
-//! Jev（意味判断を行う LLM）が関わるのは [`Provider`] の内側だけで、
+//! Jev（意味判断を行う System One モデル。**LLM ではない** —
+//! `docs/jev.md`）が関わるのは [`Provider`] の内側だけで、
 //! 一度 [`SemanticDocument`] が得られたあとの `100% -> 70% -> 30%` という
 //! Budget 操作は [`policy::decorate`] だけで完結する純粋ローカル計算である。
 //! この crate 自体は Jev を呼ばない（[`FixtureProvider`] のみ）。

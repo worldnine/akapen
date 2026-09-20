@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""akapen の `--semantic-cmd` プロトコルを喋る参照実装（LLM 不使用）。
+"""akapen の `--semantic-cmd` プロトコルを喋る参照実装（Jev を呼ばない）。
 
     akapen doc.md --semantic-cmd 'python3 examples/semantic/annotate-doc.py'
 
@@ -20,8 +20,8 @@ stdin から
 が壊れた位置を返して文書の違う場所を装飾する事故が原理的に起きない。
 
 このスクリプトの目的は、**API キー無しでパイプライン全体を端から端まで
-動かせること**である。判断そのものは意図的に素朴で、LLM のプロンプト設計
-（Jev の本体）はここには無い。
+動かせること**である。判断そのものは意図的に素朴で、Jev への question
+設計（`docs/jev.md`）はここには無い。
 
 判断規則（完全に決定論的）:
 

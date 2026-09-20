@@ -394,7 +394,8 @@ pub(crate) struct App {
     /// only accepted if it names the CURRENT value.
     ///
     /// **This is what keeps a slow answer off a document it never saw.**
-    /// An external command takes tens of seconds; if `reload.rs` notices
+    /// An external command is a process launch plus a network round
+    /// trip, so it can still be running when `reload.rs` notices
     /// the file changed while one is running, the older answer describes
     /// byte positions in text that is no longer on screen. Applying it
     /// would decorate the wrong places — and silently, since every range
@@ -641,7 +642,8 @@ impl App {
             }
             // 外部コマンド: 別スレッドへ。**ここで待たない。** イベント
             // ループは `event::poll` のポーリングで回っているので、
-            // 10〜30 秒かかる呼び出しをこの場で待つと UI が固まる。
+            // プロセス起動とネットワーク往復を挟む呼び出しをこの場で
+            // 待つと UI が固まる。
             Some(SemanticSource::Command(provider)) => {
                 let Some(channel) = self.semantic_results.as_ref() else {
                     // set_semantic_source を通らずに組み立てられた App。

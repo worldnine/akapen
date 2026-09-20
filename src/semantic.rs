@@ -43,7 +43,7 @@
 //! | `--semantic <fixture.json>` | [`FixtureProvider`] | 同期 | fixture（だから [`DigestChecked`] で照合する） |
 //! | `--semantic-cmd <コマンド>` | [`CommandProvider`] | 別スレッド | akapen の [`atomize`]（照合不要） |
 //!
-//! 外部コマンドは 10〜30 秒かかりうるので、同期に呼ぶと
+//! 外部コマンドはプロセス起動とネットワーク往復を挟むので、同期に呼ぶと
 //! `event::poll` で回っているイベントループが止まる。だから
 //! [`SemanticSource`] が型として 2 つを分けている — 「遅いかもしれない」は
 //! [`Provider`] の中には隠せない（`analyze` の戻り値が「あとで」を
@@ -139,9 +139,12 @@ pub(crate) fn load_fixture(path: &Path) -> Result<Box<dyn Provider>> {
 
 /// 外部コマンドが答えを返すまで待つ上限。**設定値はここ 1 箇所**。
 ///
-/// 寛容に取ってある: この先に繋がるのは LLM を呼ぶスクリプトで、10〜30 秒
-/// かかることが普通にある。短く切ると「動いているのに切られる」になり、
-/// ユーザーには「壊れている」と区別がつかない。UI が固まらないのは
+/// 寛容に取ってある。この先に繋がるのは Jev のアダプタスクリプトである。
+/// Jev 自体は多数の question を 1 リクエストで並列評価する判定器なので
+/// 速いはずだが、**実測していないのは合計の方**である — プロセス起動 +
+/// ネットワーク往復 + 文書サイズ。短く切ると「動いているのに切られる」に
+/// なり、ユーザーには「壊れている」と区別がつかない。寛容な既定の害は
+/// 小さいので、実測するまで 60 秒のままにしてある。UI が固まらないのは
 /// タイムアウトではなく別スレッドで走らせていること
 /// （[`crate::app::App::reanalyze_semantics`]）が担保している。
 pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
@@ -158,8 +161,9 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 /// reqwest / tokio を足すと、この機能を使わない全ユーザーにコンパイル時間・
 /// バイナリサイズ・依存監査のコストが乗る。代わりに `--send-cmd` と同じ
 /// 作法で外部コマンドへ渡す — API キー管理が akapen の責務から外れ、
-/// ユーザーが既に持っている CLI（`claude -p`、`llm`、自作スクリプト、
-/// ローカル LLM）がそのまま使える。
+/// Jev を呼ぶアダプタスクリプト（`atoms` を question 群へ変換し、
+/// typed answer を `units` へ戻すもの。`docs/jev.md`）を akapen の外に
+/// 置ける。
 ///
 /// ```text
 /// stdin   {"version":1,"source":"…","atoms":[{"index":0,…}]}
@@ -249,7 +253,8 @@ impl Provider for CommandProvider {
 ///
 /// この区別が型に出ているのは、App がそれに応じて**呼び方**を変えねば
 /// ならないからである。fixture はその場で答えるので同期でよい。外部
-/// コマンドは 10〜30 秒かかりうるので、同じ扱いをすると UI が固まる。
+/// コマンドはプロセス起動とネットワーク往復を挟むので、同じ扱いをすると
+/// UI が固まる。
 /// 「遅いかもしれない」を [`Provider`] の中に隠すことはできない —
 /// `analyze` の戻り値は `Result<SemanticDocument>` であって「あとで」を
 /// 表現できないからである。
@@ -317,7 +322,7 @@ mod tests {
 
     const DEMO_MD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.md");
     const DEMO_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.json");
-    /// 参照実装。LLM を呼ばない決定論的なスクリプトで、API キー無しで
+    /// 参照実装。Jev を呼ばない決定論的なスクリプトで、API キー無しで
     /// パイプライン全体を端から端まで動かせることがその存在理由である。
     const ANNOTATE_PY: &str =
         concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/annotate-doc.py");
@@ -778,7 +783,7 @@ mod tests {
             "待たずに殺すこと（{:?} かかった）",
             start.elapsed()
         );
-        // 既定値は寛容 — LLM は 10〜30 秒かかる。
+        // 既定値は寛容 — 所要時間は未実測（`COMMAND_TIMEOUT` のコメント）。
         assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(60));
     }
 

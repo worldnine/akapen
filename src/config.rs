@@ -121,19 +121,21 @@ pub struct Config {
     /// returns Atom INDICES, never ranges, so the positions stay
     /// akapen's own (see [`crate::semantic::CommandProvider`]).
     ///
-    /// This is where a Jev (LLM) wrapper plugs in. akapen itself gains
-    /// no HTTP client and no async runtime for it: `--send-cmd`'s
-    /// arrangement — a shell command on stdin/stdout — keeps API-key
-    /// handling out of akapen and lets the user reach for a CLI they
-    /// already have (`claude -p`, `llm`, a local model, a script).
+    /// This is where a Jev adapter plugs in — Jev is a System One model,
+    /// NOT an LLM; see `docs/jev.md`. akapen itself gains no HTTP client
+    /// and no async runtime for it: `--send-cmd`'s arrangement — a shell
+    /// command on stdin/stdout — keeps API-key handling out of akapen and
+    /// leaves the adapter (atoms in, typed answers back out as units) a
+    /// script the user owns.
     ///
     /// Mutually exclusive with `--semantic`: two annotations for one
     /// document is not a configuration, it is a question about which
     /// one wins.
     ///
     /// The command is NOT run at startup — it runs once a document is
-    /// on screen, on its own thread, because it may take tens of
-    /// seconds (see [`crate::app::App::reanalyze_semantics`]).
+    /// on screen, on its own thread, because a process launch plus a
+    /// network round trip does not return within a frame (see
+    /// [`crate::app::App::reanalyze_semantics`]).
     pub semantic_cmd: Option<String>,
     /// `--mark-blend <0.0..1.0>` / `--dim-blend <0.0..1.0>`: how strong
     /// the two range-decoration kinds are. `mark` lifts the mark

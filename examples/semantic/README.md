@@ -66,7 +66,7 @@ akapen examples/semantic/demo.md \
   --semantic-cmd "python3 examples/semantic/annotate-doc.py"
 ```
 
-`annotate-doc.py` は LLM を呼ばない**決定論的な参照実装**である。目的は
+`annotate-doc.py` は Jev を呼ばない**決定論的な参照実装**である。目的は
 API キー無しでパイプライン全体を端から端まで動かせることで、判断そのものは
 
 ```text
@@ -76,8 +76,8 @@ API キー無しでパイプライン全体を端から端まで動かせるこ�
 直前の文と語が重なる -> REDUNDANT_WITH
 ```
 
-という素朴なヒューリスティクスでしかない。実際の Jev（LLM）のプロンプト
-設計はここには無い。
+という素朴なヒューリスティクスでしかない。実際の Jev（LLM ではなく
+System One モデル。`docs/jev.md` 参照）への question 設計はここには無い。
 
 ### プロトコル
 
@@ -110,8 +110,8 @@ reading_tier / 未知の relation。同じ Atom を複数の Unit が主張し�
 
 ### 非同期
 
-コマンドは**別スレッド**で走る。LLM 呼び出しは 10〜30 秒かかることがあり、
-同期実行すると UI が固まるため。解析中はステータス行が
+コマンドは**別スレッド**で走る。外部プロセスの起動とネットワーク往復を
+挟むので、同期実行すると UI が固まるため。解析中はステータス行が
 
 ```text
 L1/42 · READ 100% · 解析中…
@@ -129,12 +129,22 @@ L1/42 · READ 100% · 解析中…
 stdin から 1 つの JSON を読み、stdout へ 1 つの JSON を書くだけでよい。
 
 ```sh
-akapen doc.md --semantic-cmd 'claude -p "$(cat prompts/annotate.md)"'
-akapen doc.md --semantic-cmd 'llm -m local-model --system "..."'
+akapen doc.md --semantic-cmd 'python3 ./jev-annotate.py'
 akapen doc.md --semantic-cmd './my-annotator.ts'
 ```
 
-API キーの管理は akapen の責務ではない — コマンドが自分の環境で解決する。
+Jev を繋ぐなら、このコマンドが**アダプタ**になる。担うのは
+
+```text
+atoms → Jev の question 群 → Jev の typed answer → units
+```
+
+で、Jev は TypeSafe の System One モデル（**LLM ではない** — typed な
+question を state に対して並列評価して構造化された値を返す）である。
+primitive と呼び出し方は `docs/jev.md` を参照。
+
+API キーの管理は akapen の責務ではない — コマンドが自分の環境で解決する
+（Jev なら `TYPESAFE_API_KEY`）。
 
 ## ファイル
 
@@ -143,7 +153,7 @@ API キーの管理は akapen の責務ではない — コマンドが自分の
 | `demo.md`             | 日本語の設計メモ（AI が書きがちな、長く重複する文書の見本） |
 | `demo.json`           | それに対する `semantic-reading` の `SemanticDocument`     |
 | `build-demo-json.py`  | `demo.json` の生成スクリプト                              |
-| `annotate-doc.py`     | `--semantic-cmd` プロトコルの参照実装（LLM 不使用）       |
+| `annotate-doc.py`     | `--semantic-cmd` プロトコルの参照実装（Jev を呼ばない）   |
 
 **byte range は手で書かない。** `demo.md` を編集したら必ず
 
