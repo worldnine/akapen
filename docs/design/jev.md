@@ -139,7 +139,12 @@ Atom 間の意味境界（SAME_UNIT / NEW_UNIT）  → Choice（2 択）
 Reading Tier（ESSENTIAL / SUPPORTING /
               CONTEXT / DETAIL）            → Choice（4 択）
 semantic redundancy                          → Noul
+Unit の核（MARKED を絞る先）                → Choice（Unit 内の Atom の数だけ）
 ```
+
+最後の 1 つだけは設計書に直接の記述が無い。設計書が MARKED を **Atom** に
+対して定義していること（「読む価値の高い**Atom**」）と、判断単位が Unit で
+あることの差を埋めるための question である（下の「Unit の核」）。
 
 設計書が挙げる問いの例（上の「この層は何のためにあるか」）は、そのまま
 question の文面の出発点になる。ただし**疑問文であることと Noul であることは
@@ -167,6 +172,38 @@ Noul の文面を対称に書いてはならない。「他の箇所で既に述
 `crates/semantic-reading/src/policy.rs` のモジュールドキュメントにある。
 
 現在の文面は `examples/semantic/jev-annotate.py` の `unit_questions`。
+
+### Unit の核 — 選択肢が本文そのものになる Choice
+
+MARKED を Unit 全体ではなく「Unit の核となる Atom」に絞るために、ラウンド 3 で
+こう聞いている（文面は `examples/semantic/jev-annotate.py` の
+`CORE_INSTRUCTIONS`）。
+
+> 次の選択肢は、この文書の中の連続した 1 つのまとまりを構成する各部分の本文で
+> ある。このまとまりから **1 か所だけ**読むとしたら、どこを読めば要点が取れるか。
+
+他の question と違い、**`criteria` の説明文が判定基準ではなく本文の引用**に
+なる（キーは `atom:<index>`）。Choice は「どの選択肢か」を返す primitive なので
+この使い方ができる。1 question あたり 255 選択肢まで扱えるが、実測でいちばん
+大きい Unit でも Atom は 96 個だった。
+
+設計と実測の詰め方は 3 点。
+
+- **instructions に Unit の本文を書かない。** 選択肢の総和がその Unit の全文に
+  なるので、instructions にも入れると同じテキストを 2 回送ることになる。
+  効くのは時間ではなく context window である
+- **聞く対象を絞る。** MARKED になりうる Unit（ESSENTIAL かつ非 REDUNDANT）で、
+  かつ Atom が 2 つ以上あるものだけ。実測では 34 Unit のうち 8 つ
+- **「重要な部分はどれか」と聞かない。** それだと「どれも重要」と答えられて
+  しまい、Unit を丸ごと光らせていた元の状態に戻る。「1 か所だけ読むなら」で
+  強制的に 1 つへ倒す
+
+核は **1 Unit につき 1 つ**で、`probabilities` を閾値で切って複数採ることは
+していない（下の「`confidence` の閾値ガードは不採用」と同じ理由）。実測では
+選ばれた核の `confidence` は 0.31〜0.96 と幅があるが、**値では何も倒していない**。
+
+比率・時間・tokens・安定性の実測は `examples/semantic/README.md`
+「MARKED を Unit の核だけに絞る」にある。
 
 ### Score を今は使っていない（禁止ではない）
 

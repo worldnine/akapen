@@ -218,7 +218,7 @@ export TYPESAFE_API_KEY=sk-…
 stdout にも stderr にも出さない。`TYPESAFE_BASE_URL` / `TYPESAFE_DEFAULT_MODEL`
 も SDK と同じ名前で効く（`--model` / `--timeout` でも指定できる）。
 
-### 2 ラウンド構成
+### 3 ラウンド構成
 
 Tier の question は Unit について聞くものだが、Unit は境界判定の答えから
 生まれる。**1 ラウンドでは原理的に組めない。**
@@ -226,9 +226,14 @@ Tier の question は Unit について聞くものだが、Unit は境界判定
 ```text
 ラウンド1  state=文書全文, questions={ 散文どうしの境界を Choice } → Unit を確定
 ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) と redundancy(Noul) }
+             → どの Unit が MARKED になるかが確定
+ラウンド3  state=文書全文, questions={ MARKED になる Unit の核を Choice }
 ```
 
-akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、2 ラウンドは
+ラウンド 3 も畳めない。Jev は question を**並列・独立に**評価するので、
+ラウンド 2 の時点では「どの Unit が ESSENTIAL か」をまだ誰も知らない。
+
+akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、3 ラウンドは
 このスクリプトの内部事情である。
 
 ### 境界は「構造は聞かない。散文どうしだけ聞く」
@@ -403,11 +408,85 @@ state で、question の粒度だけを変えて測った**（`atomize.rs` は�
 `念のため繰り返しておく。` を**どちらも DETAIL** と見たため 90 % で両側とも
 同時に DIM になり、行の途中では切り替わらなかった。
 
+### MARKED を Unit の核だけに絞る（2026-09-21 の実測）
+
+45.6 KB の実業務文書（`CLAUDE.md`）を開くと、**画面の半分近くが MARKED**
+だった。原因は Atom の粒度ではなく **Unit** である。境界の構造ルール 4
+（`list_item` どうしは SAME_UNIT）が箇条書き 1 つを丸ごと 1 Unit にまとめ、
+`policy::decorate` が Unit の Tier を構成 Atom **全部へ一律に**投影していた。
+だから ESSENTIAL な箇条書きは段落ごと光る。直前の改修で Atom を 218 → 372 へ
+細かくしても、**比率は 1 % も動かなかった**（判断も表示も Unit のままだったため）。
+
+そこでラウンド 3 を足し、MARKED になる Unit にだけ
+
+> このまとまりから **1 か所だけ**読むとしたら、どこを読めば要点が取れるか
+
+を Choice で聞いて、**その Atom だけを MARKED、同じ Unit の残りを NORMAL** に
+した。選択肢は Unit を構成する Atom の本文そのもの（キーは `atom:<index>`）。
+
+**DIM は一律のままである。** Unit が落ちたなら丸ごと沈む — ここを選択的に
+すると「なぜこの行の一部だけが沈むのか」を読者に説明できない。
+
+比率（`decorate-report`。分母は Atom のバイト長の合計）:
+
+| 文書 | Budget | MARKED 前 | MARKED 後 | NORMAL 前 → 後 | DIM 前 → 後 |
+| --- | ---: | ---: | ---: | --- | --- |
+| `CLAUDE.md` (45.6 KB) | 100 % | 46.7 % | **5.0 %** | 53.3 → 95.0 | 0.0 → 0.0 |
+| 〃 | 80 % | 46.7 % | **5.0 %** | 22.2 → 63.1 | 31.1 → 31.9 |
+| 〃 | 60 % | 46.7 % | **5.0 %** | 8.2 → 49.1 | 45.1 → 45.9 |
+| 〃 | 40 % | 22.2 % | **2.9 %** | 0.0 → 19.8 | 77.8 → 77.3 |
+| 〃 | 20 % | 8.2 % | **1.5 %** | 0.0 → 7.3 | 91.8 → 91.2 |
+| 〃 | 1 % | 0.8 % | **0.5 %** | 0.0 → 0.3 | 99.2 → 99.2 |
+| `demo.md` (1.6 KB) | 100 % | 17.7 % | **7.9 %** | 82.3 → 92.1 | 0.0 → 0.0 |
+| 〃 | 80 % | 17.7 % | **7.9 %** | 57.0 → 66.7 | 25.3 → 25.3 |
+| 〃 | 60 % | 17.7 % | **7.9 %** | 27.5 → 37.3 | 54.8 → 54.8 |
+| 〃 | 40 % | 17.7 % | **7.9 %** | 19.4 → 29.2 | 62.9 → 62.9 |
+| 〃 | 20 % | 17.7 % | **7.9 %** | 0.0 → 9.8 | 82.3 → 82.3 |
+| 〃 | 1 % | 3.3 % | **0.6 %** | 0.0 → 2.8 | 96.7 → 96.7 |
+
+**小さい文書で MARKED が消えはしない。** `demo.md` は 27 Atom のうち 6 →
+**3** が MARKED として残った（Atom が 1 つしかない Unit には核を聞かないので、
+短い文書ほど絞り込みが効かない）。
+
+ラウンド 3 の値段:
+
+| 文書 | 聞いた Unit | question | 所要 | input tokens |
+| --- | ---: | ---: | ---: | ---: |
+| `CLAUDE.md` | 34 Unit 中 8（ESSENTIAL 11 のうち Atom が 2 つ以上あるもの） | 8 | 0.99 秒 | 28,354 |
+| `demo.md` | 16 Unit 中 2 | 2 | 0.49 秒 | 1,171 |
+
+**context window には余裕が残る。** いちばん重いのは依然ラウンド 2 で、
+`CLAUDE.md` の 60,772 tokens（天井 ≒65,536 の 93 %）。ラウンド 3 は state に
+核を聞く Unit の本文だけを足すので 28,354 tokens（43 %）に収まった。
+プロセス全体は 2.64 秒 → **3.54〜3.57 秒**（2 回）、`demo.md` は 1.33 → 1.88 秒。
+
+**核の選択は 2 回の実行で揺れなかった。** `CLAUDE.md` を 2 回走らせると、
+境界（Unit の組）は完全に一致し、両方で聞かれた 7 つの question は
+**7 件とも同じ Atom** を核に選んだ。8 つ目の question は片方にしか無い —
+ラウンド 2 の Tier がその Unit で揺れて ESSENTIAL から外れたためで、
+ラウンド 3 が揺れたのではない。`demo.md` は 2 回とも完全一致。比率で見ても
+MARKED は 5.0 % と 4.9 %（修正前も 46.7 % と 46.3 %）で、この差は実行ごとの
+揺れの幅に収まっている。
+
+**核に閾値は使っていない。** Choice が返す 1 つをそのまま採り、
+`probabilities` を閾値で切って複数採ることはしない（`confidence` の閾値が
+実測で不安定だった件は上の「confidence は記録するだけ」）。選ばれた核の
+`confidence` は 0.31〜0.96 と幅が広いが、**値で判定を倒していない**。
+
+選ばれた核の `kind` の内訳（`CLAUDE.md` 8 件）は `list_item` 4 / `sentence` 3
+/ `heading` 1 だった。見出しが核になった Unit が 1 つある（構造ルール 2 で
+見出しは直後の内容と同じ Unit になる）。**これが読み物として良いかは
+測っていない。**
+
 ### `--dry-run`
 
-API を叩かず、送る 2 ラウンドのリクエスト（`state` / `model` / `questions`）を
-そのまま出す。ラウンド 2 は境界の答えに依存するので、**Jev に聞く境界はすべて
-`new_unit` だった**と仮定して組む。
+API を叩かず、送る 3 ラウンドのリクエスト（`state` / `model` / `questions`）を
+そのまま出す。後のラウンドは前のラウンドの答えに依存するので仮定を置く
+（`assumptions` にも載る）。
+
+- ラウンド 2: **Jev に聞く境界はすべて `new_unit` だった**と仮定する
+- ラウンド 3: **すべての Unit が `essential` かつ非 REDUNDANT だった**と仮定
+  する。本番ではここが絞られるので、実際に送る question はこれより少ない
 
 akapen から使うものではなく、要求の JSON を自分で流し込んで見る。
 
@@ -439,11 +518,17 @@ python3 -m unittest discover -s examples/semantic -p 'test_*.py'
 ```sh
 cargo run -p semantic-reading --example dump-request -- doc.md > request.json
 TYPESAFE_API_KEY=... python3 examples/semantic/jev-annotate.py --timeout 120 \
-  < request.json | jq '.jev.rounds'
+  < request.json > answer.json
+jq '.jev.rounds' answer.json
+cargo run -p semantic-reading --example decorate-report -- doc.md answer.json
 ```
 
 `jev.rounds` に 1 ラウンドずつの `questions` / `elapsed_s` / `usage` が載る。
 `--timeout` を既定の 20 秒より伸ばしておくのは、測っている最中に切られないため。
+
+`decorate-report` は `policy::decorate` そのものを通して、Budget ごとの
+MARKED / NORMAL / DIM の比率を出す（**分母は Atom のバイト長の合計**であって
+source 全体ではない — Markdown の記号や空行は Atom に入らない）。
 
 ### このディレクトリの追加ファイル
 
@@ -452,5 +537,9 @@ TYPESAFE_API_KEY=... python3 examples/semantic/jev-annotate.py --timeout 120 \
 | `jev-annotate.py`         | Jev アダプタ（本番の判定器）                  |
 | `test_jev_annotate.py`    | そのテスト（API を叩かない）                  |
 
-要求 JSON を作る `dump-request` は Rust 側にある
-（`crates/semantic-reading/examples/dump-request.rs`）。
+測るための道具は Rust 側にある。
+
+| example | 何を出すか |
+| --- | --- |
+| `crates/semantic-reading/examples/dump-request.rs` | アダプタへ渡す要求 JSON |
+| `crates/semantic-reading/examples/decorate-report.rs` | 返ってきた答えを当てたときの表示状態の比率 |

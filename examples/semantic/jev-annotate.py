@@ -15,7 +15,7 @@ Atom の index だけなので、このスクリプトが壊れた位置を返�
 
 ---
 
-## 2 ラウンド構成
+## 3 ラウンド構成
 
 Tier の question は Unit について聞くものだが、Unit は境界判定の答えから
 生まれる。**1 ラウンドでは原理的に組めない。**
@@ -24,8 +24,18 @@ Tier の question は Unit について聞くものだが、Unit は境界判定
                  → Unit を確定
     ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) と
                                             redundancy(Noul) }
+                 → どの Unit が MARKED になるかが確定
+    ラウンド3  state=文書全文, questions={ MARKED になる Unit の核を Choice }
 
-akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、2 ラウンドは
+ラウンド 3 も前のラウンドの答えに依存するので畳めない。Jev は question を
+**並列・独立に**評価するので、ラウンド 2 の時点では「どの Unit が ESSENTIAL
+か」をまだ誰も知らない。そしてラウンド 3 が要るのは ESSENTIAL かつ非
+REDUNDANT な Unit だけなので、先に聞くと大半が無駄になる（実測: 45.6 KB の
+文書で 34 Unit 中 11 前後が ESSENTIAL、うち Atom が 2 つ以上あって核を聞く
+意味があるのは 7〜8 つ。幅があるのは、ラウンド 2 の Tier が実行ごとに 1 Unit
+揺れるためである）。
+
+akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、3 ラウンドは
 このスクリプトの内部事情である。
 
 ## 境界は「構造は聞かない。散文どうしだけ聞く」
@@ -72,13 +82,19 @@ API_PATH = "/v1/systemone"
 #: 1 リクエストあたりのタイムアウト（秒）。
 #:
 #: Jev の SDK 既定は 10 秒（`docs/jev.md`）で、実測は 52 question を 1 リクエスト
-#: にまとめて 0.84 秒だった。akapen 側は子プロセスを 60 秒で殺すので、2 ラウンド
+#: にまとめて 0.84 秒だった。akapen 側は子プロセスを 60 秒で殺すので、3 ラウンド
 #: と Python の起動コストを 60 秒に収めるためここは 20 秒に留める。
+#:
+#: **3 ラウンド × この 20 秒はちょうど 60 秒**で、理屈の上では akapen の
+#: 打ち切りにぴったり並ぶ。実測ではそこまで行かない（下のとおり最遅でも
+#: 1 ラウンド 1.65 秒）が、**これは測った値であって保証ではない**。
+#: ラウンドを 4 つ目まで増やすなら、ここを見直すこと。
 #:
 #: **大きな文書でもこの 20 秒は余っている**（2026-09-21 の実測）。45,650 バイトの
 #: 実業務文書で 1 ラウンドあたり 0.98〜1.53 秒、2 ラウンド込みのプロセス全体で
 #: 2.42〜2.63 秒（7 回）。いちばん遅かった条件でも 1 ラウンド 1.65 秒で、
-#: 20 秒には 12 倍の余裕がある。
+#: 20 秒には 12 倍の余裕がある。核を聞くラウンド 3 を足した後も同じで、
+#: ラウンド 3 は 0.99〜1.02 秒、プロセス全体で 3.54〜3.57 秒だった（2 回）。
 #:
 #: 大文書で先に当たるのは**時間ではなく context window** である
 #: （[`http_error_message`]）。そこは 400 で即座に返るので、ここを延ばしても
@@ -114,6 +130,29 @@ BOUNDARY_CRITERIA = {
 }
 
 SAME, NEW = "same_unit", "new_unit"
+
+#: 核（MARKED を絞る先）を選ばせる question の文面。
+#:
+#: **Unit の本文をここに書かない。** 選択肢そのものが Unit の全文になるので、
+#: instructions にも本文を入れると同じテキストを 2 回送ることになり、
+#: context window（実測の天井 ≒65,536 tokens）を無駄に食う。
+#:
+#: 「重要な部分はどれか」ではなく「**1 か所だけ読むならどこか**」と聞いて
+#: いる。前者だと「どれも重要」という答え方ができてしまい、Unit を丸ごと
+#: 光らせていた元の状態に戻る。
+CORE_INSTRUCTIONS = (
+    "次の選択肢は、この文書の中の連続した 1 つのまとまりを構成する各部分の"
+    "本文である。このまとまりから **1 か所だけ**読むとしたら、どこを読めば"
+    "要点が取れるか。"
+)
+
+#: 1 question に並べる選択肢の上限。これを超える Unit には核を聞かない
+#: （核が空 = 絞り込み無し = Unit 全体が MARKED という従来の表示に戻る）。
+#:
+#: **この値では切れていない** — 45.6 KB の実文書でいちばん大きい Unit でも
+#: Atom は 96 個だった。上限に当たる文書を測っていないので、当たったときの
+#: 振る舞いを「安全側（従来どおり）」に倒してあるだけである。
+MAX_CORE_CHOICES = 255
 
 #: 単独の Unit にする Atom 種別。中身は散文ではないので、隣の散文と読む優先度を
 #: 共有しない。
@@ -425,6 +464,78 @@ def build_units(atoms: list[dict], units: list[list[int]], answers: dict) -> lis
 
 
 # ---------------------------------------------------------------------------
+# 核 — Unit の中で「これだけ読めば要点が取れる」Atom
+# ---------------------------------------------------------------------------
+
+
+def wants_core(unit: dict) -> bool:
+    """この Unit に核を聞く意味があるか。
+
+    聞くのは **MARKED になりうる Unit だけ**である。`policy::decorate` が
+    MARKED にするのは「Budget に残った ESSENTIAL かつ非 REDUNDANT」なので、
+    ここで Tier と relations を見れば足りる（Budget はこのスクリプトから
+    見えないし、見る必要もない — 核の選択は Budget に依存しない）。
+
+    絞り込むことで question 数が減る。実測（45.6 KB の文書）では 34 Unit の
+    うち 11 が ESSENTIAL かつ非 REDUNDANT で、さらに Atom が 2 つ以上ある
+    7 つだけがラウンド 3 の question になった。
+    """
+    return unit["reading_tier"] == "essential" and not unit["relations"]
+
+
+def core_questions(atoms: list[dict], units: list[dict]) -> dict:
+    """ラウンド 3 の questions（MARKED になる Unit の核）。
+
+    選択肢は Unit を構成する Atom の本文そのもので、キーは `atom:<index>`。
+    本文が空の Atom は選択肢にしない（選ばれても光らせる中身が無い）。
+
+    **Atom が 1 つしかない Unit には聞かない。** 選択肢が 1 つの Choice は
+    答えが決まっていて、question を 1 つ使う意味が無い。このとき核は空の
+    ままになり、Unit 全体が MARKED になる — Atom が 1 つなのだから同じこと
+    である。
+    """
+    questions = {}
+    for unit in units:
+        if not wants_core(unit):
+            continue
+        options = {
+            f"atom:{i}": atom_text(atoms[i])
+            for i in unit["atoms"]
+            if atom_text(atoms[i])
+        }
+        if not 2 <= len(options) <= MAX_CORE_CHOICES:
+            continue
+        questions[f"core:{unit['id']}"] = {
+            "type": "choice",
+            "instructions": CORE_INSTRUCTIONS,
+            "criteria": options,
+        }
+    return questions
+
+
+def apply_core_answers(units: list[dict], questions: dict, answers: dict) -> None:
+    """ラウンド 3 の答えを `core_atoms` として書き戻す。
+
+    **核は 1 Unit につき 1 つだけ**にしてある。Choice が返すのは 1 つで、
+    `probabilities` を閾値で切って複数採る案は採らない — 閾値を判定に使うのは
+    以前の実測で不安定だった（`docs/design/jev.md`「confidence の閾値ガードは
+    不採用」）。同じ轍を踏むなら、まず閾値の安定性を実測してからになる。
+
+    答えが無い / criteria に無い値だった question は [`choice_of`] が失敗
+    させる。境界や Tier と同じで、黙って埋めない。
+    """
+    for unit in units:
+        key = f"core:{unit['id']}"
+        question = questions.get(key)
+        if question is None:
+            continue
+        choice = choice_of(answers, key, question["criteria"])
+        unit["core_atoms"] = [int(choice.split(":")[1])]
+        unit["jev"]["core_choice"] = choice
+        unit["jev"]["core_confidence"] = confidence_of(answers, key)
+
+
+# ---------------------------------------------------------------------------
 # Jev の呼び出し
 # ---------------------------------------------------------------------------
 
@@ -549,19 +660,35 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     questions = unit_questions(atoms, units)
     payload = ask_jev(state, questions, model, timeout)
     rounds.append(round_record(payload, len(questions)))
+    built = build_units(atoms, units, payload["answers"])
+
+    # --- ラウンド 3: MARKED になる Unit の核 ---------------------------
+    questions = core_questions(atoms, built)
+    if questions:
+        payload = ask_jev(state, questions, model, timeout)
+        apply_core_answers(built, questions, payload["answers"])
+        rounds.append(round_record(payload, len(questions)))
 
     return {
         "version": VERSION,
-        "units": build_units(atoms, units, payload["answers"]),
+        "units": built,
         "jev": {"rounds": rounds, "boundaries": plan},
     }
 
 
 def dry_run(request: dict, model: str) -> dict:
-    """API を叩かずに、送る 2 ラウンドのリクエストの形を出す。
+    """API を叩かずに、送る 3 ラウンドのリクエストの形を出す。
 
-    ラウンド 2 は境界の答えに依存するので、**Jev に聞く境界はすべて NEW_UNIT
-    だったと仮定して**組む。構造ルールで決まった境界はそのまま効く。
+    後のラウンドは前のラウンドの答えに依存するので、仮定を置いて組む。
+
+    - ラウンド 2: **Jev に聞く境界はすべて NEW_UNIT だった**と仮定する
+      （構造ルールで決まった境界はそのまま効く）
+    - ラウンド 3: **すべての Unit が ESSENTIAL かつ非 REDUNDANT だった**と
+      仮定する。本番では [`wants_core`] がここを絞るので、実際に送る
+      question はこれより少ない
+
+    仮定は戻り値の `assumptions` にも載せる — 形だけ見て「これが本番で送る
+    question 数だ」と読まれると困るため。
     """
     atoms = request.get("atoms") or []
     state = request.get("source") or ""
@@ -571,8 +698,17 @@ def dry_run(request: dict, model: str) -> dict:
         if entry["decision"] is None:
             entry["decision"] = NEW
     units = group_units(atoms, plan)
+    # ラウンド 3 は Tier の答えを要るので、全部 ESSENTIAL だと仮定して組む。
+    as_essential = [
+        {"id": f"u{number}", "atoms": indices, "reading_tier": "essential", "relations": []}
+        for number, indices in enumerate(units, start=1)
+    ]
     return {
-        "assumption": "ラウンド 2 は「Jev に聞く境界はすべて new_unit」と仮定して組んでいる",
+        "assumptions": [
+            "ラウンド 2 は「Jev に聞く境界はすべて new_unit」と仮定して組んでいる",
+            "ラウンド 3 は「すべての Unit が essential かつ非 redundant」と仮定して"
+            "組んでいる（本番はここが絞られるので question はもっと少ない）",
+        ],
         "rounds": [
             {"round": 1, "state": state, "model": model, "questions": first},
             {
@@ -580,6 +716,12 @@ def dry_run(request: dict, model: str) -> dict:
                 "state": state,
                 "model": model,
                 "questions": unit_questions(atoms, units),
+            },
+            {
+                "round": 3,
+                "state": state,
+                "model": model,
+                "questions": core_questions(atoms, as_essential),
             },
         ],
     }
@@ -603,8 +745,8 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="API を叩かず、送る 2 ラウンドのリクエストの形だけを出す"
-        "（ラウンド 2 は全境界 new_unit を仮定）",
+        help="API を叩かず、送る 3 ラウンドのリクエストの形だけを出す"
+        "（ラウンド 2 は全境界 new_unit、ラウンド 3 は全 Unit essential を仮定）",
     )
     args = parser.parse_args()
 

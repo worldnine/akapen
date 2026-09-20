@@ -6,10 +6,11 @@
 
 - 構造ルール（見出し / コード / リスト / 引用 / 散文の各組み合わせ）
 - Jev のレスポンスを模したフィクスチャから Unit を組み立てる処理
+- ラウンド 3（Unit の核）を聞く対象の絞り方と、答えの書き戻し
 - `--dry-run` が送ろうとするリクエストの形（state / model / questions）
 - `TYPESAFE_API_KEY` 未設定時のエラー経路
 
-の 4 つだけである。判定の質そのものは実測（`docs/` と README の表）で見る。
+の 5 つだけである。判定の質そのものは実測（`docs/` と README の表）で見る。
 
 ファイル名にハイフンが入っていて普通の import ができないので、
 `plugins/akp/scripts/test_akp.py` と同じく SourceFileLoader で読む。
@@ -213,6 +214,103 @@ class BuildUnitsTest(unittest.TestCase):
         self.assertIsNone(units[1]["jev"]["redundant_with"])
 
 
+class CoreQuestionTest(unittest.TestCase):
+    """ラウンド 3 — MARKED になる Unit の核だけを聞く。"""
+
+    ATOMS = [
+        atom(0, "heading", "結論"),
+        atom(1, "list_item", "採用する方式は差分配信である。"),
+        atom(2, "list_item", "帯域は 3 割減る見込み。"),
+        atom(3, "sentence", "詳細は付録にまとめた。"),
+        atom(4, "sentence", ""),
+    ]
+
+    def units(self, **overrides):
+        unit = {
+            "id": "u1",
+            "atoms": [0, 1, 2],
+            "reading_tier": "essential",
+            "relations": [],
+            "jev": {},
+        }
+        unit.update(overrides)
+        return [unit]
+
+    def test_a_marked_unit_offers_each_of_its_atoms_as_a_choice(self):
+        asked = jev.core_questions(self.ATOMS, self.units())
+        self.assertEqual(list(asked), ["core:u1"])
+        question = asked["core:u1"]
+        self.assertEqual(question["type"], "choice")
+        self.assertEqual(
+            question["criteria"],
+            {
+                "atom:0": "結論",
+                "atom:1": "採用する方式は差分配信である。",
+                "atom:2": "帯域は 3 割減る見込み。",
+            },
+        )
+
+    def test_the_question_does_not_repeat_the_body_it_already_sends_as_choices(self):
+        # 本文を instructions にも入れると同じテキストを 2 回送ることになり、
+        # context window を無駄に食う。
+        question = jev.core_questions(self.ATOMS, self.units())["core:u1"]
+        for text in question["criteria"].values():
+            self.assertNotIn(text, question["instructions"])
+        self.assertIn("1 か所だけ", question["instructions"])
+
+    def test_only_units_that_can_become_marked_are_asked(self):
+        # MARKED は「ESSENTIAL かつ非 REDUNDANT」だけ。
+        for tier in ["supporting", "context", "detail"]:
+            self.assertEqual(
+                jev.core_questions(self.ATOMS, self.units(reading_tier=tier)), {}
+            )
+        self.assertEqual(
+            jev.core_questions(
+                self.ATOMS, self.units(relations=[{"redundant_with": "u0"}])
+            ),
+            {},
+        )
+
+    def test_a_unit_with_one_usable_atom_is_not_asked(self):
+        # 選択肢が 1 つの Choice は答えが決まっている。核は空のままになり、
+        # Atom が 1 つなのだから Unit 全体 = その Atom が MARKED になる。
+        self.assertEqual(jev.core_questions(self.ATOMS, self.units(atoms=[1])), {})
+        # 本文が空の Atom は選択肢にならないので、これも 1 つ扱い。
+        self.assertEqual(jev.core_questions(self.ATOMS, self.units(atoms=[3, 4])), {})
+
+    def test_an_answer_becomes_a_single_core_atom(self):
+        units = self.units()
+        questions = jev.core_questions(self.ATOMS, units)
+        jev.apply_core_answers(
+            units, questions, {"core:u1": {"choice": "atom:2", "confidence": 0.42}}
+        )
+        self.assertEqual(units[0]["core_atoms"], [2])
+        self.assertEqual(units[0]["jev"]["core_confidence"], 0.42)
+
+    def test_confidence_never_flips_the_core(self):
+        # 閾値で倒すのは採用していない（`probabilities` も見ない）。
+        units = self.units()
+        questions = jev.core_questions(self.ATOMS, units)
+        jev.apply_core_answers(
+            units, questions, {"core:u1": {"choice": "atom:0", "confidence": 0.01}}
+        )
+        self.assertEqual(units[0]["core_atoms"], [0])
+
+    def test_a_missing_or_unknown_core_answer_fails_loudly(self):
+        units = self.units()
+        questions = jev.core_questions(self.ATOMS, units)
+        with self.assertRaises(jev.JevError):
+            jev.apply_core_answers(units, questions, {})
+        with self.assertRaises(jev.JevError):
+            # 聞いていない Atom を返されたら通さない。
+            jev.apply_core_answers(units, questions, {"core:u1": {"choice": "atom:9"}})
+
+    def test_a_unit_that_was_not_asked_keeps_no_core(self):
+        units = self.units(reading_tier="detail")
+        jev.apply_core_answers(units, {}, {"core:u1": {"choice": "atom:0"}})
+        self.assertNotIn("core_atoms", units[0])
+
+
 class DryRunTest(unittest.TestCase):
     """送るリクエストの形。実際の demo.md / demo.json を材料にする。"""
 
@@ -297,6 +395,44 @@ class DryRunTest(unittest.TestCase):
             self.assertEqual(asked[key]["type"], "noul")
             # redundancy は方向を必ず指定する（対称に聞くと結論まで拾う）。
             self.assertIn("これより**前**の箇所", asked[key]["instructions"])
+
+    def test_round_three_asks_for_the_core_of_multi_atom_units_only(self):
+        rounds = self.payload()["rounds"]
+        self.assertEqual(len(rounds), 3)
+        units = {
+            f"u{n}": indices
+            for n, indices in enumerate(
+                jev.group_units(
+                    self.request["atoms"],
+                    [
+                        dict(entry, decision=entry["decision"] or jev.NEW)
+                        for entry in jev.plan_boundaries(self.request["atoms"])
+                    ],
+                ),
+                start=1,
+            )
+        }
+        asked = rounds[2]["questions"]
+        self.assertTrue(asked, "核を聞ける Unit が 1 つも無い")
+        for key, question in asked.items():
+            uid = key.split(":", 1)[1]
+            self.assertEqual(question["type"], "choice")
+            self.assertGreaterEqual(len(question["criteria"]), 2)
+            # 選択肢はその Unit の Atom だけ。
+            self.assertLessEqual(
+                {int(k.split(":")[1]) for k in question["criteria"]},
+                set(units[uid]),
+            )
+        # Atom が 1 つの Unit は聞かれない。
+        for uid, indices in units.items():
+            if len(indices) == 1:
+                self.assertNotIn(f"core:{uid}", asked)
+
+    def test_the_dry_run_names_its_assumptions(self):
+        # 形だけ見て「本番もこの question 数だ」と読まれないように。
+        assumptions = " ".join(self.payload()["assumptions"])
+        self.assertIn("new_unit", assumptions)
+        self.assertIn("essential", assumptions)
 
     def test_the_tier_criteria_are_the_design_documents_wording(self):
         # 言い換えると判定品質が落ちるので、逐語であることを固定する。

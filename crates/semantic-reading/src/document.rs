@@ -69,11 +69,12 @@ impl SemanticDocument {
     ///
     /// - Atom の範囲が逆転していないこと
     /// - Unit の Atom 添字が範囲内であること
+    /// - Unit の `core_atoms` がその Unit の `atoms` の部分集合であること
     /// - Unit の識別子が重複していないこと
     /// - `RedundantWith` の参照先が実在し、自分自身でないこと
     /// - `source_sha256` があるなら hex 64 桁であること
     ///
-    /// の 5 点。Atom がどの Unit にも属さないことは**エラーにしない**
+    /// の 6 点。Atom がどの Unit にも属さないことは**エラーにしない**
     /// （未判断の Atom は NORMAL のまま表示されればよい）。
     ///
     /// `source_sha256` は**形だけ**を見る。実際の source と一致するかは
@@ -109,6 +110,16 @@ impl SemanticDocument {
                         unit.id,
                         index.0,
                         self.atoms.len()
+                    )));
+                }
+            }
+            for index in &unit.core_atoms {
+                // 核は「この Unit の中のどこを読むか」なので、Unit の外の
+                // Atom は指せない。範囲外の添字もここで落ちる。
+                if !unit.atoms.contains(index) {
+                    return Err(Error::Invalid(format!(
+                        "unit `{}` の core atom {} はこの unit の atom ではありません",
+                        unit.id, index.0
                     )));
                 }
             }
@@ -219,6 +230,24 @@ mod tests {
         doc.units[0].atoms.push(AtomIndex(7));
         let err = doc.validate().unwrap_err().to_string();
         assert!(err.contains("範囲外の atom 7"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_a_core_atom_outside_its_own_unit() {
+        let mut own = doc();
+        own.units[0].core_atoms.push(AtomIndex(0));
+        assert!(own.validate().is_ok(), "自分の atom なら通る");
+
+        // 隣の Unit の atom は核にできない。
+        let mut neighbour = doc();
+        neighbour.units[0].core_atoms.push(AtomIndex(1));
+        let err = neighbour.validate().unwrap_err().to_string();
+        assert!(err.contains("core atom 1"), "{err}");
+
+        // 範囲外も同じ経路で落ちる。
+        let mut outside = doc();
+        outside.units[0].core_atoms.push(AtomIndex(7));
+        assert!(matches!(outside.validate(), Err(Error::Invalid(_))));
     }
 
     #[test]

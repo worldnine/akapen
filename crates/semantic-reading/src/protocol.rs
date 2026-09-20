@@ -34,6 +34,21 @@
 //! 将来キャッシュのために段階を分ける必要が出たら `stage` を足せる
 //! （未知のフィールドは拒否していない。[`AnalyzeResponse`] 参照）。
 //!
+//! # `core_atoms` を足しても版は上げない
+//!
+//! [`crate::SemanticUnit::core_atoms`]（MARKED を絞る核）は後から足した
+//! フィールドだが、[`VERSION`] は 1 のままにしてある。版を上げないのは、
+//! **上げると古い組み合わせが動かなくなるのに、何も救われない**からである。
+//!
+//! | 組み合わせ | 起きること |
+//! | ---------- | ---------- |
+//! | 新しい akapen + 古い判定器 | フィールドが無い = 空 = 絞り込み無し。Unit 全体が MARKED（従来の表示） |
+//! | 古い akapen + 新しい判定器 | 未知のフィールドとして無視される。従来の表示 |
+//!
+//! どちらも「意味を取り違える」側へは倒れない。版が守っているのは
+//! 「同じフィールドを双方が違う意味で読み書きする」事故であって、
+//! 追加されたフィールドを片方が知らないことではない。
+//!
 //! # 検証は受け取る側の責務
 //!
 //! [`AnalyzeResponse::into_document`] は全項目を検査し、**1 つでも失敗
@@ -151,8 +166,8 @@ impl<'a> AnalyzeRequest<'a> {
 /// 外部コマンドの stdout から受け取る応答。
 ///
 /// `units` の要素は [`SemanticUnit`] そのままである — `id` / `atoms` /
-/// `reading_tier` / `relations` の 4 つで、wire 形と内部表現が 1 対 1 に
-/// 対応する。別の DTO を挟まないのは、挟めば両者がずれうるからで、
+/// `reading_tier` / `core_atoms` / `relations` の 5 つで、wire 形と内部表現が
+/// 1 対 1 に対応する。別の DTO を挟まないのは、挟めば両者がずれうるからで、
 /// ずれない形にしてあれば「wire では通るが内部では表現できない」値が
 /// 存在しなくなる。
 ///
@@ -188,6 +203,7 @@ impl AnalyzeResponse {
     /// | `reading_tier` が 4 種のいずれか | serde（[`Self::from_json`]） |
     /// | `relations` が既知の関係である | serde（[`Self::from_json`]） |
     /// | atom 添字が `atoms.len()` 未満 | [`SemanticDocument::validate`] |
+    /// | `core_atoms` がその unit の `atoms` の部分集合 | [`SemanticDocument::validate`] |
     /// | unit の id が重複しない | [`SemanticDocument::validate`] |
     /// | relation の参照先が実在し、自分自身でない | [`SemanticDocument::validate`] |
     ///
@@ -220,17 +236,39 @@ impl AnalyzeResponse {
         let mut units = self.units;
         let mut claimed = vec![false; atoms.len()];
         for unit in &mut units {
-            unit.atoms.retain(|&AtomIndex(index)| match claimed.get_mut(index) {
-                // 先勝ち: すでに誰かが取っている Atom は落とす。
-                Some(taken) if *taken => false,
-                Some(taken) => {
-                    *taken = true;
-                    true
+            let mut taken_away = Vec::new();
+            unit.atoms.retain(|&index| {
+                let AtomIndex(position) = index;
+                match claimed.get_mut(position) {
+                    // 先勝ち: すでに誰かが取っている Atom は落とす。
+                    Some(taken) if *taken => {
+                        taken_away.push(index);
+                        false
+                    }
+                    Some(taken) => {
+                        *taken = true;
+                        true
+                    }
+                    // 範囲外。落とさずに残し、validate に弾かせる — ここで
+                    // 黙って捨てると「不正な添字を送っても通る」ことになる。
+                    None => true,
                 }
-                // 範囲外。落とさずに残し、validate に弾かせる — ここで
-                // 黙って捨てると「不正な添字を送っても通る」ことになる。
-                None => true,
             });
+            // 核は先勝ちの結果にだけ追従させる。取られた Atom を核に選んで
+            // いたら、その核も一緒に落ちる（全部落ちれば「絞り込み無し」に
+            // 戻り、Unit 全体が MARKED になる）。同じ Unit が同じ Atom を
+            // 2 回並べただけなら添字はまだ残っているので、核も残す。
+            //
+            // **ここで落とすのは取られた核だけである。** 最初から自分の
+            // Atom でない核は落とさず、validate に弾かせる — そちらは
+            // 判定器の誤りであって、黙って直すと気づけない。
+            let lost: Vec<_> = taken_away
+                .into_iter()
+                .filter(|index| !unit.atoms.contains(index))
+                .collect();
+            if !lost.is_empty() {
+                unit.core_atoms.retain(|index| !lost.contains(index));
+            }
         }
         let document = SemanticDocument::new(atoms, units);
         document.validate()?;
@@ -456,6 +494,90 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("範囲外の atom 42"), "{err}");
+    }
+
+    /// 核はそのまま文書まで届き、MARKED を絞る。
+    #[test]
+    fn a_core_atom_rides_through_to_the_document() {
+        let document = response(
+            r#"{"version":1,"units":[
+                {"id":"u1","atoms":[0,1,2],"reading_tier":"essential","core_atoms":[1]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(document.units[0].core_atoms, [AtomIndex(1)]);
+        assert!(!document.units[0].is_core(AtomIndex(0)));
+        let states = crate::policy::decorate(&document, 100);
+        assert_eq!(
+            states.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+            [
+                crate::DisplayState::Normal,
+                crate::DisplayState::Marked,
+                crate::DisplayState::Normal
+            ]
+        );
+    }
+
+    /// 核を名乗らない応答（従来の判定器）は、従来どおり Unit 全体が MARKED。
+    #[test]
+    fn a_response_without_core_atoms_keeps_marking_the_whole_unit() {
+        let document = response(
+            r#"{"version":1,"units":[{"id":"u1","atoms":[0,1],"reading_tier":"essential"}]}"#,
+        )
+        .unwrap();
+        assert!(document.units[0].core_atoms.is_empty());
+        let states = crate::policy::decorate(&document, 100);
+        assert!(
+            states[..2]
+                .iter()
+                .all(|(_, s)| *s == crate::DisplayState::Marked)
+        );
+    }
+
+    /// 自分の Atom でない核は応答ごと捨てる。
+    #[test]
+    fn a_core_atom_outside_its_own_unit_throws_the_response_away() {
+        let err = response(
+            r#"{"version":1,"units":[
+                {"id":"u1","atoms":[0],"reading_tier":"essential","core_atoms":[1]},
+                {"id":"u2","atoms":[1,2],"reading_tier":"detail"}
+            ]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("core atom 1"), "{err}");
+
+        // 範囲外の核も同じ経路で落ちる（黙って捨てない）。
+        let err = response(
+            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential","core_atoms":[42]}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("core atom 42"), "{err}");
+    }
+
+    /// 先勝ちで Atom を取られたら、その核も一緒に落ちる — 残りの核が
+    /// あればそれが効き、全部落ちれば絞り込み無しに戻る。
+    #[test]
+    fn the_first_come_rule_takes_the_core_with_the_atom() {
+        let document = response(
+            r#"{"version":1,"units":[
+                {"id":"first","atoms":[0,1],"reading_tier":"detail"},
+                {"id":"second","atoms":[1,2],"reading_tier":"essential","core_atoms":[1,2]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(document.units[1].atoms, [AtomIndex(2)]);
+        assert_eq!(document.units[1].core_atoms, [AtomIndex(2)], "1 は取られた");
+
+        // 核が全部取られたら空になり、Unit 全体が MARKED に戻る。
+        let document = response(
+            r#"{"version":1,"units":[
+                {"id":"first","atoms":[1],"reading_tier":"detail"},
+                {"id":"second","atoms":[0,1,2],"reading_tier":"essential","core_atoms":[1]}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(document.units[1].core_atoms.is_empty());
+        assert!(document.units[1].is_core(AtomIndex(0)));
     }
 
     /// 未知のフィールドは無視する（将来の `stage` などのため）。

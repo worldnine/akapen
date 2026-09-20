@@ -112,6 +112,18 @@ pub struct SemanticUnit {
     pub atoms: Vec<AtomIndex>,
     /// 読む優先度の粗い段階。
     pub reading_tier: ReadingTier,
+    /// この Unit の**核** — 「ここだけ読めば要点が取れる」と判断された Atom。
+    /// [`Self::atoms`] の部分集合でなければならない（[`crate::SemanticDocument::validate`]）。
+    ///
+    /// MARKED をこの Atom だけに絞るために使う（[`crate::policy::decorate`]）。
+    /// **空は「絞り込み無し」**であって「核が無い」ではない — 判定器が核を
+    /// 選ばなかった Unit は、従来どおり全体が MARKED になる。この既定が
+    /// あるので、このフィールドを知らない判定器・fixture もそのまま動く。
+    ///
+    /// 効くのは MARKED になる Unit（ESSENTIAL かつ非 REDUNDANT）だけである。
+    /// NORMAL と DIM は Unit 全体に一律で掛かる。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub core_atoms: Vec<AtomIndex>,
     /// 他 Unit との関係。空でよい。
     #[serde(default)]
     pub relations: Vec<Relation>,
@@ -128,8 +140,18 @@ impl SemanticUnit {
             id: id.into(),
             atoms: atoms.into_iter().collect(),
             reading_tier,
+            core_atoms: Vec::new(),
             relations: Vec::new(),
         }
+    }
+
+    /// この Atom は、MARKED を絞る先として残るか。
+    ///
+    /// [`Self::core_atoms`] が空なら**すべての Atom が核**である（絞り込みを
+    /// 受けていない Unit は丸ごと MARKED になる、という従来の振る舞い）。
+    /// 空でなければ、そこに挙がっている Atom だけが核になる。
+    pub fn is_core(&self, atom: AtomIndex) -> bool {
+        self.core_atoms.is_empty() || self.core_atoms.contains(&atom)
     }
 
     /// この Unit が重複だと判断された先。複数あれば最初のもの。
@@ -176,6 +198,30 @@ mod tests {
         unit.relations.push(Relation::RedundantWith("u3".into()));
         assert_eq!(unit.reading_tier, ReadingTier::Supporting);
         assert_eq!(unit.redundant_with(), Some(&UnitId::from("u3")));
+    }
+
+    #[test]
+    fn an_unrefined_unit_treats_every_atom_as_its_core() {
+        // 空の core_atoms は「核が無い」ではなく「絞り込みを受けていない」。
+        let mut unit = SemanticUnit::new("u1", [AtomIndex(0), AtomIndex(1)], ReadingTier::Essential);
+        assert!(unit.is_core(AtomIndex(0)));
+        assert!(unit.is_core(AtomIndex(1)));
+        unit.core_atoms.push(AtomIndex(1));
+        assert!(!unit.is_core(AtomIndex(0)));
+        assert!(unit.is_core(AtomIndex(1)));
+    }
+
+    #[test]
+    fn core_atoms_are_absent_from_the_wire_form_until_they_are_chosen() {
+        // 既存の fixture・判定器の出力の形を変えない（空なら書き出さない、
+        // 無ければ空として読む）。
+        let unit = SemanticUnit::new("u1", [AtomIndex(0)], ReadingTier::Essential);
+        let json = serde_json::to_string(&unit).unwrap();
+        assert_eq!(
+            json,
+            r#"{"id":"u1","atoms":[0],"reading_tier":"essential","relations":[]}"#
+        );
+        assert_eq!(serde_json::from_str::<SemanticUnit>(&json).unwrap(), unit);
     }
 
     #[test]

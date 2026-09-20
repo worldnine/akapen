@@ -196,8 +196,13 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 ///
 /// ```text
 /// stdin   {"version":1,"source":"…","atoms":[{"index":0,…}]}
-/// stdout  {"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"}]}
+/// stdout  {"version":1,"units":[{"id":"u1","atoms":[0,1],"reading_tier":"essential",
+///                                  "core_atoms":[1]}]}
 /// ```
+///
+/// `core_atoms` は任意で、「この Unit の中で、ここだけ読めば要点が取れる」
+/// と判定器が選んだ Atom である。MARKED をそこだけに絞るために
+/// [`policy::decorate`] が読む（省けば従来どおり Unit 全体が MARKED）。
 ///
 /// # コマンドは range を返さない
 ///

@@ -111,18 +111,47 @@
 //! # 表示状態の割り当て
 //!
 //! ```text
-//! 残った Unit で ESSENTIAL かつ非 REDUNDANT  -> MARKED
-//! 残ったそれ以外                              -> NORMAL
-//! 残らなかったもの                            -> DIM
-//! どの Unit にも属さない Atom                 -> NORMAL
+//! 残った Unit で ESSENTIAL かつ非 REDUNDANT
+//!     その Unit の核（core_atoms）        -> MARKED
+//!     同じ Unit の残り                    -> NORMAL
+//! 残ったそれ以外                          -> NORMAL
+//! 残らなかったもの                        -> DIM（Unit 全体に一律）
+//! どの Unit にも属さない Atom             -> NORMAL
 //! ```
 //!
 //! MARKED は Budget に依存しない。Budget 100% で全文を見せつつ ESSENTIAL に
 //! 薄い marker を重ねる、という設計書の最初のデモがそのままこの規則である。
+//!
+//! ## MARKED だけ、投影を選択的にする
+//!
+//! 設計書は判断単位と表示単位について
+//!
+//! > Semantic Unit に付与した意味情報を、その Unit を構成する Atom へ投影する
+//!
+//! とだけ書いていて、**投影が一律コピーだとは書いていない**。当初の実装が
+//! Unit の Tier を構成 Atom 全部へそのまま配ったのはこちらの解釈であり、
+//! ここで狭めているのはその解釈である（設計書の変更ではない）。設計書が
+//! MARKED / DIM を **Atom** に対して定義していることとは、むしろこの形の方が
+//! 整合する。
+//!
+//! 動機は実測である。45.6 KB の実業務文書で、Unit 一律の投影だと MARKED が
+//! Atom バイトの 46.7 %（Budget 100 / 80 / 60 %）を占めた。境界の構造ルール
+//! 「どちらも list_item → SAME」が箇条書き 1 つを丸ごと 1 Unit にするため、
+//! ESSENTIAL な項目は段落ごと光る。**半分が光っていれば、光っていない方が
+//! 目立つ。** 核だけを MARKED にすると、同じ文書・同じ Budget で 5.0 % に
+//! 落ちた（実測表は `examples/semantic/README.md`）。
+//!
+//! **DIM は一律のままにする。** Unit が落ちたなら、その Unit は丸ごと沈むのが
+//! 正しい。ここを選択的にすると「なぜこの行の一部だけが沈んでいるのか」が
+//! 読者に説明できなくなる。核の選択は「残った中のどこを読むか」であって、
+//! 「何を落とすか」ではない。
+//!
+//! 核を選ぶのは判定器（Jev）で、この層は [`crate::SemanticUnit::core_atoms`]
+//! を読むだけである。**核の選択は Budget に依存しない**ので、上の単調性は
+//! そのまま成り立つ。
 
 use std::ops::Range;
 
-use crate::atom::AtomIndex;
 use crate::display::DisplayState;
 use crate::document::SemanticDocument;
 use crate::unit::ReadingTier;
@@ -182,15 +211,20 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
     // 場合は attention の強い方を採る（[`DisplayState::stronger`]）。
     let mut states = vec![None; doc.atoms.len()];
     for (unit_index, unit) in doc.units.iter().enumerate() {
-        let state = if !kept[unit_index] {
-            DisplayState::Dim
-        } else if unit.reading_tier == ReadingTier::Essential && !unit.is_redundant() {
-            DisplayState::Marked
-        } else {
-            DisplayState::Normal
-        };
-        for &AtomIndex(atom_index) in &unit.atoms {
-            if let Some(slot) = states.get_mut(atom_index) {
+        // MARKED になりうる Unit か。なる場合だけ、Unit の中で核と残りを
+        // 分ける（NORMAL と DIM は Unit 全体に一律で掛かる）。
+        let marks = kept[unit_index]
+            && unit.reading_tier == ReadingTier::Essential
+            && !unit.is_redundant();
+        for &atom in &unit.atoms {
+            let state = if !kept[unit_index] {
+                DisplayState::Dim
+            } else if marks && unit.is_core(atom) {
+                DisplayState::Marked
+            } else {
+                DisplayState::Normal
+            };
+            if let Some(slot) = states.get_mut(atom.0) {
                 *slot = Some(slot.map_or(state, |current: DisplayState| current.stronger(state)));
             }
         }
@@ -240,7 +274,7 @@ fn keep_order(doc: &SemanticDocument) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atom::{Atom, AtomKind};
+    use crate::atom::{Atom, AtomIndex, AtomKind};
     use crate::unit::{Relation, SemanticUnit};
 
     /// 長さの等しい Atom を 1 つずつ持つ Unit を並べた文書を作る。
@@ -281,6 +315,119 @@ mod tests {
                 DisplayState::Normal,
                 DisplayState::Normal
             ]
+        );
+    }
+
+    /// 核を持つ ESSENTIAL は、核だけ MARKED で残りは NORMAL。
+    #[test]
+    fn only_the_core_of_an_essential_unit_is_marked() {
+        let atoms = (0..3)
+            .map(|i| Atom::new(i * 10..i * 10 + 10, AtomKind::Sentence))
+            .collect();
+        let mut unit = SemanticUnit::new(
+            "u0",
+            [AtomIndex(0), AtomIndex(1), AtomIndex(2)],
+            ReadingTier::Essential,
+        );
+        unit.core_atoms.push(AtomIndex(1));
+        let doc = SemanticDocument::new(atoms, vec![unit]);
+        assert_eq!(
+            states(&doc, 100),
+            [
+                DisplayState::Normal,
+                DisplayState::Marked,
+                DisplayState::Normal
+            ]
+        );
+    }
+
+    /// 核を持つ Unit が Budget から落ちたら、核も含めて丸ごと DIM。
+    /// **DIM は選択的にしない** — 行の一部だけ沈む理由を読者に説明できない。
+    #[test]
+    fn a_dropped_unit_dims_whole_even_when_it_has_a_core() {
+        let atoms = vec![
+            Atom::new(0..10, AtomKind::Sentence),
+            Atom::new(10..20, AtomKind::Sentence),
+            Atom::new(20..60, AtomKind::Sentence),
+        ];
+        let mut essential = SemanticUnit::new(
+            "keep",
+            [AtomIndex(0), AtomIndex(1)],
+            ReadingTier::Essential,
+        );
+        essential.core_atoms.push(AtomIndex(0));
+        let mut dropped = SemanticUnit::new("drop", [AtomIndex(2)], ReadingTier::Essential);
+        dropped.core_atoms.push(AtomIndex(2));
+        let doc = SemanticDocument::new(atoms, vec![essential, dropped]);
+        // 60 バイト中、短い "keep"（20 バイト）だけが 70 % に入る。
+        assert_eq!(
+            states(&doc, 70),
+            [
+                DisplayState::Marked,
+                DisplayState::Normal,
+                DisplayState::Dim
+            ]
+        );
+    }
+
+    /// 核は Budget に依存しない — 絞られた MARKED も、Unit が残る限り一定。
+    #[test]
+    fn the_core_does_not_move_when_the_budget_does() {
+        let atoms = vec![
+            Atom::new(0..10, AtomKind::Sentence),
+            Atom::new(10..20, AtomKind::Sentence),
+            Atom::new(20..90, AtomKind::Sentence),
+        ];
+        let mut essential =
+            SemanticUnit::new("u0", [AtomIndex(0), AtomIndex(1)], ReadingTier::Essential);
+        essential.core_atoms.push(AtomIndex(1));
+        let doc = SemanticDocument::new(
+            atoms,
+            vec![
+                essential,
+                SemanticUnit::new("u1", [AtomIndex(2)], ReadingTier::Detail),
+            ],
+        );
+        for budget in [100, 60, 30, 1] {
+            assert_eq!(
+                states(&doc, budget)[..2],
+                [DisplayState::Normal, DisplayState::Marked],
+                "budget {budget}"
+            );
+        }
+    }
+
+    /// 核が NORMAL / DIM の Unit に付いていても無視される — 効くのは MARKED
+    /// になる Unit だけ。
+    #[test]
+    fn a_core_on_a_non_marked_unit_changes_nothing() {
+        let atoms = vec![
+            Atom::new(0..10, AtomKind::Sentence),
+            Atom::new(10..20, AtomKind::Sentence),
+        ];
+        let mut unit =
+            SemanticUnit::new("u0", [AtomIndex(0), AtomIndex(1)], ReadingTier::Supporting);
+        unit.core_atoms.push(AtomIndex(0));
+        let doc = SemanticDocument::new(atoms, vec![unit]);
+        assert_eq!(
+            states(&doc, 100),
+            [DisplayState::Normal, DisplayState::Normal]
+        );
+    }
+
+    /// 核を返さない判定器（と既存の fixture）は従来どおり Unit 全体が MARKED。
+    #[test]
+    fn a_unit_without_a_core_still_marks_all_of_its_atoms() {
+        let atoms = vec![
+            Atom::new(0..10, AtomKind::Sentence),
+            Atom::new(10..20, AtomKind::Sentence),
+        ];
+        let unit =
+            SemanticUnit::new("u0", [AtomIndex(0), AtomIndex(1)], ReadingTier::Essential);
+        let doc = SemanticDocument::new(atoms, vec![unit]);
+        assert_eq!(
+            states(&doc, 100),
+            [DisplayState::Marked, DisplayState::Marked]
         );
     }
 

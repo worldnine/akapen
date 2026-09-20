@@ -240,6 +240,42 @@ exact / 上位集合の一覧は
 `an_answer_from_an_older_generation_is_thrown_away`（決定論的）と
 `a_slow_analysis_started_first_never_overwrites_a_newer_one`（実スレッド）。
 
+### 「Unit の判断を Atom へ投影する」は一律コピーではない（MARKED だけ選択的）
+
+設計書は
+
+> Semantic Unit に付与した意味情報を、その Unit を構成する Atom へ投影する
+
+としか書いていません。**「投影 = Unit の Tier を構成 Atom 全部へ配る」は
+実装側の解釈**であって設計書の要求ではなく、いまはそこを MARKED についてだけ
+狭めています（設計書は変更していません）。
+
+```text
+Unit が kept ∧ ESSENTIAL ∧ ¬REDUNDANT
+    core_atoms に挙がった Atom -> MARKED
+    同じ Unit の残り           -> NORMAL
+Unit が kept でその他          -> 全 Atom NORMAL
+Unit が落ちた                  -> 全 Atom DIM（**一律**）
+```
+
+刺さるのは次の 2 点です。
+
+- **`core_atoms` が空は「核が無い」ではなく「絞り込みを受けていない」**で、
+  Unit 全体が MARKED になります。これが既存 fixture と古い判定器の経路です。
+  ここを「空なら光らせない」に変えると、`demo.json` も `annotate-doc.py` も
+  黙って何も光らなくなります
+- **DIM を同じように選択的にしないでください。** Unit が落ちたなら丸ごと
+  沈むのが正しく、混ぜると「なぜこの行の一部だけ沈むのか」を読者に説明
+  できなくなります
+
+**確認したこと**: `crates/semantic-reading/src/policy.rs::decorate` の
+`marks` の条件と `unit.is_core(atom)`、テスト
+`only_the_core_of_an_essential_unit_is_marked` /
+`a_dropped_unit_dims_whole_even_when_it_has_a_core` /
+`a_unit_without_a_core_still_marks_all_of_its_atoms`。核を選ぶ question は
+`examples/semantic/jev-annotate.py::core_questions`（ラウンド 3）、比率の
+実測は `examples/semantic/README.md`「MARKED を Unit の核だけに絞る」。
+
 ---
 
 ## 外部プロセス
