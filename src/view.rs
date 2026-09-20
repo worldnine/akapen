@@ -14,6 +14,7 @@ use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 use ratatui::text::{Line, Text};
 
+use crate::decoration::{Decoration, DecorationStyles, decorate_row};
 use crate::highlight::{Highlighter, Span};
 use crate::render::{self, Rendered, Segment};
 use crate::source::Source;
@@ -451,6 +452,21 @@ pub struct ViewState {
     /// occupies in the row), used to highlight exactly the selected lines'
     /// text instead of whole rows.
     pub row_segments: Vec<Vec<Segment>>,
+    /// Per-row, per-span source attribution, parallel to [`Self::rows`]
+    /// down to the span (`row_attrs[r][i]` belongs to `rows[r][i]`). The
+    /// byte-precise layer [`crate::decoration`] intersects a
+    /// [`Decoration`] against while painting.
+    ///
+    /// **Every insertion into `rows` must insert here too** — a comment
+    /// card's rows carry `vec![None; spans.len()]`, exactly as they carry
+    /// an empty `row_segments` entry. Skipping it shifts every
+    /// attribution below the card by one row, silently.
+    pub row_attrs: Vec<Vec<Option<tui_markdown::Attr>>>,
+    /// The decoration styles resolved from the render's theme (see
+    /// [`DecorationStyles::from_theme`]). The decoration LIST is passed in
+    /// per frame, like the selection; only the styles are part of the
+    /// render.
+    pub decoration_styles: DecorationStyles,
     /// True for rows that are inline comment cards (inserted into the
     /// layout after a comment's end line). Card rows render exactly as
     /// built — no gutter, no cursor/selection background — like comment
@@ -475,10 +491,10 @@ impl ViewState {
             source_starts,
             row_segments,
             ghost,
-            // Per-span source ranges: the byte-precise layer Phase 2's
-            // range decoration will consume. The view is still
+            // Per-span source ranges: the byte-precise layer the range
+            // decoration consumes. The view's own layout code is still
             // line-oriented and reads `row_segments`.
-            row_attrs: _,
+            row_attrs,
         } = render::render(source, columns as usize, highlighter);
         let card_rows = vec![false; rows.len()];
         Self {
@@ -487,6 +503,8 @@ impl ViewState {
             cursor: 0,
             source_starts,
             row_segments,
+            row_attrs,
+            decoration_styles: DecorationStyles::from_theme(highlighter),
             card_rows,
             ghost,
             width: columns as usize,
@@ -722,6 +740,33 @@ impl ViewState {
             selected_bg,
             HISTORY_GLOW_BG_DARK,
             border_style,
+            &[],
+        )
+    }
+
+    /// [`Self::visible_text`] with a decoration list — the range-decoration
+    /// tests' entry point.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn visible_text_decorated(
+        &self,
+        viewport: usize,
+        selection: Option<(usize, usize)>,
+        selected_bg: Color,
+        decorations: &[Decoration],
+    ) -> (Text<'static>, Vec<GutterCell>) {
+        self.visible_text_with_glow(
+            viewport,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            selection,
+            selected_bg,
+            HISTORY_GLOW_BG_DARK,
+            Style::default(),
+            decorations,
         )
     }
 
@@ -738,10 +783,19 @@ impl ViewState {
         selected_bg: Color,
         glow_bg: Color,
         border_style: Style,
+        decorations: &[Decoration],
     ) -> (Text<'static>, Vec<GutterCell>) {
         if self.rows.is_empty() {
             return (Text::default(), Vec::new());
         }
+        // The decoration layer is the only consumer of `row_attrs`, and a
+        // row inserted into `rows` without its attribution entry (an
+        // inline comment card) would shift every attribution below it.
+        // Catch that here rather than as a mysteriously misplaced mark.
+        debug_assert!(
+            decorations.is_empty() || self.row_attrs.len() == self.rows.len(),
+            "row_attrs must run parallel to rows"
+        );
         // A row-group is the set of source lines sharing one start row
         // (merged paragraphs, wrapped continuations, blank lines): the row
         // is marked when any member is comment-covered. Fold the three
@@ -989,16 +1043,38 @@ impl ViewState {
             };
             spans.push(ratatui::text::Span::styled(" ", pad_style));
             // Content spans, with the exact highlight background applied.
+            // The range decoration goes on FIRST, so the bands below it
+            // (selection, cursor, history glow) still win — they patch
+            // over a decorated span exactly as they patch over a
+            // syntax-colored one. Splitting a span leaves the row's
+            // concatenated text unchanged, so the `off` byte offsets the
+            // segment lookup uses are the same either way.
+            let row: std::borrow::Cow<'_, [Span]> = if decorations.is_empty() {
+                std::borrow::Cow::Borrowed(self.rows[abs].as_slice())
+            } else {
+                let attrs = self.row_attrs.get(abs).map(|a| a.as_slice()).unwrap_or(&[]);
+                std::borrow::Cow::Owned(
+                    decorate_row(&self.rows[abs], attrs, decorations, &self.decoration_styles).0,
+                )
+            };
             let mut off = 0usize;
-            let mut content: Vec<ratatui::text::Span> = self.rows[abs]
+            let mut content: Vec<ratatui::text::Span> = row
                 .iter()
                 .map(|s| {
                     let range = (off, off + s.text.len());
                     off = range.1;
+                    // A band always clears DIM: a dimmed phrase inside the
+                    // selection or the cursor row would read as a hole in
+                    // the band. (With no decorations nothing is dim, so
+                    // this only ever sets `sub_modifier` — the drawn cells
+                    // are identical.)
                     let style = if glowing_row {
-                        s.style.bg(glow_bg).add_modifier(Modifier::BOLD)
+                        s.style
+                            .bg(glow_bg)
+                            .add_modifier(Modifier::BOLD)
+                            .remove_modifier(Modifier::DIM)
                     } else if span_hl(range) {
-                        s.style.bg(selected_bg)
+                        s.style.bg(selected_bg).remove_modifier(Modifier::DIM)
                     } else {
                         s.style
                     };
@@ -2321,6 +2397,7 @@ mod tests {
             Color::Rgb(88, 91, 112),
             glow,
             Style::default(),
+            &[],
         );
         let row = view.source_starts[2];
         assert!(
@@ -2434,4 +2511,194 @@ mod tests {
 
 
 
+}
+
+/// Paint-time range decoration: the layer lands on the drawn rows, and
+/// the view's own bands (selection, cursor) still outrank it.
+#[cfg(test)]
+mod decoration_tests {
+    use super::*;
+    use crate::decoration::{Decoration, DecorationKind, DecorationStyles};
+
+    const SEL_BG: Color = Color::Rgb(88, 91, 112);
+
+    fn view_of(text: &str, width: u16) -> (Source, ViewState, DecorationStyles) {
+        let source = Source::from_content("doc.md".into(), text.to_string());
+        let highlighter = Highlighter::new(None, false);
+        let view = ViewState::render(&source, width, &highlighter);
+        let styles = DecorationStyles::from_theme(&highlighter);
+        (source, view, styles)
+    }
+
+    fn at(source: &Source, needle: &str) -> std::ops::Range<usize> {
+        let start = source.content.find(needle).expect("needle in source");
+        start..start + needle.len()
+    }
+
+    /// The painted row `i` as `(text, style)` pairs, the two column pads
+    /// dropped.
+    fn painted(
+        view: &ViewState,
+        selection: Option<(usize, usize)>,
+        decorations: &[Decoration],
+        i: usize,
+    ) -> Vec<(String, Style)> {
+        let (text, _) = view.visible_text_decorated(100, selection, SEL_BG, decorations);
+        let spans = &text.lines[i].spans;
+        spans[1..spans.len() - 1]
+            .iter()
+            .map(|s| (s.content.to_string(), s.style))
+            .collect()
+    }
+
+    /// The display row whose text contains `needle`.
+    fn row_with(view: &ViewState, needle: &str) -> usize {
+        view.rows
+            .iter()
+            .position(|row| {
+                row.iter().map(|s| s.text.as_str()).collect::<String>().contains(needle)
+            })
+            .expect("a row renders the needle")
+    }
+
+    /// A fixture whose decorated paragraph is NOT the cursor row: the
+    /// cursor band would otherwise repaint the very thing under test.
+    const TWO_PARAGRAPHS: &str = "先頭の段落\n\n前重要後\n";
+
+    /// End to end: the decoration reaches the painted row, splitting the
+    /// span there and nowhere else.
+    #[test]
+    fn a_decoration_reaches_the_painted_row() {
+        let (source, view, styles) = view_of(TWO_PARAGRAPHS, 40);
+        let decorations = vec![Decoration {
+            range: at(&source, "重要"),
+            kind: DecorationKind::SemanticMark,
+        }];
+        let i = row_with(&view, "前重要後");
+        assert_ne!(i, view.cursor_row(), "the fixture keeps the band away");
+        let plain = painted(&view, None, &[], i);
+        let marked = painted(&view, None, &decorations, i);
+        assert_eq!(
+            plain.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
+            ["前重要後"]
+        );
+        assert_eq!(
+            marked.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
+            ["前", "重要", "後"]
+        );
+        assert_eq!(marked[1].1.bg, styles.of(DecorationKind::SemanticMark).bg);
+        assert_eq!(marked[0].1.bg, None);
+        assert_eq!(marked[2].1.bg, None);
+    }
+
+    /// The priority order: the selection band outranks a semantic mark.
+    /// A marked phrase inside the selection paints the SELECTION
+    /// background, not the mark's.
+    #[test]
+    fn the_selection_band_outranks_a_semantic_mark() {
+        let (source, view, styles) = view_of(TWO_PARAGRAPHS, 40);
+        let decorations = vec![Decoration {
+            range: at(&source, "重要"),
+            kind: DecorationKind::SemanticMark,
+        }];
+        let i = row_with(&view, "前重要後");
+        let line = view.source_line_at(i).expect("an attributed row");
+        assert_ne!(styles.of(DecorationKind::SemanticMark).bg, Some(SEL_BG));
+        // Unselected, the mark is visible...
+        let loose = painted(&view, None, &decorations, i);
+        assert!(
+            loose
+                .iter()
+                .any(|(_, s)| s.bg == styles.of(DecorationKind::SemanticMark).bg)
+        );
+        // ...and the selection band paints straight over it.
+        let row = painted(&view, Some((line, line)), &decorations, i);
+        for (text, style) in &row {
+            assert_eq!(style.bg, Some(SEL_BG), "{text:?} sits in the selection");
+        }
+    }
+
+    /// A DIM phrase under the selection band is UN-dimmed: the band must
+    /// read as one continuous highlight, not as a highlight with a hole
+    /// in it.
+    #[test]
+    fn the_selection_band_clears_dim() {
+        let (source, view, _) = view_of(TWO_PARAGRAPHS, 40);
+        let decorations = vec![Decoration {
+            range: at(&source, "重要"),
+            kind: DecorationKind::Dim,
+        }];
+        let i = row_with(&view, "前重要後");
+        let line = view.source_line_at(i).expect("an attributed row");
+        // Unselected: the phrase really is dim (or the test below would
+        // pass for the wrong reason).
+        let loose = painted(&view, None, &decorations, i);
+        let dimmed = loose.iter().find(|(t, _)| t == "重要").expect("the phrase");
+        assert!(dimmed.1.add_modifier.contains(Modifier::DIM));
+
+        // Selected: nothing in the band is dim any more.
+        let banded = painted(&view, Some((line, line)), &decorations, i);
+        for (text, style) in &banded {
+            assert!(
+                !style.add_modifier.contains(Modifier::DIM),
+                "{text:?} must not stay dim under the selection"
+            );
+            assert!(
+                style.sub_modifier.contains(Modifier::DIM),
+                "{text:?} must actively clear DIM"
+            );
+        }
+    }
+
+    /// The cursor band is the same band: a dimmed cursor row un-dims too
+    /// (the cursor row is highlighted without any selection).
+    #[test]
+    fn the_cursor_band_clears_dim_as_well() {
+        let (source, view, _) = view_of("前重要後\n\n次の段落\n", 40);
+        let decorations = vec![Decoration {
+            range: at(&source, "重要"),
+            kind: DecorationKind::Dim,
+        }];
+        let row = painted(&view, None, &decorations, view.cursor_row());
+        assert!(
+            row.iter()
+                .all(|(_, s)| !s.add_modifier.contains(Modifier::DIM)),
+            "{row:?}"
+        );
+    }
+
+    /// The paint path is the identity when nothing is decorated: the
+    /// rows, their styles and the gutter all come out unchanged.
+    #[test]
+    fn painting_with_no_decorations_changes_nothing() {
+        let source = Source::load("testdata/full.md".into()).unwrap();
+        let highlighter = Highlighter::new(None, false);
+        for width in [40u16, 80] {
+            let mut view = ViewState::render(&source, width, &highlighter);
+            view.cursor = 12;
+            let plain =
+                view.visible_text_decorated(60, Some((10, 14)), SEL_BG, &[]);
+            let same = view.visible_text_decorated(60, Some((10, 14)), SEL_BG, &[]);
+            assert_eq!(plain.0, same.0, "width {width}");
+            assert_eq!(
+                plain.1.iter().map(|g| g.glyph).collect::<Vec<_>>(),
+                same.1.iter().map(|g| g.glyph).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// `row_attrs` runs parallel to `rows` straight out of the render —
+    /// the invariant every insertion into `rows` has to maintain.
+    #[test]
+    fn row_attrs_run_parallel_to_the_rows() {
+        let source = Source::load("testdata/full.md".into()).unwrap();
+        let highlighter = Highlighter::new(None, false);
+        for width in [40u16, 80] {
+            let view = ViewState::render(&source, width, &highlighter);
+            assert_eq!(view.row_attrs.len(), view.rows.len(), "width {width}");
+            for (r, row) in view.rows.iter().enumerate() {
+                assert_eq!(view.row_attrs[r].len(), row.len(), "width {width} row {r}");
+            }
+        }
+    }
 }

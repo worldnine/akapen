@@ -1,3 +1,290 @@
+# HANDOFF: Range Decoration 層 — 任意の source byte range に Style を当てる（Phase 2）
+
+## 何を作ったか
+
+`src/decoration.rs`（新規）。Phase 1 が rendered span ごとに付けた
+`Option<Attr>`（source byte range + exact フラグ）を intersect して、
+**同一行の途中で Style を切り替える**層。Semantic Reading Layer の
+最初の足場だが、**`semantic-reading` crate には依存していない**
+（設計書「Semantic Reading Layer へ依存しない」）。`DisplayState →
+DecorationKind` の対応付けは次フェーズの仕事。
+
+公開 API は 3 つだけ:
+
+```rust
+pub struct Decoration { pub range: Range<usize>, pub kind: DecorationKind }
+
+#[non_exhaustive]
+pub enum DecorationKind { SemanticMark, Dim }
+
+pub struct DecorationStyles { /* テーマ由来 */ }
+impl DecorationStyles { pub fn from_theme(&Highlighter) -> Self; pub fn of(kind) -> Style; pub fn patch(base, kind) -> Style }
+
+pub fn decorate_row(row: &[Span], attrs: &[Option<Attr>], decorations: &[Decoration], styles: &DecorationStyles)
+    -> (Vec<Span>, Vec<Option<Attr>>);
+
+pub fn sanitize(decorations: &[Decoration], source: &str) -> Vec<Decoration>;
+```
+
+文書全体の `Rendered -> Vec<Vec<Span>>` 変換は `decorate_row` を
+`rows.iter().zip(&row_attrs)` に畳むだけなので、**専用関数は置いていない**
+（置くと本体から呼ばれない dead code になり、Phase 1 で剥がしたばかりの
+`#[allow(dead_code)]` を新設することになる）。
+
+## 交差ルール（実装どおり）
+
+| attribution | 規則 |
+|---|---|
+| `Some(attr)` かつ `attr.exact` | decoration の端で **span を byte 分割**し、交差部分だけ装飾。端が span 内部に落ちるものだけを cut 点にし、`debug_assert!(text.is_char_boundary(off))` |
+| `Some(attr)` かつ `!attr.exact` | **`decoration.range ⊇ attr.range` のときだけ** span 全体を装飾。部分的な重なりは**何もしない** |
+| `None` | 合成 span（table の枠・パディング、引用 prefix）。装飾しない |
+
+分割の作り方は「decoration の端を全部 cut 点に入れてから、各片を
+**完全に覆う** decoration だけを適用する」。端がすべて cut 点になっている
+ので、どの片も各 decoration に対して「完全に内側」か「完全に外側」のどちらか
+にしかならず、中途半端な片が残らない。
+
+空レンジ・逆転レンジ（`8..4`）は両分岐の先頭で `range.is_empty()` により
+捨てる。捨てないと逆転レンジが cut 点計算に端を入れ替えたまま到達する。
+
+複数 decoration は **スライス順に patch を重ねる**（後勝ち）。`SemanticMark`
+と `Dim` はそれぞれ bg と modifier しか触らないので、同一レンジに両方当てると
+素直に合成される。
+
+### 確認できた「にじみ出し」防止の実例
+
+- `[ラベル](https://example.com)`: `ラベル` は exact（5..14）、rendered の
+  ` (` / URL / `)` は **リンク全体 4..36 の上位集合**。`ラベル` だけを装飾すると
+  URL 側は「4..36 ⊆ 5..14」が成り立たず装飾されない。逆にリンク全体 4..36 を
+  装飾すると URL まで届く（どちらもテスト済み）
+- table cell も上位集合。`cell one` の前半だけを指す decoration は**何も装飾
+  しない**。`cell one` 全体を指せばセル全体が装飾される
+
+## Style は置換せず patch する
+
+`base.patch(kind_style)` のみ。`kind_style` が持つフィールドしか上書きされない
+ので syntax highlight（fg・BOLD/ITALIC）が生き残る。テストで
+「`**重要**` は BOLD と fg を保ったまま bg だけ増える」ことを固定した。
+
+- **`Dim`** → `add_modifier(Modifier::DIM)` だけ。fg には触らない
+  （テーマ由来のグレーにすると、dim 範囲の色が全部同じに潰れる）
+- **`SemanticMark`** → **background だけ**。fg には触らない
+
+### SemanticMark の背景をどこから取ったか（要注意）
+
+`MdcommentStyleSheet::from_theme` と同じ `highlighter.scope_style(..)` 経路で
+`markup.highlight` / `markup.mark` / `markup.quote.highlight` /
+`region.yellowish` を順に引く。
+
+**既定テーマは 2 つとも、このどれにも background を持っていない**
+（Catppuccin Mocha / Solarized (light) の両方を実測）。したがって実際に
+出荷されるのは fallback 側:
+
+```
+テーマの settings.background を settings.foreground へ 14% blend
+```
+
+- dark: `rgb(30,30,46)` → **`rgb(54,55,73)`**
+- light: `rgb(253,246,227)` → `rgb(231,229,213)`
+
+選択帯（dark `rgb(88,91,112)`）より明らかに弱い＝優先順位どおりの見え方になる。
+テストで「ページ背景より本文色より**ページ側に近い**」ことを不等式で固定してある。
+
+`invalid` スコープは Solarized (light) で赤背景を持っているが、意味が
+「エラー」なので候補リストから**意図的に外した**。
+
+テーマに `settings.background` すら無い場合のみ、本文色の明るさで
+`MARK_BG_DARK` / `MARK_BG_LIGHT` の固定値に落ちる。
+
+## 優先順位と selection × DIM
+
+`selection > comment focus > diff > semantic decoration > syntax highlight`。
+decoration は `visible_text_with_glow` の中で**最初**に当たり、selection /
+カーソル帯 / glow はその**後**に当たるので自然に勝つ。
+
+**問題があったのは DIM の打ち消しで、selection は打ち消していなかった。**
+`s.style.bg(selected_bg)` は modifier に触らないので、DIM な行を選択すると
+選択帯の中だけ沈んで「帯に穴が空いた」ように見える。selection 分岐と glow 分岐の
+両方に `.remove_modifier(Modifier::DIM)` を足した。
+
+- 副作用: decoration が空でも、**選択帯の span の `Style` 構造体に
+  `sub_modifier: DIM` が載る**（`remove_modifier` は `sub_modifier` に union する
+  実装）。DIM を持たない style に対しては描画セルが完全に同一なので、
+  **端末出力は 1 セルも変わらない**。実機の pty でも確認済み（下記）
+- 実機確認: カーソル帯をその行に乗せると ` 後` が `ESC[22m`（bold/dim off）
+  で出力され、`ESC[2m` は**出ない**
+
+## Rendered はキャッシュのまま、装飾は純粋なパス
+
+- `render::render` / `Rendered` は**装飾を一切知らない**。decoration は
+  `visible_text_with_glow` の**引数**で、`ViewState::render` にも
+  `render::render` にも届かない
+- したがって **decoration が変わっても Markdown の再パースは構造的に起きない**
+  （Budget 37% → 36% の要件はここで満たされる）
+- 適用は**可視行だけ**（`self.offset..end` のループ内）。view.rs の selection の
+  当て方と同じ。decoration が空なら `Cow::Borrowed` で 1 バイトもコピーしない
+- span 分割しても**行テキストの連結結果は変わらない**ので、`row_segments` は
+  作り直していない（`span_hl(range)` が使う `off` オフセットもそのまま有効）
+
+## row_attrs を ViewState へ移した — Phase 1 の地雷の処理
+
+`Rendered.row_attrs` の `#[allow(dead_code)]` を外し、`ViewState.row_attrs` として
+持たせた。あわせて `DecorationStyles` も `ViewState` に持たせている
+（テーマは render 時に決まるので render と一緒に解決するのが素直。decoration の
+**リスト**の方は selection と同じくフレーム引数）。
+
+Phase 1 が警告していた 2 箇所に `row_attrs.insert` を並べた。**`vec![None]` では
+なく `vec![None; spans.len()]`**（カード行も ghost 行も複数 span を持つ。row を
+move する前に `len()` を取ること）:
+
+- `main.rs` `insert_cards`（コメントカード行）
+- `main.rs` `insert_history_ghosts`（履歴 ghost 行）
+
+`row_segments` を触る箇所を正規表現で全部洗ったが、挿入はこの 2 箇所だけで、
+削除は無い（ghost の撤去は行削除ではなく `rebuild_view_preserving_cursor` に
+よる作り直し）。
+
+**ミューテーションで検証済み**: `insert_cards` の `row_attrs.insert` を外すと
+新規テスト 2 本（`a_comment_card_keeps_row_attrs_parallel_to_the_rows` /
+`a_decoration_below_a_comment_card_still_lands_on_its_own_row`）が落ちる。
+外さなければ落ちない。
+
+保険として `visible_text_with_glow` 入口に
+`debug_assert!(decorations.is_empty() || row_attrs.len() == rows.len())` を、
+`decorate_row` 入口に `debug_assert_eq!(row.len(), attrs.len())` を置いた
+（decoration 未使用時は発火しない。手組み `ViewState` を使う既存テストを
+壊さないため）。
+
+## 外から来るレンジは境界で濾す（実機で見つかった穴）
+
+`--decorations` を pty で実際に走らせたら `a decoration edge must fall on a
+UTF-8 boundary` で **panic した**（テストハーネス側が Python の文字インデックスを
+渡していたのが直接の原因だが、外部入力が debug build で TUI を落とせる時点で穴）。
+
+`decoration::sanitize(&[Decoration], source) -> Vec<Decoration>` を足し、
+**描画直前に `app.source.content` に対して**濾している（`main.rs` の draw_view）。
+`App::new` ではなく描画時にしたのは、reload・タイムマシン・ファイル切替で本文が
+入れ替わってオフセットが陳腐化するため。`app.source` と `app.view` が必ず一緒に
+差し替わることは確認済み（`render_pending_history` は同じ関数内で
+`app.source = new_source` してから view を組み直す。ファイル切替も
+`app.rs` の `source` / `view` を同じ `mem::take` の並びで入れ替える）ので、
+「画面に出ている本文」で濾せている。decoration が空のときは `Vec::new()` なので
+アロケーションゼロ。
+
+これで「akapen 内部が作るレンジは整形式」という前提が本物になり、
+`debug_assert` は attribution 層のバグ検出装置として意味を保つ。
+
+## `--decorations <json>`（隠しフラグ）
+
+`main.rs` の引数解析に素直に入ったので実装した。
+
+```
+akapen doc.md --decorations '[{"range":[23,29],"kind":"mark"},{"range":[31,35],"kind":"dim"}]'
+```
+
+`range` は**バイト**オフセット。`kind` は `mark`（= `semantic-mark`）/ `dim`。
+JSON 不正・未知の kind・逆転レンジは **起動前に loud に失敗**する（隠しフラグでも
+黙って何も描かないのは「層が壊れている」と読まれるので）。serde の
+`Deserialize` は `config.rs` 側のローカル struct に置き、`Decoration` 自体は
+serde free のままにしてある。
+
+**実機 pty で目視確認済み**。`前 **重要** 後` に対する出力:
+
+```
+\x1b[39;49m前          ← NORMAL
+\x1b[1m\x1b[39;48;2;54;55;73m重要   ← MARKED（BOLD 維持、fg そのまま、bg だけ追加）
+\x1b[22m\x1b[2m\x1b[39;49m 後     ← DIM
+```
+
+## テスト（+29 本、459 → 488）
+
+- `decoration.rs` 18 本
+  - **マイルストーン**: `marked_normal_dim_on_one_rendered_line` —
+    `前 **重要** 後` に対し同一行に 3 つの異なる style。装飾なし baseline と
+    比較して「NORMAL は完全一致 / MARKED は bg だけ増える / DIM は modifier
+    だけ増える」まで固定
+  - **span 分割**: `前重要後`（1 span）→ 3 片。spec の `**重要**` は `**` で
+    既に span が分かれているので**分割経路を通らない**。1 span のケースを別に
+    用意してある
+  - soft wrap 越え / link のにじみ（両方向）/ table cell の部分重なり /
+    合成 span / 日本語・絵文字・全角 / 複数 kind の合成 / 範囲外レンジ /
+    list marker の MVP 割り切り / fg 不可侵 / テーマ由来 bg / sanitize
+  - **恒等性**: testdata 4 ファイル × 幅 40 / 80 で `decorate_row(.., &[])` が
+    rows と一致
+- `view.rs` 6 本: 描画経路への到達、selection が mark に勝つ、
+  **selection 帯が DIM を打ち消す**、カーソル帯も同様、装飾なし描画の恒等性、
+  `row_attrs` の並行性
+- `state_tests.rs` 3 本: コメントカード下の decoration 位置（地雷）、
+  カード挿入後の並行性、**TestBackend で Config → App → draw → セルまで**
+  通した 3 領域の検証
+- `config.rs` 2 本: フラグのパースと不正値の拒否
+- 既存の ghost テストに `row_attrs` 並行性のアサートを追加
+
+### 恒等性の機械確認（Phase 1 と同じ手法）
+
+改修前 HEAD（`708d8ce`）を別 worktree に展開し、両方に同じダンプモジュールを
+差し込んで testdata 全 4 ファイル × 幅 40 / 80 の
+
+- `rows` の **span ごとの text + Style**
+- `row_attrs` / `row_segments` / `source_starts` / `ghost`
+
+をダンプして比較 → **9991 行、バイト単位で完全一致**（`cmp` で確認）。
+
+## source view には手を付けていない
+
+タスクの指示どおり rendered view を先に完成させ、source view は止めて報告する。
+理由（調査済み）:
+
+- source mode の span は `Highlighter::highlight_with` が syntect の region から
+  作っており、**byte range を一切持たない**（`Vec<Vec<Span>>` のみ）
+- 折返しは `wrap_spans`（tagged でない方）で、attribution のチャネルが無い
+- さらに `app.spans` / `line_rows` / source 側の draw は `ViewState` とは別構造で、
+  `row_attrs` に相当するものを新設して通す必要がある
+
+つまり「region の累積オフセット + line_starts で range を作る」→
+「`wrap_spans` を tagged 化する」→「source 側の描画経路に attribution を通す」の
+3 段で、rendered view と同じ規模の改修になる。**rendered view だけで価値がある**
+という判断で、別コミットにもしていない。
+
+## 既知の割り切り
+
+- **DIM にしたリスト項目の `- ` マーカーは明るいまま**。marker の attribution は
+  項目全体（`- 項目\n`）の上位集合なので、本文だけを指す decoration では
+  覆えない。項目の source range 全体を指せばマーカーも dim になる。
+  マーカーを本文と一緒に dim するには renderer 側で marker を exact 化する
+  必要があり、それは Phase 3 の領分。テストで現状を固定してある
+- hanging pad（折返しのぶら下げ空白）は `demoted()` の上位集合なので、段落全体を
+  mark すると pad にも bg が乗る。ルールどおりなので許容
+- 選択帯の `Style` 構造体に `sub_modifier: DIM` が載る（描画は不変、上記）
+- `decorate_row` は span ごとに decorations を線形走査するので、コストは
+  **O(可視 span 数 × decoration 数) / フレーム**。いまの用途（手で数個）では
+  測るまでもないが、Semantic Reading Layer が Atom 単位で数千個持ち込むと効く。
+  そのときは decorations を `range.start` でソートして二分探索に切り替える
+  余地がある（**今は実装しないこと**。不要な複雑さになる）
+
+## 検証
+
+- `cargo test --locked --workspace`: **488 / 173（+1 ignored）/ doc 7**、全緑
+  （ベースライン 459 + 29）
+- `cargo test --locked --release`: 489 passed（`debug_assert` 無効でも緑。
+  release でしか走らない「文字境界でない端は panic せず捨てる」テストが 1 本増える）
+- `cargo clippy --locked --all-targets`: **警告 0**
+- `TUI_MARKDOWN_SRC=… ./scripts/check-vendor-diff.sh`: **OK**
+  （`third_party/` は未変更なので `--update` 不要。上流 0.3.9 / フォーク 0.4.0、
+  28 ファイル、1880 変更行で以前と同一）
+- 実機 pty: `--decorations` で MARKED / NORMAL / DIM の 3 領域と、
+  カーソル帯下での DIM 打ち消しを SGR 列で確認
+- 変更ファイル: `src/decoration.rs`（新規）/ `src/render.rs` / `src/view.rs` /
+  `src/main.rs` / `src/config.rs` / `src/state_tests.rs` / `src/chrome.rs` /
+  `src/reload.rs` / `HANDOFF.md`
+
+補足: このリポジトリは rustfmt を掛けていない（`cargo fmt -p akapen -- --check`
+は改修前から全 19 ファイル 280 箇所で差分が出る。CI にも fmt ジョブは無い）。
+`decoration.rs` の 10 箇所は既存ファイルと同程度なので、揃えるために自分の
+ファイルだけ整形するようなことはしていない。
+
+---
+
 # HANDOFF: 追補 — vendor-diff CI の修復（上流バージョンとフォークのバージョンを分離）
 
 （直前の「Phase 1: Range Attribution」エントリの追補）

@@ -13,6 +13,7 @@ mod app;
 mod chrome;
 mod comment;
 mod config;
+mod decoration;
 mod effects;
 mod export;
 mod highlight;
@@ -1202,9 +1203,16 @@ fn insert_cards(view: &mut ViewState, comments: &[Comment], columns: usize) {
                     style: s.style,
                 })
                 .collect();
+            // The card row is synthesized: no source, so one `None`
+            // attribution per span. `row_attrs` runs parallel to `rows`
+            // down to the span, and the range decoration reads it —
+            // skipping this insert shifts every attribution below the
+            // card down one row, silently.
+            let card_attrs = vec![None; spans.len()];
             view.rows.insert(insert_at + i, spans);
             card_rows.insert(insert_at + i, true);
             view.row_segments.insert(insert_at + i, Vec::new());
+            view.row_attrs.insert(insert_at + i, card_attrs);
         }
     }
     view.card_rows = card_rows;
@@ -2135,8 +2143,12 @@ fn insert_history_ghosts(
                 };
                 span.style = span.style.fg(fg);
             }
+            // Ghost rows are synthesized too: one `None` attribution per
+            // span, parallel to `rows` (see `insert_cards`).
+            let ghost_attrs = vec![None; row.len()];
             view.rows.insert(insert_at + offset, row);
             view.row_segments.insert(insert_at + offset, Vec::new());
+            view.row_attrs.insert(insert_at + offset, ghost_attrs);
             view.card_rows.insert(insert_at + offset, true);
         }
     }
@@ -4170,6 +4182,12 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         app.ui_border
     };
     let border_style = Style::default().fg(page_border);
+    // Range decorations (hidden `--decorations` flag for now). They come
+    // from OUTSIDE, so their byte offsets are checked against the
+    // document that is actually on screen — which the time machine and a
+    // reload both change under them. Empty (the normal case) allocates
+    // nothing.
+    let decorations = crate::decoration::sanitize(&app.config.decorations, &app.source.content);
     let (mut text, mut gutter) = app.view.visible_text_with_glow(
         inner.height as usize,
         &marked,
@@ -4182,6 +4200,10 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         app.ui_selected_bg,
         app.ui_history_glow_bg,
         border_style,
+        // The decorations reach the PAINT only — `render::render` never
+        // sees them, so toggling a decoration cannot re-parse the
+        // markdown.
+        &decorations,
     );
     if composing {
         let full_width = content.width as usize;
@@ -5294,6 +5316,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -5341,6 +5364,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -5402,6 +5426,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path.clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -5546,6 +5571,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -5585,6 +5611,7 @@ mod mouse_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(config.files[0].clone()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -5720,6 +5747,7 @@ mod mouse_view_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path.into()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -5902,6 +5930,14 @@ mod history_animation_tests {
         // The ghost's view-relative rect: inserted at the anchor's row,
         // exactly as tall as the rows it added (the dissolve target).
         assert_eq!(rects, vec![(0, view.rows.len() - original_rows)]);
+        // Ghost rows are synthesized, but they still have to carry an
+        // attribution entry: `row_attrs` runs parallel to `rows`, and the
+        // range decoration would otherwise land a row too high below the
+        // ghost (same failure mode as a comment card).
+        assert_eq!(view.row_attrs.len(), view.rows.len());
+        for (r, row) in view.rows.iter().enumerate() {
+            assert_eq!(view.row_attrs[r].len(), row.len(), "row {r}");
+        }
     }
 
     #[test]

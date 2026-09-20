@@ -18,9 +18,10 @@
 //! the single bridge: it turns a span's range into the source line, and
 //! [`build_starts_from_tags`], [`build_row_segments_from_tags`], the
 //! ghost pass and [`insert_missing_blank_rows`] all work on those line
-//! numbers exactly as before — no view-side code knows about ranges yet.
-//! The per-span ranges survive alongside them in [`Rendered::row_attrs`],
-//! which is what Phase 2's range decoration will intersect against.
+//! numbers exactly as before — the view's own layout code stays
+//! line-oriented. The per-span ranges survive alongside them in
+//! [`Rendered::row_attrs`], which the range decoration layer
+//! ([`crate::decoration`]) intersects against at paint time.
 //! Synthesized spans (table borders and padding, quote/list prefixes,
 //! paragraph separators) carry no range (`None`); rows with no
 //! attributable text fall back to row-level highlighting in the view,
@@ -69,12 +70,10 @@ pub struct Rendered {
     pub row_segments: Vec<Vec<Segment>>,
     /// Per-row, per-span source attribution, parallel to [`Self::rows`]
     /// (`row_attrs[r][i]` belongs to `rows[r][i]`). This is the
-    /// byte-precise layer Phase 2's range decoration intersects against;
-    /// the view's own code works off [`Self::source_starts`] and
+    /// byte-precise layer the range decoration
+    /// ([`crate::decoration`]) intersects against; the view's own
+    /// line-oriented code works off [`Self::source_starts`] and
     /// [`Self::row_segments`], which are derived from it via [`line_of`].
-    // Built and tested here, consumed by the range-decoration layer that
-    // lands on top of this phase; the view itself stays line-oriented.
-    #[allow(dead_code)]
     pub row_attrs: Vec<Vec<Option<Attr>>>,
     /// Raw source text of each invisible line (a non-blank line that
     /// rendered no text: ref-defs, fences, HTML) — the view paints it as a

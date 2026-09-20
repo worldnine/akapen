@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
+use crate::decoration::{Decoration, DecorationKind};
 use crate::ime::ImeMode;
 
 /// Whether `Esc` may quit the app (in normal mode, when nothing more
@@ -96,6 +97,47 @@ pub struct Config {
     /// cursor_blaze etc.) blaze around that motion, so this lets shader
     /// users trade the IME anchor for a calm composer.
     pub cursor_anchor: bool,
+    /// `--decorations <json>`: a hidden development flag that paints
+    /// range decorations onto the rendered view, so the layer can be seen
+    /// on real documents before a producer (the Semantic Reading Layer)
+    /// exists. The value is a JSON array of
+    /// `{"range": [start, end], "kind": "mark" | "dim"}`, with `start`
+    /// and `end` byte offsets into the file. Empty (and inert) by
+    /// default.
+    pub decorations: Vec<Decoration>,
+}
+
+/// The `--decorations` JSON shape. The wire format lives here, not on
+/// [`Decoration`]: the decoration layer is a plain in-process API and
+/// stays free of serde.
+#[derive(serde::Deserialize)]
+struct DecorationSpec {
+    range: (usize, usize),
+    kind: String,
+}
+
+/// Parse the `--decorations` value. Byte offsets that do not land on a
+/// UTF-8 boundary of the document are not rejected here (the file is not
+/// open yet) — the decoration layer drops an unusable cut instead of
+/// panicking.
+fn parse_decorations(json: &str) -> Result<Vec<Decoration>> {
+    let specs: Vec<DecorationSpec> = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("--decorations: invalid JSON: {e}"))?;
+    specs
+        .into_iter()
+        .map(|spec| {
+            let (start, end) = spec.range;
+            if start > end {
+                bail!("--decorations: range {start}..{end} runs backwards");
+            }
+            let kind = match spec.kind.as_str() {
+                "mark" | "semantic-mark" => DecorationKind::SemanticMark,
+                "dim" => DecorationKind::Dim,
+                other => bail!("--decorations: unknown kind {other:?} (mark | dim)"),
+            };
+            Ok(Decoration { range: start..end, kind })
+        })
+        .collect()
 }
 
 impl Config {
@@ -116,6 +158,7 @@ impl Config {
         let mut esc_quit = EscQuit::Auto;
         let mut fx = true;
         let mut cursor_anchor = true;
+        let mut decorations: Vec<Decoration> = Vec::new();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -135,6 +178,11 @@ impl Config {
                 "--send-agent" => send_agent = true,
                 "--reply" => reply = true,
                 "--theme" => theme = it.next(),
+                "--decorations" => {
+                    if let Some(v) = it.next() {
+                        decorations = parse_decorations(&v)?;
+                    }
+                }
                 "--ime" => {
                     if let Some(v) = it.next() {
                         ime = ImeMode::parse(&v);
@@ -166,6 +214,7 @@ impl Config {
             esc_quit,
             fx,
             cursor_anchor,
+            decorations,
         }))
     }
 
@@ -178,6 +227,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{Action, Config, EscQuit};
+    use crate::decoration::{Decoration, DecorationKind};
 
     fn parse(args: &[&str]) -> Action {
         Config::parse(args.iter().map(|s| (*s).to_string())).unwrap()
@@ -349,5 +399,42 @@ mod tests {
             cfg(&parse(&["x.md", "--ime", "bogus"])).ime,
             ImeMode::Ascii
         );
+    }
+
+    #[test]
+    fn decorations_parse_from_json_and_default_to_none() {
+        assert!(cfg(&parse(&["x.md"])).decorations.is_empty());
+        let action = parse(&[
+            "x.md",
+            "--decorations",
+            r#"[{"range":[3,9],"kind":"mark"},{"range":[9,12],"kind":"dim"}]"#,
+        ]);
+        assert_eq!(
+            cfg(&action).decorations,
+            vec![
+                Decoration { range: 3..9, kind: DecorationKind::SemanticMark },
+                Decoration { range: 9..12, kind: DecorationKind::Dim },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_decorations_value_is_an_error_not_a_silent_no_op() {
+        // A hidden development flag still fails loudly: a typo that
+        // silently painted nothing would be read as "the layer is broken".
+        for bad in [
+            "not json",
+            r#"[{"range":[1,2],"kind":"glow"}]"#,
+            r#"[{"range":[9,4],"kind":"mark"}]"#,
+            r#"[{"kind":"mark"}]"#,
+        ] {
+            assert!(
+                Config::parse(
+                    ["x.md", "--decorations", bad].iter().map(|s| s.to_string())
+                )
+                .is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 }

@@ -456,6 +456,7 @@ mod handoff_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path.into()).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -513,6 +514,7 @@ mod handoff_tests {
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);

@@ -76,6 +76,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -118,6 +119,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -815,6 +817,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -863,6 +866,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -898,6 +902,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -1872,6 +1877,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -1984,6 +1990,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
         let highlight = Highlighter::new(config.theme.as_deref(), false);
@@ -2281,6 +2288,7 @@ use crate::comment::Selection;
             esc_quit: EscQuit::Auto,
             cursor_anchor: true,
             fx: true,
+            decorations: Vec::new(),
         };
         let source = Source::load(config.files[0].clone()).unwrap();
         let highlight = Highlighter::new(None, false);
@@ -5814,3 +5822,192 @@ fn afterimage_repair_keeps_the_cells_background() {
     );
 }
 
+
+/// An inline comment card inserts rows into `view.rows`; `row_attrs`
+/// must be inserted alongside, or every attribution BELOW the card shifts
+/// up by the card's height and the range decoration lands on the wrong
+/// line. Nothing else in the view reads `row_attrs`, so the drift is
+/// silent — hence this test.
+#[test]
+fn a_comment_card_keeps_row_attrs_parallel_to_the_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.md");
+    std::fs::write(&path, "一行目\n\n二行目\n\n前重要後\n").unwrap();
+    let source = Source::load(path).unwrap();
+    let highlight = Highlighter::new(None, false);
+    // A comment on the FIRST line: its card is inserted above the
+    // paragraph the decoration targets.
+    let comments = vec![crate::comment::Comment {
+        file_path: "doc.md".into(),
+        start: 1,
+        end: 1,
+        lines: String::new(),
+        revision: None,
+        text: "カード".into(),
+    }];
+    let view = render_view_with_cards(&source, 60, &highlight, &comments);
+    assert!(view.card_rows.iter().any(|&b| b), "the card was inserted");
+    assert_eq!(
+        view.row_attrs.len(),
+        view.rows.len(),
+        "row_attrs must grow with rows"
+    );
+    for (r, row) in view.rows.iter().enumerate() {
+        assert_eq!(
+            view.row_attrs[r].len(),
+            row.len(),
+            "row {r} ({:?}) lost its attributions",
+            row.iter().map(|s| s.text.as_str()).collect::<String>()
+        );
+    }
+}
+
+/// The same drift, seen the way a user would: a decoration placed on a
+/// paragraph BELOW a comment card must still paint that paragraph. With
+/// the `row_attrs` insert missing, the mark lands on a row above.
+#[test]
+fn a_decoration_below_a_comment_card_still_lands_on_its_own_row() {
+    use crate::decoration::{Decoration, DecorationKind, DecorationStyles};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.md");
+    let text = "一行目\n\n二行目\n\n前重要後\n";
+    std::fs::write(&path, text).unwrap();
+    let source = Source::load(path).unwrap();
+    let highlight = Highlighter::new(None, false);
+    let comments = vec![crate::comment::Comment {
+        file_path: "doc.md".into(),
+        start: 1,
+        end: 1,
+        lines: String::new(),
+        revision: None,
+        text: "カード".into(),
+    }];
+    let view = render_view_with_cards(&source, 60, &highlight, &comments);
+    let mark_bg = DecorationStyles::from_theme(&highlight)
+        .of(DecorationKind::SemanticMark)
+        .bg;
+    let start = text.find("重要").unwrap();
+    let decorations = vec![Decoration {
+        range: start..start + "重要".len(),
+        kind: DecorationKind::SemanticMark,
+    }];
+    let (painted, _) = view.visible_text_decorated(
+        200,
+        None,
+        ratatui::style::Color::Rgb(88, 91, 112),
+        &decorations,
+    );
+    // Exactly one row carries the mark, and it is the row that renders
+    // the decorated paragraph.
+    let marked: Vec<(usize, String)> = painted
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let text: String = line
+                .spans
+                .iter()
+                .filter(|s| s.style.bg == mark_bg)
+                .map(|s| s.content.as_ref())
+                .collect();
+            (!text.is_empty()).then_some((i, text))
+        })
+        .collect();
+    assert_eq!(marked.len(), 1, "exactly one row is marked: {marked:?}");
+    let (row, text) = &marked[0];
+    assert_eq!(text, "重要");
+    let whole: String = painted.lines[*row]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(whole.contains("前重要後"), "marked row {row} is {whole:?}");
+}
+
+/// The whole stack, drawn into a real (test) terminal: `--decorations`
+/// through `Config` → `App` → `draw` → cells. Three visibly different
+/// regions on ONE rendered line — the milestone of this phase, seen the
+/// way the terminal sees it.
+#[test]
+fn decorations_paint_three_regions_on_one_terminal_line() {
+    use crate::decoration::{Decoration, DecorationKind, DecorationStyles};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.md");
+    let text = "先頭の段落\n\n前 **重要** 後\n";
+    std::fs::write(&path, text).unwrap();
+    let mark_at = |needle: &str, kind| {
+        let start = text.find(needle).unwrap();
+        Decoration { range: start..start + needle.len(), kind }
+    };
+    let config = Config {
+        files: vec![path.clone()],
+        send_cmd: None,
+        send_agent: false,
+        reply: false,
+        theme: None,
+        ime: ImeMode::Off,
+        light: None,
+        callback: None,
+        esc_quit: EscQuit::Auto,
+        cursor_anchor: true,
+        fx: false,
+        decorations: vec![
+            mark_at("重要", DecorationKind::SemanticMark),
+            mark_at(" 後", DecorationKind::Dim),
+        ],
+    };
+    let source = Source::load(path).unwrap();
+    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let view = ViewState::render(&source, crate::view_render_width(60), &highlight);
+    let mark_bg = DecorationStyles::from_theme(&highlight)
+        .of(DecorationKind::SemanticMark)
+        .bg;
+    let mut app = App::new(config, source, highlight, view, false);
+    app.mode = Mode::View;
+    app.gutter_cols = 3;
+    // The cursor stays on line 0, so the cursor band never touches the
+    // decorated paragraph.
+    assert_eq!(app.view.cursor, 0);
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 16)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+    let w = buf.area.width as usize;
+    // The terminal row that shows the decorated paragraph.
+    // Wide glyphs occupy two cells (the second is blank), so match on a
+    // single character rather than the row's concatenated symbols.
+    let row = (0..buf.area.height as usize)
+        .find(|&y| (0..w).any(|x| buf.content[y * w + x].symbol() == "重"))
+        .expect("the decorated paragraph is on screen");
+
+    // Walk the cells and read off the three regions by their styles.
+    let cell = |x: usize| &buf.content[row * w + x];
+    let text_start = (0..w)
+        .find(|&x| cell(x).symbol() == "前")
+        .expect("the paragraph starts somewhere");
+    let plain = cell(text_start).style();
+    let marked = cell(text_start + 3).style(); // 重 (前 = 2 cols, space = 1)
+    let dimmed = cell(text_start + 8).style(); // 後
+    assert_eq!(cell(text_start + 3).symbol(), "重");
+    assert_eq!(cell(text_start + 8).symbol(), "後");
+
+    assert_eq!(marked.bg, mark_bg, "the marked region has the mark background");
+    assert_ne!(plain.bg, mark_bg, "the plain region does not");
+    assert!(
+        dimmed.add_modifier.contains(ratatui::style::Modifier::DIM),
+        "the dimmed region is dim"
+    );
+    assert!(!plain.add_modifier.contains(ratatui::style::Modifier::DIM));
+    assert!(!marked.add_modifier.contains(ratatui::style::Modifier::DIM));
+    // Three distinct styles on one terminal line.
+    assert_ne!(plain, marked);
+    assert_ne!(plain, dimmed);
+    assert_ne!(marked, dimmed);
+    // Syntax highlighting survived: the strong span keeps BOLD and its
+    // color under the mark.
+    assert!(marked.add_modifier.contains(ratatui::style::Modifier::BOLD));
+    assert_eq!(marked.fg, plain.fg);
+    assert_eq!(dimmed.fg, plain.fg);
+}
