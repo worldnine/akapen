@@ -6,6 +6,39 @@ Semantic Reading Layer の設計書（`semantic-reading-layer.md`）は Jev を�
 
 ---
 
+## この層は何のためにあるか
+
+Jev をどう使うかの前に、Jev に何をさせたいのかを置く。出発点は設計書
+（[`semantic-reading-layer.md`](semantic-reading-layer.md)）の「研究的背景」で
+ある。
+
+> Duggan & Payne の satisficing モデルでは、読み進めることで得られる
+> information gain が低下すると、読者は次の場所へ移動する。
+
+> **限られた attention を、意味的な収穫が高い部分へ配分する**
+
+Semantic Reading Layer は要約器ではなく、**限られた attention を文書のどこへ
+配るかを決める層**である。配分そのものを決めるのは Reading Policy
+（`crates/semantic-reading/src/policy.rs`。根拠はそのモジュールドキュメント）
+で、そこでは Jev を呼ばない。Jev が担うのは、配分に必要な意味判断だけである。
+
+この位置づけは question の設計に直接効く。設計書が挙げる判断の例は、
+**すべて関係的・損失ベースの疑問文**になっている。
+
+```text
+ここを飛ばすと要点を失う？        ← 飛ばした場合の損失
+これは主要な主張を支えている？    ← 他との関係
+これは主に背景説明？
+これは前に出た内容と実質同じ？    ← 既読との関係
+```
+
+「この段落は重要か」という**絶対的な問いが 1 つも無い**。attention の配分を
+決めるのだから、聞くべきは「ここに attention を使うと何が得られるか / 使わない
+と何を失うか」であって、Unit 単体の重要度ではない。question の文面を書くときは
+ここへ戻ること。
+
+---
+
 ## Jev は LLM ではない
 
 最初に、これを間違えると設計の前提が丸ごとずれる。
@@ -104,19 +137,32 @@ Reading Tier（ESSENTIAL / SUPPORTING /
 semantic redundancy                          → Noul
 ```
 
-設計書が挙げる問いの例が、すべて疑問文になっているのは偶然ではない。
-これらは Noul の question そのものである。
-
-```
-ここを飛ばすと要点を失う？
-これは主要な主張を支えている？
-これは主に背景説明？
-これは前に出た内容と実質同じ？
-```
+設計書が挙げる問いの例（上の「この層は何のためにあるか」）は、そのまま
+question の文面の出発点になる。ただし**疑問文であることと Noul であることは
+別**で、primitive は 1 つではない。「これは前に出た内容と実質同じ？」は Noul
+だが、残り 3 つは Tier の段階（ESSENTIAL / SUPPORTING / CONTEXT）に対応して
+いて、Choice の criteria になる（文面は
+`examples/semantic/jev-annotate.py` の `TIER_CRITERIA`）。
 
 **state は文書全文**。設計書の
 「単一ファイルかつ現実的なサイズである限り、全文を Jev の context へ渡す」
 はこれを指す。
+
+### redundancy の question は方向を持つ
+
+Noul の文面を対称に書いてはならない。「他の箇所で既に述べられた内容と実質
+同じか」と対称に聞くと、**結論まで 0.71 を出す** — 結論は文書中で何度も触れ
+られるので「重複」に見えるためである。「これより**前**の箇所を言い直している
+だけか」と方向を入れると、同じ結論は 0.36 へ落ち、本当の言い直しが 0.92 へ
+上がった（実測。下の「実測」と同じラウンド）。
+
+これは偶然ではなく、satisficing の逐次性から出てくる。読み進める過程のモデル
+なのだから、redundancy は文書が単体で持つ性質ではなく**既読との相対**で決まる。
+設計書も「**既読内容との** redundancy」と書いている。`REDUNDANT_WITH` が方向を
+持つ関係なのも同じ理由で、Reading Policy 側の根拠は
+`crates/semantic-reading/src/policy.rs` のモジュールドキュメントにある。
+
+現在の文面は `examples/semantic/jev-annotate.py` の `unit_questions`。
 
 ### Score を今は使っていない（禁止ではない）
 
@@ -143,13 +189,15 @@ Reading Policy 全体がここに乗っている。「粗い Tier × 細かい B
 で並べており、**バイト長の時点で既に連続値**である。「決定論的か否か」の線は
 もう引かれていない。
 
-もし現在の順序が実文書で不十分だと分かったら、**Score の question を足す前に
-`confidence` を試すべき**である。Tier 判定は Choice なので `confidence` は
-聞かなくても返ってくる（追加コストゼロ）。順位付けに使うのが設計書の意図から
-外れると感じるなら、「confidence が低い Unit は CONTEXT 側に倒す」という
-判定のガード用途もある。
+もし現在の順序が実文書で不十分だと分かったら、Score の question を足す前に
+`confidence` を見る余地がある。Tier 判定は Choice なので `confidence` は
+聞かなくても返ってくる（追加コストゼロ）。
 
-ただし**現時点でどちらもやる理由は無い**。実文書で現在の順序を見て「これは違う」
+ただし **`confidence` を閾値で判定に使うのは実測で駄目だった**（下の「実測」）。
+閾値が値の真上に乗り、実行ごとに答えが揺れる。閾値を持たない使い方
+（同一 Tier 内の tie-break など）ならこの問題は起きないが、まだ試していない。
+
+そして**現時点でどちらもやる理由は無い**。実文書で現在の順序を見て「これは違う」
 と観測した人がまだいないため。観測されていない問題を解くと、代わりに
 「なぜこの段落が先に消えたか」を説明できる性質を失う。
 
@@ -168,6 +216,55 @@ debounce / cache / rate limit / Reading Budget / Reading Policy
 
 ---
 
+## 実測（`demo.md` / 2026-09-20）
+
+すべて `examples/semantic/demo.md`（624 文字）に対する実測で、推測ではない。
+アダプタは `examples/semantic/jev-annotate.py`、詳しい表は
+`examples/semantic/README.md` にある。
+
+### 速さと値段
+
+| | question 数 | 所要 | input tokens | 概算 |
+|---|---|---|---|---|
+| プローブ（1 ラウンド） | 52 | 0.84 秒 | 11,043 | $0.00046 |
+| アダプタ本番（2 ラウンド） | 9 + 31 | 1.4 秒 | 9,229 | $0.0004 |
+
+出力トークンは無料なので、値段は state（文書全文）を何回送るかでほぼ決まる。
+52 question を 1 リクエストで 0.84 秒という数字が、「多数の小さな問いを
+1 リクエストで並列評価する」が実際にそう動くことの確認である。
+
+### 安定性
+
+同一文書・同一 question を 3 回実行した。Choice の `choice` は**全件同一**で、
+揺れたのは `confidence` だけ、幅は ±0.07 だった。
+
+### `confidence` の閾値ガードは不採用
+
+`conf < 0.5 なら NEW_UNIT に倒す`を検討して**採らなかった**。実測で閾値が値の
+真上に乗り、実行ごとに答えが裏返ったためである（ある境界が 0.46 ↔ 0.53）。
+上の ±0.07 がそのまま判定をひっくり返す幅になる。`confidence` は返す JSON に
+記録するが、**判定には使わない**。
+
+### 構造の境界は Jev に聞かない
+
+demo.md の境界 26 件のうち 17 件は見出し・コードブロック・リスト項目・引用が
+絡む境界で、**パーサが既に知っている**。全部 Jev に聞くと 20/26、構造ルールを
+併用すると 18/22 で、質問数は半分になった。設計書「Jevに判断させないもの:
+syntax parsing」の実証である。
+
+> 注意: この 2 つの数字はプローブでの実測で、出荷したスクリプトでの測り直しは
+> 21/26 / 質問 9（`examples/semantic/README.md` の表）である。分母が揃って
+> いない理由は**まだ突き合わせていない**。
+
+### 手書き fixture は正解ではない
+
+上の一致率は `examples/semantic/demo.json`（人が手で書いた注釈）との一致で
+あって、正解との一致ではない。外れた 6 件のうち 3 件は、むしろ Jev の判断の方
+が妥当だった（コードブロックを別 Unit として切る、など）。fixture を基準にした
+計測は 20〜22/26 で頭打ちになる。**この数字を上げること自体を目標にしない。**
+
+---
+
 ## akapen 側の接続
 
 akapen 本体には HTTP クライアントも async ランタイムも入れない。Jev は
@@ -180,17 +277,21 @@ atoms → Jev の question 群 → Jev の typed answer → units
 
 を担う。akapen が渡すのは Atom の index だけで、range は一度も外へ出ない。
 
-### 未解決: confidence と probabilities を捨てている
+### 未解決: confidence と probabilities が akapen まで届かない
 
-現在の `--semantic-cmd` プロトコルは `units` しか受け取らず、Jev の
-**`confidence` と `probabilities` を捨てている**。これは Jev の最大の特徴を
-使っていないということで、たとえば
+`--semantic-cmd` プロトコルの `AnalyzeResponse` は `version` と `units` しか
+持たないので、Jev の **`confidence` と `probabilities` は akapen 側に届かない**。
+アダプタは捨てずに `jev` という追加フィールドへ載せているが、プロトコルが
+知らないフィールドなので**読み飛ばされる**（未知のフィールドを拒否しないので、
+拡張自体は可能）。
 
-- 境界判定の confidence が低いときは `NEW_UNIT` 側に倒す
-- Tier の confidence が低い Unit は CONTEXT 扱いにする
-- 同一 Tier 内の順序の tie-break に使う
+使い道として挙がっていたのは 3 つで、うち 1 つは実測で潰れている。
 
-といった使い道がありうる。
+| 案 | 現状 |
+|---|---|
+| 境界判定の confidence が低いときは `NEW_UNIT` 側に倒す | **不採用**（上の「実測」。閾値が値の真上に乗って実行ごとに答えが揺れた） |
+| Tier の confidence が低い Unit は CONTEXT 扱いにする | 同じ閾値の問題を踏むはず。試していない |
+| 同一 Tier 内の順序の tie-break に使う | 閾値を持たないので上の問題は起きない。未検証 |
 
 **境界線は「順位付けか / ガードか」ではない。**「Tier の中か / Tier そのものか」
 である。

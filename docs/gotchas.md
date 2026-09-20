@@ -178,8 +178,8 @@ exact / 上位集合の一覧は
 表示が落ち着いたところで鳴ります）。
 
 直すなら、digest をメッセージから外すか、拒否した digest を覚えて 1 回だけ
-言う形にしてください。判定器を実際に繋ぐときは、revision 単位のキャッシュと
-まとめて入れるのが自然です。
+言う形にしてください（この項目だけで閉じる話です。解析結果のキャッシュは
+**この規模では作らない**ので、それと一緒に入れることはできません — 未解決 1）。
 
 **確認したこと**: `src/semantic.rs::DigestChecked::analyze` の
 `SemanticError::Invalid` メッセージが `&expected[..12]` / `&actual[..12]` を
@@ -287,7 +287,7 @@ CI はグリーンのままが正しい挙動です。**
 刺しにくるものではありませんが、**設計書と実装の差**として残っています。
 どれも「誤記」ではないので、直すには判断が要ります。
 
-### 1. `cache` と `incremental reanalysis` が未実装
+### 1. `cache` と `incremental reanalysis` は、実測して作らないと決めた
 
 設計書 [`design/semantic-reading-layer.md`](design/semantic-reading-layer.md)
 の MVP は `cache` と `incremental reanalysis` を挙げていますが、どちらも
@@ -295,15 +295,27 @@ CI はグリーンのままが正しい挙動です。**
 `RELOAD_DEBOUNCE`（300ms）はファイル変更の debounce であって解析結果の
 キャッシュではありません。
 
-`Provider` の doc は「キャッシュや debounce、rate limit は実装側が内部に
-持てばよい」と委譲しているので**責務の置き場としては設計どおり**ですが、
-置くべきものをまだ誰も持っていません。設計書と実装の最大の乖離です。
+**これは未実装の取り残しではなく、実測に基づく判断です。**
+`examples/semantic/demo.md`（624 文字）に対する Jev の全文再解析は
+**2 ラウンドで 1.4 秒 / 約 $0.0004**。しかも `--semantic-cmd` 経路の解析は
+別スレッドで走り、その前にファイル変更の debounce が 300ms 入ります。
+
+**ただし測ったのは 624 文字の 1 ファイルだけです。** 文書が大きくなれば
+input tokens も所要時間も伸びるので、この判断は規模に依存します。正確には
+**この規模では不要。文書サイズが増えたら再検討する**、です。`Provider` の doc が
+「キャッシュや debounce、rate limit は実装側が内部に持てばよい」と委譲している
+ので、**置き場は空けたまま**にしてあります。
 
 **確認したこと**: `src/app.rs::reanalyze_semantics` が毎回
 `provider.analyze(&self.source.content)` に文書全文を渡していること。
+`SemanticSource::Command`（Jev を繋ぐ経路）の腕が `std::thread::spawn` で
+別スレッドへ投げ、その場で待たないこと。
 `App` に解析結果のキャッシュ用フィールドが無いこと
 （`semantic_decorations` は doc × budget の投影であって解析のキャッシュでは
-ない）。`RELOAD_DEBOUNCE` の定義は `src/app.rs`。
+ない）。`RELOAD_DEBOUNCE`（300ms）の定義は `src/app.rs`。
+1.4 秒 / $0.0004 と 624 文字の出どころは
+[`design/jev.md`](design/jev.md) の「実測」節と
+`examples/semantic/README.md`（`wc -m examples/semantic/demo.md` が 624）。
 
 ### 2. Phase 番号が 2 つの意味で使われている（アーカイブ側）
 
@@ -321,13 +333,20 @@ Phase 1 Range Attribution / 2 Range Decoration / 3 Render Mapping 強化 /
 `view.rs` / `state_tests.rs` / `atomize.rs`）はすべて設計書の番号と
 一致していること — 衝突はアーカイブ側にだけ残っています。
 
-### 3. `--semantic-cmd` が `confidence` / `probabilities` を捨てている
+### 3. `--semantic-cmd` が `confidence` / `probabilities` を運ばない
 
 判定器の Choice / Score primitive は `probabilities` と `confidence` を
 返しますが（[`design/jev.md`](design/jev.md)）、現行プロトコルは `units`
-しか受け取りません。プロトコルは未知のフィールドを拒否していないので
-**拡張は可能**で、「出力を全部使う」と書いた箇所も無いので**矛盾しては
-いません**。
+しか受け取りません。アダプタ（`examples/semantic/jev-annotate.py`）は値を
+捨てておらず `jev` という追加フィールドに載せていますが、プロトコルが
+知らないフィールドなので**読み飛ばされます**。プロトコルは未知のフィールドを
+拒否していないので**拡張は可能**で、「出力を全部使う」と書いた箇所も無いので
+**矛盾してはいません**。
+
+使い道として挙がっていた「境界判定の confidence が低いときは `NEW_UNIT` に
+倒す」は、**実測で不採用になりました**（閾値が値の真上に乗り、実行ごとに答えが
+裏返る。[`design/jev.md`](design/jev.md) の「実測」）。残っているのは閾値を
+持たない使い方だけです。
 
 線引きは「順位付けか / ガードか」ではなく **「Tier の中か / Tier そのものか」**
 です。同一 Tier 内の順序に使うのは設計どおり（`policy::keep_order` は
@@ -338,4 +357,35 @@ Phase 1 Range Attribution / 2 Range Decoration / 3 Render Mapping 強化 /
 **確認したこと**: `crates/semantic-reading/src/protocol.rs` の
 `AnalyzeResponse` が `version` と `units` しか持たないこと
 （`confidence` / `probabilities` というフィールドはこの crate のどこにも
-無い）。`docs/design/jev.md` に未解決として記録済みであること。
+無い）。`examples/semantic/jev-annotate.py` が各 Unit の `jev` フィールドへ
+`tier_confidence` / `redundancy_noul` を書いていること。
+`docs/design/jev.md` に未解決として記録済みであること。
+
+### 4. 同一 Tier 内の rule に逐次性が無い（`context preservation`）
+
+設計書は同一 Tier 内の rule として
+`redundancy / length / document position / context preservation` の 4 つを
+挙げ、`policy::keep_order` は最初の 3 つしか使っていません。これは
+**「4 つのうち 1 つを落とした」ではありません。**
+
+最初の 3 つは Unit 単体の属性から決まる静的な値です（重複しているか・
+何バイトか・文書のどこにあるか）。4 つ目だけが
+**「残った Unit を順に読んだとき文脈が繋がるか」**という、選択の結果に依存する
+性質を指しています。そして satisficing は「読み進めて information gain が
+落ちたら次へ移る」という**逐次的**なモデルなので、4 つ目はこの層で
+**逐次性を担う唯一の項目**でした。`decorate` がしているのは「集合を選ぶ」
+ことまでで、**選んだ集合が読む経路として成立しているかは誰も見ていません。**
+
+**設計書は `context preservation` の中身を定義していません。** 語が出てくるのは
+rule の列挙 1 箇所だけです。直すには設計判断が要り、ここで定義を足すのは
+「設計書に無い設計」を足すことになります。
+
+**確認したこと**: `policy::keep_order` の並び替え鍵
+`(実効 Tier, redundant か, バイト長, 先頭バイト位置, 添字)` が、すべて
+`doc.units[index]` 1 つから計算されていること。とくに `redundant` は
+`SemanticUnit::is_redundant()` であって、`REDUNDANT_WITH` の参照先がその
+Budget で残っているかを見ていないこと（`policy::decorate` の `kept` は
+`keep_order` を呼んだ**後**に作られ、順序の計算には戻りません）。
+`grep -n "context preservation" docs/design/semantic-reading-layer.md` の
+ヒットが rule 列挙の 1 行だけであること。同じ話は
+`crates/semantic-reading/src/policy.rs` のモジュールドキュメントにあります。
