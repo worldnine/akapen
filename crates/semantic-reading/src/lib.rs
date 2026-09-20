@@ -32,13 +32,27 @@
 //! この crate が出すのは [`DisplayState`]（MARKED / NORMAL / DIM）までで、
 //! 色・背景・underline・dim といった見た目の決定はクライアント
 //! （akapen）の責務である。したがってここには ratatui も akapen 本体も
-//! 入らない。依存は serde / serde_json のみ。
+//! 入らない。依存は serde / serde_json と、Atom 生成のための
+//! pulldown-cmark（akapen 本体のレンダラと同じ version）だけ。
 //!
 //! ```text
 //! Semantic Engine        Client (akapen)
 //! ---------------        ---------------
 //! source range      ->   range decoration
 //! DisplayState      ->   色 / background / modifier
+//! ```
+//!
+//! # Atom 生成に Jev は要らない
+//!
+//! [`atomize`] は source を Markdown として解析し、[`Atom`] 列だけを返す。
+//! Tier も Unit も付けない。LLM を呼ばずネットワークも使わない、完全に
+//! 決定論的な処理なので、API キーを持たないユーザーにもこの層までは
+//! 値が届く。意味の境界（どの Atom が同じ Unit か）は Jev の仕事である。
+//!
+//! ```text
+//! source text  -> atomize          (速い / 決定論的 / ローカル)
+//!              -> Jev boundary     (遅い / 非決定的 / Provider の内側)
+//!              -> Semantic Units
 //! ```
 //!
 //! # Budget 変更では Jev を呼ばない
@@ -87,6 +101,7 @@
 #![warn(missing_docs)]
 
 mod atom;
+mod atomize;
 mod display;
 mod document;
 mod error;
@@ -95,6 +110,7 @@ mod provider;
 mod unit;
 
 pub use atom::{Atom, AtomIndex, AtomKind};
+pub use atomize::atomize;
 pub use display::DisplayState;
 pub use document::SemanticDocument;
 pub use error::Error;
