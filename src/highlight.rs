@@ -133,6 +133,31 @@ pub struct Span {
     pub style: Style,
 }
 
+/// One tokenized source line: the line's spans plus the source byte range
+/// each of them came from, kept **parallel** (`attrs[i]` belongs to
+/// `spans[i]`) — the same shape [`crate::render::Rendered`] carries for
+/// the rendered view, so both modes feed [`crate::decoration::decorate_row`]
+/// the same way.
+///
+/// # Every attribution here is exact
+///
+/// Source mode displays the source itself, so a span's text is by
+/// construction a verbatim slice of it: syntect hands back subslices of
+/// the line it was given, in order and without rewriting them. There is
+/// no rendered-vs-source gap to bridge and therefore no superset range
+/// — [`Highlighter::highlight_with`] only ever produces
+/// `Some(Attr { exact: true })`, which
+/// `source_attribution_is_exact_and_verbatim` pins.
+///
+/// The `Option` is kept anyway because it is the type
+/// [`wrap_spans_tagged`] and `decorate_row` speak; a synthesized span
+/// (the wrap's hanging pad) still has to be expressible.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaggedLine {
+    pub spans: Vec<Span>,
+    pub attrs: Vec<Option<Attr>>,
+}
+
 /// Highlights content into per-line span vectors. The grammar is picked
 /// per file ([`syntax_for`]).
 pub struct Highlighter {
@@ -230,37 +255,66 @@ impl Highlighter {
         Some(style)
     }
 
-    /// Tokenize `content` once; each inner vec is one source line's spans.
-    /// A grammar error degrades that line to a single plain span.
     /// Tokenize `content` with the given grammar into per-line spans
     /// (cross-line context like fenced code blocks needs the full
-    /// content).
+    /// content), each carrying the source byte range it came from. A
+    /// grammar error degrades that line to a single plain span — still
+    /// attributed, since the whole line is its own source.
+    ///
+    /// # syntect region → document byte range
+    ///
+    /// syntect returns each line's regions as subslices of the line, in
+    /// order and covering it exactly, so a running offset is all the
+    /// mapping needs: the line's start in the document plus the bytes of
+    /// that line already emitted. The trailing `\n` is trimmed off the
+    /// span's text, so it is trimmed off its range too — a span's range
+    /// is its own text, never the newline after it.
+    ///
+    /// Every attribution is [`Attr::exact`]: the text IS `content[range]`
+    /// (see [`TaggedLine`]).
     pub fn highlight_with(
         &self,
         content: &str,
         syntax: &'static SyntaxReference,
-    ) -> Vec<Vec<Span>> {
+    ) -> Vec<TaggedLine> {
         let mut h = HighlightLines::new(syntax, &self.theme);
         let mut out = Vec::new();
+        // Byte offset of the current line's start in `content`.
+        let mut line_start = 0usize;
         for line in LinesWithEndings::from(content) {
-            let spans = match h.highlight_line(line, syntaxes()) {
-                Ok(regions) => regions
-                    .into_iter()
-                    .map(|(style, text)| Span {
-                        text: text.trim_end_matches('\n').to_string(),
-                        style: Style::default().fg(Color::Rgb(
-                            style.foreground.r,
-                            style.foreground.g,
-                            style.foreground.b,
-                        )),
-                    })
-                    .collect(),
-                Err(_) => vec![Span {
-                    text: line.trim_end_matches('\n').to_string(),
-                    style: Style::default().fg(self.default_fg()),
-                }],
-            };
-            out.push(spans);
+            let mut spans = Vec::new();
+            let mut attrs = Vec::new();
+            // Bytes of THIS line already turned into spans — the region's
+            // offset into the line, and so into the document.
+            let mut consumed = 0usize;
+            match h.highlight_line(line, syntaxes()) {
+                Ok(regions) => {
+                    for (style, text) in regions {
+                        let body = text.trim_end_matches('\n');
+                        let at = line_start + consumed;
+                        spans.push(Span {
+                            text: body.to_string(),
+                            style: Style::default().fg(Color::Rgb(
+                                style.foreground.r,
+                                style.foreground.g,
+                                style.foreground.b,
+                            )),
+                        });
+                        attrs.push(Some(Attr::exact(at..at + body.len())));
+                        consumed += text.len();
+                    }
+                }
+                Err(_) => {
+                    let body = line.trim_end_matches('\n');
+                    spans.push(Span {
+                        text: body.to_string(),
+                        style: Style::default().fg(self.default_fg()),
+                    });
+                    attrs.push(Some(Attr::exact(line_start..line_start + body.len())));
+                }
+            }
+            out.push(TaggedLine { spans, attrs });
+            line_start += line.len();
         }
         out
     }
@@ -270,55 +324,21 @@ impl Highlighter {
 /// stop, so a tab at column 0 is 8 columns wide, at column 3 it is 5, etc.
 const TAB_STOP: usize = 8;
 
-/// Wrap `spans` into display rows no wider than `width` columns, measuring
-/// with `unicode-width` so CJK full-width characters never misalign. Tabs
-/// are expanded to the spaces a terminal would show (8-column stops from
-/// the row's current column): ratatui's cell grid measures `\t` as width 0
-/// and its renderer drops control characters, so a raw tab would misalign
-/// every following character and lose the selection/cursor background on
-/// the expansion. An empty input yields one empty row (a blank source line
-/// stays a row).
+/// Wrap `spans` into display rows no wider than `width` columns, without
+/// attribution — the caller has no source ranges to track (a deleted
+/// block's baseline text, a row-count cache).
+///
+/// A thin wrapper over [`wrap_spans_tagged`] with no attribution and no
+/// hanging indent, which is exactly this function's old body: the wrap
+/// algorithm (unicode widths, tab expansion at 8-column stops, the
+/// narrow-pane retry) lives there and only there, so the untagged and
+/// tagged paths can never drift apart.
 pub fn wrap_spans(spans: &[Span], width: usize) -> Vec<Vec<Span>> {
-    let width = width.max(1);
-    let mut rows: Vec<Vec<Span>> = Vec::new();
-    let mut row: Vec<Span> = Vec::new();
-    let mut col = 0usize; // display column where the next character lands
-    for span in spans {
-        let mut rest = span.text.as_str();
-        while !rest.is_empty() {
-            // The current row is full: flush it and start the next.
-            if col >= width {
-                rows.push(std::mem::take(&mut row));
-                col = 0;
-            }
-            let (take, take_w) = take_fit(rest, col, width - col);
-            if take.is_empty() {
-                // The next character cannot fit in the rest of this row
-                // (a wide char at the row's last column, or a tab): flush
-                // and retry from column 0, where it fits.
-                rows.push(std::mem::take(&mut row));
-                col = 0;
-                continue;
-            }
-            row.push(Span {
-                text: expand_tabs(take, col),
-                style: span.style,
-            });
-            col += take_w;
-            rest = &rest[take.len()..];
-            if col >= width {
-                rows.push(std::mem::take(&mut row));
-                col = 0;
-            }
-        }
-    }
-    if !row.is_empty() {
-        rows.push(row);
-    }
-    if rows.is_empty() {
-        rows.push(Vec::new());
-    }
-    rows
+    let attrs = vec![None; spans.len()];
+    wrap_spans_tagged(spans, &attrs, width, 0)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect()
 }
 
 
@@ -330,10 +350,22 @@ const MIN_HANGING_BODY: usize = 8;
 
 /// Width-aware wrapping that keeps a parallel source attribution.
 /// Takes one [`Attr`] per input span and returns, per display row, the
-/// row's spans plus one attribution per span. Source mode uses
-/// [`wrap_spans`] (this algorithm is shared); the tagged variant is used
-/// only by the view pipeline, where the attribution drives the exact
-/// source mapping.
+/// row's spans plus one attribution per span.
+///
+/// Widths are measured with `unicode-width`, so CJK full-width
+/// characters never misalign. Tabs are expanded to the spaces a terminal
+/// would show (8-column stops from the row's current column): ratatui's
+/// cell grid measures `\t` as width 0 and its renderer drops control
+/// characters, so a raw tab would misalign every following character and
+/// lose the selection/cursor background on the expansion. An empty input
+/// yields one empty row (a blank source line stays a row).
+///
+/// **The only wrap implementation.** Both the rendered view and source
+/// mode wrap through here — source mode passes the attribution
+/// [`Highlighter::highlight_with`] produced and `hang = 0`, the rendered
+/// view its own plus a hanging indent — and [`wrap_spans`] is this
+/// function with no attribution and no indent. There is no second copy
+/// of the wrap math to keep in step.
 ///
 /// # How a split fragment inherits its range
 ///
@@ -550,8 +582,8 @@ mod tests {
         let lines = h.highlight_with("# Heading\n\n**bold**\n", syntax_for(Path::new("x.md")));
         assert_eq!(lines.len(), 3);
         // Heading line tokenizes (markdown header), not a single plain span.
-        assert!(!lines[0].is_empty());
-        let joined: String = lines[2].iter().map(|s| s.text.as_str()).collect();
+        assert!(!lines[0].spans.is_empty());
+        let joined: String = lines[2].spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(joined, "**bold**");
     }
 
@@ -559,8 +591,8 @@ mod tests {
     fn plain_lines_carry_the_default_foreground() {
         let h = Highlighter::new(None, false);
         let lines = h.highlight_with("plain\n", syntax_for(Path::new("x.md")));
-        assert_eq!(lines[0].len(), 1);
-        assert_eq!(lines[0][0].text, "plain");
+        assert_eq!(lines[0].spans.len(), 1);
+        assert_eq!(lines[0].spans[0].text, "plain");
     }
 
     #[test]
@@ -657,7 +689,7 @@ mod tests {
         let h = Highlighter::new(Some(path.to_str().unwrap()), false);
         let lines = h.highlight_with("```\ncode\n```\n", syntax_for(Path::new("x.md")));
         // The opening fence carries the aliased code color.
-        assert_eq!(lines[0][0].style.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Rgb(0xff, 0x00, 0x00)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -913,5 +945,250 @@ mod tests {
                 .map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>())
                 .collect::<Vec<_>>()
         );
+    }
+    // ---- source-mode attribution (source view の range) ----
+
+    /// Every source line's spans are attributed, every attribution is
+    /// EXACT, and `content[range]` IS the span's text — the invariant the
+    /// whole source-mode decoration path rests on. Checked over markdown
+    /// AND Rust so the assertion does not depend on one grammar's
+    /// tokenization.
+    #[test]
+    fn source_attribution_is_exact_and_verbatim() {
+        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        for (content, file) in [
+            ("# 見出し\n\n本文 **強調** と `code`\n\n- 項目\n", "x.md"),
+            ("fn main() {\n\tlet x = 1; // コメント\n}\n", "x.rs"),
+            ("```rust\nlet y = 2;\n```\n", "x.md"),
+        ] {
+            let lines = h.highlight_with(content, syntax_for(Path::new(file)));
+            for line in &lines {
+                assert_eq!(
+                    line.spans.len(),
+                    line.attrs.len(),
+                    "attribution runs parallel to the spans"
+                );
+                for (sp, attr) in line.spans.iter().zip(&line.attrs) {
+                    let attr = attr.as_ref().expect("source mode attributes every span");
+                    assert!(attr.exact, "source spans are verbatim source, so exact");
+                    assert_eq!(
+                        &content[attr.range.clone()],
+                        sp.text,
+                        "content[range] IS the span's text"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The ranges tile the document: line by line, span by span, they run
+    /// forward and leave only the line terminators uncovered. A drifting
+    /// offset (a `\n` counted into a span, a line's start taken from the
+    /// wrong place) would show up here even where the text still matched.
+    #[test]
+    fn source_ranges_advance_through_the_document() {
+        let content = "alpha\n\n日本語の行\nlast";
+        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let lines = h.highlight_with(content, syntax_for(Path::new("x.md")));
+        assert_eq!(lines.len(), 4, "one entry per source line");
+        let mut prev_end = 0usize;
+        for line in &lines {
+            for attr in line.attrs.iter().flatten() {
+                assert!(
+                    attr.range.start >= prev_end,
+                    "ranges never go backwards: {:?} after {prev_end}",
+                    attr.range
+                );
+                prev_end = attr.range.end;
+            }
+        }
+        // The last line has no terminator, so its range ends at EOF.
+        assert_eq!(prev_end, content.len());
+        // The third line starts after "alpha\n" + "\n".
+        let third = lines[2].attrs[0].as_ref().unwrap();
+        assert_eq!(third.range.start, "alpha\n\n".len());
+        assert_eq!(&content[third.range.clone()], "日本語の行");
+    }
+
+    /// A blank line is one empty, exact span at the line's own offset —
+    /// not a missing entry and not the newline. `decorate_row` keeps such
+    /// a span as it is, so a blank row stays countable.
+    #[test]
+    fn a_blank_source_line_is_an_empty_exact_span() {
+        let content = "a\n\nb\n";
+        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let lines = h.highlight_with(content, syntax_for(Path::new("x.md")));
+        let attrs: Vec<_> = lines[1].attrs.iter().flatten().collect();
+        assert!(!attrs.is_empty(), "the blank line is still attributed");
+        for a in attrs {
+            assert!(a.exact && a.range.is_empty());
+            assert_eq!(a.range.start, 2, "at the blank line's own offset");
+        }
+    }
+
+    /// Wrapping a source line keeps the fragments verbatim: every
+    /// fragment that is still exact slices the source to its own text,
+    /// at any width, in Japanese / emoji / full-width text. This is the
+    /// byte-offset-vs-terminal-column trap the design doc names.
+    #[test]
+    fn wrapped_source_fragments_stay_verbatim() {
+        let content = "日本語の見出し\n絵文字 🎉🎉 と ＡＢＣ 全角\nplain ascii line\n";
+        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let lines = h.highlight_with(content, syntax_for(Path::new("x.md")));
+        for w in [3usize, 4, 5, 7, 12, 40] {
+            for line in &lines {
+                for (row, attrs) in wrap_spans_tagged(&line.spans, &line.attrs, w, 0) {
+                    for (frag, attr) in row.iter().zip(&attrs) {
+                        let attr = attr.as_ref().expect("a wrapped source fragment keeps its range");
+                        if attr.exact {
+                            assert_eq!(
+                                &content[attr.range.clone()],
+                                frag.text,
+                                "exact fragment at width {w}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The one place a source fragment is NOT verbatim: a tab is expanded
+    /// to the spaces the terminal shows, so the fragment's text stops
+    /// being `source[range]`. `wrap_spans_tagged` keeps the range and
+    /// drops the verbatim claim (`Attr::slice`'s `still_verbatim`), which
+    /// moves that fragment onto `decorate_row`'s SUPERSET branch: a
+    /// decoration covering it whole still lands, one ending INSIDE it
+    /// decorates nothing. That is the accepted cost of expanding tabs —
+    /// the alternative is a fragment claiming to be source text it has
+    /// rewritten, which would bleed a decoration onto its neighbours.
+    ///
+    /// The invariant pinned here is the general one: **a fragment is
+    /// exact exactly when its text is still `source[range]`.**
+    #[test]
+    fn a_tab_expanded_fragment_keeps_its_range_and_loses_exactness() {
+        let h = Highlighter::new(None, false);
+        let syntax = syntax_for(Path::new("x.txt"));
+        for (content, expect_demotion) in [("\tfoo bar\n", true), ("ab\tc\n", true), ("foo bar\n", false)] {
+            let lines = h.highlight_with(content, syntax);
+            // Before the wrap every span is verbatim, tab and all.
+            for (sp, attr) in lines[0].spans.iter().zip(&lines[0].attrs) {
+                let attr = attr.as_ref().unwrap();
+                assert!(attr.exact);
+                assert_eq!(&content[attr.range.clone()], sp.text);
+            }
+            let rows = wrap_spans_tagged(&lines[0].spans, &lines[0].attrs, 40, 0);
+            let mut demoted = false;
+            for (row, attrs) in &rows {
+                for (frag, attr) in row.iter().zip(attrs) {
+                    let attr = attr.as_ref().expect("a wrapped fragment keeps its range");
+                    let verbatim = content[attr.range.clone()] == frag.text;
+                    assert_eq!(
+                        attr.exact, verbatim,
+                        "exactness tracks verbatim-ness for {frag:?} in {content:?}"
+                    );
+                    // The POSITION survives either way: only the claim
+                    // about the text was dropped.
+                    assert!(attr.range.end <= content.len());
+                    demoted |= !attr.exact;
+                }
+            }
+            assert_eq!(
+                demoted, expect_demotion,
+                "only a tab line demotes a fragment: {content:?}"
+            );
+            let joined: String = rows[0].0.iter().map(|s| s.text.as_str()).collect();
+            assert!(!joined.contains('\t'), "the tab was expanded: {joined:?}");
+        }
+    }
+
+    /// The superset branch of `decorate_row`'s intersection rule is
+    /// essentially DEAD CODE for source mode — which is the claim
+    /// `docs/range-attribution-plan.md` makes when it calls source view
+    /// "比較的単純". Swept over the real fixtures at several widths:
+    /// every wrapped fragment is exact, with the single documented
+    /// exception of a line carrying a tab (see
+    /// `a_tab_expanded_fragment_keeps_its_range_and_loses_exactness`).
+    ///
+    /// The rendered view has the opposite balance — emphasis, entities,
+    /// softbreaks and table cells all produce supersets — so this is the
+    /// real difference between the two modes' attribution, pinned rather
+    /// than assumed.
+    #[test]
+    fn source_wrapping_reaches_the_superset_branch_only_through_tabs() {
+        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut checked = 0usize;
+        let mut tab_lines = 0usize;
+        for name in [
+            "testdata/a-readme.md",
+            "testdata/b-design.md",
+            "testdata/c-impl.rs",
+            "testdata/full.md",
+        ] {
+            let path = root.join(name);
+            let content = std::fs::read_to_string(&path).unwrap();
+            let lines = h.highlight_with(&content, syntax_for(&path));
+            for (line, src) in lines.iter().zip(content.split_inclusive('\n')) {
+                let has_tab = src.contains('\t');
+                tab_lines += usize::from(has_tab);
+                for w in [8usize, 17, 40, 80] {
+                    for (row, attrs) in wrap_spans_tagged(&line.spans, &line.attrs, w, 0) {
+                        for (frag, attr) in row.iter().zip(&attrs) {
+                            let attr =
+                                attr.as_ref().expect("every source fragment is attributed");
+                            if !has_tab {
+                                assert!(
+                                    attr.exact,
+                                    "a tab-free source fragment is never a superset: \
+                                     {frag:?} in {name} at width {w}"
+                                );
+                            }
+                            // Whatever the exactness, the POSITION is
+                            // always a real slice of the document.
+                            assert!(attr.range.end <= content.len());
+                            if attr.exact {
+                                assert_eq!(content[attr.range.clone()], frag.text);
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "the sweep covered the corpus: {checked}");
+        assert!(tab_lines > 0, "the corpus contains tab lines to exempt");
+    }
+
+    /// `wrap_spans` IS `wrap_spans_tagged` with no attribution and no
+    /// hanging indent — the delegation that keeps one wrap
+    /// implementation. Pinned over the cases the wrap loop branches on:
+    /// wide characters at the row edge, tabs, and an empty input.
+    #[test]
+    fn plain_wrap_equals_the_tagged_wrap_it_delegates_to() {
+        let cases: Vec<Vec<Span>> = vec![
+            vec![span("abcdefghij")],
+            vec![span("日本語のテキスト")],
+            vec![span("ab"), span("日本語"), span("cd")],
+            vec![span("\tfoo"), span("ab\tc")],
+            vec![span("🎉🎉🎉"), span("ＡＢＣ")],
+            vec![span("")],
+            vec![],
+        ];
+        for spans in &cases {
+            let attrs: Vec<Option<Attr>> = vec![None; spans.len()];
+            for w in [1usize, 2, 3, 5, 8, 80] {
+                let plain = wrap_spans(spans, w);
+                let tagged = wrap_spans_tagged(spans, &attrs, w, 0);
+                assert_eq!(
+                    plain.len(),
+                    tagged.len(),
+                    "same row count at width {w} for {spans:?}"
+                );
+                for (p, t) in plain.iter().zip(&tagged) {
+                    assert_eq!(p, &t.0, "same spans at width {w} for {spans:?}");
+                }
+            }
+        }
     }
 }

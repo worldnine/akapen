@@ -1,3 +1,222 @@
+# HANDOFF: source view に range decoration を通す（Phase 1+2 の source 側）
+
+## 何を作ったか
+
+rendered view だけが持っていた range decoration を、**source view（生の
+Markdown を見るモード）にも通した**。同一行の途中で MARKED / NORMAL / DIM が
+切り替わり、rendered view と**同じ source byte range**が装飾される。
+
+前任者の「source view には手を付けていない」節（下）が挙げた 3 段を、
+その順にやった。
+
+設計書の Phase 番号でいうと、これは **Phase 1（Range Attribution）と
+Phase 2（Range Decoration）の source view 側**。設計書の Phase 3 は
+「Render Mapping 強化」で、別の話（rendered 側の attribution を
+table / code まで精密にする）。
+
+## 1. range を作る — syntect region → 文書の byte range
+
+`Highlighter::highlight_with` が返す型を `Vec<Vec<Span>>` から
+`Vec<TaggedLine>`（`spans` と `attrs` の並行 vec）に変えた。
+
+syntect の `highlight_line` は、渡した行の**部分スライスを順番に隙間なく**
+返す。だから走る offset 1 本で足りる:
+
+```text
+行の文書内オフセット（line_start）
+  + その行で既に span にしたバイト数（consumed）
+```
+
+`line_start` は `LinesWithEndings` を回しながら `line.len()` を足すだけ。
+span のテキストは末尾の `\n` を落としているので、**range の方も落とす** —
+span の range は自分のテキストであって、その後ろの改行ではない。
+
+**source view は原理的に全部 exact。** 表示しているのが source そのもので、
+syntect はテキストを書き換えないので、`content[range]` は必ず span の
+テキストになる。`Attr::exact` だけを作る。rendered 側のように強調記号が
+消えたり `&amp;` が `&` になったりする段差が無い。
+
+呼び出し側（`reload.rs` / `main.rs` / 各テストの 11 箇所）は
+`app.spans = …highlight_with(…)` という代入だけなので、**1 行も触っていない**。
+`app.spans` を読むのは `App::rebuild_base_rows` と `build_rows` の 2 箇所だけ
+だった。
+
+## 2. `wrap_spans` の tagged 化 — 二重実装を作らずに
+
+`wrap_spans` と `wrap_spans_tagged` は**元から同じ折返しアルゴリズムの
+2 つの写し**だった。新しく書き足すのではなく、**片方を消した**:
+
+```rust
+pub fn wrap_spans(spans: &[Span], width: usize) -> Vec<Vec<Span>> {
+    let attrs = vec![None; spans.len()];
+    wrap_spans_tagged(spans, &attrs, width, 0).into_iter().map(|(row, _)| row).collect()
+}
+```
+
+`hang = 0` のとき `pad_due` が立たないので、tagged 側の全分岐が旧
+`wrap_spans` と 1 行ずつ一致する（narrow-pane の retry も、行が埋まった
+ときの flush も）。**折返しのロジックは今 1 つしか無い。**
+`plain_wrap_equals_the_tagged_wrap_it_delegates_to` が、幅 1〜80 ×
+（ASCII / 日本語 / 絵文字 / 全角 / タブ / 空入力）でこの同一性を固定している。
+
+折返し挙動は壊していない。既存の折返しテスト 14 本（`wrap_*` 9 本 /
+`hanging_wrap_*` 5 本）が無改造で緑のまま。
+
+## 3. source 側の描画経路に attribution を通す
+
+`build_rows`（source モードの実描画）で:
+
+- `wrap_spans(&app.spans[idx], width)` → `wrap_spans_tagged(&line.spans,
+  &line.attrs, width, 0)`
+- 各表示行に `decoration::decorate_row` を掛けてから、既存の
+  cursor / selection / changed 帯を乗せる
+
+**装飾ロジックは 1 行も書いていない。** `decorate_row` と交差ルールを
+そのまま呼ぶだけ。decoration は span を切るがテキストは変えないので、
+行数も帯の埋め幅も変わらない（`base_rows` は `wrap_spans` のままでよい）。
+
+decoration リストは `App::active_decorations` に括り出し、**draw_view と
+build_rows の両方が同じものを呼ぶ**。`--decorations` と semantic の連結も
+`sanitize` も 1 箇所になったので、2 つのモードが「どのバイトが MARKED か」で
+食い違えない。
+
+`DecorationStyles` は `App` に持たせた（`App::new` で 1 回解決）。
+`app.view.decoration_styles` は使えない — **view モードで一度も表示して
+いないファイルは `ViewState::default()` を持っており**、その styles は
+ダークテーマの決め打ちだから、light テーマの source モードで色が狂う。
+
+## タブ展開の扱い — ここだけ exact ではなくなる
+
+`wrap_spans` はタブを空白に展開する。**展開した span はもう source の
+verbatim ではない。** rendered 側の作法（`Attr::slice(.., still_verbatim)`）
+にそのまま乗った: **range は保ったまま `exact: false` に落ちる。**
+
+結果、その fragment は `decorate_row` の**上位集合の腕**へ回る:
+
+- fragment を丸ごと覆う decoration → 効く
+- fragment の**途中で終わる** decoration → その fragment には何も乗らない
+
+タブ入りの行だけの割り切りで、代わりに得られるのは「書き換えたテキストを
+source だと偽らない」こと。偽ると隣のテキストへ装飾がにじむ。
+`a_tab_expanded_fragment_keeps_its_range_and_loses_exactness` が
+**「fragment が exact ⟺ そのテキストが今も `source[range]`」**という一般形で
+固定してある。
+
+### 「上位集合の腕は実質使われない」は、タブを除けば本当だった
+
+タスクの想定どおりで、確認して**テストに書いた**
+（`source_wrapping_reaches_the_superset_branch_only_through_tabs`）。
+testdata 4 ファイル × 幅 8/17/40/80 を掃いて、**タブを含む行以外は全 fragment が
+exact**。タブ行だけを例外として明示的に除外している（`full.md` に実際に
+タブ行が 7 本あるので、この例外は空回りしていない）。rendered 側は強調・entity・softbreak・
+table cell が全部 superset になるので、ここが両モードの attribution の
+実質的な違い。
+
+## byte offset と terminal column を混同しない
+
+設計書が名指しで警告している点。decoration は**バイト**で切り、折返しは
+**カラム**で測る。`a_decoration_lands_on_multibyte_characters` が
+「日本語と🎉とＡＢＣ」に対し幅 4 / 7 / 40 で、装飾されたセルを連結したものが
+`source[start..end]` と一致することを固定している。どちらの空間で 1 ずれても
+落ちる。
+
+## budget キーを source モードにも束ねた
+
+前任者が view のみにした理由（「source は装飾が出ないので、押すたびに
+READ % だけ動くのは嘘になる」）は**この改修で消えた**ので、`-` `+` `=`
+`<` `>` を `on_source_key` にも足した。ガードも `modifiers.is_empty()` を
+付けない方針も view 側と同一。`--semantic` の無いセッションで何も起きない
+（toast すら出さない）ことも、source 側で改めて固定した。
+
+`--help` の「in the view」→「in both views」。`?` ヘルプの `read` 行は
+元からモード非依存なので変更なし。
+
+## DIM と帯 — source 側だけ `changed_bg` も「帯」に数える
+
+`Dim` は前景を書くので背景の帯では打ち消せない（`decoration.rs` の
+モジュールドキュメント）。view.rs と同じく、**帯の乗る行では `Dim` を
+decorate する前に落とす**。
+
+ただし **source モードは changed（緑）帯も行全体の背景を塗る**（view は
+gutter のマーカーだけ）。なので source では `cursor_bg || changed_bg` を
+「帯」とした。view との意図的な差で、理由は上と同じ — 背景は前景を戻せない。
+
+## 恒等性の機械確認（前任者と同じ手法）
+
+改修前 HEAD（`a0bcdec`）を別 worktree に展開し、両方に同じダンプテストを
+差し込んで
+
+- testdata 4 ファイル × 幅 20 / 40 / 80
+- × カーソル 4 位置 × 選択あり/なし × スクロール offset 3 種
+
+の `build_rows` 出力（**行ごと・span ごとの text と Style**、composer cursor
+込み）をダンプして比較 → **34127 行、バイト単位で完全一致**（`cmp`）。
+
+decoration が空なら source view の出力は 1 バイトも変わっていない。
+リポジトリ側にも `no_decorations_leaves_the_source_rows_alone` として、
+「空の decoration」と「sanitize が丸ごと捨てる decoration」の両方で
+行が一致することを残してある。
+
+## 実機 pty での確認
+
+`examples/semantic/demo.md` を 80 桁で開き、Tab で source モードへ。
+`demo.md` 7 行目「採用する方式は差分配信である。詳細は付録にまとめた。」の
+SGR を、ANSI を画面に再生して読んだ。
+
+| | source view | rendered view |
+|---|---|---|
+| READ 100 % 前半 | bg `rgb(68,70,89)` = MARKED | bg `rgb(68,70,89)` |
+| READ 100 % 後半 | 装飾なし = NORMAL | 装飾なし |
+| READ 30 % 前半 | bg `rgb(68,70,89)` のまま | 同じ |
+| READ 30 % 後半 | fg `rgb(99,103,125)` = DIM | fg `rgb(99,103,125)` |
+
+**両モードで同じ範囲が同じ色になる。** 30 % へは source モードのまま `<` を
+7 回押して到達している（キーが効いていることの実機確認でもある）。
+
+DIM 行にカーソル帯を乗せる（`j` で 7 行目へ）と、行全体が帯の背景
+`rgb(88,91,112)` になり、**前景は明るい `rgb(205,214,244)` に戻る** —
+霞まない。rendered 側で塞いだ穴が source 側でも塞がっている。
+
+## 既知の割り切り
+
+- **タブ入りの行は、fragment の途中で終わる decoration が効かない**（上記）。
+  直すなら `highlight_with` の段階で `\t` の連なりで region を割り、タブの
+  断片だけを demote すればよいが、タブ行の span 数が変わる。今回はやって
+  いない
+- `decorate_row` のコストは rendered 側と同じく O(可視 span 数 × decoration 数)
+  / フレーム。source モードは rendered より span が細かいので係数は少し重い
+  が、可視行ぶんだけ。**二分探索へ行くのはまだ早い**（Phase 2 の判断のまま）
+- source モードの `changed`（緑）帯も `Dim` を落とす（上記）。view には
+  対応する挙動が無い
+
+## 検証
+
+- `cargo test --locked --workspace`: **akapen 531 / tui-markdown 173（+1 ignored）/
+  semantic-reading 55+4+3+10 / doc 7+2**、全緑
+  （ベースライン 514 / 173 / 55+4+3+10 / 7+2 — **+17**）
+  - 内訳: `highlight.rs` +7（attribution の exact / verbatim、範囲の前進、
+    空行、折返し後の verbatim、タブの demote、上位集合の腕の掃き出し、
+    `wrap_spans` 委譲の同一性）、`main.rs` の
+    `source_decoration_tests` +8（3 style の同一行、syntax highlight の生存、
+    折返し跨ぎ、日本語/絵文字/全角、タブの all-or-nothing、恒等性、
+    カーソル帯の打ち消し、選択帯の打ち消し）、`state_tests.rs` +2
+    （実キーハンドラ経由の source モード end-to-end、`--semantic` 無しで
+    キーが死んでいること）
+- `cargo test --locked --release`: 532 passed（`debug_assert` 無効でも緑）
+- `cargo clippy --locked --all-targets`: **警告 0**
+- `TUI_MARKDOWN_SRC=… ./scripts/check-vendor-diff.sh`: **OK**
+  （上流 0.3.9 / フォーク 0.4.0、28 ファイル、1880 変更行 — `third_party/` は未変更）
+- 恒等性ダンプ: 34127 行完全一致（上記）
+- 実機 pty: 上記の表
+- 変更ファイル: `src/highlight.rs` / `src/app.rs` / `src/main.rs` /
+  `src/state_tests.rs` / `HANDOFF.md`。**`reload.rs` は未変更**（`highlight_with`
+  の呼び出しが代入だけだったため）
+
+補足: このリポジトリは rustfmt を掛けていない。既存ファイルと同程度に
+揃えてあるだけで、自分の触ったファイルだけを整形するようなことはしていない。
+
+---
+
 # HANDOFF: MARKED と DIM を実機で見分けられるようにする（見た目の調整）
 
 ## 何が起きていたか
@@ -345,6 +564,9 @@ view / source の両方の `match` と `?` ヘルプを洗った結果、記号�
 装飾も出ないので、押すたびに READ % だけ動いて何も変わらないのは嘘になる。
 読み出し自体は source モードでも出る（文書の性質であってモードの性質ではない）。
 
+> **追補**: source view にも装飾が通ったので、この理由は消えた。
+> 同じ 4 本が `on_source_key` にも束ねてある。
+
 ## `source_sha256`（手順3の落とし穴）
 
 `FixtureProvider::analyze` は渡された source を見ない。`decoration::sanitize` は
@@ -486,6 +708,8 @@ READ 75 % では `## 補足` の行が col 54 で `\x1b[2m` に切り替わり�
   decoration 数) / フレーム。demo は Atom 27 個なので効かないが、Jev が
   数千個持ち込んだら二分探索へ（**今はやらないこと**）
 - source モードでは `READ %` は出るがキーは効かない（上記の理由）
+  — **解消済み**。source view に装飾が通ったので、budget キーは
+  両モードに束ねてある
 
 ## 検証
 
@@ -743,7 +967,15 @@ serde free のままにしてある。
 
 をダンプして比較 → **9991 行、バイト単位で完全一致**（`cmp` で確認）。
 
-## source view には手を付けていない
+## source view には手を付けていない（→ 実装済み）
+
+> **追補**: この節はもう現状ではない。ここに書いた 3 段はその
+> ままの形で実装され、source view にも range decoration が通っている。
+> 冒頭の「HANDOFF: source view に range decoration を通す（Phase 1+2 の
+> source 側）」を
+> 参照。以下は当時の調査結果として残す（**地図としては正確だった** —
+> 3 段の見立ても、`app.spans` / `line_rows` が `ViewState` とは別構造だと
+> いう指摘も、そのとおりだった）。
 
 タスクの指示どおり rendered view を先に完成させ、source view は止めて報告する。
 理由（調査済み）:

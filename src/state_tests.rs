@@ -6398,3 +6398,126 @@ fn the_read_readout_appears_only_with_a_semantic_document() {
         "? ヘルプに READ の行が出る"
     );
 }
+
+/// The Phase 2 milestone, now on the SOURCE screen: `--semantic` through
+/// `Config` → `App` → `Provider` → `policy::decorate` → `build_rows` →
+/// cells, with **one source line splitting mid-line into two styles** and
+/// the split moving with the READ budget — driven by the real key
+/// handler, because the budget keys are bound in source mode now.
+///
+/// The rendered-view twin is
+/// `the_reading_budget_splits_one_terminal_line_into_two_styles`; both
+/// read the same line of `examples/semantic/demo.md`, which is the point:
+/// the two modes decorate the same source bytes.
+#[test]
+fn the_reading_budget_splits_one_source_line_into_two_styles() {
+    use crate::decoration::DecorationStyles;
+
+    let path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.md"
+    ));
+    let fixture = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.json"
+    ));
+    let config = Config {
+        files: vec![path.clone()],
+        send_cmd: None,
+        send_agent: false,
+        reply: false,
+        theme: None,
+        ime: ImeMode::Off,
+        light: None,
+        callback: None,
+        esc_quit: EscQuit::Auto,
+        cursor_anchor: true,
+        fx: false,
+        semantic: Some(fixture),
+        decoration_blend: Default::default(),
+        decorations: Vec::new(),
+    };
+    let source = Source::load(path).unwrap();
+    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let view = ViewState::render(&source, crate::view_render_width(80), &highlight, Default::default());
+    let styles = DecorationStyles::from_theme(&highlight, Default::default());
+    let mark_bg = styles.mark_style().bg;
+    let mut app = App::new(config, source, highlight, view, false);
+    app.semantic_provider = crate::semantic::provider_from_config(&app.config).unwrap();
+    app.reanalyze_semantics();
+    assert!(app.semantic_doc.is_some(), "the fixture matches demo.md");
+    // run() tokenizes every file up front; source mode reads the result.
+    app.spans = app
+        .highlight
+        .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+    app.mode = Mode::Source;
+    app.gutter_cols = 1 + app.source.gutter_width as u16 + 1;
+    // The cursor stays on line 1, so the cursor band never reaches the
+    // line under test (a band covers the decoration by design).
+    assert_eq!(app.cursor, 0);
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    // 「採用する方式は差分配信である。詳細は付録にまとめた。」は 1 本の
+    // source 行で、前半 u3（ESSENTIAL）と後半 u4（DETAIL）に分かれている。
+    // source view は生の Markdown をそのまま出すので、この行は rendered
+    // view と同じ文字列で画面に出る。
+    let halves = |app: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        let cell = |y: usize, x: usize| &buf.content[y * w + x];
+        let (row, right) = (0..buf.area.height as usize)
+            .find_map(|y| (0..w).find(|&x| cell(y, x).symbol() == "詳").map(|x| (y, x)))
+            .expect("the 結論 paragraph is on screen");
+        let left = (0..right)
+            .find(|&x| cell(row, x).symbol() == "採")
+            .expect("both halves are on the SAME terminal row");
+        (cell(row, left).style(), cell(row, right).style())
+    };
+
+    // READ 100 %: the ESSENTIAL half is MARKED, the DETAIL half NORMAL.
+    assert_eq!(app.reading_budget, 100);
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, mark_bg, "ESSENTIAL は source view でも MARKED");
+    assert_ne!(detail.bg, mark_bg, "DETAIL は NORMAL");
+    assert_ne!(essential, detail, "source view でも行の途中で切り替わる");
+    let bright = detail.fg;
+
+    // `<` を 7 回 — **source モードのキーハンドラを通す**。この層が view
+    // 専用だったあいだ、これらのキーは source には束ねられていなかった。
+    for _ in 0..7 {
+        crate::on_source_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
+    }
+    assert_eq!(app.reading_budget, 30, "source モードで budget キーが効く");
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, mark_bg, "MARKED のまま");
+    assert_eq!(detail.fg, Some(styles.dim_fg(bright)), "DETAIL は DIM に落ちる");
+    assert_ne!(detail.fg, bright);
+    assert_eq!(essential.fg, bright, "MARKED 側の前景は動かない");
+    for style in [essential, detail] {
+        assert!(!style.add_modifier.contains(ratatui::style::Modifier::DIM));
+    }
+
+    // `>` で戻せば元どおり（キーは両方向に効く）。
+    for _ in 0..7 {
+        crate::on_source_key(&mut app, KeyCode::Char('>'), KeyModifiers::NONE, None);
+    }
+    assert_eq!(app.reading_budget, 100);
+    let (_, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(detail.fg, bright, "100 % に戻れば DIM も戻る");
+}
+
+/// `--semantic` のないセッションでは、source モードの budget キーは
+/// 「その層が無かったとき」と同じ動きをする（腕が `semantic_enabled()`
+/// ガードで落ち、`_ => {}` に吸われる）。view 側と同じ約束。
+#[test]
+fn budget_keys_do_nothing_in_source_mode_without_semantic() {
+    let mut app = make_app(5, Mode::Source);
+    assert!(!app.semantic_enabled());
+    for key in ['-', '+', '=', '<', '>'] {
+        crate::on_source_key(&mut app, KeyCode::Char(key), KeyModifiers::NONE, None);
+        assert!(app.status.is_none(), "{key} は toast すら出さない");
+        assert_eq!(app.mode, Mode::Source);
+        assert_eq!(app.cursor, 0);
+    }
+}
