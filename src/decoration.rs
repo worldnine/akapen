@@ -25,12 +25,17 @@
 //! - **no** attribution (`None`) → a synthesized span: a quote prefix, a
 //!   table border, padding. It has no source, so it is never decorated.
 //!
-//! A known MVP consequence of the superset rule: a list item's `- `
-//! marker is attributed to the WHOLE item (`- 項目\n`), so dimming the
-//! item's TEXT leaves the marker at full brightness. Dimming the item's
-//! whole source range dims the marker too. Accepted for now — a marker
-//! that dims with its text needs an exact attribution in the renderer,
-//! which is Phase 3's territory.
+//! The superset rule makes an attributed range's WIDTH load-bearing: a
+//! span is decorated only by a decoration that reaches its range's last
+//! byte, so one byte too many in the attribution makes the span
+//! undecoratable forever. A list item's `- ` marker used to be
+//! attributed to the whole item — `pulldown_cmark`'s `Start(Item)`
+//! range, trailing newline included — while `atomize` stopped the
+//! Atom before that newline, and the marker stayed bright under a
+//! dimmed item. Nothing here was wrong: the renderer now anchors the
+//! marker on its OWN bytes, so a decoration over the item reaches it.
+//! When a new synthesized span is attributed, attribute it to the
+//! narrowest source it really stands for, not to its event's range.
 //!
 //! # Style is patched, never replaced
 //!

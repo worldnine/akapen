@@ -897,8 +897,10 @@ mod tests {
             attribution("- 項目ひとつ"),
             [
                 // The marker is copied from the source but re-indented,
-                // so it is a superset of the item's range.
-                ("- ".into(), "range", "- 項目ひとつ".into()),
+                // so it is a superset — of the MARKER's own bytes, not of
+                // the whole item. See
+                // `a_list_marker_is_attributed_to_the_marker_alone`.
+                ("- ".into(), "range", "- ".into()),
                 ("項目ひとつ".into(), "exact", "項目ひとつ".into()),
             ]
         );
@@ -975,11 +977,12 @@ mod tests {
                 ("b".into(), "exact", "b".into()),
             ]
         );
-        // A task-list checkbox is synthesized; the text beside it is exact.
+        // A task-list checkbox is appended to the marker span; the range
+        // widens over it, and the text beside it is exact.
         assert_eq!(
             attribution("- [x] done"),
             [
-                ("- [x] ".into(), "range", "- [x] done".into()),
+                ("- [x] ".into(), "range", "- [x]".into()),
                 ("done".into(), "exact", "done".into()),
             ]
         );
@@ -1069,6 +1072,58 @@ mod tests {
             assert_eq!(ranges.first(), Some(&"fn main() {}\n"));
             assert_eq!(ranges.last(), Some(&"let x = 1;\n"));
         }
+    }
+
+    /// A list marker's superset range covers the MARKER, not the whole
+    /// item — and never the item's trailing newline.
+    ///
+    /// The three pieces below are each individually reasonable, and the
+    /// old combination was off by one byte:
+    ///
+    /// - `atomize` leaves the trailing newline out of a list item's Atom;
+    /// - the superset rule in akapen's `decoration.rs` decorates a span
+    ///   only when the decoration COVERS the whole attributed range, on
+    ///   purpose, so decoration cannot bleed;
+    /// - the marker used to be attributed to the `Start(Item)` event's
+    ///   range, which pulldown-cmark reports WITH the newline.
+    ///
+    /// `- 項目\n` is 12 bytes; the Atom is `0..11`; the marker claimed
+    /// `0..12`. `0..11` cannot cover `0..12`, so the marker stayed bright
+    /// under a dimmed item forever. Splitting items into sentences made
+    /// it worse still: the first sentence's Atom stops at the first `。`,
+    /// so no per-Atom decoration could ever reach the item's end.
+    ///
+    /// Anchoring the marker on its own bytes fixes every case at once:
+    /// any decoration over the item's first sentence contains them.
+    #[rstest]
+    fn a_list_marker_is_attributed_to_the_marker_alone(_with_tracing: DefaultGuard) {
+        use pretty_assertions::assert_eq;
+
+        let marker_ranges = |input: &str| -> Vec<std::ops::Range<usize>> {
+            let (text, attrs) = from_str_with_options_tagged(input, &Options::default());
+            text.lines
+                .iter()
+                .zip(&attrs)
+                .flat_map(|(line, line_attrs)| line.spans.iter().zip(line_attrs))
+                .filter(|(span, _)| span.content.trim_start().starts_with(['-', '*', '+'])
+                    || span.content.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+                .filter_map(|(_, attr)| attr.as_ref())
+                .filter(|attr| !attr.exact)
+                .map(|attr| attr.range.clone())
+                .collect()
+        };
+
+        // The newline is outside the marker's range, so an Atom that
+        // stops before it still covers the marker.
+        assert_eq!(marker_ranges("- 項目\n"), [0..2]);
+        // A multi-sentence item: the marker sits inside the FIRST
+        // sentence's bytes (`atomize` gives `0..14` here).
+        assert_eq!(marker_ranges("* 一文目。二文目。\n"), [0..2]);
+        // Ordered markers keep their digits and separator.
+        assert_eq!(marker_ranges("10. 十番目\n"), [0..4]);
+        assert_eq!(marker_ranges("3) 三番目\n"), [0..3]);
+        // Nesting indent is the renderer's own layout, not source.
+        assert_eq!(marker_ranges("- 親\n  - 子\n"), [0..2, 8..10]);
     }
 
     #[rstest]

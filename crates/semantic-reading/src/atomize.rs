@@ -23,6 +23,19 @@
 //! という 2 点だけ調整する。マーカーを含めるのは、含めないと DIM にした
 //! ときにマーカーだけ明るく残るため。
 //!
+//! # 文まで割る
+//!
+//! 散文・リスト項目・引用は、どれも同じ規則で**文**へ割る。Atom は
+//! 「安全に位置を指定できる機械的単位」であって段落ではないので、
+//! 複数の文を 1 つにまとめた塊は Atom ではない。表示単位は Atom なので、
+//! 項目を割らないと「項目まるごと光る / 項目まるごと沈む」しか選べない。
+//!
+//! 項目が複数の文へ割れるとき、行頭のマーカー（`- ` / `1. `）は
+//! **最初の文の Atom に入る**。マーカーは項目の先頭にあり、range は
+//! そこから始まるので、文へ割れば自然にそうなる。2 文目以降の
+//! [`AtomKind`] も `ListItem` のままにする — 種別は「どの構文要素に
+//! 由来するか」であって、文の通し番号ではない。
+//!
 //! # 敷き詰めない
 //!
 //! Atom 列は文書を隙間なく覆わない。空行、`---`、リストの入れ子の
@@ -88,7 +101,7 @@ pub fn atomize(source: &str) -> Vec<Atom> {
             Event::Start(Tag::MetadataBlock(_)) => {
                 i = block_end(&events, i);
             }
-            // 段落だけが文へ割れる。引用の中なら種別を BlockQuote にする。
+            // 段落は文へ割る。引用の中なら種別を BlockQuote にする。
             Event::Start(Tag::Paragraph)
             | Event::Start(Tag::DefinitionListTitle)
             | Event::Start(Tag::DefinitionListDefinition) => {
@@ -104,8 +117,10 @@ pub fn atomize(source: &str) -> Vec<Atom> {
                 }
                 i = end;
             }
-            // 項目 1 つで 1 Atom。入れ子のリストがあれば、そこで親を打ち切り、
-            // 子は独立した Atom として続けて歩く（範囲を重ねないため）。
+            // 項目の中身も段落と同じ規則で文へ割る。行頭のマーカーは range の
+            // 先頭にあるので、割れば最初の文の Atom に入る。入れ子のリストが
+            // あれば、そこで親を打ち切り、子は独立した Atom として続けて歩く
+            // （範囲を重ねないため）。
             Event::Start(Tag::Item) => {
                 let end = block_end(&events, i);
                 let (body, next) = match nested_list(&events[i..end]) {
@@ -113,7 +128,16 @@ pub fn atomize(source: &str) -> Vec<Atom> {
                     None => (range.clone(), end),
                 };
                 if !is_marker_only(source[body.clone()].trim()) {
-                    atoms.push(body, AtomKind::ListItem);
+                    let mut guards = inline_guards(&events[i..end]);
+                    // `1.` の `.` は文末ではない。マーカーを guard に入れて
+                    // 終止記号の探索から外す（`1. 一つ目` が割れないように）。
+                    let marker = marker_len(source, body.start);
+                    if marker > 0 {
+                        guards.push(body.start..body.start + marker);
+                    }
+                    for sentence in split_sentences(source, body, &guards) {
+                        atoms.push(sentence, AtomKind::ListItem);
+                    }
                 }
                 i = next;
             }
@@ -188,9 +212,13 @@ fn nested_list(item: &[(Event<'_>, Range<usize>)]) -> Option<usize> {
 /// 文の切れ目を探してはいけない領域。
 ///
 /// インラインコード・リンク・画像・数式の中の `.` や `。` で切ると、URL や
-/// コード片が途中で割れる。段落の event を見れば範囲がそのまま手に入る。
-fn inline_guards(paragraph: &[(Event<'_>, Range<usize>)]) -> Vec<Range<usize>> {
-    paragraph
+/// コード片が途中で割れる。ブロックの event を見れば範囲がそのまま手に入る。
+///
+/// コードブロック・表・生 HTML も入れてある。段落の中には現れないので
+/// そこでは何もしないが、**リスト項目の中には現れうる**（項目にぶら下がった
+/// フェンスや表）。入れておかないと、コードの中の `.` で項目が割れる。
+fn inline_guards(block: &[(Event<'_>, Range<usize>)]) -> Vec<Range<usize>> {
+    block
         .iter()
         .filter(|(event, _)| {
             matches!(
@@ -199,8 +227,11 @@ fn inline_guards(paragraph: &[(Event<'_>, Range<usize>)]) -> Vec<Range<usize>> {
                     | Event::InlineMath(_)
                     | Event::DisplayMath(_)
                     | Event::InlineHtml(_)
+                    | Event::Html(_)
                     | Event::Start(Tag::Link { .. })
                     | Event::Start(Tag::Image { .. })
+                    | Event::Start(Tag::CodeBlock(_))
+                    | Event::Start(Tag::Table(_))
             )
         })
         .map(|(_, range)| range.clone())
@@ -272,6 +303,28 @@ fn with_quote_marker(source: &str, start: usize) -> usize {
     }
 }
 
+/// 項目の行頭マーカー（`-` / `*` / `+` / `1.` / `3)`）が占めるバイト数。
+/// マーカーが見当たらなければ 0。
+///
+/// レンダラ（`third_party/tui-markdown` の `start_item`）が source から
+/// マーカーを読むのと同じ規則。Item の event range はマーカーそのものから
+/// 始まるので、先頭だけ見れば決まる。
+fn marker_len(source: &str, start: usize) -> usize {
+    let rest = &source[start..];
+    match rest.chars().next() {
+        Some('-' | '*' | '+') => 1,
+        Some(c) if c.is_ascii_digit() => {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if matches!(rest.as_bytes().get(digits), Some(b'.' | b')')) {
+                digits + 1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// 中身が無くマーカーだけの項目か。入れ子のリストだけを持つ親項目で起こる。
 ///
 /// `-` や `1.` だけの Atom は DIM にしても意味が無いので作らない。
@@ -307,10 +360,11 @@ const ABBREVIATIONS: &[&str] = &[
     "Ltd", "Co", "No", "Fig", "Vol", "Jr", "Sr",
 ];
 
-/// 段落の範囲を文へ割る。切れ目が 1 つも無ければ段落全体で 1 つ。
+/// ブロック（段落・リスト項目・引用）の範囲を文へ割る。切れ目が 1 つも
+/// 無ければブロック全体で 1 つ。
 ///
-/// 段落の raw な source をそのまま見るので、`**強調**` の `*` も soft break も
-/// 引用の継続マーカーも、文の range の中に自然に残る。
+/// raw な source をそのまま見るので、`**強調**` の `*` も soft break も
+/// 行頭のリストマーカーも引用の継続マーカーも、文の range の中に自然に残る。
 fn split_sentences(
     source: &str,
     range: Range<usize>,
@@ -566,8 +620,59 @@ mod tests {
                 ("2. 二つ目", AtomKind::ListItem),
             ]
         );
-        // 項目は文へ割らない。1 項目で 1 Atom。
-        assert_eq!(sentences("- 一文目。二文目。\n"), ["- 一文目。二文目。"]);
+        // 項目の中も文へ割る。マーカーは最初の文に付く。
+        assert_eq!(
+            sentences("- 一文目。二文目。\n"),
+            ["- 一文目。", "二文目。"]
+        );
+        // 2 文目以降も種別は ListItem のまま（由来する構文要素は変わらない）。
+        assert_eq!(
+            split("1. 一文目。二文目。\n"),
+            [
+                ("1. 一文目。", AtomKind::ListItem),
+                ("二文目。", AtomKind::ListItem),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_item_splits_with_the_same_guards_as_prose() {
+        // 小数・略語・URL は項目の中でも誤爆しない。
+        assert_eq!(
+            sentences("- Version 0.3.9 is out. See e.g. the docs.\n"),
+            ["- Version 0.3.9 is out.", "See e.g. the docs."]
+        );
+        // 鉤括弧の中の `。` では切らない。
+        assert_eq!(
+            sentences("- 「終わった。」と彼は言った。次の文。\n"),
+            ["- 「終わった。」と彼は言った。", "次の文。"]
+        );
+        // インラインコードの中の `.` でも切らない。
+        assert_eq!(
+            sentences("- `a. b` は識別子です。以上。\n"),
+            ["- `a. b` は識別子です。", "以上。"]
+        );
+        // 項目にぶら下がったコードフェンスの中では切らない。
+        assert_eq!(
+            sentences("- 例です。\n\n  ```\n  let x = 1. ;\n  ```\n"),
+            ["- 例です。", "```\n  let x = 1. ;\n  ```"]
+        );
+        // 行をまたぐ項目でも、2 文目の Atom は先頭の空白を含まない。
+        assert_eq!(
+            sentences("- 一文目。\n  二文目。\n"),
+            ["- 一文目。", "二文目。"]
+        );
+    }
+
+    #[test]
+    fn a_quoted_list_item_keeps_its_quote_marker_on_the_first_sentence() {
+        assert_eq!(
+            split("> - 一文目。二文目。\n"),
+            [
+                ("> - 一文目。", AtomKind::ListItem),
+                ("二文目。", AtomKind::ListItem),
+            ]
+        );
     }
 
     #[test]

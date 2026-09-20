@@ -4,7 +4,7 @@ use pulldown_cmark::Event;
 use ratatui_core::style::Stylize;
 use ratatui_core::text::{Line, Span};
 
-use super::TextWriter;
+use super::{Attr, TextWriter};
 use crate::StyleSheet;
 
 /// Records how an active list item occupies the rendered output.
@@ -55,7 +55,15 @@ where
         // so `-`/`*`/`+` and ordered markers like `7.` or `3)` render as
         // written. Only the indentation (4 columns per nesting level) is
         // the renderer's own layout.
-        let src = self.source.get(self.current_range.start..).unwrap_or("");
+        let item_start = self.current_range.start;
+        let src = self.source.get(item_start..).unwrap_or("");
+        // How much SOURCE the marker span stands for. The default
+        // `event_attr()` would claim the whole item — including its
+        // trailing newline — which makes the marker undecoratable: a
+        // decoration over the item's text can never COVER a range that
+        // runs past it, and the superset rule is all-or-nothing. See
+        // `a_list_marker_is_attributed_to_the_marker_alone`.
+        let mut marker_bytes = 0usize;
         if let Some(last_index) = self.list_indices.last_mut() {
             let span = match last_index {
                 None => {
@@ -64,6 +72,7 @@ where
                         .next()
                         .filter(|c| matches!(c, '-' | '*' | '+'))
                         .unwrap_or('-');
+                    marker_bytes = 1;
                     Span::from(format!("{}{marker} ", " ".repeat(width - 1)))
                 }
                 Some(index) => {
@@ -72,6 +81,7 @@ where
                     let marker = if digits > 0
                         && matches!(src.as_bytes().get(digits), Some(b'.' | b')'))
                     {
+                        marker_bytes = digits + 1;
                         src[..=digits].to_string()
                     } else {
                         // Defensive fallback when the range is unusable:
@@ -82,7 +92,16 @@ where
                 }
             };
             let continuation_width = span.width();
-            self.push_span(span);
+            // Include the one source space after the marker when there is
+            // one, so the range matches what the span draws. Still a
+            // SUPERSET, never exact: the nesting indent is the renderer's
+            // own, and `task_list_marker` may append a checkbox.
+            if src.as_bytes().get(marker_bytes) == Some(&b' ') {
+                marker_bytes += 1;
+            }
+            let attr = (marker_bytes > 0)
+                .then(|| Attr::inexact(item_start..item_start + marker_bytes));
+            self.push_span_with_attr(span, attr.or_else(|| self.event_attr()));
             let marker_span_count = self.text.lines[marker_line].spans.len();
             self.list_items.push(ListItemLayout {
                 marker_line,
@@ -106,6 +125,10 @@ where
         // source-attributed span, whatever the source marker was.
         let unordered_marker_open = matches!(self.list_indices.last(), Some(None))
             && self.text.lines.last().is_some_and(|line| line.spans.len() == 1);
+        // The checkbox's own source range, to widen the marker's
+        // attribution with: the span now draws `- [x] `, so claiming only
+        // `- ` would under-report where it came from.
+        let checkbox_end = self.current_range.end;
         if let Some(line) = self.text.lines.last_mut() {
             if unordered_marker_open {
                 if let Some(first_span) = line.spans.first_mut() {
@@ -113,6 +136,14 @@ where
                     content.push('[');
                     content.push(marker);
                     content.push_str("] ");
+                    if let Some(Some(attr)) = self
+                        .out_attrs
+                        .last_mut()
+                        .and_then(|attrs| attrs.first_mut())
+                    {
+                        attr.range.end = attr.range.end.max(checkbox_end);
+                        attr.exact = false;
+                    }
                     return;
                 }
             }

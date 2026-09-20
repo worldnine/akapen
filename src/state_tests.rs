@@ -6046,6 +6046,104 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
 }
 
 
+/// **A dimmed list item takes its marker down with it** — the whole
+/// chain, in cells: `atomize` → the Atom's range → a `Dim` decoration →
+/// the renderer's attribution of the `*` marker → the terminal buffer.
+///
+/// Three components used to be individually right and off by one byte
+/// together: the Atom stopped before the item's trailing newline, the
+/// marker claimed the item's event range (newline included), and the
+/// superset rule in `decoration.rs` decorates only what a decoration
+/// COVERS. The marker therefore stayed bright under a dimmed item.
+///
+/// Splitting items into sentences made the mismatch structural rather
+/// than off-by-one: the first sentence's Atom stops at the first `。`,
+/// nowhere near the item's end. Anchoring the marker on its OWN bytes is
+/// what makes every case work, so the item below is deliberately a
+/// two-sentence one — the case that only the real fix can pass.
+///
+/// The ranges are not typed in by hand: they come from `atomize`, so a
+/// change on either side of the seam breaks this test.
+#[test]
+fn a_dimmed_list_item_dims_its_marker_too() {
+    use crate::decoration::{Decoration, DecorationKind, DecorationStyles};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.md");
+    let text = "先頭の段落\n\n* 一文目です。二文目です。\n";
+    std::fs::write(&path, text).unwrap();
+
+    // 実際に akapen が使う Atom 列。手で書いた range では、ずれが戻っても
+    // このテストは気づけない。
+    let atoms = semantic_reading::atomize(text);
+    let first_item = atoms
+        .iter()
+        .find(|a| a.kind == semantic_reading::AtomKind::ListItem)
+        .expect("項目が Atom になっている");
+    assert_eq!(
+        &text[first_item.range.clone()],
+        "* 一文目です。",
+        "項目は文へ割れ、マーカーは最初の文に付く"
+    );
+
+    let config = Config {
+        files: vec![path.clone()],
+        send_cmd: None,
+        send_agent: false,
+        reply: false,
+        theme: None,
+        ime: ImeMode::Off,
+        light: None,
+        callback: None,
+        esc_quit: EscQuit::Auto,
+        cursor_anchor: true,
+        fx: false,
+        semantic: None,
+        semantic_cmd: None,
+        decoration_blend: Default::default(),
+        decorations: vec![Decoration {
+            range: first_item.range.clone(),
+            kind: DecorationKind::Dim,
+        }],
+    };
+    let source = Source::load(path).unwrap();
+    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let view = ViewState::render(&source, crate::view_render_width(60), &highlight, Default::default());
+    let styles = DecorationStyles::from_theme(&highlight, Default::default());
+    let mut app = App::new(config, source, highlight, view, false);
+    app.mode = Mode::View;
+    app.gutter_cols = 3;
+    // カーソルは 0 行目。帯は項目の行に触れない（帯の下では Dim を落とす）。
+    assert_eq!(app.view.cursor, 0);
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 16)).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+    let w = buf.area.width as usize;
+    let row = (0..buf.area.height as usize)
+        .find(|&y| (0..w).any(|x| buf.content[y * w + x].symbol() == "*"))
+        .expect("箇条書きの行が画面に出ている");
+    let cell = |x: usize| &buf.content[row * w + x];
+    let marker_x = (0..w).find(|&x| cell(x).symbol() == "*").unwrap();
+    let dimmed_x = (0..w).find(|&x| cell(x).symbol() == "一").unwrap();
+    // 装飾の外。2 文目は別の Atom なので DIM ではない。
+    let plain_x = (0..w).find(|&x| cell(x).symbol() == "二").unwrap();
+
+    let marker = cell(marker_x).style();
+    let dimmed = cell(dimmed_x).style();
+    let plain = cell(plain_x).style();
+
+    let dim_fg = styles.dim_fg(plain.fg);
+    assert_eq!(dimmed.fg, Some(dim_fg), "本文は DIM に落ちる");
+    assert_eq!(
+        marker.fg,
+        Some(dim_fg),
+        "マーカーも同じ色まで沈む — 置き去りにされない"
+    );
+    assert_ne!(plain.fg, Some(dim_fg), "装飾していない 2 文目は明るいまま");
+    assert_eq!(marker.bg, plain.bg, "Dim は背景に触らない");
+}
+
 /// The Semantic Reading Layer, drawn into a real (test) terminal:
 /// `--semantic` through `Config` → `App` → `Provider` → `policy::decorate`
 /// → `draw` → cells. The milestone of this phase — **one source line

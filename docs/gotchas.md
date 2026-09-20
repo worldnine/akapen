@@ -122,6 +122,38 @@ span ごとに装飾リストを線形走査します。手で数個〜 demo の
 **確認したこと**: `src/decoration.rs::decorate_row` と `push_exact` が
 装飾リストをそのまま線形に走査していること（ソートも二分探索も無い）。
 
+### 上位集合 attribution の range の「広さ」は当たり判定そのもの
+
+`src/decoration.rs` の交差ルールは「上位集合 span は、装飾 range が
+**完全に覆うときだけ**装飾する」です。にじみ出しを防ぐために意図的に
+厳格にしてあります。その裏返しとして、**attribution の range が 1 バイト
+でも広すぎると、その span は永久に装飾されません。**
+
+実際に起きた例: リストマーカーの span を `Start(Item)` の event range
+（pulldown-cmark は**末尾の改行込み**で返す）に紐づけ、一方 `atomize` は
+Atom に末尾改行を含めない。`0..26` は `0..27` を覆えないので、DIM にした
+項目のマーカーだけ明るく残りました。3 つのコンポーネント（atomize /
+renderer / decoration.rs）はそれぞれ単独では正しく、噛み合わせだけが
+1 バイトずれていた、という形です。
+
+いまは renderer がマーカーをマーカー自身のバイトに紐づけるので直って
+います（`a_list_marker_is_attributed_to_the_marker_alone`）。**注意が要る
+のは一般則のほう**です:
+
+- 合成 span を新しく attribution するときは、**その span が本当に由来する
+  いちばん狭い source** を指すこと。`event_attr()`（event の range 丸ごと）
+  を既定にすると、ブロック要素では広すぎます
+- 装飾を出す側（Atom / 検索ヒット / diff）と attribution を付ける側は
+  別のファイルにいます。**片方だけを見て「直った」と判断しないこと。**
+  実機か TestBackend のセル比較で、装飾が実際に乗ることを確かめる
+
+**確認したこと**: `src/decoration.rs::decorate_row` の
+`d.range.start <= attr.range.start && d.range.end >= attr.range.end`
+（上位集合の枝）と、`third_party/tui-markdown/src/renderer/list.rs::start_item`
+がマーカーに付ける range。セル比較は
+`src/state_tests.rs::a_dimmed_list_item_dims_its_marker_too`
+（マーカーの前景色が本文と同じ dim 色まで沈むこと）。
+
 ### exact を増やすときは `line_of` が変わらないことを確認する
 
 attribution の `exact` は「span のテキストが `source[range]` そのもの」と

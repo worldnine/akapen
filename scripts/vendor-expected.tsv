@@ -17,9 +17,9 @@ src/renderer/heading.rs	11
 src/renderer/html.rs	8
 src/renderer/image.rs	53
 src/renderer/link.rs	2
-src/renderer/list.rs	133
+src/renderer/list.rs	168
 src/renderer/math.rs	17
-src/renderer/mod.rs	683
+src/renderer/mod.rs	738
 src/renderer/snapshots/tui_markdown__renderer__code__tests__highlighted_code_with_indentation-2.snap	0
 src/renderer/snapshots/tui_markdown__renderer__code__tests__highlighted_code_with_indentation.snap	0
 src/renderer/snapshots/tui_markdown__renderer__code__tests__highlighted_code-2.snap	0
