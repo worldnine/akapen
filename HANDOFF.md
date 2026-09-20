@@ -1,3 +1,63 @@
+# HANDOFF: 整合性チェックで残った未解決（設計判断が要るもの）
+
+設計書（`docs/semantic-reading-layer.md` / `docs/range-attribution-plan.md`）と
+実装・HANDOFF を突き合わせた結果、**誤記ではなく設計判断が要る**ため直さずに
+残した項目。ここは記録であって決定ではない。
+
+## 1. MVP の `cache` と `incremental reanalysis` が未実装
+
+設計書「MVP / 含める」は
+
+```text
+cache
+incremental reanalysis
+```
+
+を挙げているが、どちらも無い。現状は文書が入れ替わるたびに**全文を再解析**
+する（`App::reanalyze_semantics`）。`RELOAD_DEBOUNCE`（300ms）はファイル変更の
+debounce であって解析結果の cache ではない。設計書「編集時: 変更箇所周辺のみ
+再解析し、大きな構造変更時のみ全文再解析」も未実装。
+
+`Provider` の doc は「キャッシュや debounce、rate limit は実装側が内部に持てば
+よい」と委譲しているので**責務の置き場としては設計どおり**だが、置くべきものが
+まだ誰も持っていない。設計書と実装の最大の乖離はここ。
+
+## 2. Phase 番号が 2 つの意味で使われている
+
+`docs/range-attribution-plan.md` の Phase 3 は **Render Mapping 強化**である。
+一方このファイルの「HANDOFF: Semantic Reading Layer を akapen へ配線（**Phase 3**
+/ Reading Budget）」は別物を指している。さらに同じファイル内の「それは Phase 3 の
+領分」（DIM にしたリスト項目のマーカーの話）は設計書どおりの意味で使っている。
+**同じラベルが 2 つの意味を持っている**ので、片方を改名するか番号を外すべき。
+
+## 3. `--semantic-cmd` が `confidence` / `probabilities` を捨てている
+
+Jev の 3 つの primitive のうち Choice と Score は `probabilities` と
+`confidence` を返す（`docs/jev.md`）。現行プロトコルは `units` しか受け取らず、
+Jev の最大の特徴である校正済み確率を使っていない。
+
+`protocol.rs` は「未知のフィールドは拒否していない」ので**拡張は可能**であり、
+「Jev の出力を全部使う」と書いている箇所はどこにも無いので**矛盾はしていない**。
+ただし設計書「Jev に精密な順位スコアを出させない」との線引きが要る
+（順位付けに使うなら方針に反するが、判定のガードに使うなら反しない）。
+`docs/jev.md` に未解決として記録済み。
+
+## 4. 文書化済みの逸脱（確認のみ、対応不要）
+
+- `policy.rs`: 設計書の同一 Tier 内 rule のうち **context preservation は MVP に
+  含めていない**。モジュール doc で自己申告済み
+- `protocol.rs`: 設計書は Jev への問いを 2 段階（境界判定 → Tier 付け）に分けて
+  いるが、ワイヤは 1 往復。意図的である旨が doc に明記済み
+- 設計書「Jev に判断させないもの」（syntax parsing / Atom 生成 / source position
+  管理 / ファイル変更検知 / debounce / Reading Budget / Reading Policy / 表示状態
+  への変換 / renderer）は、`cache` と `rate limit` を除きすべてローカル側にある
+- 設計書「Budget 変更では Jev を呼ばない」は
+  `moving_the_budget_calls_neither_the_provider_nor_the_renderer` で構造ごと固定
+  されている。逆向き（文書が変われば呼ぶ）も
+  `the_provider_is_re_asked_when_the_document_itself_changes` にある
+
+---
+
 # HANDOFF: 外部コマンド委譲の Provider（`--semantic-cmd`）
 
 ## 何を作ったか
@@ -683,6 +743,13 @@ READ 100% → 30%
 ```
 
 ## 継ぎ目は `src/semantic.rs` と `App` の 4 フィールド
+
+> **追補**: 以下の `semantic_provider` / `provider_from_config` は
+> `--semantic-cmd` の追加で `semantic_source` / `source_from_config` に
+> 改名された（このファイル上部の「HANDOFF: 外部コマンド委譲の Provider」
+> を参照）。**このセクションの grep 手順はフィールド名をそのまま
+> 読み替えること** — 現行は `grep -rn 'semantic_source' src/`。構造の
+> 見立て（App が provider を叩くのは 1 箇所）は今も成り立っている。
 
 ```rust
 App {

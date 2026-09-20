@@ -4,7 +4,9 @@
 //! 部分は、すべてこの trait の内側に閉じ込める。外側（[`crate::policy`]）は
 //! 決定論的な純粋計算だけになる。
 //!
-//! 現時点の実装は [`FixtureProvider`] のみで、Jev はまだ繋がない。
+//! **この crate 内の**実装は [`FixtureProvider`] のみである。akapen 側には
+//! 外部コマンドへ委譲する `CommandProvider`（`--semantic-cmd`）があり、
+//! Jev はそのコマンドの先に繋がる。Jev 自体を呼ぶ実装はまだ無い。
 
 use std::path::Path;
 
@@ -13,7 +15,9 @@ use crate::document::SemanticDocument;
 
 /// source テキストから [`SemanticDocument`] を得る手段。
 ///
-/// 将来の Jev provider はこの trait を実装して差し替える。そのため
+/// Jev を直に叩く provider を書くならこの trait を実装して差し替える
+/// （現状は akapen の `CommandProvider` 越しに外部スクリプトが担う）。
+/// そのため
 ///
 /// - 入力は source テキストそのもの（Document Profile も summary tree も
 ///   前段に置かない。設計書の「現在の文書そのものを見て判断させる」）
