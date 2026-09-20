@@ -198,7 +198,7 @@ Convention: herdr integration code lives in the tool's own repo as a plugin (`he
 
 ## Design
 
-Design invariants and their rationale live in [docs/internals.md](docs/internals.md) (Japanese).
+Design invariants and their rationale live in [docs/internals.md](docs/internals.md) (Japanese). [docs/README.md](docs/README.md) indexes every document — which one to read, who it is for, and whether it still describes the current code. Before changing anything, read [docs/gotchas.md](docs/gotchas.md): the places that break quietly when you touch them.
 
 - Rust + [ratatui](https://ratatui.rs) 0.30. The event loop drains bursts (up to 64 events per frame) before drawing once — wheel-scroll storms stay smooth even on 70k-line files.
 - view mode converts markdown to ratatui `Text` via a vendored, instrumented copy of tui-markdown that preserves source-line attribution, then wraps it with the same width logic as source mode. Cursor positions map exactly between modes.
