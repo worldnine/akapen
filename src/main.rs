@@ -107,6 +107,12 @@ fn main() -> Result<()> {
                  \x20 --semantic <file> paint the Semantic Reading Layer from a\n\
                  \x20                   semantic-reading annotation (JSON); the READ\n\
                  \x20                   budget is -/+ by 1 and </> by 10 in the view\n\
+                 \x20 --semantic-cmd <cmd> get that annotation from a command instead:\n\
+                 \x20                   akapen writes version/source/atoms JSON to\n\
+                 \x20                   its stdin and reads version/units back (atom\n\
+                 \x20                   INDICES, never ranges). Runs off the UI thread;\n\
+                 \x20                   see examples/semantic/annotate-doc.py.\n\
+                 \x20                   Exclusive with --semantic\n\
                  \x20 --mark-blend <f>  how far the MARKED background is lifted off\n\
                  \x20                   the page, 0.0..1.0 (default 0.22)\n\
                  \x20 --dim-blend <f>   how far a DIM foreground is moved toward the\n\
@@ -339,10 +345,12 @@ fn run(config: Config) -> Result<()> {
         sources.push(Source::load(f.clone())?);
     }
 
-    // The Semantic Reading Layer's provider (`--semantic`). Resolved
-    // BEFORE the terminal enters raw mode, so a broken fixture is an
-    // ordinary command-line error instead of a TUI that paints nothing.
-    let semantic_provider = crate::semantic::provider_from_config(&config)?;
+    // The Semantic Reading Layer's source (`--semantic` / `--semantic-cmd`).
+    // Resolved BEFORE the terminal enters raw mode, so a broken fixture is
+    // an ordinary command-line error instead of a TUI that paints nothing.
+    // `--semantic-cmd` is NOT run here — it runs once a document is on
+    // screen, from its own thread.
+    let semantic_source = crate::semantic::source_from_config(&config)?;
 
     let mut terminal = NoBlinkBackend::init()?;
     // From here on the terminal is in raw mode + alternate screen; the
@@ -426,7 +434,7 @@ fn run(config: Config) -> Result<()> {
     app.histories = histories;
     app.snapshot_cache = snapshot_cache;
     app.file_states = file_states;
-    app.semantic_provider = semantic_provider;
+    app.set_semantic_source(semantic_source);
     activate_first_file(&mut app);
     // The first document is on screen now: ask the provider about it.
     // (`activate_first_file` is what puts `app.source` in place.)
@@ -641,6 +649,13 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
         expire_pending_chord(app);
         render_history_when_settled(app);
         expire_history_ghosts(app);
+        // Collect any finished `--semantic-cmd` analysis. This is the
+        // whole of the asynchrony: the worker thread does the waiting,
+        // and the loop picks the answer up on its next turn — so a
+        // command that takes 30 seconds costs one `try_recv` per tick
+        // and never a frame. Placed before the draw so an answer that
+        // landed this tick is painted this tick.
+        app.poll_semantic_analysis();
         draw_frame(terminal, app)?;
         // The hardware cursor never becomes visible: the session runs on
         // [`NoBlinkBackend`], whose show_cursor is a no-op, so the
@@ -2789,6 +2804,12 @@ fn active_review_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
 /// line rather than toasted — the point of a 1 % step is that you hold
 /// the key, and a toast per step would strobe.
 fn adjust_reading_budget(app: &mut App, delta: i16) {
+    if app.semantic_doc.is_none() && app.semantic_inflight.is_some() {
+        // `--semantic-cmd` の答え待ち。まだ無いのは事実だが「使えない」
+        // とは違う — 数秒後には来る。
+        app.flash("解析中…");
+        return;
+    }
     if app.semantic_doc.is_none() {
         // Only reachable WITH `--semantic`: the layer was asked for and
         // the provider refused this document (a fixture belonging to
@@ -5393,6 +5414,7 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5443,6 +5465,7 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5507,6 +5530,7 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5654,6 +5678,7 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5696,6 +5721,7 @@ mod mouse_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5834,6 +5860,7 @@ mod mouse_view_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

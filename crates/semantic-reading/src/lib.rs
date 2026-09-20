@@ -60,13 +60,17 @@
 //! Jev（意味判断を行う LLM）が関わるのは [`Provider`] の内側だけで、
 //! 一度 [`SemanticDocument`] が得られたあとの `100% -> 70% -> 30%` という
 //! Budget 操作は [`policy::decorate`] だけで完結する純粋ローカル計算である。
-//! この crate 自体はまだ Jev を呼ばない（[`FixtureProvider`] のみ）。
+//! この crate 自体は Jev を呼ばない（[`FixtureProvider`] のみ）。
 //!
 //! ```text
 //! Jev analysis -> SemanticDocument   (遅い / 非決定的 / Provider の内側)
 //!              -> Reading Policy     (速い / 決定論的 / 純粋関数)
 //!              -> Atom Decorations
 //! ```
+//!
+//! 外へ判断を委ねるときの話し方は [`protocol`] にある — **Atom を渡して
+//! Unit を受け取る**だけで、位置（range）は一度も外へ出ない。だから
+//! 外側が壊れた位置を返して文書の違う場所を装飾する事故が起きえない。
 //!
 //! # 使い方
 //!
@@ -106,6 +110,7 @@ mod display;
 mod document;
 mod error;
 pub mod policy;
+pub mod protocol;
 mod provider;
 mod unit;
 
@@ -114,6 +119,7 @@ pub use atomize::atomize;
 pub use display::DisplayState;
 pub use document::SemanticDocument;
 pub use error::Error;
+pub use protocol::{AnalyzeRequest, AnalyzeResponse};
 pub use provider::{FixtureProvider, Provider};
 pub use unit::{ReadingTier, Relation, SemanticUnit, UnitId};
 

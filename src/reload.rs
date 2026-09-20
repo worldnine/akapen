@@ -462,6 +462,7 @@ mod handoff_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -522,6 +523,7 @@ mod handoff_tests {
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

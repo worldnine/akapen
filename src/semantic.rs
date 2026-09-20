@@ -14,19 +14,19 @@
 //!
 //! # App が provider を叩くのは 1 箇所
 //!
-//! akapen が [`App::semantic_provider`] へ `analyze` を投げるのは
+//! akapen が [`App::semantic_source`] へ `analyze` を投げるのは
 //! [`App::reanalyze_semantics`] だけで、そこは**文書が入れ替わったとき**に
 //! しか呼ばれない（起動 / reload / タイムマシン / ファイル切替）。
 //!
 //! ```text
-//! grep -rn 'semantic_provider' src/
+//! grep -rn 'semantic_source' src/
 //! ```
 //!
 //! で全部出る — フィールドを `.analyze` で触っているのは
-//! `reanalyze_semantics` の 1 行だけで、残りは宣言・初期化・代入と
-//! [`App::semantic_enabled`] の `is_some()` である。[`DigestChecked`] の
-//! `analyze` も inner へ委譲するが、それは Provider チェーンの**内側**で
-//! あって App からは 1 回の呼び出しに見える。
+//! `reanalyze_semantics` の 2 本の腕（同期・非同期）だけで、残りは宣言・
+//! 初期化・代入と [`App::semantic_enabled`] の `is_some()` である。
+//! [`DigestChecked`] の `analyze` も inner へ委譲するが、それは Provider
+//! チェーンの**内側**であって App からは 1 回の呼び出しに見える。
 //!
 //! Budget を動かす [`App::nudge_reading_budget`] からは
 //! [`decorations_for`] にしか到達せず、その中身は `policy::decorate` の
@@ -36,16 +36,31 @@
 //!
 //! を、コメントではなく呼び出しグラフで満たしている。
 //!
-//! [`App::semantic_provider`]: crate::app::App::semantic_provider
+//! # 供給源は 2 つ、違いは「いつ答えるか」だけ
+//!
+//! | フラグ | 供給源 | 呼び方 | range の出どころ |
+//! | ------ | ------ | ------ | ---------------- |
+//! | `--semantic <fixture.json>` | [`FixtureProvider`] | 同期 | fixture（だから [`DigestChecked`] で照合する） |
+//! | `--semantic-cmd <コマンド>` | [`CommandProvider`] | 別スレッド | akapen の [`atomize`]（照合不要） |
+//!
+//! 外部コマンドは 10〜30 秒かかりうるので、同期に呼ぶと
+//! `event::poll` で回っているイベントループが止まる。だから
+//! [`SemanticSource`] が型として 2 つを分けている — 「遅いかもしれない」は
+//! [`Provider`] の中には隠せない（`analyze` の戻り値が「あとで」を
+//! 表現できない）。
+//!
+//! [`App::semantic_source`]: crate::app::App::semantic_source
 //! [`App::semantic_enabled`]: crate::app::App::semantic_enabled
 //! [`App::reanalyze_semantics`]: crate::app::App::reanalyze_semantics
 //! [`App::nudge_reading_budget`]: crate::app::App::nudge_reading_budget
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use semantic_reading::{
-    DisplayState, Error as SemanticError, FixtureProvider, Provider, SemanticDocument, policy,
+    AnalyzeRequest, AnalyzeResponse, DisplayState, Error as SemanticError, FixtureProvider,
+    Provider, SemanticDocument, atomize, policy,
 };
 use sha2::{Digest, Sha256};
 
@@ -118,24 +133,155 @@ pub(crate) fn load_fixture(path: &Path) -> Result<Box<dyn Provider>> {
     Ok(Box::new(DigestChecked::new(provider)))
 }
 
-/// 引数から provider を 1 つ決める。**provider の選択はここだけ**。
+// ---------------------------------------------------------------------------
+// `--semantic-cmd` — 意味判断を外部コマンドへ委譲する
+// ---------------------------------------------------------------------------
+
+/// 外部コマンドが答えを返すまで待つ上限。**設定値はここ 1 箇所**。
 ///
-/// `App` が持つのは [`Box<dyn Provider>`] であって具体型ではないので、
-/// 供給源を増やすのはこの `match` に腕を 1 本足す作業になる。予定されて
-/// いるのは `--semantic-cmd '<コマンド>'`（文書を stdin へ渡し、
-/// `SemanticDocument` の JSON を stdout から受け取る外部コマンド）で、
-/// akapen 本体に HTTP クライアントも非同期ランタイムも入れずに Jev を
-/// 繋ぐための口である。その `CommandProvider` もここへ刺さる。
+/// 寛容に取ってある: この先に繋がるのは LLM を呼ぶスクリプトで、10〜30 秒
+/// かかることが普通にある。短く切ると「動いているのに切られる」になり、
+/// ユーザーには「壊れている」と区別がつかない。UI が固まらないのは
+/// タイムアウトではなく別スレッドで走らせていること
+/// （[`crate::app::App::reanalyze_semantics`]）が担保している。
+pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 応答として受け取る stdout の上限。超えたら応答を捨てる
+/// （途中で切れた JSON を「壊れた応答」として報告するより、
+/// 「大きすぎる」と言う方が直せる）。
+const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
+
+/// `--semantic-cmd <コマンド>`: 意味判断だけを外部プロセスへ委譲する
+/// [`Provider`]。
+///
+/// akapen に HTTP クライアントも async ランタイムも入れないための口である。
+/// reqwest / tokio を足すと、この機能を使わない全ユーザーにコンパイル時間・
+/// バイナリサイズ・依存監査のコストが乗る。代わりに `--send-cmd` と同じ
+/// 作法で外部コマンドへ渡す — API キー管理が akapen の責務から外れ、
+/// ユーザーが既に持っている CLI（`claude -p`、`llm`、自作スクリプト、
+/// ローカル LLM）がそのまま使える。
+///
+/// ```text
+/// stdin   {"version":1,"source":"…","atoms":[{"index":0,…}]}
+/// stdout  {"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"}]}
+/// ```
+///
+/// # コマンドは range を返さない
+///
+/// **Atom 生成は akapen 側**で行う（設計書「Jev に判断させないもの:
+/// Atom生成 / source position管理」）。コマンドが返すのは Atom の
+/// **添字だけ**で、[`SemanticDocument`] は akapen 自身の [`atomize`] の
+/// 出力と、返ってきた Unit の構造から組み立てられる。
+///
+/// したがって**不正な range が原理的に生まれない**。外部コマンドが壊れた
+/// 位置を返して文書の違う場所を装飾する、という事故が起きえない。
+/// `--semantic`（fixture）経路で必要だった [`DigestChecked`] の
+/// `source_sha256` 照合も、**この経路では不要**である — range が akapen
+/// 自身のものである以上、「別の文書のもの」ということがありえない。
+///
+/// ここで `source_sha256` を**書き込んで**いるのは照合のためではなく
+/// 素性の記録のためで、「この注釈はどの文書に対するものか」を後から
+/// 言えるようにしてある（[`crate::app::App::reanalyze_semantics`] が、
+/// 文書が変わったときに古い注釈を落とす判断に使う）。
+///
+/// # 検証
+///
+/// 返ってきた JSON は全項目を検証し、1 つでも失敗したら**レスポンス全体を
+/// 捨てる**（[`AnalyzeResponse::into_document`]）。部分適用はしない。
+#[derive(Clone, Debug)]
+pub(crate) struct CommandProvider {
+    cmd: String,
+    timeout: Duration,
+}
+
+impl CommandProvider {
+    /// 既定のタイムアウト（[`COMMAND_TIMEOUT`]）でコマンドを包む。
+    pub(crate) fn new(cmd: impl Into<String>) -> Self {
+        Self {
+            cmd: cmd.into(),
+            timeout: COMMAND_TIMEOUT,
+        }
+    }
+
+    /// タイムアウトを指定して作る（テスト用。本番経路は
+    /// [`CommandProvider::new`] だけを通る）。
+    #[cfg(test)]
+    pub(crate) fn with_timeout(cmd: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            cmd: cmd.into(),
+            timeout,
+        }
+    }
+
+    /// 委譲先のコマンド行（テスト用）。
+    #[cfg(test)]
+    pub(crate) fn command(&self) -> &str {
+        &self.cmd
+    }
+}
+
+impl Provider for CommandProvider {
+    /// 文書を Atom へ割り、それを渡して Unit を受け取る 1 往復。
+    ///
+    /// **この関数は数十秒かかりうる。** 呼ぶのはワーカースレッドだけで、
+    /// イベントループから直接呼んではならない
+    /// （[`crate::app::App::reanalyze_semantics`]）。
+    fn analyze(&self, source: &str) -> semantic_reading::Result<SemanticDocument> {
+        let atoms = atomize(source);
+        let request = AnalyzeRequest::new(source, &atoms).to_json()?;
+        let stdout = crate::export::run_capturing(
+            "--semantic-cmd",
+            &self.cmd,
+            &request,
+            self.timeout,
+            RESPONSE_LIMIT,
+        )
+        .map_err(|e| SemanticError::Provider(format!("{e:#}")))?;
+        let mut document = AnalyzeResponse::from_json(&stdout)?.into_document(atoms)?;
+        // 素性の記録（照合のためではない — 上のドキュメント参照）。
+        document.source_sha256 = Some(source_digest(source));
+        Ok(document)
+    }
+}
+
+/// 意味判断の供給源。**違いは「いつ答えるか」だけ**で、どちらも
+/// [`Provider`] である。
+///
+/// この区別が型に出ているのは、App がそれに応じて**呼び方**を変えねば
+/// ならないからである。fixture はその場で答えるので同期でよい。外部
+/// コマンドは 10〜30 秒かかりうるので、同じ扱いをすると UI が固まる。
+/// 「遅いかもしれない」を [`Provider`] の中に隠すことはできない —
+/// `analyze` の戻り値は `Result<SemanticDocument>` であって「あとで」を
+/// 表現できないからである。
+pub(crate) enum SemanticSource {
+    /// `--semantic <fixture.json>`: 即座に答えが出る。その場で呼ぶ。
+    Inline(Box<dyn Provider>),
+    /// `--semantic-cmd <コマンド>`: 外部プロセス。別スレッドで走らせ、
+    /// 結果は mpsc で受ける。
+    Command(CommandProvider),
+}
+
+/// 引数から供給源を 1 つ決める。**供給源の選択はここだけ**。
+///
+/// `App` が持つのは [`SemanticSource`] であって具体型ではないので、
+/// 供給源を増やすのはこの `match` に腕を 1 本足す作業になる。
+///
+/// `--semantic` と `--semantic-cmd` は排他で、両立は
+/// [`crate::config::Config::parse`] が弾いている（ここへは来ない）。
 ///
 /// `Ok(None)` は「この層は存在しない」。そのとき akapen は改修前と
 /// **完全に同じ**挙動になる — READ の読み出しも、Budget のキーも、
 /// `?` ヘルプの行も、警告の 1 つも出ない（[`App::semantic_enabled`]）。
 ///
 /// [`App::semantic_enabled`]: crate::app::App::semantic_enabled
-pub(crate) fn provider_from_config(config: &crate::config::Config) -> Result<Option<Box<dyn Provider>>> {
-    match config.semantic.as_deref() {
-        Some(path) => Ok(Some(load_fixture(path)?)),
-        None => Ok(None),
+pub(crate) fn source_from_config(
+    config: &crate::config::Config,
+) -> Result<Option<SemanticSource>> {
+    match (config.semantic.as_deref(), config.semantic_cmd.as_deref()) {
+        (Some(path), _) => Ok(Some(SemanticSource::Inline(load_fixture(path)?))),
+        // コマンドは起動時には走らせない（文書が乗ってから、別スレッドで）。
+        (None, Some(cmd)) => Ok(Some(SemanticSource::Command(CommandProvider::new(cmd)))),
+        (None, None) => Ok(None),
     }
 }
 
@@ -171,6 +317,22 @@ mod tests {
 
     const DEMO_MD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.md");
     const DEMO_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.json");
+    /// 参照実装。LLM を呼ばない決定論的なスクリプトで、API キー無しで
+    /// パイプライン全体を端から端まで動かせることがその存在理由である。
+    const ANNOTATE_PY: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/annotate-doc.py");
+
+    /// 参照実装を起動するコマンド行。exec bit に依存せず `python3` を
+    /// 明示する（配布物のパーミッションでテストが落ちないように）。
+    fn reference_command() -> String {
+        format!("python3 '{ANNOTATE_PY}'")
+    }
+
+    /// `sh -c` で走る、決まった JSON を返すだけのコマンド。
+    fn echoing(json: &str) -> CommandProvider {
+        // シングルクォートを含まない JSON だけを渡す前提（テスト内で管理）。
+        CommandProvider::new(format!("cat >/dev/null; printf %s '{json}'"))
+    }
 
     fn demo() -> (String, SemanticDocument) {
         let source = std::fs::read_to_string(DEMO_MD).unwrap();
@@ -464,5 +626,222 @@ mod tests {
             decorations_for(&document, 200),
             decorations_for(&document, 100)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // `--semantic-cmd` — 外部コマンド委譲
+    // -----------------------------------------------------------------
+
+    /// プロトコルのラウンドトリップ: 参照実装を**実際に起動して**、
+    /// 文書 → Atom → コマンド → Unit → SemanticDocument を一周させる。
+    #[test]
+    fn the_reference_script_speaks_the_protocol_end_to_end() {
+        let source = std::fs::read_to_string(DEMO_MD).unwrap();
+        let document = CommandProvider::new(reference_command())
+            .analyze(&source)
+            .expect("参照実装が応答すること");
+
+        // **range は akapen 自身のもの。** コマンドは index しか返して
+        // いないので、Atom 列は atomize の出力と 1 バイトも違わない。
+        assert_eq!(document.atoms, atomize(&source));
+        assert!(!document.atoms.is_empty());
+        // 参照実装は Atom 1 つにつき Unit 1 つを返す。
+        assert_eq!(document.units.len(), document.atoms.len());
+        assert!(document.validate().is_ok());
+
+        // 見出しは ESSENTIAL、その直後は SUPPORTING という素朴な規則が
+        // 実際に効いている（no-op ではない）。
+        let tier_of = |atom: usize| {
+            document
+                .units
+                .iter()
+                .find(|unit| unit.atoms.contains(&AtomIndex(atom)))
+                .unwrap()
+                .reading_tier
+        };
+        assert_eq!(document.atoms[0].kind, AtomKind::Heading);
+        assert_eq!(tier_of(0), ReadingTier::Essential);
+        assert_eq!(tier_of(1), ReadingTier::Supporting);
+        assert!(
+            document.units.iter().any(|u| u.reading_tier == ReadingTier::Detail),
+            "DETAIL も出る"
+        );
+        // Budget を動かすと実際に表示状態が変わる（層として生きている）。
+        let at_100 = decorations_for(&document, 100);
+        let at_30 = decorations_for(&document, 30);
+        assert_ne!(at_100, at_30);
+        assert!(at_30.iter().any(|d| d.kind == DecorationKind::Dim));
+    }
+
+    /// 組み立てた文書は、解析した source の素性を名乗る。
+    ///
+    /// 照合のためではない（range は akapen 自身のものなので「別の文書の
+    /// もの」がありえない）。「この注釈はどの文書に対するものか」を
+    /// App が後から言えるようにするための記録である。
+    #[test]
+    fn the_command_result_is_stamped_with_the_source_it_read() {
+        let source = "# 見出し\n\n本文です。\n";
+        let document = echoing(r#"{"version":1,"units":[]}"#)
+            .analyze(source)
+            .unwrap();
+        assert_eq!(document.source_digest(), Some(source_digest(source).as_str()));
+    }
+
+    /// 不正な range が**原理的に**生まれないこと。
+    ///
+    /// コマンドが range を返してきても（プロトコルに無いフィールドとして
+    /// 無視される）、文書の位置は akapen の atomize が出したものだけになる。
+    #[test]
+    fn a_command_cannot_move_a_range_even_if_it_tries() {
+        let source = "# 見出し\n\n本文です。\n";
+        let document = echoing(
+            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential","range":{"start":9999,"end":99999}}]}"#,
+        )
+        .analyze(source)
+        .unwrap();
+        assert_eq!(document.atoms, atomize(source));
+        // 文書の外を指す range は 1 つも無い。
+        for atom in &document.atoms {
+            assert!(source.get(atom.range.clone()).is_some(), "{:?}", atom.range);
+        }
+    }
+
+    /// 検証に 1 つでも失敗したらレスポンス全体を捨てる — 外部コマンド
+    /// 経路でも同じこと。詳細な場合分けは crate 側
+    /// （`semantic_reading::protocol`）で網羅している。
+    #[test]
+    fn a_broken_response_is_refused_whole() {
+        let source = "# 見出し\n\n本文です。\n";
+        let cases = [
+            // 範囲外の atom index
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[99],"reading_tier":"essential"}]}"#, "範囲外"),
+            // id の重複
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"},{"id":"u1","atoms":[1],"reading_tier":"detail"}]}"#, "重複"),
+            // 未知の tier
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"urgent"}]}"#, "JSON"),
+            // 存在しない relation 先
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"detail","relations":[{"redundant_with":"u9"}]}]}"#, "未知"),
+            // version 不一致
+            (r#"{"version":7,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"}]}"#, "version 7"),
+            // JSON ですらない
+            ("not json", "JSON"),
+        ];
+        for (response, expected) in cases {
+            let err = echoing(response)
+                .analyze(source)
+                .expect_err("{response} は拒否されること");
+            assert!(
+                err.to_string().contains(expected),
+                "{response} => {err}"
+            );
+        }
+    }
+
+    /// 異常終了: stderr の内容を持って帰る（toast が理由を言えるように）。
+    /// クラッシュはしない。
+    #[test]
+    fn a_command_that_fails_reports_its_stderr_without_crashing() {
+        let err = CommandProvider::new(
+            "cat >/dev/null; echo 'starting' >&2; echo 'ANTHROPIC_API_KEY is not set' >&2; exit 2",
+        )
+        .analyze("# a\n")
+        .expect_err("異常終了は Err");
+        let message = err.to_string();
+        assert!(message.contains("--semantic-cmd"), "{message}");
+        assert!(message.contains("ANTHROPIC_API_KEY is not set"), "{message}");
+        // 「文書が不正」ではない — 答えを得られなかっただけ。
+        assert!(!message.contains("document が不正"), "{message}");
+    }
+
+    /// 起動できないコマンドでも落ちない。
+    #[test]
+    fn a_command_that_does_not_exist_is_an_error_not_a_panic() {
+        let err = CommandProvider::new("akapen-no-such-command-exists-here")
+            .analyze("# a\n")
+            .expect_err("起動できなければ Err");
+        assert!(err.to_string().contains("--semantic-cmd"), "{err}");
+    }
+
+    /// タイムアウト: 返ってこないコマンドは殺して Err にする。
+    ///
+    /// 既定は [`COMMAND_TIMEOUT`]（60 秒）だが、テストは注入した短い値で
+    /// 同じ経路を通す（export.rs の子プロセステストと同じ流儀）。
+    #[test]
+    fn a_command_that_never_answers_is_killed_and_reported() {
+        let start = std::time::Instant::now();
+        let err = CommandProvider::with_timeout("sleep 30", Duration::from_millis(200))
+            .analyze("# a\n")
+            .expect_err("返ってこなければ Err");
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "待たずに殺すこと（{:?} かかった）",
+            start.elapsed()
+        );
+        // 既定値は寛容 — LLM は 10〜30 秒かかる。
+        assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(60));
+    }
+
+    /// 空の文書でも一周する（Atom 0 個・Unit 0 個）。
+    #[test]
+    fn an_empty_document_round_trips_as_an_empty_annotation() {
+        let document = CommandProvider::new(reference_command()).analyze("").unwrap();
+        assert!(document.atoms.is_empty());
+        assert!(document.units.is_empty());
+        assert!(decorations_for(&document, 50).is_empty());
+    }
+
+    /// `--semantic-cmd` から Command の供給源が立ち、`--semantic` からは
+    /// Inline が立つ。**供給源の選択はこの関数だけ**。
+    #[test]
+    fn the_config_chooses_exactly_one_source() {
+        let base = |semantic: Option<&str>, cmd: Option<&str>| {
+            let mut args: Vec<String> = vec!["x.md".into()];
+            if let Some(path) = semantic {
+                args.push("--semantic".into());
+                args.push(path.into());
+            }
+            if let Some(cmd) = cmd {
+                args.push("--semantic-cmd".into());
+                args.push(cmd.into());
+            }
+            match crate::config::Config::parse(args).unwrap() {
+                crate::config::Action::Run(config) => config,
+                _ => unreachable!(),
+            }
+        };
+
+        assert!(source_from_config(&base(None, None)).unwrap().is_none());
+
+        let command = source_from_config(&base(None, Some("annotate-doc")))
+            .unwrap()
+            .expect("--semantic-cmd で層が立つ");
+        match command {
+            SemanticSource::Command(provider) => assert_eq!(provider.command(), "annotate-doc"),
+            SemanticSource::Inline(_) => panic!("Command のはず"),
+        }
+
+        let fixture = source_from_config(&base(Some(DEMO_JSON), None))
+            .unwrap()
+            .expect("--semantic で層が立つ");
+        assert!(matches!(fixture, SemanticSource::Inline(_)));
+    }
+
+    /// 起動時にコマンドは走らない。存在しないコマンドを渡しても
+    /// `source_from_config` は成功する — 走るのは文書が乗ってからで、
+    /// そこで初めて失敗を報告する。
+    #[test]
+    fn the_command_is_not_run_while_resolving_the_source() {
+        let config = match crate::config::Config::parse(
+            ["x.md", "--semantic-cmd", "exit 1"]
+                .iter()
+                .map(|s| s.to_string()),
+        )
+        .unwrap()
+        {
+            crate::config::Action::Run(config) => config,
+            _ => unreachable!(),
+        };
+        assert!(source_from_config(&config).unwrap().is_some());
     }
 }

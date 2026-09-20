@@ -57,6 +57,85 @@ SUPPORTING → ESSENTIAL。目安:
 | 73%  | それに加えて REDUNDANT な「補足」。CONTEXT はまだ全部残る |
 | 30%  | ESSENTIAL 3 つと、いちばん短い SUPPORTING 以外すべて     |
 
+## 外部コマンドに判断させる（`--semantic-cmd`）
+
+fixture ではなく、**外部コマンドに意味判断を返させる**経路もある。
+
+```sh
+akapen examples/semantic/demo.md \
+  --semantic-cmd "python3 examples/semantic/annotate-doc.py"
+```
+
+`annotate-doc.py` は LLM を呼ばない**決定論的な参照実装**である。目的は
+API キー無しでパイプライン全体を端から端まで動かせることで、判断そのものは
+
+```text
+見出し               -> ESSENTIAL
+見出し直後の 1 Atom  -> SUPPORTING
+それ以外             -> DETAIL
+直前の文と語が重なる -> REDUNDANT_WITH
+```
+
+という素朴なヒューリスティクスでしかない。実際の Jev（LLM）のプロンプト
+設計はここには無い。
+
+### プロトコル
+
+akapen → コマンド（stdin、JSON 1 行）:
+
+```json
+{"version": 1,
+ "source": "<文書全文>",
+ "atoms": [{"index": 0, "kind": "heading", "range": {"start": 0, "end": 12}, "text": "## 見出し"}]}
+```
+
+コマンド → akapen（stdout、JSON）:
+
+```json
+{"version": 1,
+ "units": [{"id": "u1", "atoms": [0], "reading_tier": "essential", "relations": []}]}
+```
+
+**コマンドは range を返さない。** 返すのは Atom の index だけで、
+`SemanticDocument` は akapen 自身の `atomize()` の出力から組み立てられる。
+だから外部コマンドが壊れた位置を返して文書の違う場所を装飾する、という
+事故が**原理的に起きない**。`--semantic` 経路で必要だった
+`source_sha256` の照合も、この経路では要らない。
+
+返ってきた JSON は全項目を検証し、1 つでも失敗したら**レスポンス全体を
+捨てる**（部分適用は何もしないより悪い）。弾かれるのは version 不一致 /
+範囲外の atom index / unit id の重複 / 存在しない relation 先 / 未知の
+reading_tier / 未知の relation。同じ Atom を複数の Unit が主張した場合は
+**先勝ち**で、後の Unit からその index を落とす。
+
+### 非同期
+
+コマンドは**別スレッド**で走る。LLM 呼び出しは 10〜30 秒かかることがあり、
+同期実行すると UI が固まるため。解析中はステータス行が
+
+```text
+L1/42 · READ 100% · 解析中…
+```
+
+になる。解析中に文書が変わったら、古い方の結果は**世代カウンタで破棄**
+される（変わった後の文書に変わる前の判定を当てない）。タイムアウトは
+60 秒。異常終了・タイムアウト・JSON 不正はステータス行に理由を出すだけで、
+直前の注釈（同じ文書のもの）は保持される。
+
+`--semantic` と `--semantic-cmd` は排他である。
+
+### 自分のコマンドを書く
+
+stdin から 1 つの JSON を読み、stdout へ 1 つの JSON を書くだけでよい。
+
+```sh
+akapen doc.md --semantic-cmd 'claude -p "$(cat prompts/annotate.md)"'
+akapen doc.md --semantic-cmd 'llm -m local-model --system "..."'
+akapen doc.md --semantic-cmd './my-annotator.ts'
+```
+
+API キーの管理は akapen の責務ではない — コマンドが自分の環境で解決する。
+
 ## ファイル
 
 | ファイル              | 中身                                                     |
@@ -64,6 +143,7 @@ SUPPORTING → ESSENTIAL。目安:
 | `demo.md`             | 日本語の設計メモ（AI が書きがちな、長く重複する文書の見本） |
 | `demo.json`           | それに対する `semantic-reading` の `SemanticDocument`     |
 | `build-demo-json.py`  | `demo.json` の生成スクリプト                              |
+| `annotate-doc.py`     | `--semantic-cmd` プロトコルの参照実装（LLM 不使用）       |
 
 **byte range は手で書かない。** `demo.md` を編集したら必ず
 

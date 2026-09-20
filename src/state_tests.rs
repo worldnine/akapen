@@ -77,6 +77,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -122,6 +123,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -822,6 +824,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -873,6 +876,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -911,6 +915,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -1888,6 +1893,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2003,6 +2009,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2303,6 +2310,7 @@ use crate::comment::Selection;
             cursor_anchor: true,
             fx: true,
             semantic: None,
+            semantic_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5970,6 +5978,7 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         cursor_anchor: true,
         fx: false,
         semantic: None,
+        semantic_cmd: None,
         decoration_blend: Default::default(),
         decorations: vec![
             mark_at("重要", DecorationKind::SemanticMark),
@@ -6067,6 +6076,7 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
         cursor_anchor: true,
         fx: false,
         semantic: Some(fixture.clone()),
+        semantic_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -6078,7 +6088,7 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
     let mut app = App::new(config, source, highlight, view, false);
     // Config → provider の分岐 → App という実経路を通す。provider を
     // 増やすときに触るのはこの関数の match 1 つだけ、という約束の固定。
-    app.semantic_provider = crate::semantic::provider_from_config(&app.config).unwrap();
+    app.set_semantic_source(crate::semantic::source_from_config(&app.config).unwrap());
     assert!(app.semantic_enabled(), "--semantic から provider が立つ");
     app.reanalyze_semantics();
     app.mode = Mode::View;
@@ -6164,10 +6174,12 @@ fn moving_the_budget_calls_neither_the_provider_nor_the_renderer() {
 
     let mut app = make_app(3, Mode::View);
     let calls = Rc::new(Cell::new(0usize));
-    app.semantic_provider = Some(Box::new(CountingProvider {
-        document,
-        calls: Rc::clone(&calls),
-    }));
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Inline(Box::new(
+        CountingProvider {
+            document,
+            calls: Rc::clone(&calls),
+        },
+    ))));
     // 文書が用意された時点で 1 回。以降は文書が変わるまで呼ばれない。
     app.reanalyze_semantics();
     assert_eq!(calls.get(), 1);
@@ -6254,7 +6266,9 @@ fn the_provider_is_re_asked_when_the_document_itself_changes() {
 
     let (mut app, dir) = make_app_keep(4, Mode::View);
     let calls = Rc::new(Cell::new(0usize));
-    app.semantic_provider = Some(Box::new(CountingProvider { calls: Rc::clone(&calls) }));
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Inline(Box::new(
+        CountingProvider { calls: Rc::clone(&calls) },
+    ))));
     app.reanalyze_semantics();
     assert_eq!(calls.get(), 1);
     let before = app.semantic_decorations.clone();
@@ -6284,7 +6298,9 @@ fn a_fixture_for_another_document_is_refused_and_leaves_no_decorations() {
     ));
     // make_app の文書は "line1..line3" — demo.md ではない。
     let mut app = make_app(3, Mode::View);
-    app.semantic_provider = Some(crate::semantic::load_fixture(&fixture).unwrap());
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Inline(
+        crate::semantic::load_fixture(&fixture).unwrap(),
+    )));
     app.reanalyze_semantics();
 
     assert!(app.semantic_doc.is_none(), "別文書の fixture は拒否される");
@@ -6316,10 +6332,10 @@ fn without_semantic_the_budget_keys_are_not_bound_at_all() {
     let mut app = make_app(6, Mode::View);
     assert!(app.config.semantic.is_none());
     assert!(
-        crate::semantic::provider_from_config(&app.config)
+        crate::semantic::source_from_config(&app.config)
             .unwrap()
             .is_none(),
-        "--semantic が無ければ provider も立たない"
+        "--semantic が無ければ供給源も立たない"
     );
     assert!(!app.semantic_enabled(), "provider が無い = 層が無い");
 
@@ -6381,7 +6397,9 @@ fn the_read_readout_appears_only_with_a_semantic_document() {
         "/examples/semantic/demo.md"
     ));
     app.source = Source::load(path).unwrap();
-    app.semantic_provider = Some(crate::semantic::load_fixture(&fixture).unwrap());
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Inline(
+        crate::semantic::load_fixture(&fixture).unwrap(),
+    )));
     app.reanalyze_semantics();
     assert!(app.semantic_doc.is_some());
 
@@ -6397,4 +6415,278 @@ fn the_read_readout_appears_only_with_a_semantic_document() {
             .any(|(label, keys)| *label == "read" && keys.contains("-/+")),
         "? ヘルプに READ の行が出る"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `--semantic-cmd` — 外部コマンドへの委譲（非同期・世代カウンタ）
+// ---------------------------------------------------------------------------
+
+/// 参照実装を起動するコマンド行。
+fn reference_semantic_command() -> String {
+    format!(
+        "python3 '{}'",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/annotate-doc.py")
+    )
+}
+
+/// `--semantic-cmd` を App に挿す（供給源と結果チャネルを同時に用意する
+/// のは `set_semantic_source` の仕事）。
+fn install_semantic_command(app: &mut App, cmd: &str) {
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
+        crate::semantic::CommandProvider::new(cmd),
+    )));
+}
+
+/// 見出しを持つ Markdown を開いた App。参照実装は見出しを ESSENTIAL に
+/// するので、これがあって初めて装飾が出る（見出しの無い文書は全部
+/// DETAIL で、Budget 100 % では誰も装飾されない — それが正しい）。
+fn semantic_markdown_app() -> (App, tempfile::TempDir) {
+    let (mut app, dir) = make_app_keep(3, Mode::View);
+    std::fs::write(
+        dir.path().join("doc.md"),
+        "# 見出し\n\n本文です。二文目です。\n\n## 次の節\n\n詳しい話。\n",
+    )
+    .unwrap();
+    // まだ供給源が無いので、この reload は再解析を起こさない。
+    reload_source(&mut app, false).unwrap();
+    assert!(!app.semantic_enabled());
+    (app, dir)
+}
+
+/// 答えが来るまでポンプを回す。来なければ panic（固まったのと同じなので
+/// テストとしては失敗させたい）。
+fn pump_until_idle(app: &mut App, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while app.semantic_inflight.is_some() {
+        assert!(Instant::now() < deadline, "{what}: 答えが来ない");
+        std::thread::sleep(Duration::from_millis(10));
+        app.poll_semantic_analysis();
+    }
+}
+
+/// 外部コマンド経路が App の高さで一周すること。**UI スレッドは待たない。**
+#[test]
+fn an_external_command_annotates_the_document_without_blocking_the_loop() {
+    let (mut app, _dir) = semantic_markdown_app();
+    install_semantic_command(&mut app, &reference_semantic_command());
+    assert!(app.semantic_enabled(), "--semantic-cmd で層が立つ");
+
+    app.reanalyze_semantics();
+    // 戻ってきた時点ではまだ答えは無い — これが「固まらない」の中身。
+    assert!(app.semantic_doc.is_none(), "解析はまだ走っているだけ");
+    assert_eq!(app.semantic_inflight, Some(1));
+    // ステータス行は黙らずに「解析中」と言う。
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(hints.contains("解析中"), "{hints}");
+    assert!(hints.contains("READ 100%"), "{hints}");
+
+    pump_until_idle(&mut app, "最初の解析");
+    let document = app.semantic_doc.as_ref().expect("注釈が入ること");
+    assert_eq!(
+        document.atoms,
+        semantic_reading::atomize(&app.source.content),
+        "range は akapen 自身の atomize のもの"
+    );
+    assert!(!app.semantic_decorations.is_empty());
+    // 答えが来たら「解析中」は消え、READ の読み出しだけが残る。
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(!hints.contains("解析中"), "{hints}");
+    assert!(hints.contains("READ 100%"), "{hints}");
+}
+
+/// **世代カウンタ**: 解析中に文書が変わったら、古い方の答えは捨てる。
+///
+/// 捨てないと、変わった後の文書に変わる前の判定を当てて違う場所を装飾する。
+/// しかも静かに壊れる — 古い range も文字境界には載るので panic もせず、
+/// 見た目も「ただの誤判定」に見える。だからここで番号で固定する。
+///
+/// スレッドを使わない決定論的な形にしてある: ワーカーが送るのと同じ
+/// メッセージを直接流し込み、ポンプに通す。
+#[test]
+fn an_answer_from_an_older_generation_is_thrown_away() {
+    use semantic_reading::{Atom, AtomIndex, AtomKind, ReadingTier, SemanticDocument, SemanticUnit};
+
+    let mut app = make_app(3, Mode::View);
+    // 走らせないコマンド（このテストで子プロセスは 1 つも起動しない）。
+    install_semantic_command(&mut app, "true");
+    let tx = app.semantic_results.as_ref().unwrap().tx.clone();
+
+    // 文書 A の注釈（世代 1）。
+    let document_a = |text: &str| {
+        let mut doc = SemanticDocument::new(
+            vec![Atom::new(0..text.len().min(5), AtomKind::Sentence)],
+            vec![SemanticUnit::new("old", [AtomIndex(0)], ReadingTier::Essential)],
+        );
+        doc.source_sha256 = Some(crate::semantic::source_digest(text));
+        doc
+    };
+
+    app.semantic_generation = 1;
+    app.semantic_inflight = Some(1);
+    // 文書が入れ替わった（reload.rs がファイル変更を検知した相当）。
+    app.semantic_generation = 2;
+    app.semantic_inflight = Some(2);
+
+    // 遅れて届いた世代 1 の答え。
+    tx.send(crate::app::AnalysisMessage {
+        generation: 1,
+        result: Ok(document_a(&app.source.content)),
+    })
+    .unwrap();
+    app.poll_semantic_analysis();
+
+    assert!(
+        app.semantic_doc.is_none(),
+        "古い世代の答えは、たとえ中身が正しくても当てない"
+    );
+    assert!(app.semantic_decorations.is_empty());
+    assert_eq!(
+        app.semantic_inflight,
+        Some(2),
+        "古い答えが、走っている新しい解析まで終わったことにしない"
+    );
+
+    // 現行世代の答えは受け取る。
+    tx.send(crate::app::AnalysisMessage {
+        generation: 2,
+        result: Ok(document_a(&app.source.content)),
+    })
+    .unwrap();
+    app.poll_semantic_analysis();
+    assert!(app.semantic_doc.is_some(), "現行世代は当てる");
+    assert_eq!(app.semantic_inflight, None, "走っているものは無くなった");
+}
+
+/// 世代カウンタを本物のスレッドで。遅い解析と速い解析を同時に走らせ、
+/// **後から始まった方が勝つ**こと。
+///
+/// 参照実装ではなく、入力に "SLOW" を含むときだけ眠るシェル 1 行を使う。
+/// どちらの答えも必ず届くので、順序の問題だけが残る形になっている。
+#[test]
+fn a_slow_analysis_started_first_never_overwrites_a_newer_one() {
+    let (mut app, dir) = make_app_keep(3, Mode::View);
+    // 応答は「Atom 0 番だけの Unit 1 つ」。id で、どちらの答えかが分かる。
+    let cmd = "input=$(cat); \
+        case \"$input\" in *SLOWDOWN*) sleep 1; id=slow ;; *) id=fast ;; esac; \
+        printf '{\"version\":1,\"units\":[{\"id\":\"%s\",\"atoms\":[0],\"reading_tier\":\"essential\"}]}' \"$id\"";
+    install_semantic_command(&mut app, cmd);
+
+    // 文書 A（遅い方）。
+    std::fs::write(dir.path().join("doc.md"), "SLOWDOWN\n\nold text\n").unwrap();
+    reload_source(&mut app, false).unwrap();
+    assert_eq!(app.semantic_inflight, Some(1));
+
+    // まだ答えが来ないうちに文書 B（速い方）へ入れ替わる。
+    std::fs::write(dir.path().join("doc.md"), "new text here\n").unwrap();
+    reload_source(&mut app, false).unwrap();
+    assert_eq!(app.semantic_inflight, Some(2));
+
+    // 速い方（世代 2）が先に返る。
+    pump_until_idle(&mut app, "速い方の解析");
+    let winner = |app: &App| {
+        app.semantic_doc
+            .as_ref()
+            .map(|doc| doc.units[0].id.to_string())
+    };
+    assert_eq!(winner(&app).as_deref(), Some("fast"));
+
+    // 遅い方（世代 1）は 1 秒後に届く。届いても**何も変えない**こと —
+    // 2.5 秒ぶん回し続けて、その間ずっと注釈が動かないことを見る。
+    let until = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(25));
+        app.poll_semantic_analysis();
+        assert_eq!(
+            winner(&app).as_deref(),
+            Some("fast"),
+            "遅れて届いた古い世代の答えが、新しい注釈を上書きした"
+        );
+        assert_eq!(app.semantic_inflight, None);
+    }
+    assert_eq!(
+        app.semantic_doc.as_ref().unwrap().source_digest(),
+        Some(crate::semantic::source_digest(&app.source.content).as_str()),
+        "注釈は画面に出ている文書のもの"
+    );
+}
+
+/// 失敗しても落ちず、**同じ文書に対する直前の注釈は保持する**。
+#[test]
+fn a_failing_command_keeps_the_annotation_it_already_has() {
+    let (mut app, _dir) = semantic_markdown_app();
+    // まず成功させて注釈を入れる。
+    install_semantic_command(&mut app, &reference_semantic_command());
+    app.reanalyze_semantics();
+    pump_until_idle(&mut app, "最初の解析");
+    let good = app.semantic_doc.clone().expect("注釈が入ること");
+    let decorations = app.semantic_decorations.clone();
+    assert!(!decorations.is_empty());
+
+    // 以降は失敗するコマンドに差し替え、同じ文書で再解析する。
+    // （供給源を差し替えてもチャネルは作り直される。）
+    install_semantic_command(&mut app, "cat >/dev/null; echo 'rate limited' >&2; exit 1");
+    app.semantic_doc = Some(good.clone());
+    app.refresh_semantic_decorations();
+    app.reanalyze_semantics();
+    pump_until_idle(&mut app, "失敗する解析");
+
+    assert_eq!(
+        app.semantic_doc.as_ref(),
+        Some(&good),
+        "同じ文書の注釈は失敗で消えない"
+    );
+    assert_eq!(app.semantic_decorations, decorations);
+    let (message, _, is_error) = app.status.clone().expect("理由が出ること");
+    assert!(is_error, "黙って握りつぶさない");
+    assert!(message.contains("rate limited"), "{message}");
+    assert!(app.running, "落ちない");
+}
+
+/// 一方で、**文書が変わったら古い注釈は即座に落とす**。
+///
+/// 解析が終わるまでのあいだ古い range を新しい文書に当て続けるのは、
+/// まさに世代カウンタが防いでいるのと同じ事故である。
+#[test]
+fn a_new_document_drops_the_old_annotation_before_the_answer_arrives() {
+    let (mut app, dir) = semantic_markdown_app();
+    install_semantic_command(&mut app, &reference_semantic_command());
+    app.reanalyze_semantics();
+    pump_until_idle(&mut app, "最初の解析");
+    assert!(app.semantic_doc.is_some());
+    assert!(!app.semantic_decorations.is_empty());
+
+    // 文書が外から書き換わる → 再解析が始まる。
+    std::fs::write(
+        dir.path().join("doc.md"),
+        "# まったく別の文書\n\nこれは前の文書ではない。\n",
+    )
+    .unwrap();
+    reload_source(&mut app, false).unwrap();
+
+    assert!(
+        app.semantic_doc.is_none(),
+        "前の文書の注釈は、答えを待つあいだも当てない"
+    );
+    assert!(app.semantic_decorations.is_empty());
+
+    // 新しい答えが来れば、新しい文書に対する注釈になる。
+    pump_until_idle(&mut app, "2 回目の解析");
+    let document = app.semantic_doc.as_ref().unwrap();
+    assert_eq!(document.atoms, semantic_reading::atomize(&app.source.content));
+}
+
+/// 解析中に Budget キーを押しても「使えません」ではなく「解析中」と言う
+/// （数秒後には使えるので、断り方が違う）。
+#[test]
+fn the_budget_keys_say_analyzing_while_an_answer_is_on_its_way() {
+    let mut app = make_app(3, Mode::View);
+    install_semantic_command(&mut app, "sleep 5");
+    app.reanalyze_semantics();
+    assert!(app.semantic_doc.is_none());
+
+    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
+    let (message, _, is_error) = app.status.clone().expect("何か言うこと");
+    assert!(message.contains("解析中"), "{message}");
+    assert!(!is_error, "エラーではない — 待てば使える");
+    assert_eq!(app.reading_budget, 100, "まだ動かない");
 }

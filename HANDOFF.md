@@ -1,3 +1,212 @@
+# HANDOFF: 外部コマンド委譲の Provider（`--semantic-cmd`）
+
+## 何を作ったか
+
+```sh
+akapen doc.md --semantic-cmd 'python3 examples/semantic/annotate-doc.py'
+```
+
+意味判断だけを外部プロセスへ委譲する経路。**将来 Jev（LLM）を繋ぐ口**で、
+このタスクでは LLM は呼んでいない。
+
+akapen に HTTP クライアントも async ランタイムも**入れていない**。
+reqwest / tokio を足すと、この機能を使わない全ユーザーにコンパイル時間・
+バイナリサイズ・依存監査のコストが乗る。代わりに `--send-cmd` と同じ作法で
+外部コマンドへ渡す — API キー管理が akapen の責務から外れ、ユーザーが
+既に持っている CLI（`claude -p`、`llm`、自作スクリプト、ローカル LLM）が
+そのまま使える。
+
+## 1. プロトコル — Atom を渡して Unit を受け取る
+
+`crates/semantic-reading/src/protocol.rs`（新規）。
+
+akapen → コマンド（stdin、JSON 1 行）:
+
+```json
+{"version": 1,
+ "source": "<文書全文>",
+ "atoms": [{"index": 0, "kind": "heading", "range": {"start": 0, "end": 12}, "text": "## 見出し"}]}
+```
+
+コマンド → akapen（stdout、JSON）:
+
+```json
+{"version": 1,
+ "units": [{"id": "u1", "atoms": [0], "reading_tier": "essential", "relations": []}]}
+```
+
+**Atom 生成は akapen 側でやる**（設計書「Jev に判断させないもの: Atom生成 /
+source position管理」）。コマンドが返すのは Atom の **index だけ**で、
+`SemanticDocument` は akapen 自身の `atomize()` の出力と、返ってきた Unit の
+構造から組み立てられる。
+
+### これが効いている理由: 不正な range が原理的に生まれない
+
+位置を一度も外へ渡して受け取り直していないので、外部コマンドが壊れた位置を
+返して文書の違う場所を装飾する事故が**起きえない**。`--semantic`（fixture）
+経路で必要だった `source_sha256` の照合も、この経路では**不要**である。
+
+`a_command_cannot_move_a_range_even_if_it_tries` で固定した — コマンドが
+`"range": {"start": 9999, ...}` を返しても、文書の位置は atomize の出力の
+ままになる（プロトコルに無いフィールドとして読まれない）。
+
+### ワイヤは 1 往復にした
+
+設計書は Jev への問いを 2 段階（境界判定 → Tier 付け）に分けているが、
+**ワイヤプロトコルは一括（atoms in, units out）**にした。外部コマンドが
+内部で LLM を 2 回呼ぶのは自由で、akapen のプロトコルが LLM 側の段取りを
+規定すべきではない。将来キャッシュのために段階を分ける必要が出たら
+`stage` を足せる（未知のフィールドは拒否していない）。
+
+### 検証 — 全項目、1 つでも駄目ならレスポンス全体を捨てる
+
+部分適用は何もしないより悪い（「半分だけ意味が付いた文書」は誤読を誘う）。
+
+| 弾く条件 | どこで |
+| -------- | ------ |
+| `version` 不一致 | `AnalyzeResponse::into_document` |
+| 未知の `reading_tier` | serde |
+| 未知の `relation` | serde |
+| atom index が範囲外 | `SemanticDocument::validate` |
+| unit id の重複 | 同上 |
+| relation の参照先が存在しない / 自分自身 | 同上 |
+| stdout が 16 MiB 超 | `export::run_capturing` |
+
+**同じ Atom を複数の Unit が主張したら先勝ち。** 後の Unit からその index を
+落とす（`policy` の attention コストが二重計上にならない／文書順の最初の判断が
+残る）。全部落とされて空になった Unit は**消さない** — 他の Unit の
+`redundant_with` の参照先として生きている可能性があり、消すと参照が宙に浮いて
+レスポンス全体が捨てられることになる。
+
+## 2. 非同期実行 — 世代カウンタ
+
+イベントループは `event::poll(Duration::from_millis(tick))` のポーリングなので、
+10〜30 秒かかる呼び出しを同期実行すると UI が固まる。
+
+```text
+reanalyze_semantics
+   ├ Inline(fixture)   -> その場で analyze（従来どおり）
+   └ Command(cmd)      -> thread::spawn + mpsc::Sender
+                          世代 N を付けて送る
+イベントループ毎 tick -> App::poll_semantic_analysis（try_recv）
+                          世代 N == 現在の世代 なら適用、違えば捨てる
+```
+
+- `App::semantic_generation` — `reanalyze_semantics` のたびに +1
+- `App::semantic_inflight: Option<u64>` — 走っている解析の世代（`解析中…` 表示）
+- `App::semantic_results: Option<AnalysisChannel>` — 送受信端をセッション中
+  持ち続ける。世代は**チャネルではなくメッセージに載せている**: 複数の解析が
+  同時に飛びうるし、先に聞いた方が先に答えるとは限らない
+
+**世代を入れていないと静かに壊れる。** 解析中に `reload.rs` がファイル変更を
+検知して再解析を始めたとき、古い方の答えは「もう画面に無いテキスト」の
+バイト位置を指している。当てても range は文字境界に載るので panic もせず、
+見た目も「ただの誤判定」に見える。だから番号で落とす。テストは
+`an_answer_from_an_older_generation_is_thrown_away`（決定論的・スレッド無し）と
+`a_slow_analysis_started_first_never_overwrites_a_newer_one`（実スレッド）の 2 本。
+
+### 古い注釈をいつ捨てるか
+
+タスクの要求は「失敗時は直前の注釈を保持」だが、**文書が変わっていたら保持は
+誤り**である（変わった後の文書に変わる前の判定を当てることになる）。
+
+そこで `App::drop_stale_annotation` を再解析の入口に置いた。注釈が名乗っている
+`source_sha256` が画面の文書と違えば、答えを待つ前に落とす。同じ文書なら残す。
+これで両方が成り立つ:
+
+- 異常終了 / タイムアウト / JSON 不正 → 理由を `flash_err`、**同じ文書の注釈は保持**
+- 文書が入れ替わった → 古い注釈は**即座に落とす**（解析中も当てない）
+
+`CommandProvider::analyze` が結果に `source_sha256` を**書き込んで**いるのは
+この判断のためで、照合（別文書の拒否）のためではない。この経路では range が
+akapen 自身のものなので「別の文書のもの」がありえない。
+
+### タイムアウト
+
+`semantic::COMMAND_TIMEOUT = 60s`。**設定値はここ 1 箇所**。寛容にしたのは、
+この先に繋がるのが LLM を呼ぶスクリプトだから — 短く切ると「動いているのに
+切られる」になり、ユーザーには「壊れている」と区別がつかない。UI が固まらない
+ことはタイムアウトではなく別スレッドが担保している。
+
+## 3. 子プロセスの実行は `export.rs` を再利用した
+
+`pipe_and_wait` を `run_child`（stdout を返す）へ一般化し、`run_capturing` を
+足した。2 つ目の実装を書かなかったのは、LLM ラッパースクリプトが普通にやる
+4 つの事故が**すでにそこで解決済み**だから:
+
+- stdin を読まない子（非ブロッキング書き込み）
+- 子の exit 後もパイプを掴んでいる孫プロセス
+- パイプバッファを超える出力の洪水
+- 返ってこない子（デッドライン + kill）
+
+`Capture` に上限と `truncated` を足し、tail だけ要る既存経路は 64 KiB、
+応答を**解析する** `--semantic-cmd` は 16 MiB を渡して、切り詰めが起きたら
+エラーにする（切れた JSON を「壊れた応答」と報告するより直せる）。
+
+## 4. 参照実装（LLM 不使用）
+
+`examples/semantic/annotate-doc.py`。
+
+```text
+見出し               -> ESSENTIAL
+見出し直後の 1 Atom  -> SUPPORTING
+それ以外             -> DETAIL
+直前の文と語が重なる -> REDUNDANT_WITH
+```
+
+目的は**パイプライン全体を API キー無しで端から端まで動かせること**で、
+判断の質ではない。実際の Jev のプロンプト設計は別タスクなのでここには無い。
+統合テストはこのスクリプトを**実際に起動**している。
+
+## 型の形について: なぜ `SemanticSource` という enum か
+
+「遅いかもしれない」を `Provider` の中に隠すことはできない — `analyze` の
+戻り値が `Result<SemanticDocument>` であって「あとで」を表現できないため。
+App は呼び方（同期 / スレッド）を変えねばならず、その分岐は型に出るのが正しい。
+
+```rust
+pub(crate) enum SemanticSource {
+    Inline(Box<dyn Provider>),   // --semantic: その場で答える
+    Command(CommandProvider),    // --semantic-cmd: 別スレッド
+}
+```
+
+`App::semantic_provider` は `App::semantic_source` になった。供給源を増やすのは
+`semantic::source_from_config` の `match` に腕を 1 本足す作業のまま。
+
+## 既知の制限
+
+- **終了時に走っている子プロセスは kill されない。** App が `Child` を持たない
+  設計（`export::run_child` がスレッド内で完結する）なので、`q` 直後に
+  `claude -p` が最大 60 秒だけ孤児として残りうる。実害は小さいが、気になるなら
+  `Child` をチャネル越しに App へ預けて終了時に殺す形にする
+- **失敗したときの理由は stderr の「最後の」非空行**。タスクは「1 行目」と
+  書いていたが、`export.rs` の既存の作法（`Capture::tail`）に合わせた。
+  python の traceback は末尾が理由で、先頭は `Traceback (most recent call last):`
+  でしかないため
+- **UI 文字列 `解析中…` だけが日本語**（他は英語）。タスク本文の字面に合わせた。
+  英語に寄せるなら `chrome.rs` の 1 行
+
+## テスト
+
+全緑。akapen 532（+18） / tui-markdown 173 / semantic-reading 71+4+3+10（+16） /
+doc 7+3（+1）。
+
+| 何を | どこに |
+|------|--------|
+| プロトコルの検証 15 本（先勝ち・空 unit・未知フィールド含む） | `protocol.rs` |
+| `Error::Provider` が「文書が不正」と言わない | `error.rs` |
+| 参照実装を起動するラウンドトリップ | `semantic.rs` |
+| range を動かせないこと / 素性の stamp | 同上 |
+| 異常終了・起動不能・タイムアウト・不正 JSON・version 不一致 | 同上 |
+| `--semantic` / `--semantic-cmd` の排他とパース | `config.rs` |
+| 非同期一周（`解析中…` 表示込み） | `state_tests.rs` |
+| 世代カウンタ（決定論 + 実スレッド） | 同上 |
+| 失敗で注釈を保持 / 文書が変われば落とす | 同上 |
+| 解析中の Budget キーは「解析中」と言う | 同上 |
+
+---
+
 # HANDOFF: MARKED と DIM を実機で見分けられるようにする（見た目の調整）
 
 ## 何が起きていたか

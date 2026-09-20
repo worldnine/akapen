@@ -276,6 +276,34 @@ fn pipe_and_wait(
     text: &str,
     timeout: Duration,
 ) -> Result<()> {
+    run_child(label, cmd, args, text, timeout, CAPTURE_LIMIT).map(|_| ())
+}
+
+/// What a finished child left behind on stdout.
+pub(crate) struct ChildOutput {
+    /// The bytes the child wrote to stdout, capped at the caller's limit.
+    pub(crate) stdout: Vec<u8>,
+    /// Whether the cap dropped anything (the front of the stream). A
+    /// caller that PARSES the output must refuse a truncated capture —
+    /// a clipped JSON document would surface as a syntax error and be
+    /// read as "the command is broken" rather than "it said too much".
+    pub(crate) truncated: bool,
+}
+
+/// The body of [`pipe_and_wait`], with the stdout capture handed back to
+/// the caller.
+///
+/// `stdout_limit` bounds what is kept: the toast paths want only a tail
+/// ([`CAPTURE_LIMIT`]), while `--semantic-cmd` wants the whole JSON
+/// answer and says so with a much larger limit.
+fn run_child(
+    label: &str,
+    cmd: &str,
+    args: &[&str],
+    text: &str,
+    timeout: Duration,
+    stdout_limit: usize,
+) -> Result<ChildOutput> {
     let mut child = Command::new(cmd)
         .args(args)
         .stdin(Stdio::piped())
@@ -302,8 +330,8 @@ fn pipe_and_wait(
     set_nonblocking(stdout.as_raw_fd());
     set_nonblocking(stderr.as_raw_fd());
     let mut stdin = Some(stdin);
-    let mut out = Capture::new(stdout);
-    let mut err = Capture::new(stderr);
+    let mut out = Capture::new(stdout, stdout_limit);
+    let mut err = Capture::new(stderr, CAPTURE_LIMIT);
     let mut bytes = text.as_bytes();
     let deadline = Instant::now() + timeout;
     loop {
@@ -329,7 +357,10 @@ fn pipe_and_wait(
                         None => anyhow!("{label} exited non-zero"),
                     });
                 }
-                return Ok(());
+                return Ok(ChildOutput {
+                    truncated: out.truncated,
+                    stdout: out.buf,
+                });
             }
             None if Instant::now() >= deadline => {
                 // The child outlived its budget (e.g. a send command
@@ -391,13 +422,19 @@ const TAIL_LIMIT: usize = 160;
 struct Capture<R: Read> {
     pipe: Option<R>,
     buf: Vec<u8>,
+    /// How much to keep; anything beyond is dropped from the front.
+    limit: usize,
+    /// Whether the limit ever dropped anything.
+    truncated: bool,
 }
 
 impl<R: Read> Capture<R> {
-    fn new(pipe: R) -> Self {
+    fn new(pipe: R, limit: usize) -> Self {
         Self {
             pipe: Some(pipe),
             buf: Vec::new(),
+            limit,
+            truncated: false,
         }
     }
 
@@ -418,9 +455,10 @@ impl<R: Read> Capture<R> {
                 }
                 Ok(n) => {
                     self.buf.extend_from_slice(&chunk[..n]);
-                    if self.buf.len() > CAPTURE_LIMIT {
-                        let excess = self.buf.len() - CAPTURE_LIMIT;
+                    if self.buf.len() > self.limit {
+                        let excess = self.buf.len() - self.limit;
                         self.buf.drain(..excess);
+                        self.truncated = true;
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => return,
@@ -495,6 +533,34 @@ fn copy_via(cmd: &str, args: &[&str], text: &str) -> Result<()> {
 /// receives the formatted export on stdin.
 pub fn send_command(cmd: &str, text: &str) -> Result<()> {
     pipe_and_wait("send command", "sh", &["-c", cmd], text, CHILD_TIMEOUT)
+}
+
+/// Run a shell command with `text` on its stdin and hand back what it
+/// wrote to stdout — the `--send-cmd` machinery, used for an ANSWER
+/// rather than a delivery.
+///
+/// `--semantic-cmd` runs here (from its own thread, see
+/// [`crate::semantic::CommandProvider`]). The hazards this shares with
+/// the export path are the reason it is not a second implementation: a
+/// child that never reads its stdin, a grandchild holding a pipe open
+/// past the child's exit, an output flood larger than a pipe buffer,
+/// and a child that simply never returns — all four are already solved
+/// in [`run_child`], and all four are things an LLM wrapper script does.
+///
+/// A non-zero exit carries the last non-empty line of stderr (else
+/// stdout) in the error, so the caller's toast can say *why*.
+pub(crate) fn run_capturing(
+    label: &str,
+    cmd: &str,
+    text: &str,
+    timeout: Duration,
+    stdout_limit: usize,
+) -> Result<String> {
+    let out = run_child(label, "sh", &["-c", cmd], text, timeout, stdout_limit)?;
+    if out.truncated {
+        bail!("{label} wrote more than {stdout_limit} bytes to stdout");
+    }
+    String::from_utf8(out.stdout).with_context(|| format!("{label} stdout is not UTF-8"))
 }
 
 // ---------------------------------------------------------------------------

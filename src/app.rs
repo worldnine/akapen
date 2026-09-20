@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::style::Color;
@@ -16,6 +17,7 @@ use crate::highlight::{Highlighter, Span as HiSpan, wrap_spans};
 use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
 use crate::overlay::Overlay;
+use crate::semantic::SemanticSource;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
 use crate::view::{
@@ -87,6 +89,35 @@ pub(crate) struct FileState {
     pub(crate) comparison_changed: HashSet<usize>,
     pub(crate) comparison_deleted_before: HashSet<usize>,
     pub(crate) comparison_deleted_blocks: Vec<DeletedBlock>,
+}
+
+/// One provider answer on its way back to the event loop.
+///
+/// The generation rides ON THE MESSAGE rather than being implied by the
+/// channel it arrived on: several analyses can be in flight at once (a
+/// file that keeps changing while a slow command runs), and the one that
+/// answers first is not necessarily the one that was asked first.
+pub(crate) struct AnalysisMessage {
+    /// The value [`App::semantic_generation`] had when this analysis was
+    /// started. An answer is applied only while that is still current.
+    pub(crate) generation: u64,
+    /// The annotation, or the reason there is none (already rendered to
+    /// a string: the error type does not cross the thread boundary).
+    pub(crate) result: Result<SemanticDocument, String>,
+}
+
+/// The line the worker threads answer on: one channel for the whole
+/// session, cloned per analysis.
+pub(crate) struct AnalysisChannel {
+    pub(crate) tx: Sender<AnalysisMessage>,
+    pub(crate) rx: Receiver<AnalysisMessage>,
+}
+
+impl AnalysisChannel {
+    pub(crate) fn new() -> Self {
+        let (tx, rx) = channel();
+        Self { tx, rx }
+    }
 }
 
 /// The TUI application state.
@@ -339,19 +370,44 @@ pub(crate) struct App {
 
     // ---- Semantic Reading Layer (docs/semantic-reading-layer.md) ----
     /// Where semantic annotation comes from: `--semantic` installs a
-    /// fixture provider, and a future Jev provider drops in here
-    /// unchanged. `None` = the layer is absent entirely.
+    /// fixture provider, `--semantic-cmd` an external command, and a
+    /// future in-process Jev provider drops in beside them unchanged.
+    /// `None` = the layer is absent entirely.
     ///
     /// **This is the seam.** Everything slow and non-deterministic lives
     /// behind it; everything outside is the deterministic local
     /// calculation the layer exists for.
-    pub(crate) semantic_provider: Option<Box<dyn Provider>>,
+    pub(crate) semantic_source: Option<SemanticSource>,
     /// The annotation for the document CURRENTLY on screen, or `None`
-    /// when there is no provider, or the provider refused this document
-    /// (a fixture whose `source_sha256` names another file). Produced
-    /// only by [`App::reanalyze_semantics`] — the one place that asks
-    /// [`App::semantic_provider`] anything.
+    /// when there is no provider, the provider refused this document
+    /// (a fixture whose `source_sha256` names another file), or an
+    /// external command is still running for a document this one does
+    /// not describe. Produced only by [`App::reanalyze_semantics`] and
+    /// [`App::accept_analysis`] — the two places that take a provider's
+    /// answer.
     pub(crate) semantic_doc: Option<SemanticDocument>,
+    /// How many times a document has been handed to the provider. Every
+    /// call to [`App::reanalyze_semantics`] bumps it, and an answer is
+    /// only accepted if it names the CURRENT value.
+    ///
+    /// **This is what keeps a slow answer off a document it never saw.**
+    /// An external command takes tens of seconds; if `reload.rs` notices
+    /// the file changed while one is running, the older answer describes
+    /// byte positions in text that is no longer on screen. Applying it
+    /// would decorate the wrong places — and silently, since every range
+    /// still lands on a character boundary. So it is dropped by number
+    /// rather than by hope ([`App::accept_analysis`]).
+    pub(crate) semantic_generation: u64,
+    /// The generation of the external analysis currently running, if
+    /// any. Drives the `解析中…` readout and is cleared when THAT
+    /// generation's answer (or a newer one) arrives.
+    pub(crate) semantic_inflight: Option<u64>,
+    /// The worker threads' end of the line. Created with the source (so
+    /// a session without `--semantic-cmd` never allocates one) and kept
+    /// for the whole session: each analysis clones the sender, and the
+    /// generation on the message — not the identity of the channel —
+    /// decides whether the answer still applies.
+    pub(crate) semantic_results: Option<AnalysisChannel>,
     /// Reading Budget: "how much attention can I spend on this
     /// document", 1..=100 %, default 100. A pure reading preference, so
     /// it is NOT per-file state — switching files keeps it.
@@ -489,8 +545,11 @@ impl App {
             ui_scrollbar: scrollbar_thumb(light),
             ui_light: light,
             scrollbar_drag: None,
-            semantic_provider: None,
+            semantic_source: None,
             semantic_doc: None,
+            semantic_generation: 0,
+            semantic_inflight: None,
+            semantic_results: None,
             reading_budget: crate::semantic::DEFAULT_BUDGET,
             semantic_decorations: Vec::new(),
         }
@@ -511,7 +570,24 @@ impl App {
     /// session that asked for the layer and got a document the provider
     /// refused keeps its keys and is told why.
     pub(crate) fn semantic_enabled(&self) -> bool {
-        self.semantic_provider.is_some()
+        self.semantic_source.is_some()
+    }
+
+    /// Install a source and, for an external command, the channel its
+    /// worker threads answer on. **The one place the layer is turned on.**
+    pub(crate) fn set_semantic_source(&mut self, source: Option<SemanticSource>) {
+        // Nothing can answer on the old channel any more (its receiving
+        // end goes with it), so a run that was in flight is over as far
+        // as this session is concerned — otherwise the status line would
+        // say 解析中… for the rest of the session.
+        self.semantic_inflight = None;
+        self.semantic_results = match source {
+            // A session without `--semantic-cmd` never allocates a
+            // channel — the layer stays exactly as cheap as before.
+            Some(SemanticSource::Command(_)) => Some(AnalysisChannel::new()),
+            _ => None,
+        };
+        self.semantic_source = source;
     }
 
     /// Re-run the provider over the document now on screen.
@@ -527,23 +603,124 @@ impl App {
     /// another file) drops the annotation and says so, rather than
     /// painting confident nonsense at positions that mean nothing here.
     pub(crate) fn reanalyze_semantics(&mut self) {
-        let analyzed = match self.semantic_provider.as_ref() {
-            Some(provider) => provider.analyze(&self.source.content),
-            None => return,
-        };
-        let refusal = match analyzed {
+        if self.semantic_source.is_none() {
+            return;
+        }
+        // Whatever happens next, the annotation in hand is only still
+        // valid if it describes the text now on screen. An annotation
+        // that names ANOTHER document is dropped here — before the new
+        // answer exists — so nothing paints old judgements onto new
+        // bytes, not even for the seconds an external command runs.
+        self.drop_stale_annotation();
+        self.semantic_generation += 1;
+        let generation = self.semantic_generation;
+        match self.semantic_source.as_ref() {
+            // 即答する provider: その場で呼ぶ。世代は必ず現在値なので
+            // 捨てられることはない（非同期経路と同じ入口を通すためだけ
+            // に番号を付けている）。
+            Some(SemanticSource::Inline(provider)) => {
+                let analyzed = provider.analyze(&self.source.content);
+                self.accept_analysis(AnalysisMessage {
+                    generation,
+                    result: analyzed.map_err(|e| e.to_string()),
+                });
+            }
+            // 外部コマンド: 別スレッドへ。**ここで待たない。** イベント
+            // ループは `event::poll` のポーリングで回っているので、
+            // 10〜30 秒かかる呼び出しをこの場で待つと UI が固まる。
+            Some(SemanticSource::Command(provider)) => {
+                let Some(channel) = self.semantic_results.as_ref() else {
+                    // set_semantic_source を通らずに組み立てられた App。
+                    self.flash_err("--semantic-cmd: 結果を受け取る口がありません");
+                    return;
+                };
+                let provider = provider.clone();
+                let tx = channel.tx.clone();
+                let source = self.source.content.clone();
+                self.semantic_inflight = Some(generation);
+                std::thread::spawn(move || {
+                    let result = provider.analyze(&source).map_err(|e| e.to_string());
+                    // 受け手が先に消えていても（終了・受信側の drop）
+                    // ここは静かに終わる。
+                    let _ = tx.send(AnalysisMessage { generation, result });
+                });
+            }
+            None => unreachable!("checked above"),
+        }
+    }
+
+    /// Drop the annotation in hand when it names a document other than
+    /// the one on screen.
+    ///
+    /// An annotation is a set of byte ranges, and byte ranges only mean
+    /// something against the text they were computed from. Both provider
+    /// kinds stamp the text they read (`source_sha256`), so this is a
+    /// comparison rather than a guess; an annotation that names nothing
+    /// is left alone (a hand-written fixture without the field — the
+    /// same backwards compatibility [`crate::semantic::DigestChecked`]
+    /// keeps).
+    fn drop_stale_annotation(&mut self) {
+        let stale = self.semantic_doc.as_ref().is_some_and(|document| {
+            document.source_digest().is_some_and(|named| {
+                let here = crate::semantic::source_digest(&self.source.content);
+                !named.eq_ignore_ascii_case(&here)
+            })
+        });
+        if stale {
+            self.semantic_doc = None;
+            self.refresh_semantic_decorations();
+        }
+    }
+
+    /// Take one answer from a provider — **or refuse it as stale.**
+    ///
+    /// An answer is applied only when it names the current generation.
+    /// A slower analysis whose document has since been replaced is
+    /// dropped on the floor: its ranges describe text that is no longer
+    /// on screen, and painting them would decorate the wrong places
+    /// without any symptom to notice (every range still lands on a
+    /// character boundary, so nothing panics and nothing looks broken).
+    ///
+    /// A failure keeps whatever annotation survived
+    /// [`App::drop_stale_annotation`] — an external command that
+    /// crashed, timed out or answered nonsense is a reason to say so,
+    /// not a reason to throw away a valid annotation for the document
+    /// the user is looking at.
+    pub(crate) fn accept_analysis(&mut self, message: AnalysisMessage) {
+        if message.generation != self.semantic_generation {
+            return; // 古い世代の答え。捨てる。
+        }
+        if self.semantic_inflight == Some(message.generation) {
+            self.semantic_inflight = None;
+        }
+        let refusal = match message.result {
             Ok(document) => {
                 self.semantic_doc = Some(document);
                 None
             }
-            Err(e) => {
-                self.semantic_doc = None;
-                Some(e.to_string())
-            }
+            Err(e) => Some(e),
         };
         self.refresh_semantic_decorations();
         if let Some(message) = refusal {
             self.flash_err(message);
+        }
+    }
+
+    /// Collect whatever the worker threads have finished. Called once per
+    /// event-loop tick; does nothing (and allocates nothing) without
+    /// `--semantic-cmd`.
+    pub(crate) fn poll_semantic_analysis(&mut self) {
+        loop {
+            let received = match self.semantic_results.as_ref() {
+                Some(channel) => channel.rx.try_recv(),
+                None => return,
+            };
+            match received {
+                Ok(message) => self.accept_analysis(message),
+                // Disconnected は起こらない（送信端を App 自身が持って
+                // いる）が、起きても待ち続けるより抜ける方が正しい。
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
+            }
         }
     }
 

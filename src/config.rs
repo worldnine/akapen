@@ -2,7 +2,8 @@
 //!
 //! `akapen <file...> [--send-cmd <cmd>] [--theme <syntect-theme>]
 //!              [--ime <off|ascii|jp>] [--light|--dark] [--esc-quit <auto|always|never>]
-//!              [--semantic <fixture.json>] [--mark-blend <f>] [--dim-blend <f>]`
+//!              [--semantic <fixture.json> | --semantic-cmd <cmd>]
+//!              [--mark-blend <f>] [--dim-blend <f>]`
 //! Positional arguments are the files to open (one or more). Unknown flags
 //! are ignored (reviewr-style). `--help`/`--version` short-circuit before parsing.
 
@@ -113,6 +114,27 @@ pub struct Config {
     ///
     /// [`SemanticDocument`]: semantic_reading::SemanticDocument
     pub semantic: Option<PathBuf>,
+    /// `--semantic-cmd <cmd>`: delegate the semantic judgement to an
+    /// external command instead of reading a fixture. akapen writes
+    /// `{"version":1,"source":…,"atoms":[…]}` to its stdin and reads
+    /// `{"version":1,"units":[…]}` back from its stdout; the command
+    /// returns Atom INDICES, never ranges, so the positions stay
+    /// akapen's own (see [`crate::semantic::CommandProvider`]).
+    ///
+    /// This is where a Jev (LLM) wrapper plugs in. akapen itself gains
+    /// no HTTP client and no async runtime for it: `--send-cmd`'s
+    /// arrangement — a shell command on stdin/stdout — keeps API-key
+    /// handling out of akapen and lets the user reach for a CLI they
+    /// already have (`claude -p`, `llm`, a local model, a script).
+    ///
+    /// Mutually exclusive with `--semantic`: two annotations for one
+    /// document is not a configuration, it is a question about which
+    /// one wins.
+    ///
+    /// The command is NOT run at startup — it runs once a document is
+    /// on screen, on its own thread, because it may take tens of
+    /// seconds (see [`crate::app::App::reanalyze_semantics`]).
+    pub semantic_cmd: Option<String>,
     /// `--mark-blend <0.0..1.0>` / `--dim-blend <0.0..1.0>`: how strong
     /// the two range-decoration kinds are. `mark` lifts the mark
     /// background off the page toward the text color; `dim` moves a
@@ -205,6 +227,7 @@ impl Config {
         let mut cursor_anchor = true;
         let mut decorations: Vec<Decoration> = Vec::new();
         let mut semantic: Option<PathBuf> = None;
+        let mut semantic_cmd: Option<String> = None;
         let mut decoration_blend = DecorationBlend::default();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -231,6 +254,7 @@ impl Config {
                     }
                 }
                 "--semantic" => semantic = it.next().map(PathBuf::from),
+                "--semantic-cmd" => semantic_cmd = it.next(),
                 "--mark-blend" => {
                     if let Some(v) = it.next() {
                         decoration_blend.mark = parse_blend("--mark-blend", &v)?;
@@ -254,11 +278,17 @@ impl Config {
         }
         if files.is_empty() {
             bail!(
-                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json>]"
+                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>]"
             );
         }
         if send_cmd.is_some() && send_agent {
             bail!("--send-cmd and --send-agent are mutually exclusive");
+        }
+        // Two annotations for one document is not a configuration: the
+        // fixture and the command would each claim the same Atom list,
+        // and whichever lost would still be what the user asked for.
+        if semantic.is_some() && semantic_cmd.is_some() {
+            bail!("--semantic and --semantic-cmd are mutually exclusive");
         }
         Ok(Action::Run(Config {
             files,
@@ -273,6 +303,7 @@ impl Config {
             fx,
             cursor_anchor,
             semantic,
+            semantic_cmd,
             decoration_blend,
             decorations,
         }))
@@ -476,6 +507,54 @@ mod tests {
         // does not exist is not a PARSE error.
         assert!(
             cfg(&parse(&["x.md", "--semantic", "nope.json"])).semantic.is_some()
+        );
+    }
+
+    #[test]
+    fn semantic_cmd_parses_and_defaults_to_off() {
+        assert!(cfg(&parse(&["x.md"])).semantic_cmd.is_none());
+        let action = parse(&["x.md", "--semantic-cmd", "annotate-doc --model fast"]);
+        assert_eq!(
+            cfg(&action).semantic_cmd.as_deref(),
+            Some("annotate-doc --model fast"),
+            "the whole string is one shell command, spaces and all"
+        );
+        assert!(
+            cfg(&action).semantic.is_none(),
+            "--semantic-cmd does not imply a fixture"
+        );
+        // The command is not run here — a nonsense command still parses.
+        assert!(
+            cfg(&parse(&["x.md", "--semantic-cmd", "exit 1"]))
+                .semantic_cmd
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn semantic_and_semantic_cmd_are_mutually_exclusive() {
+        // Two annotations for one document is a question, not a
+        // configuration — same shape as --send-cmd / --send-agent.
+        for args in [
+            vec!["x.md", "--semantic", "demo.json", "--semantic-cmd", "annotate-doc"],
+            vec!["x.md", "--semantic-cmd", "annotate-doc", "--semantic", "demo.json"],
+        ] {
+            let err = match Config::parse(args.iter().map(|s| s.to_string())) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("併用はエラーであるべき: {args:?}"),
+            };
+            assert!(err.contains("--semantic"), "{err}");
+            assert!(err.contains("--semantic-cmd"), "{err}");
+        }
+        // Either one alone is fine.
+        assert!(Config::parse(
+            ["x.md", "--semantic-cmd", "annotate-doc"]
+                .iter()
+                .map(|s| s.to_string())
+        )
+        .is_ok());
+        assert!(
+            Config::parse(["x.md", "--semantic", "d.json"].iter().map(|s| s.to_string())).is_ok()
         );
     }
 
