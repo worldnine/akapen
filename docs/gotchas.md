@@ -171,8 +171,11 @@ exact / 上位集合の一覧は
 拒否されます（装飾が消えるのは正しい。嘘の位置を装飾するよりよい）。
 
 問題は**音**です。拒否メッセージには実 digest の先頭 12 桁が入るため、
-revision ごとに文言が変わります。`is_repeat_error` は**同一文言**のときしか
-BEL を抑制しないので、**過去へ 1 revision 進むたびにビープが鳴ります。**
+**revision ごとに文言が変わります。** `is_repeat_error` は**同一文言**の
+ときしか BEL を抑制しないので、抑制が効きません。**表示した revision ごとに
+ビープが鳴ります**（矢印 1 押しごとではありません — 履歴描画は
+`HISTORY_RENDER_DEBOUNCE` = 300ms で debounce されているので、スクラブ中は
+表示が落ち着いたところで鳴ります）。
 
 直すなら、digest をメッセージから外すか、拒否した digest を覚えて 1 回だけ
 言う形にしてください。判定器を実際に繋ぐときは、revision 単位のキャッシュと
@@ -182,8 +185,11 @@ BEL を抑制しないので、**過去へ 1 revision 進むたびにビープ�
 `SemanticError::Invalid` メッセージが `&expected[..12]` / `&actual[..12]` を
 埋め込んでいること。`src/app.rs::is_repeat_error` が
 `prev == msg && at.elapsed() < STATUS_SECS` でしか抑制しないこと。
-過去 revision の表示が `src/main.rs` の履歴描画から
-`App::reanalyze_semantics` を呼ぶこと。
+拒否 → 音の経路は `App::accept_analysis` の `Err` 腕が `flash_err` を呼び、
+`flash_err` が「新しいエラーのときだけ」BEL（`\x07`）を書いて flush する
+こと。過去 revision の表示が `src/main.rs` の履歴描画から
+`App::reanalyze_semantics` を呼び、その描画自体が
+`HISTORY_RENDER_DEBOUNCE`（300ms、`src/main.rs`）で debounce されていること。
 
 ### 非同期で解析させるなら、答えには世代番号を載せる
 
