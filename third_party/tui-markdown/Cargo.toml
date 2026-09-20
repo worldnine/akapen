@@ -1,20 +1,35 @@
 [package]
 name = "akapen-tui-markdown"
+# THE FORK's own version. It moves whenever this crate's API changes and
+# has nothing to do with the upstream release it was vendored from —
+# that is `package.metadata.vendored-from` below, which is what
+# scripts/check-vendor-diff.sh resolves the upstream source with.
 version = "0.4.0"
 edition = "2021"
 description = "Fork of tui-markdown 0.3.9 instrumented with source-range attribution, for akapen"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/worldnine/akapen"
 
+[package.metadata]
+# The upstream crates.io release this fork was vendored from. Bump this
+# only when actually re-vendoring a newer tui-markdown (and then re-run
+# `./scripts/check-vendor-diff.sh --update`); bumping `version` above
+# must NOT touch it.
+vendored-from = "0.3.9"
+
 # Vendored from crates.io tui-markdown 0.3.9 (MIT OR Apache-2.0).
 # Deviations from upstream:
 # - the document-features optional dep is dropped; the crate's internal
 #   #[cfg(test)] modules are not compiled by akapen's builds.
 # - the renderer threads pulldown-cmark's event byte-ranges through the
-#   span sinks, exposing per-span source-RANGE attribution (`Attr`) via
-#   `from_str_with_options_tagged` (see renderer/mod.rs). A range is
-#   either exact (the span's text is that verbatim slice of the input,
-#   so it can be sub-sliced) or a correct superset.
+#   span sinks, exposing per-span source-RANGE attribution via
+#   `from_str_with_options_tagged` (see renderer/mod.rs). Every rendered
+#   span carries an `Attr { range, exact }`: `exact` means the span's
+#   text IS `input[range]` verbatim, so a consumer can sub-slice it by
+#   byte offset; otherwise the range is a correct superset the span was
+#   produced from (an entity reference, a softbreak, a syntax-
+#   highlighted code line, a table cell). Synthesized spans carry none.
+#   This replaced the earlier per-span source-LINE attribution.
 # - tables are width-adaptive: `Options::max_width` gives the renderer a
 #   layout budget; tables whose natural width does not fit shrink their
 #   columns and wrap cell content instead of overflowing (see

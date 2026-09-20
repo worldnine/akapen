@@ -1,3 +1,114 @@
+# HANDOFF: 追補 — vendor-diff CI の修復（上流バージョンとフォークのバージョンを分離）
+
+（直前の「Phase 1: Range Attribution」エントリの追補）
+
+## 問題
+
+Phase 1 で `third_party/tui-markdown` を 0.3.9 → 0.4.0 に上げたところ、
+CI の `vendor-diff` ジョブ（`./scripts/check-vendor-diff.sh`）が壊れた。
+
+スクリプトは **フォークの `[package] version` を「ベンダリング元の上流
+バージョン」として使っていた**。
+
+```sh
+VER="$(sed -n 's/^version = "\([0-9][^"]*\)"/\1/p' "$VENDORED/Cargo.toml" | head -1)"
+URL="https://static.crates.io/crates/tui-markdown/tui-markdown-$VER.crate"
+```
+
+結果、2 通りに壊れた（どちらもブランチ上で再現済み）:
+
+- 存在しない上流 `tui-markdown-0.4.0.crate` を取りに行って 403 → exit 2
+- `TUI_MARKDOWN_SRC` を渡した場合は、マニフェストのヘッダ（`# tui-markdown 0.3.9`）
+  と `version`（0.4.0）が食い違い、契約1 が落ちて exit 1
+
+両者が等しい前提は 0.3.9 のあいだ偶然成立していただけで、フォークの API が
+変わるたびに再発する。
+
+## 直し方: 上流バージョンをフォークの version から独立させた
+
+`third_party/tui-markdown/Cargo.toml` に上流を明示するフィールドを足した。
+
+```toml
+[package.metadata]
+vendored-from = "0.3.9"
+```
+
+`check-vendor-diff.sh` は 2 つを別々に読む:
+
+- `VER`（= `vendored-from`）… 上流ソースの解決（ダウンロード URL / registry
+  キャッシュ探索）と、マニフェストヘッダの照合。**契約1 はこちらで維持**
+  （再ベンダリング時の取り違え検知として価値があるため、外していない）
+- `FORK_VER`（= `[package] version`）… フォーク自身のバージョン。表示のみ
+
+あわせて直したもの:
+
+- スクリプト冒頭の「検証する3つの契約」「上流ソースの解決順」のコメントに、
+  2 つのバージョンが別物である旨を明記
+- `vendored-from` が無いときのエラーメッセージ（何を書けばよいか示す）
+- 契約1 不一致時のヒント（「フォーク自身のバージョンは無関係」と明示）
+- `--update` が書き出すマニフェストヘッダ。上流バージョンを指すことを明記。
+  **フォークのバージョンは焼き込まない** — `--update` を挟まずにフォークだけ
+  上がると、黙って古い値が残るため
+- Cargo.toml の「Deviations from upstream」に byte range attribution 化を
+  既存3項目と同じ粒度で追記（`Attr { range, exact }` と exactness contract）
+
+### 途中で踏んだバグ
+
+書き直したメッセージの `$FORK_VER）` が、直後の全角括弧まで変数名として
+解釈されて `unbound variable` で落ちた（`--update` を実際に走らせて発覚）。
+日本語メッセージ内の変数展開は `${FORK_VER}` と括ること。同種の箇所が他に
+無いことを正規表現で確認済み。
+
+## マニフェストの再生成
+
+`--update` で再生成。変更行数の合計は **1355 → 1880（+525）**。増分は
+Phase 1 で触った 6 ファイルにきれいに収まっている:
+
+| ファイル | 旧 | 新 | 差 |
+|---|---:|---:|---:|
+| `src/lib.rs` | 13 | 14 | +1 |
+| `src/renderer/code.rs` | 14 | 25 | +11 |
+| `src/renderer/image.rs` | 49 | 53 | +4 |
+| `src/renderer/math.rs` | 16 | 17 | +1 |
+| `src/renderer/mod.rs` | 182 | 683 | +501 |
+| `src/renderer/table.rs` | 886 | 893 | +7 |
+
+内訳（`<` = 上流の行を置き換えた数、`>` = フォーク独自の行）:
+
+- `<` は **全体で +2 だけ**。Phase 1 が新たに書き換えた上流行はこの 2 行のみ:
+  - `code.rs`: `self.push_span(Span::styled(code, style));`（inline code の exact 化）
+  - `image.rs`: `use super::TextWriter;` → `use super::{Attr, TextWriter};`
+- `>` は +523。うち `mod.rs` が +501 で、その内訳は
+  `Attr` 型 + doc + impl 78 行 / attribution ヘルパー 5 本 96 行 /
+  `run_tagged` の exactness 全域検査 16 行 / `exactness_by_markdown_construct`
+  テスト 304 行 = 494 行。残り ~58 行は `LineAttrs` と
+  `from_str_with_options_tagged` の doc 書き換え、フィールド doc、呼び出し側の
+  差し替え。
+
+`list.rs`（`out_lines` → `out_attrs` の改名）は、もともとフォーク独自行だった
+ものを書き換えただけなので変更行数は動かない（133 のまま）。**説明のつかない
+増減は無い。**
+
+## 検証
+
+- `TUI_MARKDOWN_SRC=… ./scripts/check-vendor-diff.sh`: **OK**
+  （上流 0.3.9 / フォーク 0.4.0、28 ファイル、1880 変更行）
+- **CI が実際に通る経路も確認**: `TUI_MARKDOWN_SRC` 無し・registry キャッシュ
+  無しで走らせ、`static.crates.io` から `tui-markdown-0.3.9.crate` を取得して
+  グリーンになることを確認（以前の 403 は 0.4.0 という存在しない URL が原因で、
+  ネットワーク制限ではなかった）。
+- 退行しないことの確認:
+  - マニフェストヘッダを 0.3.8 に細工 → 契約1 が期待どおり exit 1
+  - `vendored-from` を削除 → 何を書けばよいか示して exit 2
+  - フォークの version だけ 0.5.0 に上げる → **グリーンのまま**（今回の根本原因が
+    消えていることの直接確認）
+- `cargo test --locked --workspace`: 459 / 173 / doc 7、全緑
+- `cargo clippy --locked --all-targets`: 警告 0
+- 変更ファイル: `scripts/check-vendor-diff.sh` / `scripts/vendor-expected.tsv` /
+  `third_party/tui-markdown/Cargo.toml` / `HANDOFF.md`
+
+---
+
 # HANDOFF: 内部位置モデルを source line から source byte range へ（Phase 1: Range Attribution）
 
 ## 問題

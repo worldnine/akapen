@@ -1,23 +1,25 @@
 # tui-markdown 0.3.9 — vendored fork の想定差分（変更行数 = 素の diff の '<' + '>' 行数）
+# 上の 0.3.9 は【ベンダリング元の上流バージョン】= third_party/tui-markdown/Cargo.toml
+# の [package.metadata] vendored-from。フォーク自身の [package] version とは別物。
 # このファイルは scripts/check-vendor-diff.sh --update で再生成する。手編集はしないこと。
 # フォークに意図的な変更を加えたら --update で更新し、その diff をレビューすること。
 src/code_theme.rs	0
 src/code_theme/fixtures/custom.tmTheme	0
 src/code_theme/fixtures/invalid.tmTheme	0
-src/lib.rs	13
+src/lib.rs	14
 src/options.rs	19
 src/renderer/blockquote.rs	6
-src/renderer/code.rs	14
+src/renderer/code.rs	25
 src/renderer/definition_list.rs	8
 src/renderer/footnote.rs	6
 src/renderer/formatting.rs	2
 src/renderer/heading.rs	11
 src/renderer/html.rs	8
-src/renderer/image.rs	49
+src/renderer/image.rs	53
 src/renderer/link.rs	2
 src/renderer/list.rs	133
-src/renderer/math.rs	16
-src/renderer/mod.rs	182
+src/renderer/math.rs	17
+src/renderer/mod.rs	683
 src/renderer/snapshots/tui_markdown__renderer__code__tests__highlighted_code_with_indentation-2.snap	0
 src/renderer/snapshots/tui_markdown__renderer__code__tests__highlighted_code_with_indentation.snap	0
 src/renderer/snapshots/tui_markdown__renderer__code__tests__highlighted_code-2.snap	0
@@ -26,6 +28,6 @@ src/renderer/snapshots/tui_markdown__renderer__code__tests__inline_code.snap	0
 src/renderer/snapshots/tui_markdown__renderer__code__tests__unhighlighted_code-2.snap	0
 src/renderer/snapshots/tui_markdown__renderer__code__tests__unhighlighted_code.snap	0
 src/renderer/snapshots/tui_markdown__renderer__table__tests__table_snapshot.snap	0
-src/renderer/table.rs	886
+src/renderer/table.rs	893
 src/renderer/test_support.rs	0
 src/style_sheet.rs	0

@@ -3,8 +3,18 @@
 # 持っていないことを検証する。未来の自分（または CI）が、誤った再ベンダリングや
 # 意図しないフォーク変更に気づくための保険。
 #
+# 「上流バージョン」と「フォーク自身のバージョン」は別物である。
+#   上流バージョン   = third_party/tui-markdown/Cargo.toml の
+#                      [package.metadata] vendored-from
+#                      （= ベンダリング元の crates.io リリース。上流ソースの
+#                        ダウンロード URL / registry キャッシュの探索に使う）
+#   フォークのバージョン = 同 Cargo.toml の [package] version
+#                      （= フォーク自身の API が変わるたびに上がる。上流とは無関係）
+# この 2 つは 0.3.9 のあいだ偶然一致していただけで、フォークの API が変わると
+# ずれる。version を上流バージョンとして使ってはいけない。
+#
 # 検証する3つの契約:
-#   1. ベンダリング元のバージョンが、フォークの Cargo.toml とマニフェスト
+#   1. 上流バージョンが、フォークの Cargo.toml（vendored-from）とマニフェスト
 #      （scripts/vendor-expected.tsv のヘッダ）で一致している
 #   2. vendored src/ のファイル一覧が上流と完全一致（追加・欠落なし）
 #   3. ファイルごとの変更行数（素の diff の '<' + '>' 行数）がマニフェストと
@@ -16,7 +26,7 @@
 #   ./scripts/check-vendor-diff.sh --diff      # フォーク差分の全体を表示
 #   TUI_MARKDOWN_SRC=/path/to/upstream ./scripts/check-vendor-diff.sh  # 上流ソース明示指定
 #
-# 上流ソースの解決順:
+# 上流ソースの解決順（<ver> はすべて上流バージョン = vendored-from）:
 #   1. TUI_MARKDOWN_SRC 環境変数
 #   2. cargo registry の src キャッシュ（$CARGO_HOME/registry/src/*/tui-markdown-<ver>）
 #   3. static.crates.io から .crate をダウンロードして展開（CI 等、キャッシュがない環境）
@@ -34,9 +44,19 @@ case "${1:-}" in
   *) echo "usage: $0 [--update|--diff]" >&2; exit 2 ;;
 esac
 
-# --- フォークの Cargo.toml からベンダリング元バージョンを読む -------------------
-VER="$(sed -n 's/^version = "\([0-9][^"]*\)"/\1/p' "$VENDORED/Cargo.toml" | head -1)"
-[ -n "$VER" ] || { echo "error: version を $VENDORED/Cargo.toml から読めない" >&2; exit 2; }
+# --- フォークの Cargo.toml から 2 つのバージョンを読む ---------------------------
+# VER      … ベンダリング元の上流バージョン（vendored-from）。以降の上流解決と
+#            マニフェストのヘッダはすべてこちらを使う。
+# FORK_VER … フォーク自身のバージョン（[package] version）。表示のみ。
+VER="$(sed -n 's/^vendored-from = "\([0-9][^"]*\)"/\1/p' "$VENDORED/Cargo.toml" | head -1)"
+FORK_VER="$(sed -n 's/^version = "\([0-9][^"]*\)"/\1/p' "$VENDORED/Cargo.toml" | head -1)"
+[ -n "$VER" ] || {
+  echo "error: 上流バージョンを $VENDORED/Cargo.toml から読めない" >&2
+  echo "hint: [package.metadata] の vendored-from = \"<上流バージョン>\" を書いてください" >&2
+  echo "      （[package] の version はフォーク自身のバージョンで、上流とは別物です）" >&2
+  exit 2
+}
+[ -n "$FORK_VER" ] || { echo "error: version を $VENDORED/Cargo.toml から読めない" >&2; exit 2; }
 
 # --- 上流ソースを解決 -----------------------------------------------------------
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
@@ -95,6 +115,10 @@ if [ "$MODE" = update ]; then
   tmp="$MANIFEST.tmp"
   {
     echo "# tui-markdown $VER — vendored fork の想定差分（変更行数 = 素の diff の '<' + '>' 行数）"
+    # 上流バージョンだけを書く。フォーク自身のバージョンはここに焼き込まない
+    # （--update を挟まずに上がると、黙って古い値が残るため）。
+    echo "# 上の $VER は【ベンダリング元の上流バージョン】= third_party/tui-markdown/Cargo.toml"
+    echo "# の [package.metadata] vendored-from。フォーク自身の [package] version とは別物。"
     echo "# このファイルは scripts/check-vendor-diff.sh --update で再生成する。手編集はしないこと。"
     echo "# フォークに意図的な変更を加えたら --update で更新し、その diff をレビューすること。"
     while IFS= read -r f; do
@@ -102,7 +126,8 @@ if [ "$MODE" = update ]; then
     done <<< "$UP_FILES"
   } > "$tmp"
   mv "$tmp" "$MANIFEST"
-  echo "updated $MANIFEST ($TOTAL changed lines across $(printf '%s\n' "$UP_FILES" | wc -l | tr -d ' ') files)"
+  echo "updated $MANIFEST — 上流 tui-markdown $VER / フォーク $FORK_VER" \
+       "($TOTAL changed lines across $(printf '%s\n' "$UP_FILES" | wc -l | tr -d ' ') files)"
   exit 0
 fi
 
@@ -118,8 +143,9 @@ fi
 }
 MANIFEST_VER="$(sed -n 's/^# tui-markdown \([0-9][^ ]*\).*/\1/p' "$MANIFEST" | head -1)"
 if [ "$MANIFEST_VER" != "$VER" ]; then
-  echo "error: マニフェストのベンダリング元バージョン ($MANIFEST_VER) がフォークの Cargo.toml ($VER) と不一致" >&2
-  echo "hint: 上流が上がったか、フォークが別バージョンからベンダリングされた可能性。要調査" >&2
+  echo "error: マニフェストの上流バージョン ($MANIFEST_VER) が Cargo.toml の vendored-from ($VER) と不一致" >&2
+  echo "hint: 上流を上げてベンダリングし直したなら --update でマニフェストを再生成すること。" >&2
+  echo "      フォーク自身のバージョン（[package] version、いまは ${FORK_VER}）は無関係です。" >&2
   exit 1
 fi
 
@@ -147,4 +173,5 @@ if [ "$MISMATCH" != 0 ]; then
   exit 1
 fi
 
-echo "OK: tui-markdown $VER — $N_EXPECTED ファイル、$TOTAL 変更行、$MANIFEST の想定どおり"
+echo "OK: 上流 tui-markdown $VER / フォーク akapen-tui-markdown $FORK_VER —" \
+     "$N_EXPECTED ファイル、$TOTAL 変更行、$MANIFEST の想定どおり"
