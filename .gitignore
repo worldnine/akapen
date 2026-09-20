@@ -5,3 +5,6 @@ pi-session-*.html
 /third_party/tui-markdown/Cargo.lock
 examples/demo/out/
 .DS_Store
+
+# Python の生成物（examples/semantic と plugins/akp のテスト）
+__pycache__/

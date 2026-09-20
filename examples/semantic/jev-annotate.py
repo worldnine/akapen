@@ -1,0 +1,600 @@
+#!/usr/bin/env python3
+"""akapen の `--semantic-cmd` プロトコルを Jev に繋ぐアダプタ。
+
+    TYPESAFE_API_KEY=... \
+      akapen doc.md --semantic-cmd 'python3 examples/semantic/jev-annotate.py'
+
+隣の `annotate-doc.py` は判断をしない決定論的な参照実装で、こちらが**本番の
+判定器**である。判断は Jev（TypeSafe の System One モデル。**LLM ではない** —
+typed な question を state に対して並列評価して構造化された値を返す。
+`docs/jev.md`）に委譲する。
+
+stdin / stdout の形は `annotate-doc.py` と同じで、**range は返さない**。返すのは
+Atom の index だけなので、このスクリプトが壊れた位置を返して文書の違う場所を
+装飾する事故は原理的に起きない。
+
+---
+
+## 2 ラウンド構成
+
+Tier の question は Unit について聞くものだが、Unit は境界判定の答えから
+生まれる。**1 ラウンドでは原理的に組めない。**
+
+    ラウンド1  state=文書全文, questions={ 散文どうしの境界を Choice }
+                 → Unit を確定
+    ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) と
+                                            redundancy(Noul) }
+
+akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、2 ラウンドは
+このスクリプトの内部事情である。
+
+## 境界は「構造は聞かない。散文どうしだけ聞く」
+
+設計書「Jevに判断させないもの: syntax parsing」のとおり、見出し・コードブロック
+・リスト項目・引用が絡む境界は**パーサが既に知っている**。実測（demo.md の境界
+26 件）でも、全部 Jev に聞くと質問を浪費したうえ誤りが増えた。
+
+    全部 Jev に聞く（文面 v1）   20/26   質問 26
+    全部 Jev に聞く（文面 v2）   17/26   質問 26
+    構造ルール + 散文だけ v2     18/22   質問 13   ← この方針を採用
+
+ローカルの構造ルールは [`boundary_rule`] にある。
+
+## 鍵は環境変数だけを見る
+
+`TYPESAFE_API_KEY` **のみ**。キーチェーンや `op` をここに埋めない。akapen は
+再解析のたびにこのスクリプトを起動し直すので、毎回 `security` や `op read` を
+叩くのは無駄（`op` なら生体認証が毎回出る）。そして akapen は OSS なので、
+macOS 固有の手段を埋めると他 OS で動かない。鍵の取り出し方の例は
+`examples/semantic/README.md` にある。
+
+鍵は stdout にも stderr にも出さない。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
+VERSION = 1
+
+#: `docs/jev.md` の SDK 定数に合わせる（`DEFAULT_BASE_URL` / `DEFAULT_MODEL`）。
+DEFAULT_BASE_URL = "https://api.typesafe.ai"
+DEFAULT_MODEL = "jev-latest"
+API_PATH = "/v1/systemone"
+
+#: 1 リクエストあたりのタイムアウト（秒）。
+#:
+#: Jev の SDK 既定は 10 秒（`docs/jev.md`）で、実測は 52 question を 1 リクエスト
+#: にまとめて 0.84 秒だった。akapen 側は子プロセスを 60 秒で殺すので、2 ラウンド
+#: と Python の起動コストを 60 秒に収めるためここは 20 秒に留める。
+DEFAULT_TIMEOUT = 20.0
+
+#: Noul がこの値以上なら REDUNDANT_WITH を付ける。
+#:
+#: **実測 2 点から置いた暫定値で、掃引していない。** demo.md の 1 回の実行で、
+#: 言い直しの u9 が 0.92、結論の u3 が 0.36 だった。その間を取っている。
+REDUNDANCY_THRESHOLD = 0.7
+
+#: Reading Tier の criteria。設計書 `docs/semantic-reading-layer.md` の
+#: 「Reading Tier」の定義の逐語。**言い換えないこと** — ここが判定品質を支配する。
+TIER_CRITERIA = {
+    "essential": "落とすと文書の要点、結論、制約などを取り違える可能性が高い。",
+    "supporting": "ESSENTIAL な内容の理解・納得に役立つ。",
+    "context": "背景や前提、理解補助。",
+    "detail": "例、細部、追加説明。",
+}
+
+#: 意味境界の criteria。
+#:
+#: 「話題が同じか」ではなく「**拾い読みするとき一緒に読む必要があるか**」を
+#: 聞いている。話題の同一性を聞く文面（旧 v1「片方だけ読むと意味が欠ける」）は
+#: `採用する方式は差分配信である。| 詳細は付録にまとめた。` を同一 Unit に
+#: まとめてしまい、**行の途中で表示状態が切り替わるという製品の看板を消した**。
+#: 実測でも v1 20/26 → v2 17/26（構造ルール併用で 18/22）と、この文面の方が
+#: 境界の質が良い。
+BOUNDARY_CRITERIA = {
+    "same_unit": "この 2 つは読む優先度が同じで切り離せない。片方だけ残しても意味を成さない。",
+    "new_unit": "この 2 つは読む優先度が違いうる。片方を飛ばしても、もう片方の要点は失われない。",
+}
+
+SAME, NEW = "same_unit", "new_unit"
+
+#: 単独の Unit にする Atom 種別。中身は散文ではないので、隣の散文と読む優先度を
+#: 共有しない。
+STANDALONE_KINDS = frozenset({"code_block", "table"})
+
+#: redundancy の参照先を選ぶときに無視する、内容を持たない語
+#: （`annotate-doc.py` の同名定数と同じ）。
+STOP_WORDS = frozenset(
+    "の は が を に へ と で も や か ね よ です ます である だ する した"
+    " こと もの ため よう この その あの the a an is are of to and or in on".split()
+)
+
+
+class JevError(Exception):
+    """akapen のステータス行に 1 行で出したい失敗。"""
+
+
+# ---------------------------------------------------------------------------
+# 境界 — 構造ルールと、散文どうしだけの question
+# ---------------------------------------------------------------------------
+
+
+def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str | None, str]:
+    """隣り合う 2 つの Atom の境界を、構造だけで決められるなら決める。
+
+    返り値は `(SAME / NEW / None, 理由)`。`None` は「構造では決まらないので
+    Jev に聞く」を意味する。
+
+    設計書「Jevに判断させないもの: syntax parsing」に従い、**パーサが既に
+    知っていることは聞かない**。実測でも、構造が絡む境界を Jev に聞くと質問を
+    浪費したうえ誤りが増えた。
+
+    規則は上から順に当てる（順序に意味がある）:
+
+    1. 次が heading         -> NEW  見出しは必ず新しいまとまりを始める
+    2. 現在が heading       -> SAME 見出しは直後の内容に付く
+    3. どちらかが code_block / table -> NEW  単独の Unit にする
+    4. どちらも list_item   -> SAME 同じリストの項目は 1 つのまとまり
+    5. どちらも sentence    -> None Jev に聞く
+    6. それ以外             -> NEW  既定（引用と散文の間など）
+
+    規則 1 と 2 の順序は「見出しの直前」が「見出しの直後」に勝つということで、
+    これがないと見出しが前の段落に吸われる。
+
+    **規則 2 が規則 3 に勝つ**ことも意図的で、`## 設定例` + コードブロックは
+    1 つの Unit になる（見出しだけの Unit は単独では Tier を判定しづらい）。
+    ただし **この組み合わせは測っていない** — demo.md に出てこない。
+
+    規則 4 と規則 6 の引用の扱い（block_quote どうしは NEW になる）も
+    **測っていない**。判断の根拠は:
+
+    - list_item どうし: 箇条書きは著者が既に 1 つのまとまりとして束ねた構造で、
+      半分だけ DIM になったリストは読み物として壊れる。なお Atom には
+      ネスト段階が載らないので、別々のリストが隣接していても区別できない。
+    - block_quote: 引用は自己完結した挿入で、「引用した」こと自体が周囲の散文と
+      読む優先度が違うという著者の表明である。連続する引用は別々の引用なので
+      規則 6 で NEW になる。
+    """
+    if next_kind == "heading":
+        return NEW, "rule:next_is_heading"
+    if current_kind == "heading":
+        return SAME, "rule:current_is_heading"
+    if current_kind in STANDALONE_KINDS or next_kind in STANDALONE_KINDS:
+        return NEW, "rule:standalone_block"
+    if current_kind == "list_item" and next_kind == "list_item":
+        return SAME, "rule:same_list"
+    if current_kind == "sentence" and next_kind == "sentence":
+        return None, "jev"
+    return NEW, "rule:default"
+
+
+def atom_text(atom: dict) -> str:
+    """Atom の本文。前後の空白は落とす（末尾の改行を含む Atom がある）。"""
+    return (atom.get("text") or "").strip()
+
+
+def plan_boundaries(atoms: list[dict]) -> list[dict]:
+    """すべての境界について、構造で決まったか Jev に聞くかを並べる。
+
+    要素は `{"after_atom": i, "decision": SAME/NEW/None, "by": 理由}`。
+    `decision` が `None` のものだけがラウンド 1 の question になる。
+    """
+    plan = []
+    for i in range(len(atoms) - 1):
+        decision, why = boundary_rule(atoms[i].get("kind"), atoms[i + 1].get("kind"))
+        # 本文が空の Atom は Jev に見せても判断材料が無い。既定側へ倒す。
+        if decision is None and not (atom_text(atoms[i]) and atom_text(atoms[i + 1])):
+            decision, why = NEW, "rule:empty_text"
+        plan.append({"after_atom": i, "decision": decision, "by": why})
+    return plan
+
+
+def boundary_questions(atoms: list[dict], plan: list[dict]) -> dict:
+    """ラウンド 1 の questions（構造で決まらなかった境界だけ）。"""
+    questions = {}
+    for entry in plan:
+        if entry["decision"] is not None:
+            continue
+        i = entry["after_atom"]
+        questions[f"boundary:{i}"] = {
+            "type": "choice",
+            "instructions": (
+                "この文書を拾い読みするとき、次の 2 つの連続する部分は"
+                "必ず一緒に読まなければならないか、それとも片方だけ飛ばせるか。\n\n"
+                f"――― 前 ―――\n{atom_text(atoms[i])}\n"
+                f"――― 後 ―――\n{atom_text(atoms[i + 1])}\n―――――――――"
+            ),
+            "criteria": dict(BOUNDARY_CRITERIA),
+        }
+    return questions
+
+
+def apply_boundary_answers(plan: list[dict], answers: dict) -> None:
+    """ラウンド 1 の答えを plan へ書き戻す（`confidence` も残す）。
+
+    答えが無い / criteria に無い値だった question は**失敗させる**。既定へ
+    倒さないのは、黙って埋めた境界が「それらしく見えるが間違っている注釈」に
+    なるため（プロトコル側の「部分適用は何もしないより悪い」と同じ理由）。
+    """
+    for entry in plan:
+        if entry["decision"] is not None:
+            continue
+        key = f"boundary:{entry['after_atom']}"
+        entry["decision"] = choice_of(answers, key, BOUNDARY_CRITERIA)
+        entry["confidence"] = confidence_of(answers, key)
+
+
+def group_units(atoms: list[dict], plan: list[dict]) -> list[list[int]]:
+    """境界の答えから Unit（Atom index の並び）を組む。"""
+    if not atoms:
+        return []
+    units = [[0]]
+    for entry in plan:
+        index = entry["after_atom"] + 1
+        if entry["decision"] == SAME:
+            units[-1].append(index)
+        else:
+            units.append([index])
+    return units
+
+
+# ---------------------------------------------------------------------------
+# Tier と redundancy
+# ---------------------------------------------------------------------------
+
+
+def unit_body(atoms: list[dict], indices: list[int]) -> str:
+    """Unit の本文。Tier / redundancy の question に埋める対象。"""
+    return " ".join(filter(None, (atom_text(atoms[i]) for i in indices)))
+
+
+def unit_questions(atoms: list[dict], units: list[list[int]]) -> dict:
+    """ラウンド 2 の questions（Unit ごとの Tier と redundancy）。
+
+    redundancy は**方向を必ず指定する**。「これより前の箇所ですでに述べられた
+    内容を言い直しているだけか」であって、対称に「重複しているか」と聞いては
+    ならない。実測では対称な文面だと結論の u3 が 0.71 を出し（結論は文書中で
+    何度も触れられるので「重複」に見える）、方向ありへ直すと u3 は 0.36 に落ち、
+    本当の言い直しである u9 が 0.92 になった。
+
+    これは設計書の「研究的背景」と整合する。Duggan & Payne の satisficing は
+    「読み進めて information gain が落ちたら次へ移る」という**逐次的**なモデル
+    で、設計書も「**既読内容との** redundancy」と書いている。redundancy は
+    既読との相対で決まるので、方向が本質である。
+
+    先頭の Unit には redundancy を聞かない —「これより前」が存在せず、
+    REDUNDANT_WITH の参照先も作れない。
+    """
+    questions = {}
+    for number, indices in enumerate(units, start=1):
+        uid = f"u{number}"
+        body = unit_body(atoms, indices)
+        questions[f"tier:{uid}"] = {
+            "type": "choice",
+            "instructions": (
+                "この文書の中で、次の部分はどの読む優先度に当たりますか。\n\n"
+                f"――― 対象 ―――\n{body}\n―――――――――"
+            ),
+            "criteria": dict(TIER_CRITERIA),
+        }
+        if number > 1:
+            questions[f"redundant:{uid}"] = {
+                "type": "noul",
+                "instructions": (
+                    "次の部分は、これより**前**の箇所ですでに述べられた内容を"
+                    "言い直しているだけで、新しい情報を加えていない。\n\n"
+                    f"――― 対象 ―――\n{body}\n―――――――――"
+                ),
+            }
+    return questions
+
+
+def words(text: str) -> set[str]:
+    """redundancy の**参照先**を選ぶための語の集合（`annotate-doc.py` と同じ）。
+
+    日本語には分かち書きが無いので 2 文字の連続を語の代わりに使う。
+    """
+    cleaned = "".join(c if c.isalnum() else " " for c in text)
+    tokens = [t for t in cleaned.split() if t not in STOP_WORDS]
+    bag: set[str] = set()
+    for token in tokens:
+        if token.isascii():
+            bag.add(token.lower())
+        else:
+            bag.update(token[i : i + 2] for i in range(max(len(token) - 1, 1)))
+    return bag
+
+
+def overlap(a: set[str], b: set[str]) -> float:
+    """2 つの語集合の重なり（小さい方に対する割合）。"""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def redundancy_target(bodies: list[str], number: int) -> str | None:
+    """`number` 番目（1 始まり）の Unit が言い直している**先**を選ぶ。
+
+    Jev の Noul が答えるのは「前に述べられたことの言い直しか」までで、
+    **どの Unit かは答えない**。参照先は語の重なりがいちばん大きい先行 Unit を
+    ローカルに選ぶ。
+
+    設計書の分担で言えば、これは Jev の判断ではなくローカル rule である。
+    なお現在の `policy::keep_order` が見ているのは `is_redundant()`
+    （relations が空でないか）だけで、**参照先の id は実在検査以外に使われて
+    いない** — 選び方が表示に効くようになるのは relation の使い道が増えてから。
+    """
+    bag = words(bodies[number - 1])
+    best_score, best = 0.0, None
+    for earlier in range(1, number):
+        score = overlap(bag, words(bodies[earlier - 1]))
+        if score > best_score:
+            best_score, best = score, f"u{earlier}"
+    return best
+
+
+# ---------------------------------------------------------------------------
+# 答えの取り出し（緩めない）
+# ---------------------------------------------------------------------------
+
+
+def answer_of(answers: dict, key: str) -> dict:
+    answer = answers.get(key)
+    if not isinstance(answer, dict):
+        raise JevError(f"Jev の応答に {key} の答えがありません")
+    return answer
+
+
+def choice_of(answers: dict, key: str, criteria: dict) -> str:
+    got = answer_of(answers, key).get("choice")
+    if not isinstance(got, str) or got not in criteria:
+        raise JevError(f"Jev が {key} に未知の choice を返しました: {got!r}")
+    return got
+
+
+def confidence_of(answers: dict, key: str) -> float | None:
+    got = answer_of(answers, key).get("confidence")
+    return float(got) if isinstance(got, (int, float)) else None
+
+
+def noul_of(answers: dict, key: str) -> float:
+    got = answer_of(answers, key).get("noul")
+    if not isinstance(got, (int, float)):
+        raise JevError(f"Jev が {key} に noul を返しませんでした: {got!r}")
+    return float(got)
+
+
+# ---------------------------------------------------------------------------
+# Unit の組み立て
+# ---------------------------------------------------------------------------
+
+
+def build_units(atoms: list[dict], units: list[list[int]], answers: dict) -> list[dict]:
+    """ラウンド 2 の答えから、プロトコルの `units` を組む。
+
+    `confidence` と `noul` は**捨てず**、各 Unit の `jev` フィールドに記録する
+    （プロトコルは未知のフィールドを拒否しないので akapen 側は無視する）。
+    使い道は実測してから決める。閾値で判定を倒すことは**していない** —
+    実測で閾値が値の真上に乗り、実行ごとに答えが揺れたため。
+    """
+    bodies = [unit_body(atoms, indices) for indices in units]
+    out = []
+    for number, indices in enumerate(units, start=1):
+        uid = f"u{number}"
+        tier = choice_of(answers, f"tier:{uid}", TIER_CRITERIA)
+        record: dict = {
+            "tier_choice": tier,
+            "tier_confidence": confidence_of(answers, f"tier:{uid}"),
+        }
+        relations: list[dict] = []
+        if number > 1:
+            noul = noul_of(answers, f"redundant:{uid}")
+            record["redundancy_noul"] = noul
+            if noul >= REDUNDANCY_THRESHOLD:
+                target = redundancy_target(bodies, number)
+                record["redundant_with"] = target
+                if target is not None:
+                    relations.append({"redundant_with": target})
+        out.append(
+            {
+                "id": uid,
+                "atoms": list(indices),
+                "reading_tier": tier,
+                "relations": relations,
+                "jev": record,
+            }
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Jev の呼び出し
+# ---------------------------------------------------------------------------
+
+
+def one_line(text: str) -> str:
+    """ステータス行に載せるために改行と連続空白を潰す。"""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def api_key() -> str:
+    """環境変数 `TYPESAFE_API_KEY` **だけ**を見る。値は絶対に出力しない。"""
+    key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+    if not key:
+        raise JevError(
+            "TYPESAFE_API_KEY が未設定です。export TYPESAFE_API_KEY=... して "
+            "akapen を起動し直してください（鍵の取り出し方は "
+            "examples/semantic/README.md）"
+        )
+    return key
+
+
+def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
+    """1 リクエストで questions をまとめて評価させる。
+
+    Jev は「すべての question を同じ state に対して並列かつ独立に評価する」
+    設計なので（`docs/jev.md`）、まとめるのはコスト上の妥協ではなく想定された
+    使い方である。
+    """
+    base = os.environ.get("TYPESAFE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    body = json.dumps({"state": state, "model": model, "questions": questions}).encode()
+    request = urllib.request.Request(
+        base + API_PATH,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key()}",
+            "Content-Type": "application/json",
+        },
+    )
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        # 本文には鍵は載らない（載せていない）。要点だけ 1 行にする。
+        detail = one_line(e.read().decode("utf-8", "replace"))[:200]
+        raise JevError(f"Jev が HTTP {e.code} を返しました: {detail}") from e
+    except urllib.error.URLError as e:
+        raise JevError(f"Jev に接続できません: {one_line(str(e.reason))}") from e
+    except json.JSONDecodeError as e:
+        raise JevError(f"Jev の応答が JSON ではありません: {one_line(str(e))}") from e
+    except TimeoutError as e:
+        raise JevError(f"Jev が {timeout} 秒以内に応答しませんでした") from e
+    if not isinstance(payload.get("answers"), dict):
+        raise JevError("Jev の応答に answers がありません")
+    payload["elapsed_s"] = round(time.monotonic() - started, 3)
+    return payload
+
+
+def round_record(payload: dict, count: int) -> dict:
+    """報告用に 1 ラウンド分の実測を残す。"""
+    return {
+        "questions": count,
+        "elapsed_s": payload.get("elapsed_s"),
+        "model": payload.get("model"),
+        "usage": payload.get("usage"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 入り口
+# ---------------------------------------------------------------------------
+
+
+def annotate(request: dict, model: str, timeout: float) -> dict:
+    version = request.get("version")
+    if version != VERSION:
+        raise JevError(f"対応していないプロトコル版です: {version!r}")
+    state = request.get("source") or ""
+    atoms = request.get("atoms") or []
+    if not atoms:
+        return {"version": VERSION, "units": []}
+
+    rounds = []
+
+    # --- ラウンド 1: 散文どうしの境界 -> Unit --------------------------
+    plan = plan_boundaries(atoms)
+    questions = boundary_questions(atoms, plan)
+    if questions:
+        payload = ask_jev(state, questions, model, timeout)
+        apply_boundary_answers(plan, payload["answers"])
+        rounds.append(round_record(payload, len(questions)))
+    units = group_units(atoms, plan)
+
+    # --- ラウンド 2: Unit ごとの Tier と redundancy ---------------------
+    questions = unit_questions(atoms, units)
+    payload = ask_jev(state, questions, model, timeout)
+    rounds.append(round_record(payload, len(questions)))
+
+    return {
+        "version": VERSION,
+        "units": build_units(atoms, units, payload["answers"]),
+        "jev": {"rounds": rounds, "boundaries": plan},
+    }
+
+
+def dry_run(request: dict, model: str) -> dict:
+    """API を叩かずに、送る 2 ラウンドのリクエストの形を出す。
+
+    ラウンド 2 は境界の答えに依存するので、**Jev に聞く境界はすべて NEW_UNIT
+    だったと仮定して**組む。構造ルールで決まった境界はそのまま効く。
+    """
+    atoms = request.get("atoms") or []
+    state = request.get("source") or ""
+    plan = plan_boundaries(atoms)
+    first = boundary_questions(atoms, plan)
+    for entry in plan:
+        if entry["decision"] is None:
+            entry["decision"] = NEW
+    units = group_units(atoms, plan)
+    return {
+        "assumption": "ラウンド 2 は「Jev に聞く境界はすべて new_unit」と仮定して組んでいる",
+        "rounds": [
+            {"round": 1, "state": state, "model": model, "questions": first},
+            {
+                "round": 2,
+                "state": state,
+                "model": model,
+                "questions": unit_questions(atoms, units),
+            },
+        ],
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="akapen の --semantic-cmd を Jev に繋ぐアダプタ",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("TYPESAFE_DEFAULT_MODEL", DEFAULT_MODEL),
+        help=f"Jev のモデル（既定 {DEFAULT_MODEL}、TYPESAFE_DEFAULT_MODEL でも指定可）",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help=f"1 リクエストのタイムアウト秒（既定 {DEFAULT_TIMEOUT}）",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="API を叩かず、送る 2 ラウンドのリクエストの形だけを出す"
+        "（ラウンド 2 は全境界 new_unit を仮定）",
+    )
+    args = parser.parse_args()
+
+    try:
+        request = json.load(sys.stdin)
+    except json.JSONDecodeError as e:
+        print(f"jev-annotate: stdin が JSON ではありません: {one_line(str(e))}", file=sys.stderr)
+        return 1
+    try:
+        if args.dry_run:
+            response = dry_run(request, args.model)
+        else:
+            response = annotate(request, args.model, args.timeout)
+    except JevError as e:
+        # akapen はステータス行に stderr の**最後の非空行**を 160 字まで出す
+        # （`src/export.rs` の `Capture::tail`）。だから 1 行に収める。
+        print(f"jev-annotate: {one_line(str(e))}", file=sys.stderr)
+        return 1
+    except (KeyError, TypeError, ValueError) as e:
+        print(f"jev-annotate: 要求を読めません: {one_line(str(e))}", file=sys.stderr)
+        return 1
+    json.dump(response, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
