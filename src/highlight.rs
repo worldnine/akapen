@@ -10,6 +10,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Style};
+use tui_markdown::Attr;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{ScopeSelectors, Theme, ThemeItem, ThemeSet};
 use syntect::parsing::{Scope, SyntaxReference, SyntaxSet};
@@ -327,47 +328,66 @@ pub fn wrap_spans(spans: &[Span], width: usize) -> Vec<Vec<Span>> {
 /// loop needs room to always make progress).
 const MIN_HANGING_BODY: usize = 8;
 
-/// Width-aware wrapping that keeps a parallel source-line attribution.
-/// Takes one `Option<usize>` per input span and returns, per display row,
-/// the row's spans plus one attribution per span; a fragment split off a
-/// wrapped span inherits the span's line. Source mode uses [`wrap_spans`]
-/// (this algorithm is shared); the tagged variant is used only by the view
-/// pipeline, where the attribution drives the exact source-line mapping.
+/// Width-aware wrapping that keeps a parallel source attribution.
+/// Takes one [`Attr`] per input span and returns, per display row, the
+/// row's spans plus one attribution per span. Source mode uses
+/// [`wrap_spans`] (this algorithm is shared); the tagged variant is used
+/// only by the view pipeline, where the attribution drives the exact
+/// source mapping.
+///
+/// # How a split fragment inherits its range
+///
+/// - An **exact** span (`span.text == source[range]`, see [`Attr`]) is
+///   sub-sliced by byte offset: fragment `k` bytes in, `n` bytes long,
+///   gets `range.start + k .. range.start + k + n`. It stays exact unless
+///   tab expansion rewrote the fragment's text, which keeps the range and
+///   drops the verbatim claim.
+/// - A **superset** span cannot be cut (its text is not a copy of its
+///   range), so every fragment keeps the span's whole range.
+///
+/// Either way the invariant a range decoration depends on holds: **a
+/// fragment's range is always a subset of its span's range**, asserted
+/// below.
 ///
 /// `hang` is the hanging indent: continuation rows (the second and later
 /// display rows of a wrapped line) start with `hang` columns of spaces,
 /// so a list item's continuation aligns under its text instead of under
 /// the marker. The pad span inherits the attribution of the text that
-/// follows it, so selection highlighting and mouse mapping treat the pad
-/// as part of the line. A `hang` that would leave the continuation body
-/// narrower than [`MIN_HANGING_BODY`] falls back to 0 (plain wrapping).
+/// follows it — demoted to a superset, since spaces are not source text —
+/// so selection highlighting and mouse mapping treat the pad as part of
+/// the line. A `hang` that would leave the continuation body narrower
+/// than [`MIN_HANGING_BODY`] falls back to 0 (plain wrapping).
 pub fn wrap_spans_tagged(
     spans: &[Span],
-    lines: &[Option<usize>],
+    attrs: &[Option<Attr>],
     width: usize,
     hang: usize,
-) -> Vec<(Vec<Span>, Vec<Option<usize>>)> {
-    debug_assert_eq!(spans.len(), lines.len(), "attribution parallels spans");
+) -> Vec<(Vec<Span>, Vec<Option<Attr>>)> {
+    debug_assert_eq!(spans.len(), attrs.len(), "attribution parallels spans");
     let width = width.max(1);
     let hang = if width.saturating_sub(hang) < MIN_HANGING_BODY {
         0
     } else {
         hang
     };
-    let mut rows: Vec<(Vec<Span>, Vec<Option<usize>>)> = Vec::new();
+    let mut rows: Vec<(Vec<Span>, Vec<Option<Attr>>)> = Vec::new();
     let mut row: Vec<Span> = Vec::new();
-    let mut row_lines: Vec<Option<usize>> = Vec::new();
+    let mut row_attrs: Vec<Option<Attr>> = Vec::new();
     let mut col = 0usize; // display column where the next character lands
     // A continuation row owes its hanging pad; materialized lazily when
     // the first content lands (so a line ending exactly at a row boundary
     // never leaves a trailing pad-only row).
     let mut pad_due = false;
-    for (span, line) in spans.iter().zip(lines) {
+    for (span, attr) in spans.iter().zip(attrs) {
         let mut rest = span.text.as_str();
+        // Bytes of THIS span already emitted, i.e. the fragment's offset
+        // into `span.text` — and, for an exact attribution, into its
+        // source range.
+        let mut consumed = 0usize;
         while !rest.is_empty() {
             // The current row is full: flush it and start the next.
             if col >= width {
-                rows.push((std::mem::take(&mut row), std::mem::take(&mut row_lines)));
+                rows.push((std::mem::take(&mut row), std::mem::take(&mut row_attrs)));
                 col = hang;
                 pad_due = hang > 0;
             }
@@ -377,35 +397,54 @@ pub fn wrap_spans_tagged(
                 // (a wide char at the row's last column, or a tab): flush
                 // and retry from the continuation column, where it fits
                 // (MIN_HANGING_BODY guarantees at least 8 free columns).
-                rows.push((std::mem::take(&mut row), std::mem::take(&mut row_lines)));
+                rows.push((std::mem::take(&mut row), std::mem::take(&mut row_attrs)));
                 col = hang;
                 pad_due = hang > 0;
                 continue;
             }
+            let text = expand_tabs(take, col);
+            let frag = attr.as_ref().map(|a| {
+                if a.exact {
+                    a.slice(consumed, consumed + take.len(), text == take)
+                } else {
+                    a.clone()
+                }
+            });
             if pad_due {
                 row.push(Span {
                     text: " ".repeat(hang),
                     style: Style::default(),
                 });
-                row_lines.push(*line);
+                // The pad is synthesized whitespace, never source text:
+                // it takes the span's position but not its exactness.
+                row_attrs.push(attr.as_ref().map(Attr::demoted));
                 pad_due = false;
             }
             row.push(Span {
-                text: expand_tabs(take, col),
+                text,
                 style: span.style,
             });
-            row_lines.push(*line);
+            debug_assert!(
+                match (&frag, attr) {
+                    (Some(f), Some(a)) => f.range.start >= a.range.start && f.range.end <= a.range.end,
+                    (None, _) => true,
+                    _ => false,
+                },
+                "a fragment's range must stay inside its span's range"
+            );
+            row_attrs.push(frag);
             col += take_w;
+            consumed += take.len();
             rest = &rest[take.len()..];
             if col >= width {
-                rows.push((std::mem::take(&mut row), std::mem::take(&mut row_lines)));
+                rows.push((std::mem::take(&mut row), std::mem::take(&mut row_attrs)));
                 col = hang;
                 pad_due = hang > 0;
             }
         }
     }
     if !row.is_empty() {
-        rows.push((row, row_lines));
+        rows.push((row, row_attrs));
     }
     if rows.is_empty() {
         rows.push((Vec::new(), Vec::new()));
@@ -800,26 +839,40 @@ mod tests {
         assert_eq!(rows.len(), 1, "a wide char still fits a width-1 pane");
     }
 
+    use tui_markdown::Attr;
+
     /// Text of one tagged row, pad included.
-    fn row_text(row: &(Vec<Span>, Vec<Option<usize>>)) -> String {
+    fn row_text(row: &(Vec<Span>, Vec<Option<Attr>>)) -> String {
         row.0.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    /// An exact attribution over `range`, for wrap tests whose spans are
+    /// stand-ins rather than real renderer output.
+    fn at(range: std::ops::Range<usize>) -> Option<Attr> {
+        Some(Attr::exact(range))
     }
 
     #[test]
     fn hanging_wrap_indents_continuation_rows() {
-        let rows = wrap_spans_tagged(&[span("- abcdefghijklmn")], &[Some(3)], 10, 2);
+        let rows = wrap_spans_tagged(&[span("- abcdefghijklmn")], &[at(100..116)], 10, 2);
         assert_eq!(
             rows.iter().map(row_text).collect::<Vec<_>>(),
             vec!["- abcdefgh", "  ijklmn"]
         );
-        // The pad inherits the line: selection highlighting and mouse
-        // mapping treat it as part of the item.
-        assert_eq!(rows[1].1, vec![Some(3), Some(3)]);
+        // The pad inherits the span's position: selection highlighting
+        // and mouse mapping treat it as part of the item. It is not
+        // source text, so it keeps the whole range as a superset; the
+        // fragment beside it is sliced exactly.
+        assert_eq!(
+            rows[1].1,
+            vec![Some(Attr::inexact(100..116)), at(110..116)]
+        );
+        assert_eq!(rows[0].1, vec![at(100..110)]);
     }
 
     #[test]
     fn hanging_wrap_measures_cjk_by_display_width() {
-        let rows = wrap_spans_tagged(&[span("- あいうえおかきくけこ")], &[Some(0)], 10, 2);
+        let rows = wrap_spans_tagged(&[span("- あいうえおかきくけこ")], &[at(0..32)], 10, 2);
         let texts: Vec<String> = rows.iter().map(row_text).collect();
         assert_eq!(texts, vec!["- あいうえ", "  おかきく", "  けこ"]);
         assert!(texts.iter().all(|t| width(t) <= 10));
@@ -833,7 +886,7 @@ mod tests {
     #[test]
     fn hanging_wrap_falls_back_when_the_body_would_be_too_narrow() {
         // width 12, hang 6 leaves 6 < MIN_HANGING_BODY columns: plain wrap.
-        let rows = wrap_spans_tagged(&[span("- [x] abcdefghijkl")], &[Some(0)], 12, 6);
+        let rows = wrap_spans_tagged(&[span("- [x] abcdefghijkl")], &[at(0..18)], 12, 6);
         assert_eq!(
             rows.iter().map(row_text).collect::<Vec<_>>(),
             vec!["- [x] abcdef", "ghijkl"]
@@ -844,14 +897,14 @@ mod tests {
     fn hanging_wrap_leaves_no_trailing_pad_only_row() {
         // The text ends exactly at the row boundary: the owed pad must
         // never materialize as a spurious empty continuation row.
-        let rows = wrap_spans_tagged(&[span("- abcdefgh")], &[Some(0)], 10, 2);
+        let rows = wrap_spans_tagged(&[span("- abcdefgh")], &[at(0..10)], 10, 2);
         assert_eq!(rows.iter().map(row_text).collect::<Vec<_>>(), vec!["- abcdefgh"]);
     }
 
     #[test]
     fn hanging_wrap_with_zero_hang_matches_plain_wrap() {
         let spans = [span("abcde"), span("fgh")];
-        let tagged = wrap_spans_tagged(&spans, &[Some(0), Some(1)], 4, 0);
+        let tagged = wrap_spans_tagged(&spans, &[at(0..5), at(5..8)], 4, 0);
         let plain = wrap_spans(&spans, 4);
         assert_eq!(
             tagged.iter().map(row_text).collect::<Vec<_>>(),

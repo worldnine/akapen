@@ -475,6 +475,10 @@ impl ViewState {
             source_starts,
             row_segments,
             ghost,
+            // Per-span source ranges: the byte-precise layer Phase 2's
+            // range decoration will consume. The view is still
+            // line-oriented and reads `row_segments`.
+            row_attrs: _,
         } = render::render(source, columns as usize, highlighter);
         let card_rows = vec![false; rows.len()];
         Self {

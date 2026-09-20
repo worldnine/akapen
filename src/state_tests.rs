@@ -2233,7 +2233,7 @@ use crate::comment::Selection;
         // viewport never caught up. The up branch (start < offset) is
         // height-independent, which is why only downward movement broke.
         let mut app = make_app(200, Mode::Source);
-        let viewport = app.source_viewport_rows() as usize;
+        let viewport = app.source_viewport_rows();
         for _ in 0..250 {
             on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
             assert_cursor_visible(&app, viewport);
@@ -2252,14 +2252,14 @@ use crate::comment::Selection;
         app.offset = 80;
         on_source_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
         assert_eq!(app.cursor, 31);
-        assert_cursor_visible(&app, app.source_viewport_rows() as usize);
+        assert_cursor_visible(&app, app.source_viewport_rows());
         // Cursor far below the viewport: one k lands it inside — this
         // direction is the one that used to fail (height-dependent branch).
         app.cursor = 90;
         app.offset = 10;
         on_source_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE, None);
         assert_eq!(app.cursor, 89);
-        assert_cursor_visible(&app, app.source_viewport_rows() as usize);
+        assert_cursor_visible(&app, app.source_viewport_rows());
     }
 
     /// A session app over two temp files (a.md viewable, b.rs not).

@@ -122,7 +122,7 @@ where
             // stay in lockstep with the spans.
             let at = line.spans.len().min(1);
             line.spans.insert(at, marker_span);
-            let attrs = self.out_lines.last_mut().expect("out_lines parallels text");
+            let attrs = self.out_attrs.last_mut().expect("out_attrs parallels text");
             attrs.insert(at, None);
         } else {
             self.push_span(marker_span);

@@ -5,7 +5,7 @@ use ratatui_core::style::Style;
 use ratatui_core::text::Span;
 use tracing::instrument;
 
-use super::TextWriter;
+use super::{Attr, TextWriter};
 use crate::{ImageFallback, StyleSheet};
 
 const IMAGE_INDICATOR: &str = "[img]";
@@ -21,7 +21,7 @@ const IMAGE_INDICATOR: &str = "[img]";
 pub struct PendingImage<'a> {
     destination: CowStr<'a>,
     style: Style,
-    description: Vec<(Span<'a>, Option<usize>)>,
+    description: Vec<(Span<'a>, Option<Attr>)>,
 }
 
 impl<'a> PendingImage<'a> {
@@ -33,42 +33,43 @@ impl<'a> PendingImage<'a> {
         }
     }
 
-    /// Buffer one description span together with the source line it came
+    /// Buffer one description span together with the source range it came
     /// from, so the fallback flush can replay the attribution after the
     /// image's inline stream has closed.
-    pub fn push_span(&mut self, span: Span<'a>, line: Option<usize>) {
-        self.description.push((span, line));
+    pub fn push_span(&mut self, span: Span<'a>, attr: Option<Attr>) {
+        self.description.push((span, attr));
     }
 
-    /// `line` is the image element's own source line: the synthesized
+    /// `attr` is the image element's own source range: the synthesized
     /// spans (the `[img]` indicator, the URL fallback, the ` (url)`
     /// suffix) are attributed to it, so an image whose description is
     /// empty — a row made ONLY of synthesized spans — still maps to its
-    /// source line instead of being classed invisible.
+    /// source position instead of being classed invisible. None of them
+    /// is a verbatim slice, so the range stays a superset.
     fn into_fallback(
         self,
         fallback: ImageFallback,
-        line: Option<usize>,
-    ) -> Vec<(Span<'a>, Option<usize>)> {
+        attr: Option<Attr>,
+    ) -> Vec<(Span<'a>, Option<Attr>)> {
         let Self {
             destination,
             style,
             description,
         } = self;
-        let mut content: Vec<(Span<'a>, Option<usize>)> = match fallback {
+        let mut content: Vec<(Span<'a>, Option<Attr>)> = match fallback {
             ImageFallback::AltText if description.is_empty() => {
-                Self::destination_span(destination, style, line)
+                Self::destination_span(destination, style, attr.clone())
             }
             ImageFallback::AltText => description,
-            ImageFallback::Url => Self::destination_span(destination, style, line),
+            ImageFallback::Url => Self::destination_span(destination, style, attr.clone()),
             ImageFallback::AltTextAndUrl if description.is_empty() => {
-                Self::destination_span(destination, style, line)
+                Self::destination_span(destination, style, attr.clone())
             }
             ImageFallback::AltTextAndUrl if destination.is_empty() => description,
             ImageFallback::AltTextAndUrl => {
                 let mut description = description;
                 let destination = format!(" ({destination})");
-                description.push((Span::styled(destination, style), line));
+                description.push((Span::styled(destination, style), attr.clone()));
                 description
             }
         };
@@ -78,19 +79,19 @@ impl<'a> PendingImage<'a> {
         } else {
             format!("{IMAGE_INDICATOR} ")
         };
-        content.insert(0, (Span::styled(indicator, style), line));
+        content.insert(0, (Span::styled(indicator, style), attr));
         content
     }
 
     fn destination_span(
         destination: CowStr<'a>,
         style: Style,
-        line: Option<usize>,
-    ) -> Vec<(Span<'a>, Option<usize>)> {
+        attr: Option<Attr>,
+    ) -> Vec<(Span<'a>, Option<Attr>)> {
         if destination.is_empty() {
             Vec::new()
         } else {
-            vec![(Span::styled(destination, style), line)]
+            vec![(Span::styled(destination, style), attr)]
         }
     }
 }
@@ -116,11 +117,12 @@ where
     pub fn end_image(&mut self) {
         self.pop_inline_style();
         if let Some(image) = self.images.pop() {
-            // End(Image) carries the whole element's range, so
-            // `current_line` is the image's own first source line — the
-            // home for its synthesized spans.
-            for (span, line) in image.into_fallback(self.image_fallback, self.current_line) {
-                self.push_span_with_line(span, line);
+            // End(Image) carries the whole element's range: the event
+            // range is the image's own source extent — the home for its
+            // synthesized spans.
+            let attr = self.event_attr();
+            for (span, attr) in image.into_fallback(self.image_fallback, attr) {
+                self.push_span_with_attr(span, attr);
             }
         }
     }

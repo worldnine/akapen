@@ -1,8 +1,8 @@
 [package]
 name = "akapen-tui-markdown"
-version = "0.3.9"
+version = "0.4.0"
 edition = "2021"
-description = "Fork of tui-markdown 0.3.9 instrumented with source-line attribution, for akapen"
+description = "Fork of tui-markdown 0.3.9 instrumented with source-range attribution, for akapen"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/worldnine/akapen"
 
@@ -11,8 +11,10 @@ repository = "https://github.com/worldnine/akapen"
 # - the document-features optional dep is dropped; the crate's internal
 #   #[cfg(test)] modules are not compiled by akapen's builds.
 # - the renderer threads pulldown-cmark's event byte-ranges through the
-#   span sinks, exposing per-span source-line attribution via
-#   `from_str_with_options_tagged` (see renderer/mod.rs).
+#   span sinks, exposing per-span source-RANGE attribution (`Attr`) via
+#   `from_str_with_options_tagged` (see renderer/mod.rs). A range is
+#   either exact (the span's text is that verbatim slice of the input,
+#   so it can be sub-sliced) or a correct superset.
 # - tables are width-adaptive: `Options::max_width` gives the renderer a
 #   layout budget; tables whose natural width does not fit shrink their
 #   columns and wrap cell content instead of overflowing (see

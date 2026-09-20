@@ -1,3 +1,167 @@
+# HANDOFF: 内部位置モデルを source line から source byte range へ（Phase 1: Range Attribution）
+
+## 問題
+
+akapen の内部位置は「source line」が一次情報だった。vendored tui-markdown の
+`LineAttrs = Vec<Vec<Option<usize>>>` は、rendered span ごとに **行番号だけ** を
+持つ。これでは同一行内の一部だけを別スタイルにできない。
+
+```text
+line 42
+[この部分だけ重要][この部分は通常][ここは重複]
+```
+
+上に載る予定の Semantic Reading Layer（`docs/semantic-reading-layer.md`）は、
+Atom 単位の MARKED / NORMAL / DIM を「同じ行の途中で切り替える」ことを前提に
+設計されている。行単位の attribution では静かに実現できない。
+
+renderer は `Parser::into_offset_iter()` を使っており、内部には `Event + Range<usize>`
+がすでに存在する。**新しく位置情報を取る必要はなく、すでにある byte range を
+途中で捨てずに rendered output まで運ぶ** のが本改修（`docs/range-attribution-plan.md`
+の Phase 1）。
+
+## exactness contract（この改修の中核）
+
+素朴に「event の range」を使うと `**重要**` の range が `**` ごと全体を指す。
+Phase 2 の range decoration がこれを使うと、同じ行の隣接テキストへ装飾がにじみ出て
+目的が達成できない。そこで range に **exact かどうか** を持たせた。
+
+```rust
+pub struct Attr {
+    pub range: std::ops::Range<usize>,
+    pub exact: bool,
+}
+pub type LineAttrs = Vec<Vec<Option<Attr>>>;
+```
+
+- `exact == true` … `span.text == input[range]`（verbatim スライス）。
+  したがって `span.text.len() == range.len()` で、**byte オフセットで部分スライス
+  できる**。`**重要**` の `重要` span は `重要` だけを指す。
+- `exact == false` … **正しい上位集合**。span はその range から生成されたが、
+  コピーではない（`&amp;` → `&`、softbreak → 空白、syntect が再分割した
+  code、table cell）。位置の特定には使えるが、スライスしてはいけない。
+- `None` … source に対応しない合成 span（table の枠・パディング、引用/リスト
+  の prefix、段落区切り）。従来の `None` の意味をそのまま引き継ぐ。
+
+exact 判定は pulldown-cmark が `CowStr::Borrowed` で input のスライスを返すことを
+利用する（`TextWriter::exact_attr`）。ポインタ差でオフセットを取り、さらに
+`source[offset..offset+len] == text` を実際に照合する二段ガードなので、
+Owned / Boxed / Inlined を exact と誤認することはない。空文字列はポインタが
+どこを指すか保証がないため、明示的に除外している。
+
+**構造別の exact / fallback 一覧は `renderer/mod.rs` の
+`exactness_by_markdown_construct` テストが正典。** 後続フェーズはこの表を前提に
+設計してよい（テストは全ケースの全 span について `exact ⇒ verbatim` も検証する）。
+
+## 実装内容
+
+### third_party/tui-markdown（0.3.9 → 0.4.0）
+
+- `Attr` / `LineAttrs` を上記のとおり定義し、`Attr::{exact, inexact, demoted, slice}`
+  を用意。`line_starts` / `line_at` を `pub` にした（akapen 側が **同じ関数** で
+  range → 行を導出するため。再実装すると末尾改行まわりで静かにズレる）。
+- `TextWriter` の `current_line` / `current_end_line` を廃止し、attribution は
+  4 つのヘルパーに集約:
+  - `exact_attr` / `exact_subslice_attr` … borrow 由来の exact な range
+  - `event_attr` … event 自身の range（上位集合）。合成 span の既定
+  - `event_end_attr` … End event 由来の描画（front matter の閉じ `---`）
+  - `nth_line_attr(k)` … 複数行 event の k 行目 = event range ∩ その行の範囲。
+    syntect 再分割 code、`$$…$$`、書き換えられた text event 用
+- `out_lines` → `out_attrs` に改名。`push_span_with_line` → `push_span_with_attr`。
+- `run_tagged` に **exactness の全域チェック**を `debug_assert` で追加。exact を
+  名乗る span が実際に `input[range]` でなければ落ちる。task-list marker の
+  `to_mut()` や table cell の再マージのような「attribution 後の書き換え」を
+  そのまま捕まえる。
+- `table.rs`: cell の attribution は構造上つねに上位集合（折返しと空白畳み込みで
+  テキストが書き換わるため）。`TableCell::push` で `demoted()` を強制。
+  `CellChar` から冗長な `line` を落とし（`spans[ch.span].1` と同値）、`Copy` を維持。
+- `image.rs` / `code.rs` / `math.rs` も `Option<Attr>` へ。
+
+### akapen 本体
+
+- `highlight.rs::wrap_spans_tagged`: exact な span は **byte オフセットで部分
+  スライス**（fragment k 文字目 n バイト → `range.start+k .. range.start+k+n`）。
+  上位集合の span は全 fragment が元 range 全体を保持。タブ展開でテキストが
+  書き換わった fragment は range を保ったまま exact を落とす。
+  不変条件「fragment の range ⊆ 元 span の range」を `debug_assert` で表現。
+  hanging pad は span の位置を継ぐが `demoted()`（空白は source text ではない）。
+- `render.rs`: `Rendered` に `row_attrs: Vec<Vec<Option<Attr>>>`（rows と並行）を
+  追加。Phase 2 の range decoration はここを intersect する。
+  `Segment` に `source: Range<usize>`（その phrase の source 上の hull）を追加。
+- **`line_of(starts, attr) -> usize` を唯一の橋渡しにした。** wrap 直後に
+  `row_attrs` から `row_lines: Vec<Vec<Option<usize>>>` を導出し、
+  `build_starts_from_tags` / `build_row_segments_from_tags` / ghost 判定 /
+  `insert_missing_blank_rows` は従来どおり行番号だけを消費する。view 側
+  （`view.rs` / `main.rs` / `yank.rs`）は一切変更なし。
+
+### 既存 UX は 1 ピクセルも変えていない（機械的に確認）
+
+リファクタ前の HEAD を別ディレクトリへ展開し、testdata の全 `.md`（full.md /
+a-readme.md / b-design.md / c-impl.rs）について
+
+- renderer の per-span 行 attribution
+- 幅 40 / 80 での `source_starts`
+- 幅 40 / 80 での `row_segments`（line / start / end）
+- `ghost`
+
+をダンプして改修後と `diff` した。**差分 0 行**。`nth_line_attr` を締めた後にも
+再取得して 0 行を再確認している。
+
+## 検証
+
+- `cargo test --locked`: **459 passed; 0 failed**（改修前のベースラインは 449。
+  新規 10 本の内訳は下記。タスク記載の「422 本」は古い数値だった）。
+- `cargo test --locked -p akapen-tui-markdown`: 173 passed / 1 ignored、doc-test 7 passed。
+- `cargo test --locked --release`: 459 passed（`debug_assert` が無効な状態でも緑）。
+- `cargo clippy --locked --all-targets`: **警告 0**。改修前から残っていた 4 件
+  （`main.rs` の collapsible_match、`state_tests.rs` の unnecessary_cast × 3）も
+  ついでに解消した。
+- 新規テストが実際に効くことを mutation で確認: `wrap_spans_tagged` の部分
+  スライスを外すと 2 本、`text()` の exact 判定を外すと 7 本が落ちる。
+
+新規テスト（10 本）:
+
+- `renderer/mod.rs::exactness_by_markdown_construct` … 構造別 exact / fallback 一覧
+- `render.rs::range_attribution::` … `exact_ranges_are_verbatim_source_slices`
+  （full.md を幅 20/40/80/200 で走査、release でも効く素の `assert!`）、
+  ASCII / 日本語 / 絵文字・全角、`**strong**`、`[link](url)`、`` `inline code` ``、
+  リスト項目、blockquote、狭い幅の soft wrap での部分スライス、hanging pad、
+  `Segment.source` と `line` の一致
+
+## 注意点
+
+- **`Attr` は `Copy` ではない**（`Range<usize>` を持つため）。連鎖して
+  `render::Segment` も `Copy` を失った。既存の利用箇所はすべて参照経由だった
+  ので影響は無かったが、新規コードでは `.clone()` が要る。
+- **exact を増やすときは `line_of` が変わらないことを必ず確認すること。**
+  たとえば link の URL span を exact にすると、reference link では URL が
+  ref-def 行から borrow されているため `line_of` が別の行へ飛ぶ。同じ理由で
+  HTML block の各行も意図的に上位集合のままにしてある。この phase の判断基準は
+  「exact 化は `line_of` が構造上変わらない場所だけ」。
+- byte offset と terminal column を混同しないこと。日本語 1 文字 = 3 bytes =
+  2 columns。`Segment.start` / `.end` は **行内テキストの byte** オフセット
+  （従来どおり）、`Segment.source` は **source 全体の byte** レンジで、別物。
+- `Rendered.row_attrs` は現状 view から読まれていないので `#[allow(dead_code)]`
+  を付けている。Phase 2 で消せる。
+- **Phase 2 で `row_attrs` を `ViewState` へ移すときの罠**: インラインコメント
+  カードの行を差し込む `main.rs:1207` と `main.rs:2139` が
+  `view.row_segments.insert(insert_at + i, Vec::new())` をしている。いまは
+  `row_attrs` が `ViewState` に無いので壊れないが、移した瞬間に
+  `row_attrs.insert(..., vec![None])` を並べて入れないと、カードより下の
+  attribution が 1 行ぶん静かにズレる。
+- `akapen-tui-markdown` は crates.io 未公開の path 依存なので、`LineAttrs` の
+  破壊的変更は外部影響なし。衛生上 0.4.0 へ上げ、ルート `Cargo.toml` と
+  `Cargo.lock` も揃えた（lock の差分はこの 1 エントリのみ）。
+- vendored crate のテストに元からある `unused import: super::*` 警告 10 件は
+  手つかず（改修前と同数・同箇所）。完了条件の `cargo clippy --locked
+  --all-targets`（ルートパッケージのみ）の対象外。
+- 変更ファイル: `third_party/tui-markdown/`（Cargo.toml / lib.rs / renderer の
+  mod・code・math・image・table）/ `src/highlight.rs` / `src/render.rs` /
+  `src/view.rs` / `src/main.rs` / `src/state_tests.rs` / `Cargo.toml` /
+  `Cargo.lock` / `HANDOFF.md`
+
+---
+
 # HANDOFF: `e` → $EDITOR 復帰後にターミナルを再初期化する（マウスでゴミが出るバグ）
 
 ## 問題

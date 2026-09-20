@@ -30,14 +30,15 @@ where
         // lines one-for-one (the fences and the verbatim content), so each
         // physical line is attributed to the matching source line — same
         // per-line correction as `text()`, or every row of a multi-line
-        // block would collapse onto the opening `$$` line.
+        // block would collapse onto the opening `$$` line. The fences are
+        // re-synthesized rather than copied, so the ranges are supersets.
         for (index, line) in display_math.lines().enumerate() {
             if index > 0 {
                 self.push_line(Line::default(), vec![]);
             }
-            self.push_span_with_line(
+            self.push_span_with_attr(
                 Span::styled(line.to_owned(), style),
-                self.current_line.map(|l| l + index),
+                self.nth_line_attr(index),
             );
         }
         self.needs_newline = true;

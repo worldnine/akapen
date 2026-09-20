@@ -59,6 +59,7 @@ mod style_sheet;
 pub use crate::code_theme::{BuiltinCodeTheme, CodeTheme, CodeThemeLoadError};
 pub use crate::options::{ImageFallback, Options};
 pub use crate::renderer::{
-    from_str, from_str_with_options, from_str_with_options_tagged, LineAttrs,
+    from_str, from_str_with_options, from_str_with_options_tagged, line_at, line_starts, Attr,
+    LineAttrs,
 };
 pub use crate::style_sheet::{AlertKind, DefaultStyleSheet, StyleSheet};

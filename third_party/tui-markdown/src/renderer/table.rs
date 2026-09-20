@@ -8,7 +8,7 @@
 //! width an enclosing list marker or blockquote prefix takes), a table whose natural width does
 //! not fit shrinks its columns (proportional to the natural widths, floored at each column's
 //! widest unsplittable token) and wraps cell content across multiple rows instead of overflowing.
-//! Wrapped cell lines keep the source-line attribution of the spans they carry. A width-constrained
+//! Wrapped cell lines keep the source attribution of the spans they carry. A width-constrained
 //! table also draws a separator between every pair of body rows, so the boundaries of multi-line
 //! wrapped rows stay readable; a table at its natural width keeps the light look (header separator
 //! only).
@@ -20,7 +20,7 @@ use pulldown_cmark::Alignment;
 use ratatui_core::style::Style;
 use ratatui_core::text::{Line, Span};
 
-use super::TextWriter;
+use super::{Attr, TextWriter};
 use crate::StyleSheet;
 
 const HORIZONTAL_BORDER: char = '─';
@@ -100,7 +100,7 @@ where
     /// Table rendering currently puts styles on individual spans and leaves the line style and
     /// alignment at their defaults. This makes it safe to move the first rendered line's spans
     /// onto the existing marker line.
-    fn push_table_lines(&mut self, lines: Vec<(Line<'a>, Vec<Option<usize>>)>) {
+    fn push_table_lines(&mut self, lines: Vec<(Line<'a>, Vec<Option<Attr>>)>) {
         let Some(list_item) = self.list_items.last().copied() else {
             for (line, attrs) in lines {
                 self.push_line(line, attrs);
@@ -120,7 +120,7 @@ where
                 self.text.lines[list_item.marker_line]
                     .spans
                     .extend(first_line.spans);
-                self.out_lines[list_item.marker_line].extend(first_attrs);
+                self.out_attrs[list_item.marker_line].extend(first_attrs);
             }
         }
 
@@ -161,8 +161,8 @@ impl<'a> TableBuilder<'a> {
         self.current_cell = TableCell::default();
     }
 
-    pub fn push_span(&mut self, span: Span<'a>, line: Option<usize>) {
-        self.current_cell.push(span, line);
+    pub fn push_span(&mut self, span: Span<'a>, attr: Option<Attr>) {
+        self.current_cell.push(span, attr);
     }
 
     pub fn finish_cell(&mut self) {
@@ -185,7 +185,7 @@ impl<'a> TableBuilder<'a> {
         self,
         styles: &S,
         available_width: usize,
-    ) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
+    ) -> Vec<(Line<'a>, Vec<Option<Attr>>)> {
         let column_count = self.column_count();
         if column_count == 0 {
             return Vec::new();
@@ -333,7 +333,7 @@ impl<'a> TableHeader<'a> {
         column_widths: &[usize],
         alignments: &[Alignment],
         styles: &S,
-    ) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
+    ) -> Vec<(Line<'a>, Vec<Option<Attr>>)> {
         render_line(
             &self.cells,
             column_widths,
@@ -355,7 +355,7 @@ impl<'a> TableRow<'a> {
         column_widths: &[usize],
         alignments: &[Alignment],
         styles: &S,
-    ) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
+    ) -> Vec<(Line<'a>, Vec<Option<Attr>>)> {
         render_line(
             &self.cells,
             column_widths,
@@ -368,14 +368,16 @@ impl<'a> TableRow<'a> {
 
 #[derive(Default)]
 struct TableCell<'a> {
-    /// (span, source line) — the line is the source line of the cell's
-    /// row, recorded when the span was buffered.
-    spans: Vec<(Span<'a>, Option<usize>)>,
+    /// (span, source range) — the range of the cell content the span was
+    /// buffered from. Cell text is re-wrapped and whitespace-collapsed
+    /// below, so these attributions are supersets by construction (see
+    /// [`Attr`]); nothing here may claim to be a verbatim slice.
+    spans: Vec<(Span<'a>, Option<Attr>)>,
 }
 
 impl<'a> TableCell<'a> {
-    fn push(&mut self, span: Span<'a>, line: Option<usize>) {
-        self.spans.push((span, line));
+    fn push(&mut self, span: Span<'a>, attr: Option<Attr>) {
+        self.spans.push((span, attr.map(|a| a.demoted())));
     }
 
     fn width(&self) -> usize {
@@ -410,8 +412,8 @@ impl<'a> TableCell<'a> {
     /// Wrap the cell content to `column_width` display columns and render
     /// every line: the padding for `alignment` (applied per line, so
     /// alignment survives wrapping), the cell's `style` on content and
-    /// padding alike, and one source-line attribution per output span — a
-    /// wrapped fragment inherits its source line.
+    /// padding alike, and one source attribution per output span — a
+    /// wrapped fragment inherits its span's whole (superset) range.
     fn render_lines(
         &self,
         column_width: usize,
@@ -423,14 +425,14 @@ impl<'a> TableCell<'a> {
             .map(|line| {
                 let content_width: usize = line.iter().map(|(span, _)| Span::width(span)).sum();
                 let (pad_left, pad_right) = padding(column_width, content_width, alignment);
-                // Padding is synthesized filler: it carries no source line.
+                // Padding is synthesized filler: it carries no source range.
                 let mut spans = vec![Span::styled(" ".repeat(pad_left + 1), style)];
-                let mut attrs = vec![None];
-                for (span, line) in line {
+                let mut attrs: Vec<Option<Attr>> = vec![None];
+                for (span, attr) in line {
                     let mut span = span;
                     span.style = span.style.patch(style);
                     spans.push(span);
-                    attrs.push(line);
+                    attrs.push(attr);
                 }
                 spans.push(Span::styled(" ".repeat(pad_right + 1), style));
                 attrs.push(None);
@@ -440,23 +442,25 @@ impl<'a> TableCell<'a> {
     }
 }
 
-/// One rendered line of a cell: its spans plus the per-span source-line
+/// One rendered line of a cell: its spans plus the per-span source
 /// attribution (padding spans carry `None`).
-type CellLine<'a> = (Vec<Span<'a>>, Vec<Option<usize>>);
+type CellLine<'a> = (Vec<Span<'a>>, Vec<Option<Attr>>);
 
 /// The rendered lines of a whole cell (one per wrap row).
 type CellLines<'a> = Vec<CellLine<'a>>;
 
 /// One character of a cell with the source span it came from, flattened so
 /// wrapping can cut at any boundary without losing the span's style, source
-/// line, or identity (a wrapped line re-merges its characters by span index,
-/// so a cell that does not wrap keeps its input spans exactly).
+/// range, or identity (a wrapped line re-merges its characters by span
+/// index, so a cell that does not wrap keeps its input spans exactly).
+///
+/// The span index alone carries the attribution: style and range are both
+/// read back from the cell's span list, so the character stays `Copy`.
 #[derive(Clone, Copy)]
 struct CellChar {
     ch: char,
-    /// Index into the cell's span list; also the span's style and line.
+    /// Index into the cell's span list; also the span's style and range.
     span: usize,
-    line: Option<usize>,
 }
 
 /// Greedy word-wrap state for one cell.
@@ -569,17 +573,13 @@ impl CellWrap {
 /// dropped at a line break and never invented between words the source did
 /// not separate.
 fn wrap_cell<'a>(
-    spans: &[(Span<'a>, Option<usize>)],
+    spans: &[(Span<'a>, Option<Attr>)],
     width: usize,
-) -> Vec<Vec<(Span<'a>, Option<usize>)>> {
+) -> Vec<Vec<(Span<'a>, Option<Attr>)>> {
     let mut chars: Vec<CellChar> = Vec::new();
-    for (span_idx, (span, line)) in spans.iter().enumerate() {
+    for (span_idx, (span, _)) in spans.iter().enumerate() {
         for ch in span.content.chars() {
-            chars.push(CellChar {
-                ch,
-                span: span_idx,
-                line: *line,
-            });
+            chars.push(CellChar { ch, span: span_idx });
         }
     }
 
@@ -590,7 +590,7 @@ fn wrap_cell<'a>(
         let w = char_display_width(ch.ch);
         if ch.ch.is_whitespace() {
             // Whitespace ends the word; the run collapses to one separator
-            // space carrying the run's first character's style and line.
+            // space carrying the run's first character's style and range.
             wrap.commit_word();
             wrap.pending_space = Some(ch);
             while i < chars.len() && chars[i].ch.is_whitespace() {
@@ -622,24 +622,27 @@ fn wrap_cell<'a>(
         .map(|line| {
             // Re-merge consecutive characters of the same source span, so a
             // span that was never cut keeps its exact input text (and a
-            // wrapped span becomes one fragment per line).
-            let mut out: Vec<(Span<'a>, Option<usize>)> = Vec::new();
-            let mut cur: Option<(usize, Option<usize>, String)> = None;
+            // wrapped span becomes one fragment per line). Every fragment
+            // inherits its span's whole range: a wrapped or
+            // whitespace-collapsed cell cannot be sliced, which is why a
+            // cell's attribution is a superset to begin with.
+            let mut out: Vec<(Span<'a>, Option<Attr>)> = Vec::new();
+            let mut cur: Option<(usize, String)> = None;
             for ch in line {
                 match &mut cur {
-                    Some((span, line, text)) if *span == ch.span && *line == ch.line => {
+                    Some((span, text)) if *span == ch.span => {
                         text.push(ch.ch);
                     }
                     _ => {
-                        if let Some((span, line, text)) = cur.take() {
-                            out.push((Span::styled(text, spans[span].0.style), line));
+                        if let Some((span, text)) = cur.take() {
+                            out.push((Span::styled(text, spans[span].0.style), spans[span].1.clone()));
                         }
-                        cur = Some((ch.span, ch.line, ch.ch.to_string()));
+                        cur = Some((ch.span, ch.ch.to_string()));
                     }
                 }
             }
-            if let Some((span, line, text)) = cur {
-                out.push((Span::styled(text, spans[span].0.style), line));
+            if let Some((span, text)) = cur {
+                out.push((Span::styled(text, spans[span].0.style), spans[span].1.clone()));
             }
             out
         })
@@ -669,7 +672,7 @@ impl BorderGlyphs {
         }
     }
 
-    fn render<'a>(self, column_widths: &[usize], style: Style) -> (Line<'a>, Vec<Option<usize>>) {
+    fn render<'a>(self, column_widths: &[usize], style: Style) -> (Line<'a>, Vec<Option<Attr>>) {
         let mut border = String::new();
         border.push(self.left);
         for (index, width) in column_widths.iter().enumerate() {
@@ -681,7 +684,7 @@ impl BorderGlyphs {
             }
         }
         border.push(self.right);
-        // Border rows are synthesized: they carry no source line.
+        // Border rows are synthesized: they carry no source range.
         (Line::from(Span::styled(border, style)), vec![None])
     }
 }
@@ -696,7 +699,7 @@ fn render_line<'a>(
     alignments: &[Alignment],
     content_style: Style,
     border_style: Style,
-) -> Vec<(Line<'a>, Vec<Option<usize>>)> {
+) -> Vec<(Line<'a>, Vec<Option<Attr>>)> {
     let empty_cell = TableCell::default();
     // Wrap every cell once; the per-column blank line fills a shorter
     // cell's continuation rows.
@@ -788,7 +791,7 @@ mod tests {
     fn single_cell() {
         let mut builder = TableBuilder::new(vec![Alignment::None]);
         builder.start_cell();
-        builder.push_span(Span::raw("hi"), Some(0));
+        builder.push_span(Span::raw("hi"), Some(Attr::inexact(0..2)));
         builder.finish_cell();
         builder.finish_header();
         assert_eq!(builder.render(&DefaultStyleSheet, usize::MAX).len(), 4);
@@ -806,7 +809,7 @@ mod tests {
     fn cell_style_covers_padding_and_empty_cells() {
         let style = Style::new().on_green();
         let cell = TableCell {
-            spans: vec![(Span::raw("x"), Some(3))],
+            spans: vec![(Span::raw("x"), Some(Attr::inexact(3..4)))],
         };
         assert_eq!(
             cell.render_lines(4, Alignment::Center, style),
@@ -816,7 +819,7 @@ mod tests {
                     Span::styled("x", style),
                     Span::styled("   ", style),
                 ],
-                vec![None, Some(3), None]
+                vec![None, Some(Attr::inexact(3..4)), None]
             )]
         );
 
@@ -1636,9 +1639,12 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_cell_lines_carry_the_source_line_attribution() {
+    fn wrapped_cell_lines_carry_the_source_attribution() {
         // Column 7: "aa bb cc" (8) wraps to "aa bb" / "cc"; both lines'
-        // content spans carry the cell row's source line (2, 0-based).
+        // content spans carry the cell's source range (source line 2,
+        // 0-based). A cell's attribution is a superset by construction:
+        // wrapping and whitespace collapsing rewrite the text, so a
+        // fragment can only inherit the whole range.
         let options = Options::new(DefaultStyleSheet).max_width(11);
         let (text, attrs) = from_str_with_options_tagged(
             indoc! {"
@@ -1651,11 +1657,12 @@ mod tests {
         let rendered: Vec<String> = text.lines.iter().map(ToString::to_string).collect_vec();
         assert_eq!(rendered[3], "│ aa bb   │");
         assert_eq!(rendered[4], "│ cc      │");
+        let cell = Attr::inexact(20..28); // `aa bb cc` within the row
         for line_attrs in &attrs[3..=4] {
             assert_eq!(
                 line_attrs,
-                &vec![None, None, Some(2), None, None],
-                "wrapped lines inherit the cell row's source line"
+                &vec![None, None, Some(cell.clone()), None, None],
+                "wrapped lines inherit the cell's source range as a superset"
             );
         }
     }

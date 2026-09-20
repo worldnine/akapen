@@ -77,19 +77,99 @@ where
 }
 
 /// Per-source-line attribution of the rendered output: one entry per
-/// [`Text::lines`] entry, holding one `Option<usize>` per span in the
-/// line — the source line (0-based) the span's text came from.
+/// [`Text::lines`] entry, holding one `Option<Attr>` per span in the
+/// line — the source byte range the span's text came from.
 /// `None` marks synthesized spans (borders, padding, quote/list prefixes,
-/// paragraph separators) that belong to no source line. The byte-ranges
-/// of the lines are preserved, so a consumer can wrap the text and keep
-/// the attribution alongside every fragment.
-pub type LineAttrs = Vec<Vec<Option<usize>>>;
+/// paragraph separators) that belong to no source range. The ranges are
+/// preserved through the line's spans in order, so a consumer can wrap
+/// the text and keep the attribution alongside every fragment.
+pub type LineAttrs = Vec<Vec<Option<Attr>>>;
 
-/// Render Markdown `input` into a [`Text`] plus per-span source-line
-/// attribution (see [`LineAttrs`]). The text is byte-identical to
-/// [`from_str_with_options`]; the attribution is computed from
-/// pulldown-cmark's event byte-ranges, so every span that renders source
-/// text knows exactly which line it came from.
+/// One rendered span's source attribution: the byte range of `input` the
+/// span came from, plus whether that range is **exact**.
+///
+/// # The exactness contract
+///
+/// `exact` means the span's text is a *verbatim slice* of the source:
+///
+/// ```text
+/// span.content == input[attr.range]   (hence span.content.len() == attr.range.len())
+/// ```
+///
+/// An exact range can therefore be sub-sliced by byte offset — a wrapped
+/// fragment's range is the matching sub-range of its span's range — and a
+/// decoration expressed in source bytes maps onto the rendered text
+/// character for character.
+///
+/// `exact == false` means the range is a **correct superset**: the span's
+/// text was produced *from* that source range, but is not a copy of it.
+/// `**strong**` renders as `strong` with the whole `**strong**` range;
+/// `&amp;` renders as `&`; a softbreak renders as a space whose range is
+/// the source's `\n`. Such a range can be used to locate the span in the
+/// source (which line, which construct), but **not** to slice it: a
+/// consumer that decorates `range` would bleed onto the neighbouring
+/// source text.
+///
+/// Every span that a range decoration must be able to target precisely —
+/// plain text, emphasis/strong content, heading text, link labels, list
+/// item text, blockquote text, inline code — is exact. See
+/// `exactness_by_markdown_construct` in this module's tests for the
+/// authoritative per-construct table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Attr {
+    /// Byte range into the rendered input.
+    pub range: std::ops::Range<usize>,
+    /// Whether `input[range]` is the span's text verbatim (see the type
+    /// docs). `false` marks a correct superset.
+    pub exact: bool,
+}
+
+impl Attr {
+    /// An exact attribution: `input[range]` IS the span's text.
+    pub fn exact(range: std::ops::Range<usize>) -> Self {
+        Self { range, exact: true }
+    }
+
+    /// A superset attribution: the span was produced from `range`, but is
+    /// not a verbatim copy of it.
+    pub fn inexact(range: std::ops::Range<usize>) -> Self {
+        Self {
+            range,
+            exact: false,
+        }
+    }
+
+    /// The same range, demoted to a superset. Used where a span's text is
+    /// synthesized from (or alongside) source text that is itself exact —
+    /// a wrap's hanging pad, a tab expanded to spaces.
+    pub fn demoted(&self) -> Self {
+        Self::inexact(self.range.clone())
+    }
+
+    /// The sub-range `self.range.start + start .. self.range.start + end`,
+    /// for slicing an EXACT attribution by byte offset into the span's
+    /// text. `exact` is carried over from `still_verbatim`, so a fragment
+    /// whose text was rewritten (tab expansion) keeps the correct range
+    /// while losing the verbatim claim.
+    ///
+    /// Only meaningful on an exact attribution; on a superset the whole
+    /// range must be kept (see [`Attr::exact`]).
+    pub fn slice(&self, start: usize, end: usize, still_verbatim: bool) -> Self {
+        debug_assert!(self.exact, "only an exact range may be sliced");
+        debug_assert!(end <= self.range.len(), "slice within the attributed range");
+        Self {
+            range: self.range.start + start..self.range.start + end,
+            exact: self.exact && still_verbatim,
+        }
+    }
+}
+
+/// Render Markdown `input` into a [`Text`] plus per-span source-range
+/// attribution (see [`LineAttrs`] and [`Attr`]). The text is
+/// byte-identical to [`from_str_with_options`]; the attribution is
+/// computed from pulldown-cmark's event byte-ranges, so every span that
+/// renders source text knows the byte range it came from — exactly,
+/// wherever the span's text is a verbatim slice of the input.
 pub fn from_str_with_options_tagged<'a, S>(input: &'a str, options: &Options<S>) -> (Text<'a>, LineAttrs)
 where
     S: StyleSheet,
@@ -122,7 +202,11 @@ where
 }
 
 /// Byte offset of the start of every source line (0 at index 0).
-fn line_starts(input: &str) -> Vec<usize> {
+///
+/// Public so a consumer can derive a source LINE from an [`Attr`] with
+/// exactly the function the renderer used — one definition, no chance of
+/// the two drifting apart at a file's trailing newline.
+pub fn line_starts(input: &str) -> Vec<usize> {
     let mut starts = vec![0usize];
     for (i, b) in input.bytes().enumerate() {
         if b == b'\n' {
@@ -133,7 +217,7 @@ fn line_starts(input: &str) -> Vec<usize> {
 }
 
 /// The source line containing `byte` (binary search over [`line_starts`]).
-fn line_at(line_starts: &[usize], byte: usize) -> usize {
+pub fn line_at(line_starts: &[usize], byte: usize) -> usize {
     match line_starts.binary_search(&byte) {
         Ok(i) => i,
         Err(i) => i - 1,
@@ -149,21 +233,16 @@ struct TextWriter<'a, 'theme, I, S: StyleSheet> {
     source: &'a str,
     /// Rendered terminal text.
     text: Text<'a>,
-    /// Byte offset of each source line's start (for event → line mapping).
+    /// Byte offset of each source line's start, for the per-source-line
+    /// attribution of a multi-line event ([`TextWriter::nth_line_attr`]).
     line_starts: Vec<usize>,
-    /// The source line of the event currently being handled.
-    current_line: Option<usize>,
-    /// The source line the current event's range ENDS on. Start/End events
-    /// both carry the whole element's range, so a closing construct drawn
-    /// from an End event (the metadata block's closing `---`) must anchor
-    /// on the range end, not the start.
-    current_end_line: Option<usize>,
     /// Byte range of the event currently being handled. A `Start(Item)`
     /// range begins at the list marker itself, which is how the item
     /// handler reads the marker character verbatim from [`Self::source`].
     current_range: std::ops::Range<usize>,
-    /// Per-span source-line attribution, parallel to [`TextWriter::text`].
-    out_lines: Vec<Vec<Option<usize>>>,
+    /// Per-span source-range attribution, parallel to [`TextWriter::text`]
+    /// (`out_attrs[l][i]` belongs to `text.lines[l].spans[i]`).
+    out_attrs: Vec<Vec<Option<Attr>>>,
     /// Styles for nested inline constructs, with the active style at the top.
     inline_styles: Vec<Style>,
     /// Prefixes added to each output line, from the outermost block to the innermost.
@@ -242,10 +321,8 @@ where
             source,
             text: Text::default(),
             line_starts,
-            current_line: None,
-            current_end_line: None,
             current_range: 0..0,
-            out_lines: Vec::new(),
+            out_attrs: Vec::new(),
             inline_styles: vec![],
             line_styles: vec![],
             line_prefixes: vec![],
@@ -274,23 +351,35 @@ where
     fn run_tagged(mut self) -> (Text<'a>, LineAttrs) {
         debug!("Running text writer");
         while let Some((event, range)) = self.iter.next() {
-            self.current_line = Some(line_at(&self.line_starts, range.start));
-            self.current_end_line = Some(line_at(
-                &self.line_starts,
-                range.end.saturating_sub(1).max(range.start),
-            ));
             self.current_range = range;
             self.handle_event(event);
         }
-        debug_assert_eq!(self.text.lines.len(), self.out_lines.len());
-        for (line, attrs) in self.text.lines.iter().zip(&self.out_lines) {
+        debug_assert_eq!(self.text.lines.len(), self.out_attrs.len());
+        for (line, attrs) in self.text.lines.iter().zip(&self.out_attrs) {
             debug_assert_eq!(
                 line.spans.len(),
                 attrs.len(),
                 "attribution must parallel the rendered spans"
             );
+            // The exactness contract, checked at the only place that can
+            // see both sides: every span claiming an exact range must BE
+            // that slice of the source. Catches any later mutation of an
+            // already-attributed span (the task-list marker's `to_mut()`,
+            // a table cell's re-merge) that would silently make Phase 2's
+            // range decoration bleed into the neighbouring text.
+            for (span, attr) in line.spans.iter().zip(attrs) {
+                if let Some(attr) = attr {
+                    debug_assert!(
+                        !attr.exact || self.source.get(attr.range.clone()) == Some(span.content.as_ref()),
+                        "span {:?} claims exact range {:?} = {:?}",
+                        span.content,
+                        attr.range,
+                        self.source.get(attr.range.clone())
+                    );
+                }
+            }
         }
-        (self.text, self.out_lines)
+        (self.text, self.out_attrs)
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -439,7 +528,17 @@ where
 
             let span = Span::styled(line.to_owned(), style);
 
-            self.push_span_with_line(span, self.current_line.map(|l| l + k));
+            // `line` is a subslice of the event's text; when that text is
+            // still borrowed from the input (the ordinary case — see
+            // `exact_attr`), the slice's own offset is an EXACT range and
+            // no per-line bookkeeping is needed. Otherwise the event
+            // rewrote the text (an entity reference, a smart replacement)
+            // and the k-th source line's span is the tightest correct
+            // superset — the same line the old line-attribution used.
+            let attr = self
+                .exact_subslice_attr(&text, line)
+                .or_else(|| self.nth_line_attr(k));
+            self.push_span_with_attr(span, attr);
         }
         self.needs_newline = false;
     }
@@ -461,14 +560,14 @@ where
         // lines: the opening one is the block range's first line, the
         // closing one its last (Start/End events both carry the whole
         // element's range, so the end fence anchors on the range end).
-        self.push_line(Line::from("---"), vec![self.current_line]);
+        self.push_line(Line::from("---"), vec![self.event_attr()]);
         self.push_line(Line::default(), vec![]);
         self.in_metadata_block = true;
     }
 
     fn end_metadata_block(&mut self) {
         if self.in_metadata_block {
-            self.push_line(Line::from("---"), vec![self.current_end_line]);
+            self.push_line(Line::from("---"), vec![self.event_end_attr()]);
             self.line_styles.pop();
             self.in_metadata_block = false;
             self.needs_newline = true;
@@ -482,7 +581,9 @@ where
         // A rule renders its own source line (`---`/`***`/`___`), so the
         // drawn row is attributed to it — the cursor and selection land on
         // the visible rule, and it is never mistaken for an invisible line.
-        self.push_line(Line::from("---"), vec![self.current_line]);
+        // The drawn `---` is the renderer's own glyph, not the source's
+        // marker (`***` renders as `---`): a superset, never exact.
+        self.push_line(Line::from("---"), vec![self.event_attr()]);
         self.needs_newline = true;
     }
 
@@ -497,7 +598,7 @@ where
     }
 
     #[instrument(level = "trace", skip(self))]
-    fn push_line(&mut self, line: Line<'a>, attrs: Vec<Option<usize>>) {
+    fn push_line(&mut self, line: Line<'a>, attrs: Vec<Option<Attr>>) {
         let style = self.line_styles.last().copied().unwrap_or_default();
         let mut line = line.patch_style(style);
 
@@ -511,34 +612,130 @@ where
             line.spans.insert(0, prefix);
         }
         // The prefixes (and their spacer) are synthesized markers: they
-        // carry no source line.
+        // carry no source range.
         let prefix_count = if has_prefixes { line_prefixes.len() + 1 } else { 0 };
-        let mut all_attrs = Vec::with_capacity(prefix_count + attrs.len());
+        let mut all_attrs: Vec<Option<Attr>> = Vec::with_capacity(prefix_count + attrs.len());
         all_attrs.extend(std::iter::repeat_n(None, prefix_count));
         all_attrs.extend(attrs);
         self.text.lines.push(line);
-        self.out_lines.push(all_attrs);
+        self.out_attrs.push(all_attrs);
         // The parallel track must mirror the line's real span count — a
         // drop (ratatui's empty-content `Line::styled`) would silently
         // shift every later attribution on the line.
-        debug_assert_eq!(self.out_lines.len(), self.text.lines.len());
+        debug_assert_eq!(self.out_attrs.len(), self.text.lines.len());
         debug_assert_eq!(
-            self.out_lines.last().expect("pushed").len(),
+            self.out_attrs.last().expect("pushed").len(),
             self.text.lines.last().expect("pushed").spans.len()
         );
     }
 
-    #[instrument(level = "trace", skip(self))]
-    fn push_span(&mut self, span: Span<'a>) {
-        self.push_span_with_line(span, self.current_line);
+    /// The current event's own range as a SUPERSET attribution: correct,
+    /// but not a verbatim slice (the span's text was produced from the
+    /// event, not copied out of it). The default for every synthesized
+    /// span that still belongs to a construct — list markers, quote
+    /// alert headings, `$…$` math, the `[img]` indicator, link URLs.
+    fn event_attr(&self) -> Option<Attr> {
+        Some(Attr::inexact(self.current_range.clone()))
+    }
+
+    /// The current event's END anchored attribution. Start and End events
+    /// both carry the whole element's range, so a closing construct drawn
+    /// from an End event (the metadata block's closing `---`) must sit on
+    /// the range's last byte, not its first.
+    fn event_end_attr(&self) -> Option<Attr> {
+        let anchor = self
+            .current_range
+            .end
+            .saturating_sub(1)
+            .max(self.current_range.start);
+        Some(Attr::inexact(anchor..self.current_range.end))
+    }
+
+    /// A SUPERSET attribution for the k-th source line of a multi-line
+    /// event: the event's range INTERSECTED with that line's byte span.
+    /// For `k == 0` that is the event range itself (clipped at the first
+    /// line's end) — the tightest correct superset there is.
+    ///
+    /// Used where the rendered text is a per-source-line transformation
+    /// the renderer cannot slice back — a syntax-highlighted code block
+    /// (syntect re-splits the line into owned spans), a reconstructed
+    /// `$$…$$` block, a text event pulldown-cmark rewrote. Every drawn
+    /// line still lands on its own source line instead of collapsing
+    /// onto the event's first one.
+    fn nth_line_attr(&self, k: usize) -> Option<Attr> {
+        let first = line_at(&self.line_starts, self.current_range.start);
+        let line_start = *self.line_starts.get(first + k)?;
+        if line_start >= self.current_range.end && k > 0 {
+            return self.event_attr();
+        }
+        let start = line_start.max(self.current_range.start);
+        let end = self
+            .line_starts
+            .get(first + k + 1)
+            .copied()
+            .unwrap_or(self.source.len())
+            .min(self.current_range.end)
+            .max(start);
+        Some(Attr::inexact(start..end))
+    }
+
+    /// The EXACT attribution of `text`, when it is a verbatim borrow of
+    /// [`Self::source`] — pulldown-cmark hands out `CowStr::Borrowed`
+    /// slices of the input for ordinary text, so the offset falls out of
+    /// the pointer with no extra bookkeeping.
+    ///
+    /// Two guards make this sound rather than merely likely: the slice
+    /// must lie inside the input's allocation (an `Owned`/`Boxed`/
+    /// `Inlined` CowStr — an entity reference, a smart-quote replacement
+    /// — is elsewhere), and `source[offset..]` must actually start with
+    /// `text`. An empty string is rejected outright: its pointer is not
+    /// required to point anywhere, so a zero-length verbatim check would
+    /// accept any offset at all.
+    ///
+    /// Returns `None` when `text` is not a verbatim borrow; the caller
+    /// then falls back to a superset ([`Self::event_attr`]).
+    fn exact_attr(&self, text: &str) -> Option<Attr> {
+        if text.is_empty() {
+            return None;
+        }
+        let base = self.source.as_ptr() as usize;
+        let at = text.as_ptr() as usize;
+        let offset = at.checked_sub(base)?;
+        if offset.checked_add(text.len())? > self.source.len() {
+            return None;
+        }
+        if self.source.get(offset..offset + text.len()) != Some(text) {
+            return None;
+        }
+        Some(Attr::exact(offset..offset + text.len()))
+    }
+
+    /// [`Self::exact_attr`] for `part`, a SUBSLICE of the borrowed string
+    /// `whole` (a single line of a multi-line text event). Deriving the
+    /// offset from `whole`'s base keeps the pointer arithmetic inside one
+    /// allocation, so an empty `part` — the leading `""` of a text event
+    /// that starts with a newline — is still placed exactly.
+    fn exact_subslice_attr(&self, whole: &str, part: &str) -> Option<Attr> {
+        let base = self.exact_attr(whole)?;
+        let within = (part.as_ptr() as usize).checked_sub(whole.as_ptr() as usize)?;
+        if within.checked_add(part.len())? > whole.len() {
+            return None;
+        }
+        Some(base.slice(within, within + part.len(), true))
     }
 
     #[instrument(level = "trace", skip(self))]
-    fn push_span_with_line(&mut self, span: Span<'a>, line: Option<usize>) {
+    fn push_span(&mut self, span: Span<'a>) {
+        let attr = self.event_attr();
+        self.push_span_with_attr(span, attr);
+    }
+
+    #[instrument(level = "trace", skip(self))]
+    fn push_span_with_attr(&mut self, span: Span<'a>, attr: Option<Attr>) {
         // An active image owns every span produced by its inline event stream. Checking it before
         // the table sink also lets a completed fallback enter a table cell as one ordered unit.
         if let Some(image) = self.images.last_mut() {
-            image.push_span(span, line);
+            image.push_span(span, attr);
             return;
         }
 
@@ -548,15 +745,15 @@ where
         // inline event handler cannot accidentally write table content into the surrounding text.
         // See <https://github.github.com/gfm/#tables-extension->.
         if let Some(builder) = &mut self.table_builder {
-            builder.push_span(span, line);
+            builder.push_span(span, attr);
             return;
         }
 
         if let Some(line_buf) = self.text.lines.last_mut() {
             line_buf.push_span(span);
-            self.out_lines.last_mut().expect("out_lines parallels text").push(line);
+            self.out_attrs.last_mut().expect("out_attrs parallels text").push(attr);
         } else {
-            self.push_line(Line::from(vec![span]), vec![line]);
+            self.push_line(Line::from(vec![span]), vec![attr]);
         }
     }
 }
@@ -569,6 +766,310 @@ mod tests {
 
     use super::test_support::{with_tracing, DefaultGuard};
     use super::*;
+
+    /// Every rendered span of `input`, as
+    /// `(text, "exact"|"range"|"-", source slice or "")`.
+    ///
+    /// `exact` = the span's text IS `input[range]` (sub-sliceable);
+    /// `range` = the range is a correct superset the span was produced
+    /// from; `-` = a synthesized span with no source at all.
+    fn attribution(input: &str) -> Vec<(String, &'static str, String)> {
+        let (text, attrs) = from_str_with_options_tagged(input, &Options::default());
+        let mut out = Vec::new();
+        for (line, line_attrs) in text.lines.iter().zip(&attrs) {
+            for (span, attr) in line.spans.iter().zip(line_attrs) {
+                let (kind, slice) = match attr {
+                    None => ("-", String::new()),
+                    Some(a) => (
+                        if a.exact { "exact" } else { "range" },
+                        input[a.range.clone()].to_owned(),
+                    ),
+                };
+                // THE contract, asserted on every span of every case
+                // below, not just the named one: an exact range is the
+                // span's text verbatim.
+                if kind == "exact" {
+                    assert_eq!(
+                        slice,
+                        span.content.as_ref(),
+                        "exact range must be the span's text verbatim ({input:?})"
+                    );
+                }
+                out.push((span.content.to_string(), kind, slice));
+            }
+        }
+        out
+    }
+
+    /// **The exactness table.** Which Markdown constructs render spans
+    /// whose source range can be sub-sliced (`exact`) and which only get
+    /// a correct superset (`range`) — the contract every later phase's
+    /// range decoration is designed against.
+    ///
+    /// Exact, because pulldown-cmark hands the content out borrowed from
+    /// the input and the renderer copies it verbatim: plain text,
+    /// emphasis/strong/strikethrough content, heading text, link and
+    /// image labels, list item text, blockquote text, inline code,
+    /// autolink text, table-less escaped characters, fenced and indented
+    /// code content, HTML *inline* text.
+    ///
+    /// Superset, because the rendered text is not a copy of the source
+    /// it came from: an entity reference (`&amp;` → `&`), a softbreak
+    /// (`\n` → ` `), a syntax-highlighted fence (syntect re-splits the
+    /// line into owned spans), a `$$…$$` block (reconstructed), an HTML
+    /// *block* line, a table cell (re-wrapped and whitespace-collapsed),
+    /// a list marker, a rule, the metadata fences, the image fallback.
+    ///
+    /// No source at all: block prefixes and their spacer, table borders
+    /// and padding, the task-list checkbox, the heading marker line.
+    #[rstest]
+    fn exactness_by_markdown_construct(_with_tracing: DefaultGuard) {
+        use pretty_assertions::assert_eq;
+
+        // --- exact: the span's text is a verbatim slice ---------------
+        assert_eq!(
+            attribution("hello world"),
+            [("hello world".into(), "exact", "hello world".into())]
+        );
+        assert_eq!(
+            attribution("日本語のテキスト"),
+            [("日本語のテキスト".into(), "exact", "日本語のテキスト".into())]
+        );
+        assert_eq!(
+            attribution("絵文字 🎉 と全角ＡＢ"),
+            [("絵文字 🎉 と全角ＡＢ".into(), "exact", "絵文字 🎉 と全角ＡＢ".into())]
+        );
+        // The whole point of the exactness contract: `**重要**` renders
+        // as `重要`, and the range covers `重要` ALONE. A naive
+        // event-range attribution would cover `**重要**` and bleed the
+        // decoration onto the neighbouring text on the same line.
+        assert_eq!(
+            attribution("前 **重要** 後"),
+            [
+                ("前 ".into(), "exact", "前 ".into()),
+                ("重要".into(), "exact", "重要".into()),
+                (" 後".into(), "exact", " 後".into()),
+            ]
+        );
+        assert_eq!(
+            attribution("a *em* ~~del~~ b"),
+            [
+                ("a ".into(), "exact", "a ".into()),
+                ("em".into(), "exact", "em".into()),
+                (" ".into(), "exact", " ".into()),
+                ("del".into(), "exact", "del".into()),
+                (" b".into(), "exact", " b".into()),
+            ]
+        );
+        assert_eq!(
+            attribution("# 見出し"),
+            [
+                // The heading marker line is synthesized layout.
+                ("# ".into(), "-", String::new()),
+                ("見出し".into(), "exact", "見出し".into()),
+            ]
+        );
+        // A link's LABEL is exact; its URL is not (a reference link's URL
+        // is borrowed from the ref-def elsewhere in the document, so the
+        // renderer never claims a URL span is the text beside it).
+        assert_eq!(
+            attribution("[ラベル](http://example.com)"),
+            [
+                ("ラベル".into(), "exact", "ラベル".into()),
+                (" (".into(), "range", "[ラベル](http://example.com)".into()),
+                (
+                    "http://example.com".into(),
+                    "range",
+                    "[ラベル](http://example.com)".into()
+                ),
+                (")".into(), "range", "[ラベル](http://example.com)".into()),
+            ]
+        );
+        assert_eq!(
+            attribution("a `コード` b"),
+            [
+                ("a ".into(), "exact", "a ".into()),
+                ("コード".into(), "exact", "コード".into()),
+                (" b".into(), "exact", " b".into()),
+            ]
+        );
+        assert_eq!(
+            attribution("- 項目ひとつ"),
+            [
+                // The marker is copied from the source but re-indented,
+                // so it is a superset of the item's range.
+                ("- ".into(), "range", "- 項目ひとつ".into()),
+                ("項目ひとつ".into(), "exact", "項目ひとつ".into()),
+            ]
+        );
+        assert_eq!(
+            attribution("> 引用文"),
+            [
+                // The `> ` prefix and its spacer are the renderer's own.
+                (">".into(), "-", String::new()),
+                (" ".into(), "-", String::new()),
+                ("引用文".into(), "exact", "引用文".into()),
+            ]
+        );
+        // An escape is exact: pulldown-cmark emits the escaped character
+        // as its own borrowed slice, so the range is the `*`, not `\*`.
+        assert_eq!(
+            attribution(r"a \* b"),
+            [
+                ("a ".into(), "exact", "a ".into()),
+                ("* b".into(), "exact", "* b".into()),
+            ]
+        );
+        assert_eq!(
+            attribution("<http://example.com>"),
+            [
+                ("http://example.com".into(), "exact", "http://example.com".into()),
+                (" (".into(), "range", "<http://example.com>".into()),
+                (
+                    "http://example.com".into(),
+                    "range",
+                    "<http://example.com>".into()
+                ),
+                (")".into(), "range", "<http://example.com>".into()),
+            ]
+        );
+        // An unhighlighted fence keeps its content verbatim, one exact
+        // span per line of the block.
+        assert_eq!(
+            attribution("```not-a-language\nsome code\nmore\n```"),
+            [
+                // The default style sheet draws the fences; akapen hides
+                // them (`code_block_fence` = "").
+                ("```not-a-language".into(), "-", String::new()),
+                ("some code".into(), "exact", "some code".into()),
+                ("more".into(), "exact", "more".into()),
+                ("```".into(), "-", String::new()),
+            ]
+        );
+
+        // --- superset: correct, but not a verbatim slice --------------
+        // An entity reference is rewritten, so pulldown-cmark hands out
+        // an owned string: the range covers the whole `&amp;`.
+        assert_eq!(
+            attribution("a &amp; b"),
+            [
+                ("a ".into(), "exact", "a ".into()),
+                ("&".into(), "range", "&amp;".into()),
+                (" b".into(), "exact", " b".into()),
+            ]
+        );
+        // A softbreak renders as a space; its range is the source `\n`.
+        assert_eq!(
+            attribution("one\ntwo"),
+            [
+                ("one".into(), "exact", "one".into()),
+                (" ".into(), "range", "\n".into()),
+                ("two".into(), "exact", "two".into()),
+            ]
+        );
+        // A hard break starts a new physical line; both halves stay exact.
+        assert_eq!(
+            attribution("a\\\nb"),
+            [
+                ("a".into(), "exact", "a".into()),
+                ("b".into(), "exact", "b".into()),
+            ]
+        );
+        // A task-list checkbox is synthesized; the text beside it is exact.
+        assert_eq!(
+            attribution("- [x] done"),
+            [
+                ("- [x] ".into(), "range", "- [x] done".into()),
+                ("done".into(), "exact", "done".into()),
+            ]
+        );
+        // A table cell's content is re-wrapped and whitespace-collapsed
+        // by the layout, so a cell span can never claim to be a slice.
+        assert_eq!(
+            attribution("| a |\n|---|\n| b |"),
+            [
+                ("┌───┐".into(), "-", String::new()),
+                ("│".into(), "-", String::new()),
+                (" ".into(), "-", String::new()),
+                ("a".into(), "range", "a".into()),
+                (" ".into(), "-", String::new()),
+                ("│".into(), "-", String::new()),
+                ("├───┤".into(), "-", String::new()),
+                ("│".into(), "-", String::new()),
+                (" ".into(), "-", String::new()),
+                ("b".into(), "range", "b".into()),
+                (" ".into(), "-", String::new()),
+                ("│".into(), "-", String::new()),
+                ("└───┘".into(), "-", String::new()),
+            ]
+        );
+        // A rule draws the renderer's own `---`, whatever the source wrote.
+        assert_eq!(
+            attribution("a\n\n***\n\nb"),
+            [
+                ("a".into(), "exact", "a".into()),
+                // The event range of a rule includes its newline.
+                ("---".into(), "range", "***\n".into()),
+                ("b".into(), "exact", "b".into()),
+            ]
+        );
+        // HTML stays literal text but is re-emitted line by line rather
+        // than sliced, so each line keeps its own event's range (newline
+        // included) as a superset.
+        assert_eq!(
+            attribution("<div>\n<p>x</p>\n</div>"),
+            [
+                ("<div>".into(), "range", "<div>\n".into()),
+                ("<p>x</p>".into(), "range", "<p>x</p>\n".into()),
+                ("</div>".into(), "range", "</div>".into()),
+            ]
+        );
+        // The metadata fences are drawn by the renderer; the opening one
+        // anchors on the block's first line, the closing one on its last.
+        assert_eq!(
+            attribution("---\ntitle: Demo\n---\n\nBody"),
+            [
+                // Opening fence: the block's whole range (it anchors on
+                // the first line). Closing fence: the range's last byte.
+                ("---".into(), "range", "---\ntitle: Demo\n---".into()),
+                ("title: Demo".into(), "exact", "title: Demo".into()),
+                ("---".into(), "range", "-".into()),
+                ("Body".into(), "exact", "Body".into()),
+            ]
+        );
+        // An image renders a synthesized fallback; every part of it maps
+        // to the image element's own range.
+        assert_eq!(
+            attribution("![alt](x.png)"),
+            [
+                ("[img] ".into(), "range", "![alt](x.png)".into()),
+                ("alt".into(), "exact", "alt".into()),
+            ]
+        );
+
+        // --- a highlighted fence: superset, one range per source line --
+        #[cfg(feature = "highlight-code")]
+        {
+            let attrs = attribution("```rust\nfn main() {}\nlet x = 1;\n```");
+            // The drawn fences (`-`) aside, syntect re-splits each line
+            // into owned spans: nothing inside a highlighted block can
+            // claim to be a verbatim slice.
+            assert!(
+                attrs.iter().all(|(_, kind, _)| *kind != "exact"),
+                "no span of a highlighted block is exact: {attrs:?}"
+            );
+            // Every span of the first drawn line maps to `fn main() {}`,
+            // every span of the second to `let x = 1;` — the rows do not
+            // collapse onto the fence's opening line.
+            let ranges: Vec<&str> = attrs
+                .iter()
+                .filter(|(_, kind, _)| *kind == "range")
+                .map(|(_, _, slice)| slice.as_str())
+                .collect();
+            assert_eq!(ranges.first(), Some(&"fn main() {}\n"));
+            assert_eq!(ranges.last(), Some(&"let x = 1;\n"));
+        }
+    }
 
     #[rstest]
     fn empty(_with_tracing: DefaultGuard) {

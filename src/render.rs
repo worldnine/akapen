@@ -6,19 +6,30 @@
 //! source mode uses ([`wrap_spans_tagged`]). The renderer never fails,
 //! needs no external binary, and keeps full truecolor.
 //!
-//! The source-line mapping is **exact**: the vendored renderer threads
+//! The source mapping is **byte-precise**: the vendored renderer threads
 //! pulldown-cmark's event byte-ranges through its span sinks, so every
-//! rendered span knows the source line it came from
-//! (`tui_markdown::from_str_with_options_tagged`). [`build_starts_from_tags`]
-//! and [`build_row_segments_from_tags`] derive `source_starts` and
-//! `row_segments` directly from that attribution — no text matching, no
-//! heuristics. Synthesized spans (table borders and padding, quote/list
-//! prefixes, paragraph separators) carry no source line (`None`); rows
-//! with no attributable text fall back to row-level highlighting in the
-//! view, exactly as before.
+//! rendered span carries the source byte range it came from
+//! (`tui_markdown::from_str_with_options_tagged` → [`Attr`]). A range is
+//! either *exact* — the span's text IS that slice of the source, so it
+//! can be sub-sliced — or a correct *superset*; see [`Attr`] for the
+//! contract and the per-construct table.
+//!
+//! Everything the view consumes is still line-oriented. [`line_of`] is
+//! the single bridge: it turns a span's range into the source line, and
+//! [`build_starts_from_tags`], [`build_row_segments_from_tags`], the
+//! ghost pass and [`insert_missing_blank_rows`] all work on those line
+//! numbers exactly as before — no view-side code knows about ranges yet.
+//! The per-span ranges survive alongside them in [`Rendered::row_attrs`],
+//! which is what Phase 2's range decoration will intersect against.
+//! Synthesized spans (table borders and padding, quote/list prefixes,
+//! paragraph separators) carry no range (`None`); rows with no
+//! attributable text fall back to row-level highlighting in the view,
+//! exactly as before.
 
 use ratatui::style::{Modifier, Style};
 use tui_markdown::{BuiltinCodeTheme, CodeTheme, Options, StyleSheet};
+
+use tui_markdown::{Attr, line_at, line_starts};
 
 use crate::highlight::{Highlighter, Span, wrap_spans_tagged};
 use crate::source::Source;
@@ -30,14 +41,23 @@ use crate::source::Source;
 /// Rows that cannot be attributed (a blank row, a wrap inside an
 /// unrendered region) carry no segments — the view falls back to
 /// row-level highlighting there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `line`/`start`/`end` are what the view uses; `source` is the phrase's
+/// extent in the SOURCE, the hull of the spans that were merged into it.
+/// The hull is a superset by nature (`a **b** c` merges into one segment
+/// whose source range swallows the `**`), so a consumer that needs
+/// byte-precise positions reads [`Rendered::row_attrs`] instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     pub line: usize,
     pub start: usize,
     pub end: usize,
+    /// The phrase's source byte range (`line_of(source) == line`).
+    pub source: std::ops::Range<usize>,
 }
 
-/// The rendered view: display rows plus the source-line mapping.
+/// The rendered view: display rows plus the source mapping —
+/// line-oriented for the view, byte-precise underneath.
 #[derive(Debug)]
 pub struct Rendered {
     /// One styled row per display line, pre-wrapped to the pane width.
@@ -47,6 +67,15 @@ pub struct Rendered {
     pub source_starts: Vec<usize>,
     /// Per-row phrase segments (see [`Segment`]).
     pub row_segments: Vec<Vec<Segment>>,
+    /// Per-row, per-span source attribution, parallel to [`Self::rows`]
+    /// (`row_attrs[r][i]` belongs to `rows[r][i]`). This is the
+    /// byte-precise layer Phase 2's range decoration intersects against;
+    /// the view's own code works off [`Self::source_starts`] and
+    /// [`Self::row_segments`], which are derived from it via [`line_of`].
+    // Built and tested here, consumed by the range-decoration layer that
+    // lands on top of this phase; the view itself stays line-oriented.
+    #[allow(dead_code)]
+    pub row_attrs: Vec<Vec<Option<Attr>>>,
     /// Raw source text of each invisible line (a non-blank line that
     /// rendered no text: ref-defs, fences, HTML) — the view paints it as a
     /// ghost onto a nearby blank row when the cursor or the selection
@@ -238,8 +267,9 @@ pub fn render(source: &Source, width: usize, highlighter: &Highlighter) -> Rende
         .max_width(width);
     let (text, line_attrs) =
         tui_markdown::from_str_with_options_tagged(&source.content, &options);
+    let starts = line_starts(&source.content);
     let mut rows: Vec<Vec<Span>> = Vec::new();
-    let mut row_lines: Vec<Vec<Option<usize>>> = Vec::new();
+    let mut row_attrs: Vec<Vec<Option<Attr>>> = Vec::new();
     for (line, attrs) in text.lines.iter().zip(&line_attrs) {
         // Block-level styles (headings, front matter, quotes, tables) live
         // on the Line, not the spans — ratatui renders each span as
@@ -254,18 +284,25 @@ pub fn render(source: &Source, width: usize, highlighter: &Highlighter) -> Rende
                 style: base.patch(s.style),
             })
             .collect();
-        for (r_spans, r_lines) in wrap_spans_tagged(&spans, attrs, width, hanging_indent(&spans)) {
+        for (r_spans, r_attrs) in wrap_spans_tagged(&spans, attrs, width, hanging_indent(&spans)) {
             rows.push(r_spans);
-            row_lines.push(r_lines);
+            row_attrs.push(r_attrs);
         }
     }
+    // Everything below is line-oriented; `line_of` is the only bridge
+    // between the byte-range model and the view's line numbers, so the
+    // whole downstream pipeline is unchanged by this phase.
+    let row_lines: Vec<Vec<Option<usize>>> = row_attrs
+        .iter()
+        .map(|attrs| attrs.iter().map(|a| a.as_ref().map(|a| line_of(&starts, a))).collect())
+        .collect();
     // The vendored renderer emits list markers itself, copied verbatim
     // from the source (`-`/`*`/`+`, ordered numbers as written), so no
     // post-pass rewriting is needed — and none may exist: a span-text
     // pass also matched fenced-code lines like "-" or "- [x]" and
     // silently destroyed their content.
     let source_starts = build_starts_from_tags(&rows, &row_lines, &source.lines);
-    let row_segments = build_row_segments_from_tags(&rows, &row_lines);
+    let row_segments = build_row_segments_from_tags(&rows, &row_attrs, &row_lines);
     // Which source lines rendered any text at all (appear in the tags).
     // Invisible non-blank lines (ref-defs, fences, HTML) share a row by
     // design; the blank-row insertion and the ghost display both need to
@@ -284,9 +321,27 @@ pub fn render(source: &Source, width: usize, highlighter: &Highlighter) -> Rende
             (!r && !line.trim().is_empty()).then(|| line.trim_end().to_string())
         })
         .collect();
-    let (rows, source_starts, row_segments) =
-        insert_missing_blank_rows(rows, source_starts, row_segments, &source.lines, &rendered);
-    Rendered { rows, source_starts, row_segments, ghost }
+    let (rows, source_starts, row_segments, row_attrs) = insert_missing_blank_rows(
+        rows,
+        source_starts,
+        row_segments,
+        row_attrs,
+        &source.lines,
+        &rendered,
+    );
+    Rendered { rows, source_starts, row_segments, row_attrs, ghost }
+}
+
+/// The source LINE a span's attribution sits on: the line its range
+/// STARTS on. The single bridge from the byte-range model to the
+/// line-oriented view code — everything downstream (`source_starts`,
+/// `row_segments`, the ghost pass, the blank-row insertion) consumes
+/// line numbers and is unchanged by this phase.
+///
+/// Uses the renderer's own [`line_at`], so the two can never disagree
+/// about a file's last line or its trailing newline.
+fn line_of(starts: &[usize], attr: &Attr) -> usize {
+    line_at(starts, attr.range.start)
 }
 
 /// The hanging indent of one rendered logical line: the display width of
@@ -428,39 +483,72 @@ fn build_starts_from_tags(
 /// `None` spans (synthesized borders, prefixes) break the run, so the
 /// segments cover exactly the attributed text. Rows with no attributed
 /// text get no segments — the view falls back to row-level highlighting.
+///
+/// Each segment also records its SOURCE extent: the hull of the merged
+/// spans' ranges. A hull is a superset (it spans the markup between two
+/// merged spans, and an inexact span contributes its whole event range),
+/// which is why byte-precise consumers use [`Rendered::row_attrs`]
+/// instead. The hull always starts on `line`, so `line_of(source)` and
+/// `line` agree — asserted below.
 fn build_row_segments_from_tags(
     rows: &[Vec<Span>],
+    row_attrs: &[Vec<Option<Attr>>],
     row_lines: &[Vec<Option<usize>>],
 ) -> Vec<Vec<Segment>> {
     rows.iter()
+        .zip(row_attrs)
         .zip(row_lines)
-        .map(|(row, lines)| {
+        .map(|((row, attrs), lines)| {
             let mut segments: Vec<Segment> = Vec::new();
             let mut start = 0usize;
-            let mut cur: Option<usize> = None;
-            let mut seg_start = 0usize;
-            for (span, line) in row.iter().zip(lines) {
-                if let Some(l) = line {
-                    if cur != Some(*l) {
-                        if let Some(c) = cur {
-                            segments.push(Segment { line: c, start: seg_start, end: start });
+            // The open run: its source line, byte start in the row, and
+            // the hull of the source ranges merged into it so far.
+            let mut cur: Option<(usize, usize, std::ops::Range<usize>)> = None;
+            let close = |segments: &mut Vec<Segment>,
+                         (line, seg_start, source): (usize, usize, std::ops::Range<usize>),
+                         end: usize| {
+                segments.push(Segment { line, start: seg_start, end, source });
+            };
+            for ((span, line), attr) in row.iter().zip(lines).zip(attrs) {
+                match (line, attr) {
+                    (Some(l), Some(a)) => match &mut cur {
+                        Some((c, _, hull)) if *c == *l => {
+                            hull.start = hull.start.min(a.range.start);
+                            hull.end = hull.end.max(a.range.end);
                         }
-                        cur = Some(*l);
-                        seg_start = start;
+                        _ => {
+                            if let Some(open) = cur.take() {
+                                close(&mut segments, open, start);
+                            }
+                            cur = Some((*l, start, a.range.clone()));
+                        }
+                    },
+                    _ => {
+                        if let Some(open) = cur.take() {
+                            close(&mut segments, open, start);
+                        }
                     }
-                } else if let Some(c) = cur {
-                    segments.push(Segment { line: c, start: seg_start, end: start });
-                    cur = None;
                 }
                 start += span.text.len();
             }
-            if let Some(c) = cur {
-                segments.push(Segment { line: c, start: seg_start, end: start });
+            if let Some(open) = cur.take() {
+                close(&mut segments, open, start);
             }
             segments
         })
         .collect()
 }
+
+/// The row-parallel products of the render pipeline, passed through the
+/// blank-row insertion together so an inserted row lands in all four:
+/// the rows themselves, each source line's first row, the per-row phrase
+/// segments, and the per-row, per-span source attribution.
+type RowLayout = (
+    Vec<Vec<Span>>,
+    Vec<usize>,
+    Vec<Vec<Segment>>,
+    Vec<Vec<Option<Attr>>>,
+);
 
 /// Insert a display row for every blank RUN the renderer folded away (the
 /// blank after a heading or fence, say): the run's head then owns a row,
@@ -479,9 +567,10 @@ fn insert_missing_blank_rows(
     mut rows: Vec<Vec<Span>>,
     mut starts: Vec<usize>,
     mut segments: Vec<Vec<Segment>>,
+    mut attrs: Vec<Vec<Option<Attr>>>,
     source_lines: &[String],
     rendered: &[bool],
-) -> (Vec<Vec<Span>>, Vec<usize>, Vec<Vec<Segment>>) {
+) -> RowLayout {
     let blank = |i: usize| source_lines[i].trim().is_empty();
     let run_head = |i: usize| blank(i) && (i == 0 || !blank(i - 1));
     for i in 0..source_lines.len() {
@@ -509,6 +598,8 @@ fn insert_missing_blank_rows(
             }],
         );
         segments.insert(at, Vec::new());
+        // The inserted row holds one empty, unattributed span.
+        attrs.insert(at, vec![None]);
         for st in starts.iter_mut().skip(i + 1) {
             *st += 1;
         }
@@ -521,7 +612,7 @@ fn insert_missing_blank_rows(
             j += 1;
         }
     }
-    (rows, starts, segments)
+    (rows, starts, segments, attrs)
 }
 
 #[cfg(test)]
@@ -731,7 +822,7 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "見出し前文\n\n---\n\n***\n\n___\n").unwrap();
         let source = Source::load(path).unwrap();
-        let Rendered { rows, source_starts, row_segments, ghost } =
+        let Rendered { rows, source_starts, row_segments, ghost, .. } =
             render(&source, 60, &Highlighter::new(None, false));
         for &line in &[2usize, 4, 6] {
             assert_eq!(ghost[line], None, "a rule renders — no ghost");
@@ -761,7 +852,7 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "数式:\n\n$$\nx = 1\n$$\n").unwrap();
         let source = Source::load(path).unwrap();
-        let Rendered { rows, source_starts, row_segments, ghost } =
+        let Rendered { rows, source_starts, row_segments, ghost, .. } =
             render(&source, 60, &Highlighter::new(None, false));
         for (line, needle) in [(2usize, "$$"), (3, "x = 1"), (4, "$$")] {
             assert_eq!(ghost[line], None, "math lines render — no ghost");
@@ -784,7 +875,7 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "---\ntitle: x\n---\n\n# H\n").unwrap();
         let source = Source::load(path).unwrap();
-        let Rendered { rows, source_starts, row_segments, ghost } =
+        let Rendered { rows, source_starts, row_segments, ghost, .. } =
             render(&source, 60, &Highlighter::new(None, false));
         assert_eq!(ghost[0], None);
         assert_eq!(ghost[2], None);
@@ -1126,5 +1217,271 @@ mod tests {
         // blockquote.
         assert!(rows.iter().any(|r| row_text(r) == "- real item"));
         assert!(rows.iter().any(|r| row_text(r) == "> - quote item"));
+    }
+}
+
+/// Range attribution: the exactness contract as akapen's own pipeline
+/// (render → wrap → rows) delivers it, and its invariants.
+#[cfg(test)]
+mod range_attribution {
+    use super::{Rendered, line_of, render};
+    use crate::highlight::Highlighter;
+    use crate::source::Source;
+    use tui_markdown::{Attr, line_starts};
+
+    fn rendered(text: &str, width: usize) -> (Source, Rendered) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, text).expect("write");
+        let source = Source::load(path).expect("load");
+        let r = render(&source, width, &Highlighter::new(None, false));
+        (source, r)
+    }
+
+    /// Every rendered span of the document, flattened, as
+    /// `(text, Option<(source slice, exact)>)`.
+    fn spans(source: &Source, r: &Rendered) -> Vec<(String, Option<(String, bool)>)> {
+        r.rows
+            .iter()
+            .zip(&r.row_attrs)
+            .flat_map(|(row, attrs)| row.iter().zip(attrs))
+            .map(|(span, attr)| {
+                let a = attr.as_ref().map(|a| {
+                    (
+                        source.content[a.range.clone()].to_string(),
+                        a.exact,
+                    )
+                });
+                (span.text.clone(), a)
+            })
+            .collect()
+    }
+
+    /// The exact source slice of the first span whose text is `needle`.
+    /// Panics when the span is missing or its range is only a superset —
+    /// both are the failure this module exists to catch.
+    fn exact_slice(source: &Source, r: &Rendered, needle: &str) -> String {
+        let found = spans(source, r)
+            .into_iter()
+            .find(|(text, _)| text == needle)
+            .unwrap_or_else(|| panic!("no span renders {needle:?}"));
+        match found.1 {
+            Some((slice, true)) => slice,
+            other => panic!("span {needle:?} is not exactly attributed: {other:?}"),
+        }
+    }
+
+    /// THE contract, over the whole pipeline: a span claiming an exact
+    /// range IS that slice of the source — so a range decoration
+    /// expressed in source bytes lands on exactly those characters. Also
+    /// checks every range is in bounds and on char boundaries, exact or
+    /// not.
+    ///
+    /// A plain `assert!` (not `debug_assert!`): the contract must hold in
+    /// release builds too, and this walks the kitchen-sink fixture at
+    /// four widths, wrapping included.
+    #[test]
+    fn exact_ranges_are_verbatim_source_slices() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let source = Source::load(std::path::Path::new(root).join("testdata/full.md")).unwrap();
+        let highlighter = Highlighter::new(None, false);
+        for width in [20usize, 40, 80, 200] {
+            let r = render(&source, width, &highlighter);
+            assert_eq!(r.rows.len(), r.row_attrs.len(), "attrs parallel rows");
+            let mut exact_spans = 0usize;
+            for (row, attrs) in r.rows.iter().zip(&r.row_attrs) {
+                assert_eq!(row.len(), attrs.len(), "attrs parallel a row's spans");
+                for (span, attr) in row.iter().zip(attrs) {
+                    let Some(attr) = attr else { continue };
+                    assert!(
+                        attr.range.end <= source.content.len()
+                            && source.content.is_char_boundary(attr.range.start)
+                            && source.content.is_char_boundary(attr.range.end),
+                        "w{width}: range {:?} is not a valid slice of the source",
+                        attr.range
+                    );
+                    if attr.exact {
+                        exact_spans += 1;
+                        assert_eq!(
+                            &source.content[attr.range.clone()],
+                            span.text,
+                            "w{width}: span {:?} claims exact range {:?}",
+                            span.text,
+                            attr.range
+                        );
+                    }
+                }
+            }
+            assert!(exact_spans > 100, "w{width}: only {exact_spans} exact spans");
+        }
+    }
+
+    /// Plain ASCII, Japanese, and emoji/full-width text are all exact —
+    /// the range is a BYTE range, so it must follow UTF-8 lengths, not
+    /// character counts and not terminal columns.
+    #[test]
+    fn plain_text_is_exact_in_ascii_japanese_and_wide_characters() {
+        for body in ["Plain ASCII sentence.", "日本語の本文です。", "絵文字 🎉 と全角ＡＢＣ"] {
+            let (source, r) = rendered(&format!("{body}\n"), 80);
+            assert_eq!(exact_slice(&source, &r, body), body);
+        }
+        // Byte range, not column count: the Japanese sentence is 9
+        // characters / 27 bytes / 18 terminal columns.
+        let (source, r) = rendered("日本語の本文です。\n", 80);
+        let span = spans(&source, &r)
+            .into_iter()
+            .find(|(t, _)| t == "日本語の本文です。")
+            .expect("body span");
+        assert_eq!(span.1.expect("attributed").0.len(), 27);
+    }
+
+    /// The reason the exactness contract exists: `**重要**` renders as
+    /// `重要`, and its range must cover `重要` ALONE. With a naive
+    /// event range it would cover the asterisks too, and a Phase 2
+    /// decoration would bleed onto the text beside it on the same line.
+    #[test]
+    fn strong_emphasis_excludes_its_markers() {
+        let (source, r) = rendered("前置き **重要** 後置き\n", 80);
+        assert_eq!(exact_slice(&source, &r, "重要"), "重要");
+        // And the neighbours keep their own, disjoint slices.
+        assert_eq!(exact_slice(&source, &r, "前置き "), "前置き ");
+        assert_eq!(exact_slice(&source, &r, " 後置き"), " 後置き");
+    }
+
+    /// A link's LABEL is exact (the decorated prose); its URL suffix is
+    /// a superset — a reference link's URL lives on another line
+    /// entirely, so the renderer never claims the two are the same text.
+    #[test]
+    fn link_label_is_exact_and_the_url_suffix_is_not() {
+        let (source, r) = rendered("[ラベル](https://example.com) の話\n", 80);
+        assert_eq!(exact_slice(&source, &r, "ラベル"), "ラベル");
+        let url = spans(&source, &r)
+            .into_iter()
+            .find(|(t, _)| t == "https://example.com")
+            .expect("url span");
+        assert_eq!(url.1.map(|(_, exact)| exact), Some(false), "the URL span is a superset");
+    }
+
+    /// Inline code renders its content verbatim: exact, backticks excluded.
+    #[test]
+    fn inline_code_is_exact_without_its_backticks() {
+        let (source, r) = rendered("呼び出しは `render(&source)` です\n", 80);
+        assert_eq!(exact_slice(&source, &r, "render(&source)"), "render(&source)");
+    }
+
+    /// A list item's text is exact; the marker the renderer draws is a
+    /// superset of the item.
+    #[test]
+    fn list_item_text_is_exact() {
+        let (source, r) = rendered("- 最初の項目\n- 次の項目\n", 80);
+        assert_eq!(exact_slice(&source, &r, "最初の項目"), "最初の項目");
+        assert_eq!(exact_slice(&source, &r, "次の項目"), "次の項目");
+        let marker = spans(&source, &r)
+            .into_iter()
+            .find(|(t, _)| t == "- ")
+            .expect("marker span");
+        assert_eq!(marker.1.map(|(_, exact)| exact), Some(false));
+    }
+
+    /// Blockquote text is exact; the `>` prefix and its spacer carry no
+    /// range at all (they are the renderer's own).
+    #[test]
+    fn blockquote_text_is_exact_and_its_prefix_is_unattributed() {
+        let (source, r) = rendered("> 引用された一文。\n", 80);
+        assert_eq!(exact_slice(&source, &r, "引用された一文。"), "引用された一文。");
+        let prefix = spans(&source, &r)
+            .into_iter()
+            .find(|(t, _)| t == ">")
+            .expect("quote prefix span");
+        assert_eq!(prefix.1, None, "a synthesized prefix has no source range");
+    }
+
+    /// Soft wrap at a narrow width: an exact span cut across rows is
+    /// SUB-SLICED. The fragments' ranges are contiguous, disjoint,
+    /// inside the original, and each is still its own text verbatim —
+    /// which is what lets a decoration survive wrapping.
+    #[test]
+    fn soft_wrap_sub_slices_an_exact_span() {
+        let body = "あいうえおかきくけこさしすせそたちつてと";
+        let (source, r) = rendered(&format!("{body}\n"), 12);
+        let frags: Vec<(String, std::ops::Range<usize>)> = r
+            .rows
+            .iter()
+            .zip(&r.row_attrs)
+            .flat_map(|(row, attrs)| row.iter().zip(attrs))
+            .filter_map(|(span, attr)| {
+                let a = attr.as_ref()?;
+                a.exact.then(|| (span.text.clone(), a.range.clone()))
+            })
+            .collect();
+        assert!(frags.len() > 1, "width 12 must wrap the line: {frags:?}");
+        let mut prev_end = frags[0].1.start;
+        for (text, range) in &frags {
+            assert_eq!(range.start, prev_end, "fragments are contiguous");
+            assert_eq!(&source.content[range.clone()], text, "each fragment is verbatim");
+            prev_end = range.end;
+        }
+        // Together they reconstruct the whole paragraph.
+        let joined: String = frags.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(joined, body);
+        assert_eq!(&source.content[frags[0].1.start..prev_end], body);
+    }
+
+    /// The wrap's hanging pad takes the item's POSITION but never claims
+    /// to be source text: it is a superset of the span it precedes.
+    #[test]
+    fn a_hanging_pad_is_never_exact() {
+        let (source, r) = rendered("- あいうえおかきくけこさしすせそ\n", 14);
+        let pads: Vec<Option<Attr>> = r
+            .rows
+            .iter()
+            .zip(&r.row_attrs)
+            .flat_map(|(row, attrs)| row.iter().zip(attrs))
+            .filter(|(span, _)| !span.text.is_empty() && span.text.chars().all(|c| c == ' '))
+            .map(|(_, attr)| attr.clone())
+            .collect();
+        assert!(!pads.is_empty(), "width 14 must produce a hanging pad");
+        for pad in pads {
+            assert!(
+                pad.as_ref().is_none_or(|a| !a.exact),
+                "a pad is synthesized whitespace, never a source slice"
+            );
+        }
+        // …and it still resolves to the item's own source line, so
+        // selection highlighting and mouse mapping are unchanged.
+        let starts = line_starts(&source.content);
+        for attrs in &r.row_attrs {
+            for attr in attrs.iter().flatten() {
+                assert_eq!(line_of(&starts, attr), 0);
+            }
+        }
+    }
+
+    /// The line-oriented view layer and the byte-range layer agree: a
+    /// phrase segment's source hull starts on the very line the segment
+    /// claims. `line_of` is the only bridge between the two, so a drift
+    /// here is a drift in the cursor and the selection.
+    #[test]
+    fn every_segment_source_hull_starts_on_its_own_line() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let source = Source::load(std::path::Path::new(root).join("testdata/full.md")).unwrap();
+        let starts = line_starts(&source.content);
+        let highlighter = Highlighter::new(None, false);
+        for width in [40usize, 80] {
+            let r = render(&source, width, &highlighter);
+            for (row, segments) in r.row_segments.iter().enumerate() {
+                for seg in segments {
+                    assert_eq!(
+                        line_of(&starts, &Attr::inexact(seg.source.clone())),
+                        seg.line,
+                        "w{width} row {row}: segment {seg:?} does not start on its own line"
+                    );
+                    assert!(
+                        seg.source.end <= source.content.len(),
+                        "w{width} row {row}: segment {seg:?} out of bounds"
+                    );
+                }
+            }
+        }
     }
 }

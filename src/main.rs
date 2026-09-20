@@ -3335,10 +3335,8 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                 app.input_cursor = i;
             }
         }
-        KeyCode::Delete => {
-            if app.input_cursor < app.input.len() {
-                app.input.remove(app.input_cursor);
-            }
+        KeyCode::Delete if app.input_cursor < app.input.len() => {
+            app.input.remove(app.input_cursor);
         }
         _ => {}
     }

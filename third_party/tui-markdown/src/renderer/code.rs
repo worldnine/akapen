@@ -42,7 +42,13 @@ where
             inline_style.patch(self.styles.code())
         };
 
-        self.push_span(Span::styled(code, style));
+        // Inline code renders its content verbatim, and pulldown-cmark
+        // hands it out borrowed from the input: an EXACT range. (The
+        // CommonMark space-strip of `` ` a ` `` only narrows the slice,
+        // so it stays a borrow.) A `Code` event whose content was
+        // rewritten falls back to the event's own range.
+        let attr = self.exact_attr(&code).or_else(|| self.event_attr());
+        self.push_span_with_attr(Span::styled(code, style), attr);
     }
 
     pub fn start_codeblock(&mut self, kind: CodeBlockKind<'_>) {
@@ -102,10 +108,13 @@ where
 
         // Syntect emits one Text line per source line of the block; line k
         // of the block is the k-th source line after the event's start.
+        // The highlighter re-splits the line into owned spans, so nothing
+        // here is a verbatim slice: every span gets the k-th source
+        // line's range as a superset.
         for (k, line) in text.lines.into_iter().enumerate() {
-            let line_attrs = vec![self.current_line.map(|l| l + k); line.spans.len()];
+            let line_attrs = vec![self.nth_line_attr(k); line.spans.len()];
             self.text.push_line(line);
-            self.out_lines.push(line_attrs);
+            self.out_attrs.push(line_attrs);
         }
         self.needs_newline = false;
         true
