@@ -50,7 +50,8 @@ Jev の最大の特徴である校正済み確率を使っていない。
   いるが、ワイヤは 1 往復。意図的である旨が doc に明記済み
 - 設計書「Jev に判断させないもの」（syntax parsing / Atom 生成 / source position
   管理 / ファイル変更検知 / debounce / Reading Budget / Reading Policy / 表示状態
-  への変換 / renderer）は、`cache` と `rate limit` を除きすべてローカル側にある
+  への変換 / renderer）は、すべてローカル側にある。`cache` と `rate limit` は
+  Jev 側に漏れているのではなく、**どちらの側にも無い**（未実装。項目 1）
 - 設計書「Budget 変更では Jev を呼ばない」は
   `moving_the_budget_calls_neither_the_provider_nor_the_renderer` で構造ごと固定
   されている。逆向き（文書が変われば呼ぶ）も
