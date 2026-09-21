@@ -298,7 +298,20 @@ class CoreQuestionTest(unittest.TestCase):
         question = self.ask(self.units())["core:u1"]
         for text in question["criteria"].values():
             self.assertNotIn(text, question["instructions"])
-        self.assertIn("1 か所だけ", question["instructions"])
+        self.assertIn("読み飛ばす", question["instructions"])
+
+    def test_the_core_question_is_phrased_as_a_loss_not_as_a_single_read(self):
+        # 旧文面「1 か所だけ読むとしたら、どこを読めば要点が取れるか」は、
+        # 後続をまとめる導入文や節の主題ラベルを選ばせる（Jev は正しく答えて
+        # いて、問いの方が違う軸を聞いていた）。設計書が挙げる判断の例は
+        # すべて「ここを飛ばすと要点を失う？」という損失の形である。
+        self.assertIn("読み飛ばす", jev.CORE_INSTRUCTIONS)
+        self.assertIn("要点を失う", jev.CORE_INSTRUCTIONS)
+        self.assertNotIn("1 か所だけ", jev.CORE_INSTRUCTIONS)
+        # 「重要な部分はどれか」に戻すと「どれも重要」と答えられてしまう。
+        self.assertNotIn("重要", jev.CORE_INSTRUCTIONS)
+        # 本文を instructions に書かない約束はそのまま。
+        self.assertLess(len(jev.CORE_INSTRUCTIONS), 200)
 
     def test_only_units_that_can_become_marked_are_asked(self):
         # MARKED は「ESSENTIAL かつ非 REDUNDANT」だけ。
