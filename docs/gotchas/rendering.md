@@ -205,6 +205,38 @@ exact / 上位集合の一覧は
 `MARK_TINT`。実機（別ペインで `herdr pane read --format ansi`）で
 ダーク / `--light` / `--theme DarkNeon` / source モードの diff 帯を確認。
 
+### カーソル行の MARKED は帯に隠れる — 「1 本だけ琥珀が乗らない」に見える
+
+**症状**: `--semantic` で開いた文書で、policy が MARKED と判定した Atom の
+うち **1 つだけ**琥珀が乗らない。他は乗る。`policy::decorate` を直に呼ぶと
+その Atom も `Marked` を返すので、描画側の退行に見える。
+
+**原因**: その行に**カーソルが乗っていた**だけです。カーソル帯は行全体の
+背景を塗り、マークより優先します（`src/view.rs` の `span_hl` →
+`s.style.bg(selected_bg)` は無条件。「MARKED の天井の理由が変わった」の
+末尾「帯とマークが重なったとき」参照）。帯の下では MARKED の句と NORMAL の
+句が**同じ背景**になるので、「その行だけマークが無い」と読めます。
+確かめたい行へカーソルを動かして見る、という確認のしかた自体が
+症状を作ります。文書末尾の Unit ほど「j で下りて見る」ので当たりやすい。
+
+**切り分け**: 状態行の `行/総行数` がその Atom の行を指していないか。
+`k` で 1 行離れて琥珀が戻れば帯です。`decorate_row` の交差ルール、
+hanging pad、折り返し、`section_of` / `presupposes` はどれも無関係でした。
+
+**確認したこと**: 実機の該当行 5 本すべての背景が選択帯 `48;2;88;91;112`
+で、状態行のカーソル位置がその source 行だったこと（`herdr pane read
+--format ansi`）。TestBackend で同じ文書を幅 80〜236、budget 100 / 31、
+すべてのスクロール位置で描き、カーソルを他の行に置けば **17 本すべて**に
+琥珀が乗り、カーソルをその行に置くと琥珀 0 セル・帯 74 セルになること。
+合成文書での固定は `src/state_tests.rs` の
+`a_marked_line_under_the_cursor_shows_the_band_not_the_amber`
+（帯の下で MARKED と NORMAL の背景が一致し、離れれば琥珀が戻る）。
+
+**ついでに踏みかけた地雷**: 実機の akapen は**起動時のバイナリ**で動き
+続けます。症状を見たプロセスの起動時刻と `target/debug/akapen` の更新時刻
+を見比べてから、いまのコードを疑うこと（`ps -o lstart= -p <pid>` と
+`ls -l`）。
+
 ### テーマの highlight scope 尊重は、一度やって落とした
 
 **これは自然に再発する案です。** 「テーマが自前の highlight 背景を
