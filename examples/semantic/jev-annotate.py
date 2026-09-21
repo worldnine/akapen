@@ -51,7 +51,7 @@ akapen 側のプロトコルは 1 往復（atoms in / units out）のままで�
 question**」（`docs.typesafe.ai/models.md`）。**後者を見落とすと、合計が 64k に
 収まっているのに 400 で落ちる** — 実測でも state 30k + question 3k（合計 33k）
 が失敗した。核 question は Unit の全散文 Atom を選択肢として引用するので
-ここに当たりうる。上限は [`core_budget`] が state の大きさから毎回計算する。
+ここに当たりうる。上限は [`RequestBudget`] が state の大きさから毎回計算する。
 
 ## 境界は「構造は聞かない。散文どうしだけ聞く」
 
@@ -100,15 +100,20 @@ API_PATH = "/v1/systemone"
 #: にまとめて 0.84 秒だった。akapen 側は子プロセスを 60 秒で殺すので、3 ラウンド
 #: と Python の起動コストを 60 秒に収めるためここは 20 秒に留める。
 #:
-#: **3 ラウンド × この 20 秒はちょうど 60 秒**で、理屈の上では akapen の
-#: 打ち切りにぴったり並ぶ。実測ではそこまで行かない（下のとおり最遅でも
-#: 1 ラウンド 1.65 秒）が、**これは測った値であって保証ではない**。
-#: ラウンドを 4 つ目まで増やすなら、ここを見直すこと。
+#: **この 20 秒はもう 3 回ぶんではない。** リクエストは分割されるので、上限は
+#: 「20 秒 × チャンクの総数 + probe」になる。実測（2026-09-21）では 65 KB の
+#: `docs/gotchas.md` が 10 リクエスト（probe 1 + チャンク 9）で、理屈の上では
+#: 200 秒 — akapen の `COMMAND_TIMEOUT`（60 秒）を**超えうる**。
 #:
-#: **大きな文書でもこの 20 秒は余っている**（2026-09-21 の実測）。45,650 バイトの
-#: 実業務文書で 1 ラウンドあたり 0.98〜1.53 秒、いちばん遅かった条件でも
-#: 1.65 秒で、20 秒には 12 倍の余裕がある。redundancy をラウンド 3 へ移した
-#: 後の 3 ラウンド込みのプロセス全体は、4 文書で 2.2〜3.7 秒だった。
+#: **実測では超えない。** 同じ文書のプロセス全体が 12.7〜13.0 秒で、1 リクエスト
+#: あたりは最遅でも 1.5 秒である。20 秒はその 13 倍で、そこまで遅くなるなら
+#: 打ち切られるべきでもある。**だが「3 × 20 = 60 でちょうど並ぶ」という以前の
+#: 理屈はもう成り立たない** — 天井に張り付く文書を足すときは、ここではなく
+#: リクエストの総数を見ること。
+#:
+#: **大きな文書でもこの 20 秒は余っている**（2026-09-21 の実測）。1 リクエスト
+#: あたりは 65 KB の文書でも 1.5 秒以内で、20 秒には 13 倍の余裕がある。
+#: プロセス全体は 1.7 秒（1.6 KB）〜13.0 秒（65 KB）だった。
 #:
 #: 大文書で先に当たるのは**時間ではなく context window** である
 #: （[`http_error_message`]）。そこは 400 で即座に返るので、ここを延ばしても
@@ -192,10 +197,26 @@ CORE_INSTRUCTIONS = (
 #: **この値では切れていない** — 45.6 KB の実文書でいちばん大きい Unit でも
 #: Atom は 96 個だった。上限に当たる文書を測っていないので、当たったときの
 #: 振る舞いを「安全側（従来どおり）」に倒してあるだけである。
+#: 1 リクエスト全体のトークン上限。Jev の context window の**1 つ目の**制約。
+#:
+#: 公式値は「64k tokens per request」（`docs.typesafe.ai/models.md`）＝ 65,536。
+#: 実測の切れ目は `usage.input_tokens` で 65,771 成功 / 65,874 失敗と公式値より
+#: 約 235 上にあるが（`docs/gotchas.md` 未解決 5）、**分母には公式値を使う** —
+#: budget の数え方が `usage` と違うようなので、実測の切れ目に寄せる理由が無い。
+#:
+#: **この制約は分割で外せる。** state を毎回送り直せば、question をいくつの
+#: リクエストに分けても各 question の答えは変わらない（Jev は question を
+#: 並列・独立に評価する。`docs/design/jev.md`）。外せないのは下の
+#: [`STATE_PLUS_QUESTION_LIMIT`] のほうで、**そちらが本当の天井**である。
+REQUEST_LIMIT = 65_536
+
 #: Jev の context window の**2 つ目の**制約（`docs/gotchas.md`）。
 #: 公式は「64k tokens per request; **32k tokens for `state` plus the longest
 #: question**」で、後者は 1 つの question の大きさを直接縛る。実測でも
 #: state 30k + question 3k（合計 33k）は 64k に収まっていながら失敗した。
+#:
+#: **こちらは分割しても外せない。** state はどのチャンクにも丸ごと乗るので、
+#: リクエストを増やしても `state + その question` は小さくならない。
 STATE_PLUS_QUESTION_LIMIT = 32_768
 
 #: バイト数からトークン数を見積もる係数。**多めに出る側へ倒してある。**
@@ -205,6 +226,20 @@ STATE_PLUS_QUESTION_LIMIT = 32_768
 #: 多く見積もる方が安全**である（見積もりが小さすぎると上限を超えた question を
 #: 送って 400 で落ちる）。日本語と英語が混ざる文書で最も高かった 0.496 を丸めた。
 TOKENS_PER_BYTE = 0.5
+
+#: question 1 つあたりの器（型と criteria のキー名）の実測値。
+#:
+#: `docs/gotchas.md` 未解決 5 の内訳表の「器（型と criteria のキー名）68」。
+#: 残りの内訳（criteria の説明文 65 / instructions の枠組み文 65）は
+#: [`question_tokens`] が本文と一緒に [`TOKENS_PER_BYTE`] で数えるので、
+#: ここで二重に足さないこと。Tier question 全体の実測 181 に対して
+#: [`question_tokens`] は 257 を返す（1.42 倍の過大評価）。定型文が日本語で、
+#: 実レートが 0.376 tokens/byte しかないためで、**上限の判定には安全側**である。
+QUESTION_OVERHEAD = 68
+
+#: リクエスト全体の予算から引く安全マージン。内訳は [`CORE_QUESTION_MARGIN`]
+#: と同じ（見積もり誤差と、公式値と実測の切れ目のずれ）。
+REQUEST_MARGIN = 2_048
 
 #: 核 question の予算から引く安全マージン。内訳:
 #:
@@ -217,6 +252,28 @@ TOKENS_PER_BYTE = 0.5
 #: 45.6 KB の実文書（state 実測 17,561 tokens）で最大の Unit は選択肢 82 個・
 #: question 実測 5,469 tokens。この値でも予算 7,895 に収まる。
 CORE_QUESTION_MARGIN = 2_048
+
+#: state のトークン数を**実測しに行く**閾値（見積もりがこれを超えたら測る）。
+#:
+#: 32k 枠の半分。ここを下回っていれば、[`TOKENS_PER_BYTE`] が実測の 1.4 倍まで
+#: 過大評価していても真値は 16k を超えず、1 つの question に 14k 以上が残る。
+#: 実測でいちばん大きかった question は 5,469 tokens（45.6 KB の文書の 96 Atom
+#: の Unit）なので、3 倍近い余裕がある。
+#:
+#: **超えたら見積もりでは判定できない。** 0.5 tokens/byte は 65 KB の文書の
+#: state を 32,612 と見積もるが、実レート 0.34〜0.39 での真値は 22〜26k で、
+#: 見積もりのままでは「question を 1 つも送れない文書」に見えてしまう。
+#: そこだけ [`measure_state_tokens`] が 1 リクエスト使って実測する。
+STATE_PROBE_THRESHOLD = STATE_PLUS_QUESTION_LIMIT // 2
+
+#: state のトークン数を測るためだけの、いちばん小さい question。
+#:
+#: 答えは使わない。欲しいのは応答の `usage.input_tokens` だけである。
+#: 本文を持たないので、`usage` はほぼ state そのもののトークン数になる
+#: （器のぶんだけ多めに出る ＝ 安全側）。
+PROBE_QUESTION = {
+    "state-probe": {"type": "noul", "instructions": "この文書は日本語で書かれている。"}
+}
 
 #: 単独の Unit にする Atom 種別。中身は散文ではないので、隣の散文と読む優先度を
 #: 共有しない。
@@ -609,7 +666,16 @@ def choice_of(answers: dict, key: str, criteria: dict) -> str:
 
 
 def confidence_of(answers: dict, key: str) -> float | None:
-    got = answer_of(answers, key).get("confidence")
+    """`confidence` は**無くてよい**ので、答えが丸ごと無いときも None を返す。
+
+    `choice` / `noul` と違ってここで黙って埋めているわけではない — 記録用の
+    付加情報で、判定には使っていない（`docs/gotchas.md` 未解決 3）。送れなかった
+    question の Unit もこの経路を通るので、落とさないこと。
+    """
+    answer = answers.get(key)
+    if not isinstance(answer, dict):
+        return None
+    got = answer.get("confidence")
     return float(got) if isinstance(got, (int, float)) else None
 
 
@@ -700,24 +766,17 @@ def core_candidates(atoms: list[dict], unit: dict) -> dict:
     }
 
 
-def core_budget(source: str) -> int:
-    """1 つの核 question に使えるトークン数の上限。
+def core_fits(options: dict, budget: RequestBudget) -> bool:
+    """この選択肢の集合が 1 question として送れるか（見積もり）。
 
-    「`state` + 最長 question ≦ 32k」という制約は、**state の大きさによって
-    1 question に使える量が変わる**ということである。だから選択肢の個数を
-    固定値で切っても正しくならない — 45.6 KB の文書では 82 個で 5,469 tokens
-    だが、同じ個数でも state が小さければ余裕があり、大きければ足りない。
-
-    返り値が 0 以下なら、その文書ではどんな核 question も送れない。
+    見るのは `pair`（32k の側）である。**`whole` ではない** — 核 question が
+    大きすぎて落ちるのは「1 リクエストに何個並ぶか」の問題ではなく、
+    「`state` とこの question の 2 つだけで 32k を超える」問題だからで、
+    そこは分割で救えない（[`RequestBudget`]）。1 リクエストに並べきれない
+    ぶんは [`plan_chunks`] が別のリクエストへ回す。
     """
-    state = len(source.encode()) * TOKENS_PER_BYTE
-    return int(STATE_PLUS_QUESTION_LIMIT - CORE_QUESTION_MARGIN - state)
-
-
-def core_fits(options: dict, budget: int) -> bool:
-    """この選択肢の集合が予算に収まるか（見積もり）。"""
-    body = sum(len(text.encode()) for text in options.values())
-    return body * TOKENS_PER_BYTE <= budget
+    question = {"type": "choice", "instructions": CORE_INSTRUCTIONS, "criteria": options}
+    return question_tokens(question) <= budget.pair
 
 
 def assign_lone_cores(
@@ -749,7 +808,7 @@ def assign_lone_cores(
 def core_questions(
     atoms: list[dict],
     units: list[dict],
-    source: str,
+    budget: RequestBudget,
     handled: frozenset[int] = frozenset(),
 ) -> dict:
     """ラウンド 3 の questions のうち核の分。
@@ -762,11 +821,10 @@ def core_questions(
     4 文書のいずれにも「MARKED になる Atom 2 個以上の Unit で散文が 0 個」は
     無かった。
 
-    **予算を超える Unit にも聞かない**（[`core_budget`]）。核が無ければ Unit
+    **予算を超える Unit にも聞かない**（[`core_fits`]）。核が無ければ Unit
     全体が MARKED になる — 絞り込めないだけで、注釈としては壊れない安全側の
     振る舞いである。
     """
-    budget = core_budget(source)
     questions = {}
     for position, unit in enumerate(units):
         if position in handled or not wants_core(unit):
@@ -812,7 +870,7 @@ def unit_runs(units: list[list[int]], plan: list[dict]) -> list[list[int]]:
 
 
 def plan_run_cores(
-    atoms: list[dict], units: list[dict], runs: list[list[int]], source: str
+    atoms: list[dict], units: list[dict], runs: list[list[int]], budget: RequestBudget
 ) -> tuple[dict, dict, dict, frozenset[int]]:
     """**1 本のリストにつき核を 1 つ**に絞る。Tier（沈む側）は触らない。
 
@@ -839,12 +897,11 @@ def plan_run_cores(
 
     ## 予算を超えた run は面倒を見ない
 
-    run 全体の散文を選択肢にすると [`core_budget`] を超えることがある。その run は
+    run 全体の散文を選択肢にすると 32k 枠を超えることがある。その run は
     `handled` に入れず、**従来の Unit ごとの核へ落とす**。「核が無ければ Unit
     全体が MARKED」を run に当てると、そのリストの**全項目が光って最悪**になる。
     そこへは落とさない。
     """
-    budget = core_budget(source)
     questions: dict = {}
     fixed: dict[int, list[int]] = {}
     scope: dict[str, list[int]] = {}
@@ -958,14 +1015,14 @@ def api_key() -> str:
 def http_error_message(code: int, detail: str) -> str:
     """HTTP エラーを、ステータス行に出して意味が通る 1 行にする。
 
-    とくに `max_tokens_exceeded` は**この経路でいちばん現実的な失敗**なので、
-    生の JSON ではなく原因と対処を出す。実測（2026-09-21）では:
+    `max_tokens_exceeded` はこの経路でいちばん現実的な失敗なので、生の JSON
+    ではなく原因と対処を出す。
 
-    - 45,650 バイトの実文書は成功し、ラウンド 2 の input が 60,518〜63,152
-      tokens。**天井の 92〜96 %** に載っている
-    - 同じ文書を 1.06 倍にすると `max_tokens_exceeded` で失敗する
-    - 天井は二分探索で input 65,033 tokens が成功・約 65.5k が失敗 —
-      つまり **65,536 (2^16) tokens** と読める（TypeSafe の公式値は未確認）
+    **「文書を分けてください」とはもう言わない。** リクエストの分割は
+    [`send_in_chunks`] が自動でやるので、ここまで来たということは
+    **`state` だけで 32k 枠を使い切っている**ということである。`state` は
+    どのチャンクにも丸ごと乗るので、**分割では外せない**（`docs/gotchas.md`
+    未解決 5 の 2 つ目の制約）。文書そのものを小さくするしかない。
 
     `docs/design/jev.md` は「context window は需要に応じて変わりうる」と書いて
     いるので、**数値を断定せず実測値として**出す。ここで切れるのは時間ではなく
@@ -973,10 +1030,10 @@ def http_error_message(code: int, detail: str) -> str:
     """
     if "max_tokens_exceeded" in detail:
         return (
-            "文書が大きすぎて Jev の context window に入りません"
-            "（実測では input 約 65,000 tokens が上限で、45KB 程度の文書が"
-            "その 9 割超を使います）。タイムアウトではないので待っても変わり"
-            "ません。文書を分けてください"
+            "文書が大きすぎて Jev の context window に入りません。分割は自動"
+            "なので、これは文書全文（state）だけで 32k tokens を使い切った状態"
+            "です。state は分割では外せません。タイムアウトではないので待っても"
+            "変わりません"
         )
     return f"Jev が HTTP {code} を返しました: {detail}"
 
@@ -1030,8 +1087,224 @@ def round_record(payload: dict, count: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 予算とリクエスト分割
+#
+# **ここはどのラウンドからも使う。** ラウンド 2 専用にしないこと — ラウンド 1
+# （境界）もラウンド 3（redundancy と核）も同じ崖を持っている。実測の見積もり
+# では 58 KB の `examples/semantic/README.md` は 3 ラウンドとも天井の 2 倍を
+# 超える。1 つのラウンドだけ直すと、次の文書で別のラウンドが落ちる。
+# ---------------------------------------------------------------------------
+
+
+def estimate_tokens(text: str) -> int:
+    """バイト数からトークン数を見積もる（[`TOKENS_PER_BYTE`]）。"""
+    return int(len(text.encode()) * TOKENS_PER_BYTE)
+
+
+def question_tokens(question: dict) -> int:
+    """question 1 つのトークン数の見積もり。
+
+    器（[`QUESTION_OVERHEAD`]）＋ instructions と criteria のテキスト。
+    criteria の**キーも数える** — `atom:123` のようなキーは選択肢の個数だけ
+    並ぶので、選択肢が多い核 question では無視できない。
+
+    **個数で切らずにこれで切る。** 同じ 10 個の question でも、`demo.md` の
+    Unit なら 2,000 tokens、45 KB の文書の大きな Unit なら 20,000 tokens に
+    なる。`docs/gotchas.md`「核の question は個数ではなくトークンで切る」と
+    同じ理由で、固定の個数はどの文書でも正しくない。
+    """
+    text = question.get("instructions") or ""
+    for key, value in (question.get("criteria") or {}).items():
+        text += key + value
+    return QUESTION_OVERHEAD + estimate_tokens(text)
+
+
+class RequestBudget:
+    """1 文書ぶんの予算。**2 つの制約を 1 か所で持つ。**
+
+    - `whole` … 1 リクエスト全体に使える question の合計（64k の側）。
+      **分割で外せる**ので、これはチャンクの切れ目を決めるためだけに使う
+    - `pair` … `state` + question 1 つに使える question 1 つ分（32k の側）。
+      **分割しても外せない。** これを超える question は、どう分けても送れない
+
+    `state_tokens` の出どころは `measured`（`usage.input_tokens` を読んだ）か
+    `estimate`（[`estimate_tokens`]）。報告に効くので捨てずに持つ。
+    """
+
+    def __init__(self, state_tokens: int, measured: bool = False) -> None:
+        self.state_tokens = state_tokens
+        self.measured = measured
+        #: 実測に使ったリクエストの記録（測らなかったときは None）。
+        #: **報告で数えられるように残す** — これを `rounds` に載せないと、
+        #: リクエスト数と input tokens の合計が食い違う（probe のぶんだけ
+        #: 少なく出る。実測で 7 % ずれた）。
+        self.probe: dict | None = None
+        self.whole = REQUEST_LIMIT - REQUEST_MARGIN - state_tokens
+        self.pair = STATE_PLUS_QUESTION_LIMIT - CORE_QUESTION_MARGIN - state_tokens
+
+    @classmethod
+    def estimated(cls, state: str) -> "RequestBudget":
+        """API を叩かずに見積もりだけで作る（`--dry-run` とテスト用）。"""
+        return cls(estimate_tokens(state), measured=False)
+
+    def record(self) -> dict:
+        return {
+            "state_tokens": self.state_tokens,
+            "state_tokens_by": "usage" if self.measured else "estimate",
+            "whole": self.whole,
+            "pair": self.pair,
+        }
+
+
+def measure_state_tokens(state: str, model: str, timeout: float) -> RequestBudget:
+    """この文書の `state` のトークン数を決める。
+
+    見積もりが [`STATE_PROBE_THRESHOLD`] 以下なら、そのまま使って**測らない**
+    （小さい文書に余分なリクエストを課金しない）。超えたら
+    [`PROBE_QUESTION`] だけを付けた 1 リクエストを投げ、`usage.input_tokens`
+    を読む。
+
+    **見積もりのままでは 32k 側の判定が壊れる。** 0.5 tokens/byte は 65 KB の
+    文書を 32,612 tokens と見積もるが、実レートでの真値は 22〜26k である。
+    見積もりを信じると「question を 1 つも送れない」と誤って結論し、**分割で
+    救えるはずの文書を落とす**。32k の側は分割で外せない本当の天井なので、
+    ここだけは実測が要る。
+
+    probe 自体が 400 で落ちるなら、`state` だけで 32k 枠を使い切っている
+    ということで、**その文書は分割しても通らない**。[`http_error_message`] が
+    そう言う。
+    """
+    estimate = estimate_tokens(state)
+    if estimate <= STATE_PROBE_THRESHOLD:
+        return RequestBudget(estimate, measured=False)
+    payload = ask_jev(state, dict(PROBE_QUESTION), model, timeout)
+    used = (payload.get("usage") or {}).get("input_tokens")
+    record = round_record(payload, len(PROBE_QUESTION))
+    record["round"] = "probe"
+    if not isinstance(used, (int, float)):
+        # usage を返さない相手でも止まらない。見積もりへ戻すだけ。
+        budget = RequestBudget(estimate, measured=False)
+    else:
+        budget = RequestBudget(int(used), measured=True)
+    budget.probe = record
+    return budget
+
+
+def plan_chunks(questions: dict, budget: RequestBudget) -> tuple[list[dict], list[str]]:
+    """questions を「1 リクエストに収まる塊」の列へ分ける。
+
+    返り値は `(チャンクの列, 送れなかった question のキー)`。
+
+    切り方は**入力の順のまま**の貪欲詰めである。並べ替えない —
+    question のキーは Unit や境界の番号を持っていて、順序が変わると
+    デバッグのとき突き合わせられなくなる。答えはキーで戻すので、分け方が
+    答えを変えることはない。
+
+    **`pair` を超える question は誰にも送れない。** 分割はリクエストの数を
+    増やすだけで `state` を小さくしないので、`state + その question` が 32k を
+    超える question は、チャンクを 1 つにしても救えない。呼び手がそれぞれの
+    落とし先を決める（[`annotate`] を見ること）。
+    """
+    chunks: list[dict] = []
+    dropped: list[str] = []
+    current: dict = {}
+    spent = 0
+    for key, question in questions.items():
+        cost = question_tokens(question)
+        if cost > budget.pair:
+            dropped.append(key)
+            continue
+        if current and spent + cost > budget.whole:
+            chunks.append(current)
+            current, spent = {}, 0
+        current[key] = question
+        spent += cost
+    if current:
+        chunks.append(current)
+    return chunks, dropped
+
+
+def send_in_chunks(
+    state: str,
+    questions: dict,
+    budget: RequestBudget,
+    model: str,
+    timeout: float,
+) -> tuple[dict, list[dict], list[str]]:
+    """questions を予算に収まるリクエストへ分けて送り、答えをマージする。
+
+    返り値は `(answers, リクエストごとの記録, 送れなかったキー)`。
+
+    ## なぜ分けてよいのか
+
+    Jev は question を**同じ state に対して並列かつ独立に**評価する
+    （`docs/design/jev.md`）。LLM のような文脈の持ち越しが無いので、同じ
+    state に対して question を複数のリクエストへ分けても、各 question の答えは
+    変わらない**はず**である。**「はず」なので測ってある** —
+    `examples/semantic/README.md`「リクエスト分割」に、分割版と非分割版の
+    Tier 一致率を揺れの床と並べて置いた。
+
+    ## state は毎回丸ごと送る
+
+    織り込み済みのコストである。分割で増えるのは `(チャンク数 − 1) × state`
+    ちょうどで、それ以外は増えない。`state` を切り詰めて安くする案は採らない
+    — 設計書が「全文を Context として扱う」と決めていて、それは分割の話では
+    なく設計の話である。
+
+    ## 取りこぼさない
+
+    マージで、**同じキーが 2 つのチャンクから返ってきたら失敗させる**。
+    答えが足りないほうは各ラウンドの [`choice_of`] / [`noul_of`] が捕まえる
+    （どちらも黙って埋めない）。
+    """
+    answers: dict = {}
+    records: list[dict] = []
+    chunks, dropped = plan_chunks(questions, budget)
+    for chunk in chunks:
+        payload = ask_jev(state, chunk, model, timeout)
+        for key, answer in payload["answers"].items():
+            if key in answers:
+                raise JevError(f"{key} の答えが 2 つのチャンクから返りました")
+            answers[key] = answer
+        records.append(round_record(payload, len(chunk)))
+    return answers, records, dropped
+
+
+# ---------------------------------------------------------------------------
 # 入り口
 # ---------------------------------------------------------------------------
+
+
+#: 送れなかった Tier question の Unit に入れる Reading Tier。
+#:
+#: **選んだ形と理由**（2026-09-21）。`state` + その question だけで 32k を
+#: 超える Unit には Tier を聞けない。核には「聞かなければ Unit 全体が MARKED」
+#: という安全側の落とし先があるが、**Tier には対応するものが無い**ので、
+#: ここで決める。
+#:
+#: 既定値を置く・Unit を落とす・文書全体を失敗させるの 3 つから、**既定値
+#: `detail` ＋ `core_atoms: []`** を採った。
+#:
+#: 1. `core_atoms: []` は「核を持たない」＝ **MARKED にならない**（プロトコルの
+#:    3 値。`docs/gotchas.md`）。だから既定の Tier が決めるのは「**いつ沈むか**」
+#:    だけで、「読む価値が高い」と嘘をつく経路は最初から無い
+#: 2. `detail` を選んだのは `policy::decorate` の打ち切り方のためである。
+#:    `keep_order` は Tier を第 1 キーにして長さの**昇順**に並べ、`decorate` は
+#:    **最初に予算へ入らなかった Unit で `break` する**。送れないほど巨大な
+#:    Unit（この経路に来るには本文だけで 18 KB 前後が要る）を上位 Tier に置くと、
+#:    そこで打ち切られて**その下の Unit が丸ごと巻き添えで沈む**。`detail` なら
+#:    順序の最後尾に来るので、被害はその Unit 自身に閉じる
+#: 3. **Unit を落とす案は却下した。** `decorate` の `total` はすべての Unit の
+#:    バイト長の合計なので、Unit を消すと Budget の分母が黙って縮み、
+#:    「Budget 50 %」が指す量が文書によって変わる
+#: 4. **文書全体を失敗させる案も却下した。** 核の既存の落とし先（絞り込めない
+#:    だけで注釈としては壊れない）と作法を揃えた。1 つの巨大な Unit のために
+#:    文書全体の注釈を失うほうが損失が大きい
+#:
+#: **実測ではどの文書でも 0 件だった**（5 文書。`examples/semantic/README.md`
+#: 「リクエスト分割」）。この経路に来るのは 1 つの Unit の本文が 18 KB 前後に
+#: なる文書だけなので、**動いたところを見ていない落とし先**である。
+UNANSWERED_TIER = "detail"
 
 
 def annotate(request: dict, model: str, timeout: float) -> dict:
@@ -1043,24 +1316,60 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     if not atoms:
         return {"version": VERSION, "units": []}
 
-    rounds = []
+    # 3 ラウンドで共有する予算。`state` のトークン数はここで 1 度だけ決める
+    # （大きい文書では 1 リクエスト使って実測する。[`measure_state_tokens`]）。
+    budget = measure_state_tokens(state, model, timeout)
+    rounds = [budget.probe] if budget.probe else []
+    unsent: dict[str, list[str]] = {}
+
+    def ask(questions: dict, label: str) -> dict:
+        answers, records, dropped = send_in_chunks(state, questions, budget, model, timeout)
+        for record in records:
+            record["round"] = label
+        rounds.extend(records)
+        if dropped:
+            unsent[label] = dropped
+        return answers
 
     # --- ラウンド 1: 散文どうしの境界 -> Unit --------------------------
+    #
+    # 送れなかった境界は **NEW_UNIT** へ倒す。SAME だと巨大な Atom どうしが
+    # さらに大きな Unit になり、ラウンド 2 の Tier question も送れなくなる。
+    # NEW なら Unit は小さいままなので、後のラウンドが救える側へ倒れる。
     plan = plan_boundaries(atoms, state)
     questions = boundary_questions(atoms, plan)
     if questions:
-        payload = ask_jev(state, questions, model, timeout)
-        apply_boundary_answers(plan, payload["answers"])
-        rounds.append(round_record(payload, len(questions)))
+        answers = ask(questions, "boundary")
+        for entry in plan:
+            key = f"boundary:{entry['after_atom']}"
+            if entry["decision"] is None and key not in answers:
+                entry["decision"], entry["by"] = NEW, "rule:question_too_large"
+        apply_boundary_answers(plan, answers)
     units = group_units(atoms, plan)
 
     # --- ラウンド 2: Unit ごとの Tier ----------------------------------
+    #
+    # **1 つも送れなかったら失敗させる。** [`UNANSWERED_TIER`] は個別の巨大な
+    # Unit のための落とし先であって、文書全体の落とし先ではない。全部が既定値に
+    # なった注釈は「それらしく見えるが、何も判定していない」ものになる
+    # （[`apply_boundary_answers`] が黙って埋めないのと同じ理由）。実測では
+    # 83 KB の文書がここに来て、**530 Unit すべてが detail** の応答を exit 0 で
+    # 返していた。`state` は 32k に収まっているので probe は通り、**question の
+    # ぶんだけが足りない**という、いちばん気づきにくい壊れ方をする。
     questions = unit_questions(atoms, units)
-    payload = ask_jev(state, questions, model, timeout)
-    rounds.append(round_record(payload, len(questions)))
-    answers = dict(payload["answers"])
+    answers = dict(ask(questions, "tier"))
+    unanswered = set(unsent.get("tier", ()))
+    if questions and len(unanswered) == len(questions):
+        raise JevError(
+            f"文書が大きすぎます。state が {budget.state_tokens} tokens あり、"
+            f"32k の枠に question の余地が {max(budget.pair, 0)} tokens しか"
+            "残らないので、Tier を 1 つも聞けません。state はどのリクエストにも"
+            "乗るので分割では外せません。文書を小さくしてください"
+        )
     tiers = [
-        choice_of(answers, f"tier:u{n}", TIER_CRITERIA)
+        UNANSWERED_TIER
+        if f"tier:u{n}" in unanswered
+        else choice_of(answers, f"tier:u{n}", TIER_CRITERIA)
         for n in range(1, len(units) + 1)
     ]
 
@@ -1070,6 +1379,10 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     # REDUNDANT」だが、redundancy の答えを待つとラウンドが 4 つになる。
     # 実測では 4 文書とも「ESSENTIAL かつ REDUNDANT」は 0〜1 件しかないので、
     # 捨てることになる核の question はほぼ出ない。
+    #
+    # ここで送れなかった question は、どちらも**聞かなかった場合と同じ**に
+    # 倒れる。redundancy を聞かなければ REDUNDANT にならず、核を聞かなければ
+    # Unit 全体が MARKED になる — どちらも既存の安全側の振る舞いである。
     provisional = [
         {
             "id": f"u{n}",
@@ -1083,19 +1396,25 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     # run キャップ（1 本のリストにつき核 1 つ）を先に決める。残りは従来どおり
     # Unit ごとに聞く。
     runs = unit_runs(units, plan)
-    run_questions, fixed, scope, handled = plan_run_cores(atoms, provisional, runs, state)
+    run_questions, fixed, scope, handled = plan_run_cores(atoms, provisional, runs, budget)
     questions = redundancy_questions(atoms, units, tiers)
     questions.update(run_questions)
-    questions.update(core_questions(atoms, provisional, state, handled))
+    questions.update(core_questions(atoms, provisional, budget, handled))
     if questions:
-        payload = ask_jev(state, questions, model, timeout)
-        rounds.append(round_record(payload, len(questions)))
-        answers.update(payload["answers"])
+        third = ask(questions, "core")
+        for key in unsent.get("core", ()):
+            # 聞けなかった question は「そもそも出さなかった」ことにする。
+            questions.pop(key, None)
+            scope.pop(key, None)
+        answers.update(third)
 
     built = build_units(atoms, units, tiers, answers)
-    # `provisional` に溜めた `core_by` を引き継ぐ（run キャップの記録）。
     for unit, source_unit in zip(built, provisional):
         unit["jev"].update(source_unit["jev"])
+    for number in range(1, len(units) + 1):
+        if f"tier:u{number}" in unanswered:
+            built[number - 1]["core_atoms"] = []
+            built[number - 1]["jev"]["tier_by"] = "rule:question_too_large"
     apply_run_cores(built, questions, fixed, scope, answers)
     assign_lone_cores(atoms, built, handled)
     apply_core_answers(built, questions, answers)
@@ -1106,14 +1425,13 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
             unit["jev"].pop("core_choice", None)
             unit["jev"].pop("core_by", None)
 
-    return {
-        "version": VERSION,
-        "units": built,
-        "jev": {"rounds": rounds, "boundaries": plan},
-    }
+    report = {"rounds": rounds, "boundaries": plan, "budget": budget.record()}
+    if unsent:
+        report["unsent"] = unsent
+    return {"version": VERSION, "units": built, "jev": report}
 
 
-def dry_run(request: dict, model: str) -> dict:
+def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
     """API を叩かずに、送る 3 ラウンドのリクエストの形を出す。
 
     後のラウンドは前のラウンドの答えに依存するので、仮定を置いて組む。
@@ -1146,28 +1464,49 @@ def dry_run(request: dict, model: str) -> dict:
         }
         for number, indices in enumerate(units, start=1)
     ]
+    budget = (
+        RequestBudget(state_tokens, measured=True)
+        if state_tokens is not None
+        else RequestBudget.estimated(state)
+    )
     run_questions, _fixed, _scope, handled = plan_run_cores(
-        atoms, as_essential, unit_runs(units, plan), state
+        atoms, as_essential, unit_runs(units, plan), budget
     )
     third = redundancy_questions(atoms, units, tiers)
     third.update(run_questions)
-    third.update(core_questions(atoms, as_essential, state, handled))
+    third.update(core_questions(atoms, as_essential, budget, handled))
+    rounds = []
+    for number, questions in enumerate(
+        (first, unit_questions(atoms, units), third), start=1
+    ):
+        chunks, dropped = plan_chunks(questions, budget)
+        rounds.append(
+            {
+                "round": number,
+                "state": state,
+                "model": model,
+                "questions": questions,
+                "plan": {
+                    "chunks": len(chunks),
+                    "tokens": [
+                        budget.state_tokens + sum(map(question_tokens, c.values()))
+                        for c in chunks
+                    ],
+                    "unsent": dropped,
+                },
+            }
+        )
     return {
         "assumptions": [
             "ラウンド 2 は「Jev に聞く境界はすべて new_unit」と仮定して組んでいる",
             "ラウンド 3 は「すべての Unit が essential」と仮定して組んでいる"
             "（本番はここが絞られるので question はもっと少ない）",
+            "`state` のトークン数が見積もり（0.5 tokens/byte）のときは、本番より"
+            "多くのチャンクに割れる。本番は大きい文書では実測する"
+            "（--state-tokens で実測値を渡せる）",
         ],
-        "rounds": [
-            {"round": 1, "state": state, "model": model, "questions": first},
-            {
-                "round": 2,
-                "state": state,
-                "model": model,
-                "questions": unit_questions(atoms, units),
-            },
-            {"round": 3, "state": state, "model": model, "questions": third},
-        ],
+        "budget": budget.record(),
+        "rounds": rounds,
     }
 
 
@@ -1192,6 +1531,14 @@ def main() -> int:
         help="API を叩かず、送る 3 ラウンドのリクエストの形だけを出す"
         "（ラウンド 2 は全境界 new_unit、ラウンド 3 は全 Unit essential を仮定）",
     )
+    parser.add_argument(
+        "--state-tokens",
+        type=int,
+        default=None,
+        help="--dry-run で使う state のトークン数の実測値。省くと 0.5 tokens/byte "
+        "の見積もりを使うが、それは大きい文書では 1.4 倍ほど過大になり、"
+        "本番より多くのチャンクに割れて見える",
+    )
     args = parser.parse_args()
 
     try:
@@ -1201,7 +1548,7 @@ def main() -> int:
         return 1
     try:
         if args.dry_run:
-            response = dry_run(request, args.model)
+            response = dry_run(request, args.model, args.state_tokens)
         else:
             response = annotate(request, args.model, args.timeout)
     except JevError as e:

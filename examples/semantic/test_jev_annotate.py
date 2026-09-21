@@ -396,7 +396,7 @@ class CoreQuestionTest(unittest.TestCase):
     SOURCE = "結論\n\n採用する方式は差分配信である。帯域は 3 割減る見込み。\n"
 
     def ask(self, units):
-        return jev.core_questions(self.ATOMS, units, self.SOURCE)
+        return jev.core_questions(self.ATOMS, units, jev.RequestBudget.estimated(self.SOURCE))
 
     def test_a_marked_unit_offers_its_prose_atoms_as_choices(self):
         # 見出しは候補に入らない（「1 か所だけ読むなら」の答えにならない）。
@@ -559,7 +559,7 @@ class RunCapTest(unittest.TestCase):
     def test_one_question_covers_the_whole_run(self):
         units = self.units("essential", "essential", "essential")
         questions, fixed, scope, handled = jev.plan_run_cores(
-            self.atoms, units, [[0, 1, 2]], self.SOURCE
+            self.atoms, units, [[0, 1, 2]], jev.RequestBudget.estimated(self.SOURCE)
         )
         self.assertEqual(list(questions), ["core:run:1"])
         self.assertEqual(
@@ -575,7 +575,7 @@ class RunCapTest(unittest.TestCase):
         # 「絞り込み無し」になって Unit 全体が光る。
         units = self.units("essential", "essential", "essential")
         questions, fixed, scope, _ = jev.plan_run_cores(
-            self.atoms, units, [[0, 1, 2]], self.SOURCE
+            self.atoms, units, [[0, 1, 2]], jev.RequestBudget.estimated(self.SOURCE)
         )
         jev.apply_run_cores(
             units, questions, fixed, scope, {"core:run:1": {"choice": "atom:1"}}
@@ -590,7 +590,7 @@ class RunCapTest(unittest.TestCase):
         # CONTEXT の項目は核の話に加わらない（Tier は項目ごとのまま効く）。
         units = self.units("essential", "context", "essential")
         questions, _, scope, handled = jev.plan_run_cores(
-            self.atoms, units, [[0, 1, 2]], self.SOURCE
+            self.atoms, units, [[0, 1, 2]], jev.RequestBudget.estimated(self.SOURCE)
         )
         self.assertEqual(
             questions["core:run:1"]["criteria"],
@@ -603,7 +603,7 @@ class RunCapTest(unittest.TestCase):
         # 畳む相手がいないので従来どおり。
         units = self.units("essential", "context", "context")
         questions, fixed, scope, handled = jev.plan_run_cores(
-            self.atoms, units, [[0, 1, 2]], self.SOURCE
+            self.atoms, units, [[0, 1, 2]], jev.RequestBudget.estimated(self.SOURCE)
         )
         self.assertEqual((questions, fixed, scope, handled), ({}, {}, {}, frozenset()))
 
@@ -648,17 +648,17 @@ class RunCapTest(unittest.TestCase):
             (jev.STATE_PLUS_QUESTION_LIMIT - jev.CORE_QUESTION_MARGIN - target)
             / jev.TOKENS_PER_BYTE
         )
-        budget = jev.core_budget(source)
-        self.assertLessEqual(2 * body, budget, "1 Unit ぶんは収まる予算であること")
-        self.assertGreater(6 * body, budget, "run 全体は収まらない予算であること")
+        budget = jev.RequestBudget.estimated(source)
+        self.assertLessEqual(2 * body, budget.pair, "1 Unit ぶんは収まる予算であること")
+        self.assertGreater(6 * body, budget.pair, "run 全体は収まらない予算であること")
 
         questions, fixed, scope, handled = jev.plan_run_cores(
-            atoms, units, [[0, 1, 2]], source
+            atoms, units, [[0, 1, 2]], budget
         )
         # run としては面倒を見ない。
         self.assertEqual((questions, fixed, scope, handled), ({}, {}, {}, frozenset()))
         # そして Unit ごとの経路がちゃんと拾う — ここが「全項目が光る」との分かれ目。
-        per_unit = jev.core_questions(atoms, units, source, handled)
+        per_unit = jev.core_questions(atoms, units, budget, handled)
         self.assertEqual(sorted(per_unit), ["core:u1", "core:u2", "core:u3"])
         for question in per_unit.values():
             self.assertEqual(len(question["criteria"]), 2)
@@ -673,10 +673,13 @@ class RunCapTest(unittest.TestCase):
     def test_the_per_unit_path_skips_what_the_run_already_handled(self):
         units = self.units("essential", "essential", "essential")
         _, _, _, handled = jev.plan_run_cores(
-            self.atoms, units, [[0, 1, 2]], self.SOURCE
+            self.atoms, units, [[0, 1, 2]], jev.RequestBudget.estimated(self.SOURCE)
         )
         self.assertEqual(
-            jev.core_questions(self.atoms, units, self.SOURCE, handled), {}
+            jev.core_questions(
+                self.atoms, units, jev.RequestBudget.estimated(self.SOURCE), handled
+            ),
+            {},
         )
         jev.assign_lone_cores(self.atoms, units, handled)
         for unit in units:
@@ -747,20 +750,23 @@ class CoreBudgetTest(unittest.TestCase):
     """
 
     def test_the_budget_shrinks_as_the_state_grows(self):
-        small = jev.core_budget("あ" * 100)
-        large = jev.core_budget("あ" * 100_000)
-        self.assertGreater(small, large)
+        small = jev.RequestBudget.estimated("あ" * 100)
+        large = jev.RequestBudget.estimated("あ" * 100_000)
+        self.assertGreater(small.pair, large.pair)
+        self.assertGreater(small.whole, large.whole)
 
     def test_a_huge_state_leaves_no_budget_at_all(self):
         # state だけで 32k を使い切る文書では、核はどうやっても聞けない。
-        self.assertLessEqual(jev.core_budget("あ" * 40_000), 0)
+        self.assertLessEqual(jev.RequestBudget.estimated("あ" * 40_000).pair, 0)
 
     def test_the_measured_worst_case_still_fits(self):
         # 実測（2026-09-21）: 45,650 バイトの文書の最大 Unit は選択肢 82 個・
         # 本文 11,026 バイトで、question は 5,469 tokens だった。
-        budget = jev.core_budget("x" * 45_650)
-        self.assertGreater(budget, 0)
-        self.assertTrue(jev.core_fits({f"atom:{i}": "x" * 134 for i in range(82)}, budget))
+        budget = jev.RequestBudget.estimated("x" * 45_650)
+        self.assertGreater(budget.pair, 0)
+        self.assertTrue(
+            jev.core_fits({f"atom:{i}": "x" * 134 for i in range(82)}, budget)
+        )
 
     def test_a_unit_over_the_budget_is_not_asked(self):
         # 上限を超えたら核を聞かない。核が無ければ Unit 全体が MARKED に
@@ -769,9 +775,14 @@ class CoreBudgetTest(unittest.TestCase):
         atoms = [atom(i, "sentence", "文" * 4_000) for i in range(4)]
         unit = {"id": "u1", "atoms": [0, 1, 2, 3], "reading_tier": "essential",
                 "relations": [], "jev": {}}
-        self.assertEqual(jev.core_questions(atoms, [unit], source), {})
+        self.assertEqual(
+            jev.core_questions(atoms, [unit], jev.RequestBudget.estimated(source)), {}
+        )
         # 同じ Unit でも state が小さければ聞ける。
-        self.assertIn("core:u1", jev.core_questions(atoms, [unit], "短い。"))
+        self.assertIn(
+            "core:u1",
+            jev.core_questions(atoms, [unit], jev.RequestBudget.estimated("短い。")),
+        )
 
 
 class DryRunTest(unittest.TestCase):
@@ -980,6 +991,378 @@ class HttpErrorMessageTest(unittest.TestCase):
         line = jev.http_error_message(401, "unauthorized")
         self.assertIn("401", line)
         self.assertIn("unauthorized", line)
+
+
+class SendInChunksTest(unittest.TestCase):
+    """リクエスト分割 — [`plan_chunks`] / [`send_in_chunks`] / [`RequestBudget`]。
+
+    **ラウンド 2 専用のテストにしないこと。** 分割はどのラウンドからも使う
+    1 つの実装なので、ここで確かめるのも question の中身に依存しない性質だけ
+    である（トークンで切る / `pair` を超えたら送らない / 取りこぼさない）。
+    """
+
+    def question(self, body_bytes: int) -> dict:
+        return {
+            "type": "choice",
+            "instructions": "問い。" + "x" * body_bytes,
+            "criteria": dict(jev.TIER_CRITERIA),
+        }
+
+    # --- 個数ではなくトークンで切る ------------------------------------
+
+    def test_chunks_are_cut_by_tokens_not_by_count(self):
+        """同じ**個数**でも、本文が大きければチャンクは増える。"""
+        budget = jev.RequestBudget(state_tokens=1_000)
+        small = {f"q{i}": self.question(100) for i in range(20)}
+        large = {f"q{i}": self.question(20_000) for i in range(20)}
+        self.assertEqual(len(jev.plan_chunks(small, budget)[0]), 1)
+        self.assertGreater(len(jev.plan_chunks(large, budget)[0]), 1)
+
+    def test_every_chunk_fits_the_whole_request_limit(self):
+        budget = jev.RequestBudget(state_tokens=5_000)
+        questions = {f"q{i}": self.question(9_000) for i in range(40)}
+        chunks, dropped = jev.plan_chunks(questions, budget)
+        self.assertEqual(dropped, [])
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            spent = sum(jev.question_tokens(q) for q in chunk.values())
+            self.assertLessEqual(budget.state_tokens + spent, jev.REQUEST_LIMIT)
+            self.assertLessEqual(spent, budget.whole)
+
+    def test_nothing_is_lost_or_duplicated_by_the_split(self):
+        budget = jev.RequestBudget(state_tokens=5_000)
+        questions = {f"q{i}": self.question(9_000) for i in range(40)}
+        chunks, _ = jev.plan_chunks(questions, budget)
+        seen = [key for chunk in chunks for key in chunk]
+        self.assertEqual(seen, list(questions), "順も中身も変えない")
+
+    # --- 32k の側のガード ------------------------------------------------
+
+    def test_a_question_too_large_for_the_pair_limit_is_never_sent(self):
+        """`state` + その question が 32k を超えるものは、どう分けても送れない。"""
+        budget = jev.RequestBudget(state_tokens=20_000)
+        questions = {
+            "ok": self.question(1_000),
+            "huge": self.question(40_000),
+        }
+        chunks, dropped = jev.plan_chunks(questions, budget)
+        self.assertEqual(dropped, ["huge"])
+        self.assertEqual([sorted(c) for c in chunks], [["ok"]])
+
+    def test_the_pair_limit_is_what_binds_not_the_whole_limit(self):
+        """`pair` は必ず `whole` より小さい。
+
+        だから `pair` を通った question は、空のチャンクには必ず収まる
+        （収まらないと無限ループになる）。
+        """
+        for state_tokens in (0, 1_000, 20_000, 31_000):
+            with self.subTest(state_tokens=state_tokens):
+                budget = jev.RequestBudget(state_tokens=state_tokens)
+                self.assertLess(budget.pair, budget.whole)
+
+    def test_a_state_that_fills_the_pair_limit_sends_nothing(self):
+        budget = jev.RequestBudget(state_tokens=32_000)
+        chunks, dropped = jev.plan_chunks({"q": self.question(10)}, budget)
+        self.assertEqual((chunks, dropped), ([], ["q"]))
+
+    # --- 小さい文書の挙動が変わらない ------------------------------------
+
+    def test_small_documents_still_go_in_one_request(self):
+        """合格条件 3 — 分割が不要なら 1 リクエストのまま。
+
+        実文書で確かめる。`demo.md` と `design/semantic-reading-layer.md` は
+        3 ラウンドとも 1 チャンクでなければならない（見積もりは実測の
+        1.4 倍まで過大評価するので、ここが本番より厳しい側の判定になる）。
+        """
+        for name in ("demo.md", "../../docs/design/semantic-reading-layer.md"):
+            with self.subTest(document=name):
+                source = (HERE / name).read_text(encoding="utf-8")
+                request = dump_request(HERE / name)
+                plan = jev.dry_run(request, "jev-latest")
+                for entry in plan["rounds"]:
+                    self.assertEqual(
+                        entry["plan"]["chunks"], 1, f"round {entry['round']}"
+                    )
+                    self.assertEqual(entry["plan"]["unsent"], [])
+                self.assertEqual(
+                    plan["budget"]["state_tokens"], jev.estimate_tokens(source)
+                )
+
+    # --- 見積もりの精度 ---------------------------------------------------
+
+    def test_the_estimate_is_conservative_but_not_wildly_so(self):
+        """実測 181 tokens の Tier question を、見積もりが 1.0〜1.6 倍で返す。
+
+        **下回ってはいけない** — 見積もりが小さいと上限を超えた question を
+        送って 400 で落ちる。**大きすぎてもいけない** — 収まる文書を無駄に
+        分割し、`state` を余分に課金する。実測の内訳（`docs/gotchas.md`
+        未解決 5）は器 68 / criteria 65 / 枠組み文 65 = 181。
+        """
+        tier = jev.unit_questions(
+            [{"kind": "sentence", "text": "", "range": [0, 0]}], [[0]]
+        )["tier:u1"]
+        estimate = jev.question_tokens(tier)
+        self.assertGreaterEqual(estimate, 181)
+        self.assertLessEqual(estimate, int(181 * 1.6))
+
+    def test_the_criteria_keys_are_counted(self):
+        """`atom:123` のようなキーは選択肢の数だけ並ぶので、無視できない。"""
+        few = {"type": "choice", "instructions": "問い。", "criteria": {"a": "x"}}
+        many = {
+            "type": "choice",
+            "instructions": "問い。",
+            "criteria": {f"atom:{i}": "x" for i in range(100)},
+        }
+        self.assertGreater(
+            jev.question_tokens(many) - jev.question_tokens(few),
+            100,
+            "キーを数えていないと、この差はほぼ 0 になる",
+        )
+
+    # --- state のトークン数 -----------------------------------------------
+
+    def test_a_small_state_is_estimated_without_spending_a_request(self):
+        calls = []
+        budget = self.measure("短い文書。" * 10, calls)
+        self.assertEqual(calls, [], "小さい文書で余分なリクエストを使わない")
+        self.assertFalse(budget.measured)
+        self.assertIsNone(budget.probe)
+
+    def test_a_large_state_is_measured_from_usage(self):
+        calls = []
+        budget = self.measure("あ" * 40_000, calls)
+        self.assertEqual(len(calls), 1, "実測は 1 リクエストだけ")
+        self.assertEqual(sorted(calls[0]), ["state-probe"])
+        self.assertTrue(budget.measured)
+        self.assertEqual(budget.state_tokens, 12_345)
+        # probe も記録に残す。残さないとリクエスト数と tokens の合計が食い違う。
+        self.assertEqual(budget.probe["round"], "probe")
+        self.assertEqual(budget.probe["usage"], {"input_tokens": 12_345})
+        # 見積もり（0.5/byte で 60,000）を信じていたら pair は負になっていた。
+        self.assertGreater(budget.pair, 0)
+
+    def test_a_probe_without_usage_falls_back_to_the_estimate(self):
+        calls = []
+        budget = self.measure("あ" * 40_000, calls, usage=None)
+        self.assertFalse(budget.measured)
+        self.assertEqual(budget.state_tokens, jev.estimate_tokens("あ" * 40_000))
+
+    def measure(self, state, calls, usage={"input_tokens": 12_345}):
+        payload = {"answers": {"state-probe": {"noul": 0.5}}}
+        if usage is not None:
+            payload["usage"] = usage
+
+        def fake(state_, questions, model, timeout):
+            calls.append(questions)
+            return dict(payload)
+
+        return with_fake_ask(fake, lambda: jev.measure_state_tokens(state, "m", 1.0))
+
+    # --- マージ -----------------------------------------------------------
+
+    def test_answers_from_every_chunk_are_merged(self):
+        budget = jev.RequestBudget(state_tokens=1_000)
+        questions = {f"q{i}": self.question(30_000) for i in range(8)}
+
+        def fake(state, chunk, model, timeout):
+            return {
+                "answers": {key: {"choice": key} for key in chunk},
+                "usage": {"input_tokens": 1},
+            }
+
+        answers, records, dropped = with_fake_ask(
+            fake,
+            lambda: jev.send_in_chunks("state", questions, budget, "m", 1.0),
+        )
+        self.assertEqual(sorted(answers), sorted(questions))
+        self.assertEqual(dropped, [])
+        self.assertGreater(len(records), 1, "この大きさは 1 リクエストに入らない")
+        self.assertEqual(sum(r["questions"] for r in records), len(questions))
+
+    def test_the_same_key_from_two_chunks_fails_loudly(self):
+        """黙って上書きしない。`choice_of` と同じ作法。"""
+        budget = jev.RequestBudget(state_tokens=1_000)
+        questions = {f"q{i}": self.question(30_000) for i in range(8)}
+
+        def fake(state, chunk, model, timeout):
+            # どのチャンクも同じキーを返す、壊れた相手。
+            return {"answers": {"q0": {"choice": "q0"}}}
+
+        with self.assertRaises(jev.JevError) as caught:
+            with_fake_ask(
+                fake,
+                lambda: jev.send_in_chunks("state", questions, budget, "m", 1.0),
+            )
+        self.assertIn("q0", str(caught.exception))
+
+    def test_a_missing_answer_is_not_filled_in_silently(self):
+        """欠けた答えは、後段の [`choice_of`] が失敗させる。"""
+        budget = jev.RequestBudget(state_tokens=1_000)
+        answers, _, _ = with_fake_ask(
+            lambda state, chunk, model, timeout: {"answers": {}},
+            lambda: jev.send_in_chunks(
+                "state", {"tier:u1": self.question(10)}, budget, "m", 1.0
+            ),
+        )
+        with self.assertRaises(jev.JevError):
+            jev.choice_of(answers, "tier:u1", jev.TIER_CRITERIA)
+
+    def test_the_state_is_sent_whole_with_every_chunk(self):
+        """`state` は毎回丸ごと乗る — 切り詰めない（設計書「全文を Context」）。"""
+        budget = jev.RequestBudget(state_tokens=1_000)
+        questions = {f"q{i}": self.question(30_000) for i in range(8)}
+        seen = []
+
+        def fake(state, chunk, model, timeout):
+            seen.append(state)
+            return {"answers": {key: {"choice": key} for key in chunk}}
+
+        with_fake_ask(
+            fake,
+            lambda: jev.send_in_chunks("文書全文", questions, budget, "m", 1.0),
+        )
+        self.assertGreater(len(seen), 1)
+        self.assertEqual(set(seen), {"文書全文"})
+
+
+class UnansweredTierTest(unittest.TestCase):
+    """送れなかった Tier question の落とし先（[`UNANSWERED_TIER`]）。
+
+    **実文書では 1 度も通っていない枝である**（5 文書で 0 件）。この経路に
+    来るには 1 つの Unit の本文が 18 KB 前後になる必要がある。決めた形を
+    ここで固定しておく。
+    """
+
+    def test_the_fallback_never_becomes_marked(self):
+        """既定の Tier が何であれ、`core_atoms: []` で MARKED にならない。"""
+        self.assertEqual(jev.UNANSWERED_TIER, "detail")
+
+    def test_an_oversized_unit_gets_the_fallback_and_an_empty_core(self):
+        # state + この Unit の本文だけで 32k を超える文書を作る。
+        body = "あ" * 12_000                       # 36,000 バイト
+        source = "あ" * 10_000 + "\n\n" + body
+        atoms = [
+            {"index": 0, "kind": "sentence", "text": "短い文。", "range": [0, 12]},
+            {"index": 1, "kind": "heading", "text": "見出し", "range": [12, 21]},
+            {"index": 2, "kind": "sentence", "text": body, "range": [21, 36_021]},
+        ]
+        request = {"version": jev.VERSION, "source": source, "atoms": atoms}
+
+        def fake(state, chunk, model, timeout):
+            answers = {}
+            for key in chunk:
+                if key == "state-probe":
+                    return {"answers": {key: {"noul": 0.1}},
+                            "usage": {"input_tokens": 20_000}}
+                answers[key] = {"choice": "essential", "noul": 0.1}
+            return {"answers": answers}
+
+        out = with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
+        unsent = out["jev"]["unsent"]["tier"]
+        self.assertEqual(len(unsent), 1, "巨大な Unit の Tier だけが送れない")
+        number = int(unsent[0].split("u")[1])
+        unit = out["units"][number - 1]
+        self.assertEqual(unit["reading_tier"], jev.UNANSWERED_TIER)
+        self.assertEqual(
+            unit["core_atoms"], [], "核を持たない = MARKED にならない"
+        )
+        self.assertEqual(unit["jev"]["tier_by"], "rule:question_too_large")
+        # 残りの Unit は普通に判定されている — 文書全体を失敗させない。
+        others = [u for n, u in enumerate(out["units"], 1) if n != number]
+        self.assertTrue(others)
+        for other in others:
+            self.assertEqual(other["reading_tier"], "essential")
+
+    def test_a_document_where_nothing_can_be_asked_fails_loudly(self):
+        """全部が既定値の注釈を exit 0 で返さない。
+
+        **実測で踏んだ枝である。** 83 KB の文書は `state` が 30,808 tokens で
+        32k の probe は通るのに、question に残る余地が **負**になる。ここを
+        塞ぐ前は **530 Unit すべてが `detail`** の応答を exit 0 で返していた
+        — `state` が収まっているぶん、いちばん気づきにくい壊れ方をする。
+
+        [`UNANSWERED_TIER`] は個別の巨大な Unit のための落とし先であって、
+        文書全体の落とし先ではない。
+        """
+        source = "あ" * 30_000
+        atoms = [atom(i, "sentence", "文" * 300) for i in range(3)]
+        request = {"version": jev.VERSION, "source": source, "atoms": atoms}
+
+        def fake(state, chunk, model, timeout):
+            if "state-probe" in chunk:
+                return {"answers": {"state-probe": {"noul": 0.1}},
+                        "usage": {"input_tokens": 30_800}}
+            raise AssertionError("1 つも送れないはずのリクエストが飛んだ")
+
+        with self.assertRaises(jev.JevError) as caught:
+            with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
+        self.assertIn("大きすぎ", str(caught.exception))
+        self.assertIn("30800", str(caught.exception).replace(",", ""))
+
+    def test_one_answerable_question_is_enough_to_keep_going(self):
+        """一部だけ送れないなら、既定値へ倒して続ける（文書は失敗させない）。"""
+        source = "あ" * 10_000
+        atoms = [
+            atom(0, "sentence", "短い文。"),
+            atom(1, "heading", "見出し"),
+            atom(2, "sentence", "あ" * 12_000),
+        ]
+        request = {"version": jev.VERSION, "source": source, "atoms": atoms}
+
+        def fake(state, chunk, model, timeout):
+            if "state-probe" in chunk:
+                return {"answers": {"state-probe": {"noul": 0.1}},
+                        "usage": {"input_tokens": 20_000}}
+            return {"answers": {k: {"choice": "essential", "noul": 0.1} for k in chunk}}
+
+        out = with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
+        tiers = [u["reading_tier"] for u in out["units"]]
+        self.assertIn(jev.UNANSWERED_TIER, tiers)
+        self.assertIn("essential", tiers)
+
+    def test_the_unit_is_kept_so_the_budget_denominator_does_not_move(self):
+        """送れなかった Unit も落とさない。
+
+        落とすと `decorate` の `total`（全 Unit のバイト長の合計）が黙って縮み、
+        「Budget 50 %」が指す量が文書によって変わる。
+        """
+        source = "あ" * 10_000
+        atoms = [
+            atom(0, "sentence", "短い文。"),
+            atom(1, "heading", "見出し"),
+            atom(2, "sentence", "あ" * 12_000),
+        ]
+        request = {"version": jev.VERSION, "source": source, "atoms": atoms}
+
+        def fake(state, chunk, model, timeout):
+            if "state-probe" in chunk:
+                return {"answers": {"state-probe": {"noul": 0.1}},
+                        "usage": {"input_tokens": 20_000}}
+            return {"answers": {k: {"choice": "essential", "noul": 0.1} for k in chunk}}
+
+        out = with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
+        covered = sorted(i for unit in out["units"] for i in unit["atoms"])
+        self.assertEqual(covered, [0, 1, 2], "Atom を 1 つも取りこぼさない")
+
+
+def with_fake_ask(fake, body):
+    """[`ask_jev`] を差し替えて `body()` を呼ぶ（API は叩かない）。"""
+    real = jev.ask_jev
+    jev.ask_jev = fake
+    try:
+        return body()
+    finally:
+        jev.ask_jev = real
+
+
+def dump_request(path):
+    """`dump-request` と同じ形の要求 JSON を、本物の `atomize` から作る。"""
+    out = subprocess.run(
+        ["cargo", "run", "--quiet", "-p", "semantic-reading",
+         "--example", "dump-request", "--", str(path)],
+        capture_output=True, text=True, cwd=str(HERE.parents[1]), check=True,
+    )
+    return json.loads(out.stdout)
 
 
 if __name__ == "__main__":
