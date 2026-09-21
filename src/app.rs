@@ -712,6 +712,7 @@ impl App {
         let refusal = match message.result {
             Ok(document) => {
                 self.semantic_doc = Some(document);
+                self.lift_budget_onto_floor();
                 None
             }
             Err(e) => Some(e),
@@ -762,8 +763,11 @@ impl App {
     /// this layer, and it is held here by the call graph rather than by
     /// a comment.
     pub(crate) fn nudge_reading_budget(&mut self, delta: i16) -> bool {
+        // 下限より下へは回せない。下限は文書の測定値で、そこから下では
+        // Budget を下げても画面は動かず、`READ` の数字だけが嘘になる
+        // （`policy::floor`）。上限は 100 のまま。
         let next = (self.reading_budget as i16 + delta).clamp(
-            crate::semantic::MIN_BUDGET as i16,
+            self.reading_floor().unwrap_or(crate::semantic::MIN_BUDGET) as i16,
             crate::semantic::MAX_BUDGET as i16,
         ) as u8;
         if next == self.reading_budget {
@@ -772,6 +776,34 @@ impl App {
         self.reading_budget = next;
         self.refresh_semantic_decorations();
         true
+    }
+
+    /// The Reading Budget's floor for the annotation in hand — the
+    /// smallest `READ %` at which the number matches what is on screen
+    /// ([`semantic_reading::policy::floor`]). `None` without an
+    /// annotation: no analysis, no floor.
+    pub(crate) fn reading_floor(&self) -> Option<u8> {
+        self.semantic_doc.as_ref().map(crate::semantic::floor_for)
+    }
+
+    /// Is the budget sitting on its floor? Lowering it would do nothing.
+    pub(crate) fn at_reading_floor(&self) -> bool {
+        self.reading_floor()
+            .is_some_and(|floor| self.reading_budget <= floor)
+    }
+
+    /// Lift the budget onto the floor if an annotation just arrived (or
+    /// was replaced) with a floor above it. The budget is a reading
+    /// preference and rides along across documents, so it can land under
+    /// the new document's floor — where it would read `READ 1%` while
+    /// showing 40 %. Raising it keeps the number honest; lowering never
+    /// happens here (a budget above the floor is the user's choice).
+    fn lift_budget_onto_floor(&mut self) {
+        if let Some(floor) = self.reading_floor()
+            && self.reading_budget < floor
+        {
+            self.reading_budget = floor;
+        }
     }
 
     /// Set a transient footer message.

@@ -6306,11 +6306,12 @@ fn moving_the_budget_calls_neither_the_provider_nor_the_renderer() {
     // それでいて表示状態はちゃんと変わっている（no-op ではない）。
     assert_ne!(app.semantic_decorations, at_100);
 
-    // 上限・下限で止まり、そこでも provider には触れない。
+    // 上限・下限で止まり、そこでも provider には触れない。下限は 1 % では
+    // なく文書の下限（`policy::floor` — 一段目の大きさ）である。
     for _ in 0..40 {
         on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
     }
-    assert_eq!(app.reading_budget, crate::semantic::MIN_BUDGET);
+    assert_eq!(app.reading_budget, app.reading_floor().unwrap());
     for _ in 0..40 {
         on_view_key(&mut app, KeyCode::Char('>'), KeyModifiers::NONE, None);
     }
@@ -6327,6 +6328,177 @@ fn moving_the_budget_calls_neither_the_provider_nor_the_renderer() {
     on_view_key(&mut app, KeyCode::Char('='), KeyModifiers::NONE, None);
     assert_eq!(app.reading_budget, 100);
     assert_eq!(calls.get(), 1);
+}
+
+/// **The budget cannot be turned below the document's floor.** Below the
+/// first tier of the ledger (cores and their lineage, kept regardless of
+/// the budget) the screen does not move, so `-`/`<` stop there instead
+/// of spinning a number that lies. The footer says so — `(floor)` rides
+/// on the percentage — and no BEL is rung (nothing invalid was asked).
+#[test]
+fn the_budget_stops_at_the_floor_and_the_footer_says_so() {
+    let fixture = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.json"
+    ));
+    let path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.md"
+    ));
+    let mut app = make_app(3, Mode::View);
+    app.source = Source::load(path).unwrap();
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Inline(
+        crate::semantic::load_fixture(&fixture).unwrap(),
+    )));
+    app.reanalyze_semantics();
+    let floor = app.reading_floor().expect("annotation in hand → a floor");
+    assert!(
+        floor > crate::semantic::MIN_BUDGET,
+        "demo.json has cores, so the floor is above 1 % ({floor})"
+    );
+
+    // Above the floor: no mark.
+    assert!(!app.at_reading_floor());
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(hints.contains("READ 100%"), "{hints}");
+    assert!(!hints.contains("floor"), "{hints}");
+
+    // Hold `<`: the readout lands on the floor and stays there.
+    for _ in 0..20 {
+        on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
+    }
+    assert_eq!(app.reading_budget, floor);
+    assert!(app.at_reading_floor());
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(hints.contains(&format!("READ {floor}% (floor)")), "{hints}");
+    assert!(app.status.is_none(), "止まるだけで、何も鳴らさない: {:?}", app.status);
+
+    // `-` at the floor is a no-op too, and the decorations are exactly
+    // those of the floor budget — the number matches the screen.
+    let at_floor = app.semantic_decorations.clone();
+    assert!(!app.nudge_reading_budget(-1));
+    assert_eq!(app.reading_budget, floor);
+    assert_eq!(app.semantic_decorations, at_floor);
+    assert_eq!(
+        at_floor,
+        crate::semantic::decorations_for(app.semantic_doc.as_ref().unwrap(), floor)
+    );
+
+    // What the floor promises: the bytes on screen fit in `floor` %, and
+    // one step below they would not (the number would lie).
+    let document = app.semantic_doc.as_ref().unwrap();
+    let shown = |budget: u8| -> usize {
+        semantic_reading::policy::decorate(document, budget)
+            .iter()
+            .filter(|(_, s)| *s != semantic_reading::DisplayState::Dim)
+            .map(|(r, _)| r.len())
+            .sum()
+    };
+    let total: usize = document.atoms.iter().map(|a| a.len()).sum();
+    assert!(shown(floor) * 100 <= floor as usize * total);
+    assert!(shown(floor - 1) * 100 > (floor as usize - 1) * total);
+
+    // Stepping up leaves the floor; the mark goes away.
+    on_view_key(&mut app, KeyCode::Char('+'), KeyModifiers::NONE, None);
+    assert_eq!(app.reading_budget, floor + 1);
+    assert!(!crate::chrome::footer_hints(&app).contains("floor"));
+}
+
+/// **An answer that arrives under the budget lifts it onto the floor.**
+/// The budget rides along across documents, so it can be sitting at 5 %
+/// when an annotation with a 40 % floor lands; a re-analysis can move
+/// the floor the same way. Never lowered — a budget above the floor is
+/// the user's choice. Without an annotation there is no floor at all.
+#[test]
+fn an_arriving_annotation_lifts_the_budget_onto_its_floor() {
+    use semantic_reading::{Atom, AtomIndex, AtomKind, ReadingTier, SemanticDocument, SemanticUnit};
+
+    let mut app = make_app(3, Mode::View);
+    install_semantic_command(&mut app, "true");
+    let tx = app.semantic_results.as_ref().unwrap().tx.clone();
+    let content = app.source.content.clone();
+    assert!(content.len() >= 10, "make_app の文書は 10 バイト以上: {}", content.len());
+
+    // 核が文書の 4 割 → 下限 40 %。
+    let with_floor = |core_len: usize| {
+        let mut doc = SemanticDocument::new(
+            vec![
+                Atom::new(0..core_len, AtomKind::Sentence),
+                Atom::new(core_len..10, AtomKind::Sentence),
+            ],
+            vec![
+                SemanticUnit::new("core", [AtomIndex(0)], ReadingTier::Essential),
+                SemanticUnit::new("rest", [AtomIndex(1)], ReadingTier::Detail),
+            ],
+        );
+        doc.source_sha256 = Some(crate::semantic::source_digest(&content));
+        doc
+    };
+
+    // No annotation yet: no floor, and the budget goes wherever it is put.
+    assert_eq!(app.reading_floor(), None);
+    assert!(!app.at_reading_floor());
+    app.reading_budget = 5;
+
+    app.semantic_generation = 1;
+    app.semantic_inflight = Some(1);
+    tx.send(crate::app::AnalysisMessage {
+        generation: 1,
+        result: Ok(with_floor(4)),
+    })
+    .unwrap();
+    app.poll_semantic_analysis();
+    assert_eq!(app.reading_floor(), Some(40));
+    assert_eq!(app.reading_budget, 40, "5 % は下限を割っていたので引き上げる");
+    assert!(app.at_reading_floor());
+    assert_eq!(
+        app.semantic_decorations,
+        crate::semantic::decorations_for(app.semantic_doc.as_ref().unwrap(), 40),
+        "引き上げた予算で投影されている"
+    );
+
+    // Re-analysis moves the floor up (core grew to 7 / 10): lifted again.
+    app.semantic_generation = 2;
+    app.semantic_inflight = Some(2);
+    tx.send(crate::app::AnalysisMessage {
+        generation: 2,
+        result: Ok(with_floor(7)),
+    })
+    .unwrap();
+    app.poll_semantic_analysis();
+    assert_eq!(app.reading_floor(), Some(70));
+    assert_eq!(app.reading_budget, 70);
+
+    // Re-analysis moves the floor down (core shrank to 2 / 10): the
+    // budget stays where the user left it, and `<` can now go lower.
+    app.semantic_generation = 3;
+    app.semantic_inflight = Some(3);
+    tx.send(crate::app::AnalysisMessage {
+        generation: 3,
+        result: Ok(with_floor(2)),
+    })
+    .unwrap();
+    app.poll_semantic_analysis();
+    assert_eq!(app.reading_floor(), Some(20));
+    assert_eq!(app.reading_budget, 70, "下限が下がっても予算は下げない");
+    assert!(!app.at_reading_floor());
+    for _ in 0..10 {
+        on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
+    }
+    assert_eq!(app.reading_budget, 20);
+    assert!(crate::chrome::footer_hints(&app).contains("READ 20% (floor)"));
+
+    // A failed re-analysis keeps the annotation, hence the floor.
+    app.semantic_generation = 4;
+    app.semantic_inflight = Some(4);
+    tx.send(crate::app::AnalysisMessage {
+        generation: 4,
+        result: Err("boom".to_string()),
+    })
+    .unwrap();
+    app.poll_semantic_analysis();
+    assert_eq!(app.reading_floor(), Some(20));
+    assert_eq!(app.reading_budget, 20);
 }
 
 /// 継ぎ目の反対側: **文書が入れ替わったら provider は呼ばれる。**

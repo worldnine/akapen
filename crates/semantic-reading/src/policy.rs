@@ -180,17 +180,29 @@
 //! 直したのではない** — 拾い直しは best-fit であり、下の単調性を壊す。
 //! 核を**そもそも取り合いに出さない**ので、落ちなくなった。
 //!
-//! ## 二段目が予算を使い切ることはある
+//! ## 一段目が予算を超えることはある — そこが Budget の下限
 //!
 //! 一段目は Budget を見ないので、**核とその閉包が `budget` を超えることが
-//! ある**。実測の記事では一段目だけで文書の 28.3 % を占めた。READ 1 % でも
-//! その 28.3 % が出る。
+//! ある**。実測では一段目だけで記事の 28.3 %、設計書の 42.5 %、業務議事録の
+//! 42〜55 % を占めた。READ 1 % と言ってもその量が出る。
 //!
 //! これは「30 % と言って 45 % 出る」を避けるという上の話と衝突して見えるが、
 //! 衝突していない。あちらは**二段目の取り合いの中で前提を隠れて払う**こと
 //! （予算の意味が文書ごとに変わる）を避けている。こちらは
 //! **「最低限これを読め」は予算より先にある**という宣言で、量は
 //! 一段目の大きさとして数えられる。
+//!
+//! 数えた値が [`floor`] である — 一段目のバイト数 ÷ 全体を切り上げた
+//! 整数で、**その文書で `READ` の数字が表示量と一致するいちばん小さい
+//! Budget**（一致は残る Unit について。予算外で戻る見出しの行は上乗せ）。下限より下では残る集合が動かず数字だけが嘘になるので、
+//! クライアント（akapen）は Budget をそこより下へ回さず、下限にいることを
+//! ステータス行に出す。**下限は測定値であって閾値ではない** — 定数も設定も
+//! 無く、`decorate` と同じ `first_tier` で数える。下限が高い文書は核が多いか、
+//! 核の前提の系譜が長い文書である。
+//!
+//! 下限は Tier の判定と一緒に揺れる。実測では業務議事録の 4 ランで
+//! 43 / 56 / 48 / 50 %（幅 13 ポイント）、Tier を固定して辺だけ揺らした
+//! 32 fixture では幅 0〜4 ポイントだった。
 //!
 //! ## 単調性は何に支えられているか
 //!
@@ -453,22 +465,8 @@ pub const MAX_BUDGET: u8 = 100;
 pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, DisplayState)> {
     let budget = budget.clamp(MIN_BUDGET, MAX_BUDGET);
 
-    // Unit ごとの attention コスト（構成 Atom のバイト長の合計）。
-    // 範囲外の添字は validate で弾かれるが、ここでも黙って無視して panic しない。
-    let cost = |unit: &crate::unit::SemanticUnit| -> usize {
-        unit.atoms
-            .iter()
-            .filter_map(|&index| doc.atom(index))
-            .map(|atom| atom.len())
-            .sum()
-    };
-
     let order = keep_order(doc);
-    let total: usize = doc.units.iter().map(cost).sum();
-    let by_id = index_by_id(doc);
-
-    let mut kept = vec![false; doc.units.len()];
-    let mut spent: usize = 0;
+    let total: usize = doc.units.iter().map(|unit| cost(doc, unit)).sum();
 
     // ---- 一段目 — 核を先に、単独で確保する ----------------------------
     //
@@ -476,26 +474,11 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
     // 前提の閉包を、予算の取り合いの前に確保する。取り合いに混ぜると
     // 「READ を下げたら『最低限これを読め』が消える」が起きる（下の
     // 「台帳の単位」）。この集合は Budget の関数ではないので、`spent` の
-    // 初期値も Budget に依存しない定数である。
-    let mut bill = Vec::new();
-    let mut any_core = false;
-    for &unit_index in &order {
-        if !bears_a_core(&doc.units[unit_index]) {
-            continue;
-        }
-        any_core = true;
-        // この Unit と、その前提の閉包。重複は無い（`prerequisites` は
-        // 訪問済み集合で辿り、seed 自身を含めない）。
-        bill.clear();
-        bill.push(unit_index);
-        prerequisites(doc, &by_id, unit_index, &mut bill);
-        for &index in &bill {
-            if !kept[index] {
-                kept[index] = true;
-                spent += cost(&doc.units[index]);
-            }
-        }
-    }
+    // 初期値も Budget に依存しない定数である。**同じ集合を [`floor`] も
+    // 読む** — 計算は `first_tier` の 1 箇所にある。
+    let by_id = index_by_id(doc);
+    let mut kept = vec![false; doc.units.len()];
+    let (mut spent, any_core) = first_tier(doc, &order, &by_id, &mut kept);
 
     // ---- 二段目 — 残りの予算を Unit が奪い合う ------------------------
     //
@@ -512,7 +495,7 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
         if kept[unit_index] {
             continue;
         }
-        let due = cost(&doc.units[unit_index]);
+        let due = cost(doc, &doc.units[unit_index]);
         let fits = ((spent + due) as u128) * 100 <= (budget as u128) * (total as u128);
         if fits || (!any_core && rank == 0) {
             kept[unit_index] = true;
@@ -566,6 +549,108 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
         // どの Unit にも属さない Atom は未判断であって低優先度ではない。
         .map(|(atom, state)| (atom.range.clone(), state.unwrap_or(DisplayState::Normal)))
         .collect()
+}
+
+/// Reading Budget の**下限** — その文書で `READ` の数字が表示量と一致する
+/// いちばん小さい Budget。
+///
+/// 一段目（核とその `PRESUPPOSES` 閉包）は Budget を見ずに残るので、
+/// その大きさより下では **Budget をいくら下げても残る集合は変わらない**。
+/// 表示は「READ 1 %」と言いながら一段目の分（実測で文書の 3〜5 割）を
+/// 出すことになり、数字が嘘になる。この関数はその境目を返す。
+///
+/// 値は **一段目のバイト数 ÷ 全体を切り上げた整数**で、[`decorate`] と同じ
+/// `cost` / `total` で数える。核が 1 つも無い文書では一段目が空で、代わりに
+/// 先頭 1 Unit が強制で残る（[`decorate`] の保険）ので、その Unit の
+/// 大きさがこれに相当する。Unit が無い、または全体が 0 バイトの文書では
+/// [`MIN_BUDGET`]。
+///
+/// **これは測定値であって閾値ではない。** 定数も設定も無く、文書
+/// （とその注釈）だけから決まる。下限が高い文書は核が多いか、核の前提の
+/// 系譜が長い文書である。
+///
+/// # 成り立つこと
+///
+/// - `budget < floor` なら、残る集合は `decorate(doc, MIN_BUDGET)` と同じ
+///   （一段目そのもの）。そこでは表示量が `budget` % を**超えている**
+/// - `budget >= floor` なら、残る Unit の表示量は `budget` % 以下（数字は
+///   嘘をつかない）。**見出しの復帰（`restore_section_heads`）は予算の外**
+///   なので、画面にはそのぶんだけ上乗せされる — 実測で設計書 +1.4 ポイント、
+///   業務議事録 +0.1 ポイント。下限は一段目のバイト数で数えるので、
+///   `section_of` の有無で下限そのものは動かない
+/// - `floor` は Budget の関数ではないので、[`decorate`] の単調性はそのまま
+///
+/// `decorate(doc, floor)` は一段目に加えて、**切り上げの端数（全体の 1 %
+/// 未満）に収まる Unit** を二段目で拾うことがある。だから
+/// `decorate(doc, floor)` と `decorate(doc, floor - 1)` が同じとは限らない
+/// — 同じであることが多いが、それは文書の性質で、この関数の約束ではない。
+pub fn floor(doc: &SemanticDocument) -> u8 {
+    let order = keep_order(doc);
+    let total: usize = doc.units.iter().map(|unit| cost(doc, unit)).sum();
+    if total == 0 {
+        return MIN_BUDGET;
+    }
+    let by_id = index_by_id(doc);
+    let mut kept = vec![false; doc.units.len()];
+    let (mut spent, any_core) = first_tier(doc, &order, &by_id, &mut kept);
+    if !any_core {
+        // 一段目が空なら、先頭の 1 つが Budget を見ずに残る（`decorate` の
+        // 保険と同じ Unit — `keep_order` の先頭）。
+        if let Some(&first) = order.first() {
+            spent = cost(doc, &doc.units[first]);
+        }
+    }
+    // 切り上げ。spent <= total なので 100 を超えない。
+    let percent = ((spent as u128) * 100).div_ceil(total as u128);
+    u8::try_from(percent)
+        .unwrap_or(MAX_BUDGET)
+        .clamp(MIN_BUDGET, MAX_BUDGET)
+}
+
+/// Unit の attention コスト（構成 Atom のバイト長の合計）。
+///
+/// 範囲外の添字は validate で弾かれるが、ここでも黙って無視して panic しない。
+fn cost(doc: &SemanticDocument, unit: &crate::unit::SemanticUnit) -> usize {
+    unit.atoms
+        .iter()
+        .filter_map(|&index| doc.atom(index))
+        .map(|atom| atom.len())
+        .sum()
+}
+
+/// **一段目。** 核を持つ Unit（[`bears_a_core`]）とその前提の閉包を `kept`
+/// に立て、使った額と「核が 1 つでもあったか」を返す。**Budget を見ない。**
+///
+/// [`decorate`] と [`floor`] の両方がここを読む。**2 箇所で別々に書かない**
+/// こと — ずれると「下限で止めたのに表示量が下限を超える」が出る
+/// （`bears_a_core` と同じ理由）。
+fn first_tier(
+    doc: &SemanticDocument,
+    order: &[usize],
+    by_id: &HashMap<&str, usize>,
+    kept: &mut [bool],
+) -> (usize, bool) {
+    let mut spent = 0usize;
+    let mut any_core = false;
+    let mut bill = Vec::new();
+    for &unit_index in order {
+        if !bears_a_core(&doc.units[unit_index]) {
+            continue;
+        }
+        any_core = true;
+        // この Unit と、その前提の閉包。重複は無い（`prerequisites` は
+        // 訪問済み集合で辿り、seed 自身を含めない）。
+        bill.clear();
+        bill.push(unit_index);
+        prerequisites(doc, by_id, unit_index, &mut bill);
+        for &index in &bill {
+            if !kept[index] {
+                kept[index] = true;
+                spent += cost(doc, &doc.units[index]);
+            }
+        }
+    }
+    (spent, any_core)
 }
 
 /// この Unit は**一段目**に入るか — すなわち MARKED になりうるか。
@@ -1181,6 +1266,184 @@ mod tests {
         presuppose(&mut mixed, 1, 0);
         presuppose(&mut mixed, 3, 1);
         assert_monotone(&mixed, "mixed");
+    }
+
+    /// その Budget で DIM でない Atom のバイト数の合計。
+    fn shown_bytes(doc: &SemanticDocument, budget: u8) -> usize {
+        decorate(doc, budget)
+            .iter()
+            .filter(|(_, state)| *state != DisplayState::Dim)
+            .map(|(range, _)| range.len())
+            .sum()
+    }
+
+    /// **下限の合格条件の本体。** 単調性（`assert_monotone`）の上に乗せて、
+    /// 下限より下では残る集合が動かないこと、下限から上では `READ` の数字
+    /// が表示量に対して嘘をつかないことを Budget 1..=100 で確かめる。
+    fn assert_floor(doc: &SemanticDocument, label: &str) {
+        assert_monotone(doc, label);
+        let floor = floor(doc);
+        let total: usize = doc.atoms.iter().map(|atom| atom.len()).sum();
+        let at_floor = kept_units(doc, floor);
+        let below = kept_units(doc, MIN_BUDGET);
+        for budget in MIN_BUDGET..=MAX_BUDGET {
+            let now = kept_units(doc, budget);
+            let shown = shown_bytes(doc, budget) as u128 * 100;
+            if budget < floor {
+                // 下限より下は一段目そのもので、Budget をいくら下げても
+                // 動かない。そこでは表示量が Budget を超えている（数字が嘘）。
+                assert_eq!(now, below, "{label}: budget {budget} < floor {floor}");
+                assert!(
+                    shown > budget as u128 * total as u128,
+                    "{label}: budget {budget} < floor {floor} なのに表示量が収まっている"
+                );
+            } else {
+                // 下限以上では表示量は Budget 以下（数字は嘘をつかない）、
+                // 残る集合は下限のものを含んで単調に広がる。
+                assert!(
+                    shown <= budget as u128 * total as u128,
+                    "{label}: budget {budget} >= floor {floor} で表示量が超えた"
+                );
+                for index in &at_floor {
+                    assert!(now.contains(index), "{label}: budget {budget} で u{index} が消えた");
+                }
+            }
+        }
+        // 下限は一段目の切り上げなので、下限の残る集合は一段目を含む。
+        for index in &below {
+            assert!(at_floor.contains(index), "{label}: floor {floor} で u{index} が消えた");
+        }
+    }
+
+    #[test]
+    fn the_floor_is_where_the_number_stops_lying() {
+        // 核 1 つ、前提なし。一段目 = 10 / 100 → 下限 10 %。
+        let plain = sized(&[
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 30),
+            (ReadingTier::Context, 30),
+            (ReadingTier::Detail, 30),
+        ]);
+        assert_eq!(floor(&plain), 10);
+        assert_floor(&plain, "plain");
+
+        // 核が長い系譜を引き連れる。一段目 = 10 + 30 + 40 = 80 / 100。
+        let mut chain = sized(&[
+            (ReadingTier::Detail, 40),
+            (ReadingTier::Context, 30),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 20),
+        ]);
+        presuppose(&mut chain, 2, 1);
+        presuppose(&mut chain, 1, 0);
+        assert_eq!(floor(&chain), 80);
+        assert_floor(&chain, "chain");
+
+        // 切り上げ。一段目 = 10 / 30 = 33.3… → 34 %。
+        let thirds = sized(&[
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 10),
+            (ReadingTier::Detail, 10),
+        ]);
+        assert_eq!(floor(&thirds), 34);
+        assert_floor(&thirds, "thirds");
+
+        // 一段目が予算を食い切る（9 割超）。
+        let mut crowded = sized(&[
+            (ReadingTier::Context, 200),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 20),
+        ]);
+        presuppose(&mut crowded, 1, 0);
+        presuppose(&mut crowded, 2, 0);
+        assert_eq!(floor(&crowded), 92);
+        assert_floor(&crowded, "crowded");
+    }
+
+    /// 下限より下で `decorate` は `decorate(doc, floor - 1)` と一致し、
+    /// 表示量は一段目そのもの。`floor` が 1 なら「下」は無い。
+    #[test]
+    fn below_the_floor_the_budget_does_nothing() {
+        let mut chain = sized(&[
+            (ReadingTier::Detail, 40),
+            (ReadingTier::Context, 30),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 20),
+        ]);
+        presuppose(&mut chain, 2, 1);
+        presuppose(&mut chain, 1, 0);
+        let floor = floor(&chain);
+        let frozen = decorate(&chain, floor - 1);
+        for budget in MIN_BUDGET..floor {
+            assert_eq!(decorate(&chain, budget), frozen, "budget {budget}");
+        }
+        assert_eq!(shown_bytes(&chain, floor - 1), 80);
+        assert_eq!(kept_units(&chain, floor), [0, 1, 2], "80 % では残りの 20 は入らない");
+        assert_eq!(kept_units(&chain, MAX_BUDGET), [0, 1, 2, 3]);
+    }
+
+    /// 核が無い文書では先頭 1 Unit の強制残留が一段目に相当する。
+    #[test]
+    fn without_a_core_the_floor_is_the_forced_first_unit() {
+        let doc = sized(&[
+            (ReadingTier::Supporting, 25),
+            (ReadingTier::Context, 25),
+            (ReadingTier::Detail, 50),
+        ]);
+        assert_eq!(floor(&doc), 25);
+        assert_floor(&doc, "no core");
+
+        // 核を持たない ESSENTIAL（`Some([])`）も一段目に入らない。
+        let mut unsettled = sized(&[
+            (ReadingTier::Essential, 50),
+            (ReadingTier::Detail, 50),
+        ]);
+        unsettled.units[0].set_core([]);
+        assert_eq!(floor(&unsettled), 50);
+        assert_floor(&unsettled, "empty core");
+    }
+
+    /// 全文が核なら下限は 100。Budget は何をしても動かない。
+    #[test]
+    fn a_document_that_is_all_core_has_a_floor_of_one_hundred() {
+        let doc = sized(&[(ReadingTier::Essential, 10), (ReadingTier::Essential, 20)]);
+        assert_eq!(floor(&doc), MAX_BUDGET);
+        assert_floor(&doc, "all core");
+    }
+
+    #[test]
+    fn the_floor_of_an_empty_or_zero_length_document_is_the_minimum() {
+        assert_eq!(floor(&SemanticDocument::default()), MIN_BUDGET);
+        let zero = sized(&[(ReadingTier::Essential, 0), (ReadingTier::Detail, 0)]);
+        assert_eq!(floor(&zero), MIN_BUDGET);
+        let broken = SemanticDocument::new(
+            vec![Atom::new(0..10, AtomKind::Sentence)],
+            vec![SemanticUnit::new("u0", [AtomIndex(7)], ReadingTier::Essential)],
+        );
+        assert_eq!(floor(&broken), MIN_BUDGET);
+    }
+
+    /// 下限は Budget の関数ではなく、`decorate` の一段目と同じ集合で数える。
+    /// 一段目が読む集合（`kept_units(doc, MIN_BUDGET)`）のバイト数を切り上げた
+    /// 値と一致すること。
+    #[test]
+    fn the_floor_agrees_with_the_first_tier_of_decorate() {
+        let mut shared = sized(&[
+            (ReadingTier::Context, 25),
+            (ReadingTier::Essential, 15),
+            (ReadingTier::Essential, 15),
+            (ReadingTier::Detail, 45),
+        ]);
+        presuppose(&mut shared, 1, 0);
+        presuppose(&mut shared, 2, 0);
+        let first_tier: usize = kept_units(&shared, MIN_BUDGET)
+            .iter()
+            .map(|&i| shared.atoms[i].len())
+            .sum();
+        assert_eq!(first_tier, 55);
+        assert_eq!(floor(&shared) as usize, first_tier);
+        assert_floor(&shared, "shared");
     }
 
     /// その Budget で MARKED を持つ Unit の添字。

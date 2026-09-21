@@ -59,6 +59,8 @@
 - `cargo clippy --workspace --all-targets -- -D warnings` は緑になったことがない
 - 箇条書きを項目ごとに割ると MARKED が増える — 規則 4 の変更は条件を満たさなかった
 - 中身が残っているのに見出しが沈む — 規則 2 の意図は境界だけでは守れない
+- `docs/design/semantic-reading-layer.md` も test の fixture — 書き足すと 1 リクエストから溢れる
+- Budget の下限は「数字の約束」であって「集合の約束」ではない — `decorate(floor)` と `decorate(floor - 1)` は同じとは限らない
 
 ### [公開リポジトリとしての約束](gotchas/public-repo.md)
 

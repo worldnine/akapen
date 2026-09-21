@@ -451,7 +451,7 @@ pub(crate) fn help_rows(
     if semantic {
         // Only with `--semantic`: without an annotation these keys refuse,
         // and the help must not offer what the session cannot do.
-        rows.push(("read", "-/+ budget ±1 · </> ±10 (READ % in the footer)"));
+        rows.push(("read", "-/+ budget ±1 · </> ±10 (READ % in the footer; stops at the document's floor)"));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows

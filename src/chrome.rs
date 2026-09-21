@@ -455,10 +455,22 @@ pub(crate) fn footer_hints(app: &App) -> String {
     // beside the budget because the budget is what the answer will act
     // on — and it appears even before the first annotation exists, which
     // is exactly when the silence would be most confusing.
-    let read = |p: String| match (&app.semantic_doc, app.semantic_inflight) {
-        (_, Some(_)) => format!("{p} · READ {}% · analyzing…", app.reading_budget),
-        (Some(_), None) => format!("{p} · READ {}%", app.reading_budget),
-        (None, None) => p,
+    //
+    // `(floor)` rides on the percentage when the budget sits on its floor:
+    // below it `-`/`<` do nothing, because the first tier of the ledger
+    // (the cores and their lineage) is kept regardless of the budget
+    // (`policy::floor`). The number is the floor itself, so what the
+    // footer says and what the screen shows agree — READ 43% (floor)
+    // means 43 % is on screen and no less can be asked for.
+    let read = |p: String| {
+        let floor = if app.at_reading_floor() { " (floor)" } else { "" };
+        match (&app.semantic_doc, app.semantic_inflight) {
+            (_, Some(_)) => {
+                format!("{p} · READ {}%{floor} · analyzing…", app.reading_budget)
+            }
+            (Some(_), None) => format!("{p} · READ {}%{floor}", app.reading_budget),
+            (None, None) => p,
+        }
     };
     let hints = match app.mode {
         Mode::Input => "Enter confirm · ^j newline · ←→↑↓ move · Esc cancel".to_string(),
