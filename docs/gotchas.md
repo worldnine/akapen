@@ -489,6 +489,64 @@ cargo run -p semantic-reading --example decorate-report -- frozen.md answer.json
 5 文書の `source` を書き出して `cmp` すると、`demo.md` と
 `design/semantic-reading-layer.md` は現物と一致し、`README.md` だけ不一致。
 
+### `state` が大きい文書は境界を 1 つも聞けない — 比率より先に `jev.unsent` を見る
+
+1 つの question の大きさを縛るのは `state + その question <= 32k`
+（`STATE_PLUS_QUESTION_LIMIT`）で、`jev-annotate.py` が 1 question に割く予算は
+**`32,768 − state − 2,048`** です。`state` が 30k を超えると、この予算は
+**数百 tokens まで潰れます**。
+
+境界 question は Atom を 2 つ引用するので、そこに真っ先に当たります。落とし先は
+決めてあるので**失敗せず、黙って全境界が NEW になります**。
+
+2026-09-21 の実測（`examples/semantic/README.md`、75.5 KB）:
+
+| | `state` tokens | 1 question の予算 | 送れなかった境界 | 送れなかった Tier |
+| --- | --- | --- | --- | --- |
+| 現物 | 30,395 | **325** | **339 / 339** | 200 / 537 |
+| 見出しを剥がした版 | 30,273 | **447** | 103 / 439 | 32 / 594 |
+
+**`state` が 122 tokens 違うだけで、送れる境界が 0 件と 336 件に分かれます。**
+崖であって坂ではないので、**近い 2 つの文書を比べているつもりで、実際には
+予算の崖の左右を比べていることがあります**。
+
+送れなかった Tier は `detail` + `core_atoms: []` になるので、**この帯に入った
+文書は DETAIL がバイトの 96 % を占めます**。比率だけ見ると「判定が壊れた」に
+見えますが、壊れているのは判定ではなく送信です。
+
+**比率を読む前に `jev.unsent` を見てください。** `{"boundary": n, "tier": m}` が
+入っています。
+
+**確認したこと**: `examples/semantic/jev-annotate.py` の `RequestBudget.__init__`
+が `self.pair = STATE_PLUS_QUESTION_LIMIT - CORE_QUESTION_MARGIN - state_tokens`
+と書いていること（`whole` のほうは `REQUEST_LIMIT - REQUEST_MARGIN - state_tokens`。
+**マージンは両方 2,048 なので、数字だけでは取り違えます**）。
+`README.md` の見出しあり / なしを 4 ランずつ走らせ、8 ラン全部で上の件数が
+再現したこと（`~/.local/share/akapen/evidence/runs/2026-09-21-headless/ans/`）。
+`examples/semantic/README.md`「送れなかった question の落とし先」は
+**5 文書とも 0 件と書いていますが、それは `README.md` が 55.6 KB だったとき**
+（run キャップのマージ `afd1614`）の話です。
+
+### `boundary_rule` は段落の切れ目を見ていない — 空行を跨ぐ SAME は規則 2 だけが出す
+
+`plan_boundaries` に渡る情報には**空行が入っています**（`range` の隙間の `\n` の
+数）。しかし `boundary_rule` はそれを 1 度も読みません。
+
+その結果、**見出しを剥がした文書では「空行を跨いで SAME」が 1 件も出なくなります**。
+2026-09-21 の実測で、段落の切れ目に立つ SAME の件数は規則 2
+（`rule:current_is_heading`）の発火数と 4 文書とも**完全に一致**しました
+（`demo` 7 / `design` 35 / `README.md` 56 / 実サンプル 2）。ほかに経路が無いためです。
+
+**「段落は残っているから大丈夫」と考えないこと。** 段落は要求 JSON に残って
+いますが、いまの実装はそれを使っていません。空行の合図は全部 Jev への question に
+なります（実サンプル 3 本で、Jev に聞く境界の 49〜54 % が段落の切れ目）。
+
+**確認したこと**: `examples/semantic/jev-annotate.py` の `boundary_rule` の引数が
+`current_kind` / `next_kind` / `next_indent` の 3 つだけで、`source` も `range` も
+受け取らないこと（`plan_boundaries` が `source` を使うのは規則 4 のインデントの
+ためだけ）。10 条件 × 4 ランの `jev.boundaries` を集計した数字は
+`examples/semantic/README.md`「見出しが無い文書はどれだけ壊れるか」。
+
 ### 要求 JSON の `range` はバイト位置 — Python の文字列添字で読むと全件ずれる
 
 `AnalyzeRequest` の `range` は **source のバイト位置**です。Python の `str` の
