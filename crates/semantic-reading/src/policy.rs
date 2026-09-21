@@ -54,7 +54,9 @@
 //!    占める source のバイト数で測り、`budget` はその何 % までを残すかを
 //!    表す。入らない Unit が現れた時点で打ち切る（後ろの小さい Unit を
 //!    拾い直さない）。**二段目の Unit は自分の前提を連れてこない。**
-//! 4. **残った Unit の意味情報を Atom へ投影する**。判断単位は Unit、
+//! 4. **節に何か残ったなら、その節の見出しを戻す**（下の「見出しは中身に
+//!    付いてくる」）。予算を見ない後段で、戻すのは見出しの行だけである。
+//! 5. **残った Unit の意味情報を Atom へ投影する**。判断単位は Unit、
 //!    表示単位は Atom。
 //!
 //! 二段にしている理由は下の「台帳の単位」にある。**予算の意味は変えて
@@ -244,6 +246,110 @@
 //! 残っている**（`docs/gotchas/open-questions.md`）。今回入れたのは
 //! `PRESUPPOSES` の側だけである。
 //!
+//! # 見出しは中身に付いてくる — 境界規則 2 の言い直し
+//!
+//! > **節の中の Unit が 1 つでも残るなら、その節の見出しも残す。**
+//!
+//! **新しい原理ではない。** 判定器の境界規則 2「見出しは直後の内容に付く」
+//! （`examples/semantic/jev-annotate.py` の `boundary_rule`）が、
+//! 「見出しだけの Unit は単独では Tier を判定しづらい」という理由ですでに
+//! 言っていることである。規則 4 で箇条書きを項目ごとに割ってから、見出しの
+//! Unit は「見出し ＋ せいぜい最初の項目」になり、**2 つ目以降の項目は別
+//! Unit として浮いた** — 境界だけでは規則 2 の意図が守れなくなった。ここに
+//! あるのは、その意図を「中身が複数 Unit になった場合」について言い直した
+//! ものである。**似た規則が 2 つあると読まないこと。**
+//!
+//! 業務議事録（22.7 KB・13 節）を READ 30 % で表示したときの報告は 2 件で、
+//! 中身は 17 atom 中 8 / 13 atom 中 2 が残っていた — それが何なのかを言う
+//! ラベルだけが無い。**同じ文書を既存の応答 6 ランで数え直すと 4〜5 件**に
+//! なる（応答が `PRESUPPOSES` の前のもので、残る集合が違うため）。以下の
+//! 数字はすべて後者の数え方である。
+//!
+//! ## 構造だけで決まる。Jev には聞かない
+//!
+//! 設計書「Jev に判断させないもの」に `syntax parsing` がある。どの Unit が
+//! どの節に属するかは構文から決まるので、判定器が
+//! [`crate::SemanticUnit::section_of`] として構造のまま渡してくる。この層が
+//! するのは「同じ節か」を属性で見ることだけで、**`#` の数も節の範囲も
+//! 知らない**。
+//!
+//! ## 置き場所 — `PRESUPPOSES` にしなかった理由
+//!
+//! 「見出しは中身の前提である」と読めば仕組みは既にある — 判定器が
+//! [`crate::Relation::Presupposes`] を構造的に立てれば、閉包がそのまま
+//! 見出しを引き上げる。**採らなかった理由は 2 つある。**
+//!
+//! - **出自が混ざる。** あの配列に並ぶのは Jev が判定したものだけで、そこへ
+//!   構造由来の辺を足すと、JSON を読む人が「どれが判定されたのか」を
+//!   区別できなくなる
+//! - **どちらの段で払うのかを決めねばならない。** 台帳は二段で、一段目は
+//!   Budget を見ず、二段目は自分の前提を連れてこない。見出しを前提にすると
+//!   **核を持つ節の見出しだけが無料で戻り、核の無い節の見出しは戻らない** —
+//!   「中身が残るなら見出しも残す」とは別の rule になる。二段目にも前提を
+//!   連れてこさせる形に戻せば、今度は台帳が一段だった頃の
+//!   「長い系譜が払えずに落ちる」が見出しで再発する
+//!
+//! 逆に、**この層が Atom の並びから節を組み立てる案**も採らない。それには
+//! 見出しの深さが要る — `### 費用` で `## 決定事項` の節が終わるのかどうかは
+//! `#` の数を見ないと決まらず、それは crate に markdown を教えることである。
+//! 属性で受け取れば、深さを知らずに入れ子が伝わる（`section_of` は親の節を
+//! 指すので、戻した見出しから辿り直すだけで根まで上がる）。
+//!
+//! ## 戻すのは Atom — 見出しの行だけ
+//!
+//! 規則 2 は見出しを直後の内容に付けるので、**見出しの Unit には実質的な
+//! 第 1 文が同居していることがある**。Unit ごと戻すと、それも一緒に戻って
+//! くる。戻したいのは「これが何の節か」というラベルだけなので、
+//! [`AtomKind::Heading`] の Atom だけを NORMAL にする。
+//!
+//! **これは下の「DIM は一律」の唯一の例外である。** そちらが禁じているのは
+//! 「残った Unit の中で、どこを読むかによって沈み方を変える」ことで、行の
+//! 途中で説明のつかない切り替わりが起きるのを避けるための rule である。
+//! ここで戻るのは**見出しの行そのもの**なので、画面には「節の名前は見える
+//! が中身は沈んでいる」という、読者に説明できる形しか出ない。核の選択とは
+//! 別の話である。
+//!
+//! ## NORMAL であって MARKED ではない
+//!
+//! 戻した見出しは NORMAL にする。MARKED は「読む価値が高い」であって、この
+//! 見出しは予算の取り合いに負けている。ラベルだけが光る状態は
+//! `docs/gotchas/semantic-reading.md`「箇条書きのラベルが MARKED になる」で
+//! 読み物として意味を成さないと書いたものそのものである。
+//!
+//! ## 予算には数えない
+//!
+//! 前提（`PRESUPPOSES`）は数えるのに、こちらは数えない。**大きさが 1 桁
+//! 違う。** 前提の閉包は実測で文書の 2.5〜10.3 % に達し、数えないと
+//! 「30 % と言って 45 % 出る」になった。戻る見出しは実測で Atom バイトの
+//! **0.68〜3.26 %**（4 文書 18 ラン、READ 1 / 5 / 30 %。上限の 3.26 % は
+//! 1.6 KB の `demo.md` で、大きい文書ほど小さい）。
+//!
+//! 数えると、戻した見出しのぶんだけ二段目の取り合いが変わり、
+//! **「見出しが戻ったせいで本文が沈む」**が起きる。それは規則 2 の意図の
+//! 逆である。
+//!
+//! ## 単調性
+//!
+//! 見えている Unit は `kept` を `section_of` で閉じたものになる。`kept` が
+//! Budget について入れ子なら、閉包も入れ子である（閉包は単調な写像で、
+//! **辺の構造を使っていない**）。Atom で見ても同じで、戻るのは見出しの
+//! Atom だけなので、Budget を上げて DIM へ戻る Atom は無い
+//! （`heading_restoration_stays_monotone`）。
+//!
+//! ## 空っぽの見出しは直さない
+//!
+//! 節が丸ごと沈むとき、見出しも沈んだままである。実測では 4 文書 18 ラン ×
+//! READ 1 / 5 / 30 / 100 % のすべてで、部分木に何も残らない節の見出しは
+//! **1 件残らず DIM のまま**だった。**直すのは逆向きだけ**である。
+//!
+//! 部分木で見るのが要点で、**子の節に中身が残っていれば親の見出しは戻る**。
+//! `### 費用` が残れば `## 決定事項` が戻り、それが `#` を戻す。READ 1 % で
+//! 文書の背骨だけが立つのはこの連鎖である（`examples/semantic/README.md`
+//! では見出し 25 本のうち 2 本 → 6〜8 本）。背骨は骨格そのものなので、
+//! これは正しい見え方だと判断した。**低予算の見え方は実際に変わる** —
+//! 前後の数字は `docs/gotchas/semantic-reading.md`
+//! 「中身が残っているのに見出しが沈む」にある。
+//!
 //! # 表示状態の割り当て
 //!
 //! ```text
@@ -252,6 +358,8 @@
 //!     同じ Unit の残り                    -> NORMAL
 //! 残ったそれ以外                          -> NORMAL
 //! 残らなかったもの                        -> DIM（Unit 全体に一律）
+//!     ただし、節に中身が残っている見出しの行 -> NORMAL（上の「見出しは
+//!                                            中身に付いてくる」）
 //! どの Unit にも属さない Atom             -> NORMAL
 //! ```
 //!
@@ -305,6 +413,11 @@
 //! 読者に説明できなくなる。核の選択は「残った中のどこを読むか」であって、
 //! 「何を落とすか」ではない。
 //!
+//! **例外は 1 つだけで、上の「見出しは中身に付いてくる」である。** あちらが
+//! 戻すのは見出しの行そのもので、説明も 1 行で付く（節の名前は見えるが中身は
+//! 沈んでいる）。核の選択のように、行の途中で理由の言えない切り替わりを
+//! 作ることはしない。
+//!
 //! 核を選ぶのは判定器（Jev）で、この層は [`crate::SemanticUnit::core_atoms`]
 //! を読むだけである。**核の選択は Budget に依存しない**ので、上の単調性は
 //! そのまま成り立つ。
@@ -312,6 +425,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use crate::atom::AtomKind;
 use crate::display::DisplayState;
 use crate::document::SemanticDocument;
 use crate::unit::ReadingTier;
@@ -409,6 +523,12 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
         rank += 1;
     }
 
+    // ---- 見出しの復帰 — 節に何か残ったなら、その節の見出しも残す --------
+    //
+    // **ここは予算を見ない。** 取り合いが終わったあとに、沈んだ見出しの
+    // 行だけを戻す（下の「見出しは中身に付いてくる」）。
+    let restored = restore_section_heads(doc, &by_id, &kept);
+
     // Unit の判断を Atom へ投影する。1 つの Atom を複数の Unit が指している
     // 場合は attention の強い方を採る（[`DisplayState::stronger`]）。
     let mut states = vec![None; doc.atoms.len()];
@@ -421,12 +541,18 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
         let marks = bears_a_core(unit);
         debug_assert!(!marks || kept[unit_index], "核を持つ Unit は一段目で残る");
         for &atom in &unit.atoms {
-            let state = if !kept[unit_index] {
-                DisplayState::Dim
-            } else if marks && unit.is_core(atom) {
-                DisplayState::Marked
-            } else {
+            let state = if kept[unit_index] {
+                if marks && unit.is_core(atom) {
+                    DisplayState::Marked
+                } else {
+                    DisplayState::Normal
+                }
+            } else if restored[unit_index] && is_heading(doc, atom) {
+                // 落ちた節の見出し。**行だけ**が戻り、同じ Unit に同居して
+                // いる本文は沈んだままである（下の「戻すのは Atom」）。
                 DisplayState::Normal
+            } else {
+                DisplayState::Dim
             };
             if let Some(slot) = states.get_mut(atom.0) {
                 *slot = Some(slot.map_or(state, |current: DisplayState| current.stronger(state)));
@@ -449,6 +575,62 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
 /// ならない Unit」や、その逆が出る。
 fn bears_a_core(unit: &crate::unit::SemanticUnit) -> bool {
     unit.reading_tier == ReadingTier::Essential && !unit.is_redundant() && unit.has_core()
+}
+
+/// この Atom は見出しの行か。
+///
+/// 見出しかどうかは [`crate::atomize`] が既に決めていて、答えは
+/// [`AtomKind::Heading`] として Atom に乗っている。**この層が読むのは
+/// そこだけ**で、`#` の数も節の範囲も見ない（それは
+/// [`crate::SemanticUnit::section_of`] が運んでくる）。
+fn is_heading(doc: &SemanticDocument, atom: crate::atom::AtomIndex) -> bool {
+    doc.atom(atom)
+        .is_some_and(|atom| atom.kind == AtomKind::Heading)
+}
+
+/// 残った Unit から `section_of` を辿り、**戻す見出し Unit** に印を付ける。
+///
+/// 返り値は Unit ごとの真偽で、`kept` が真のものは常に偽である
+/// （すでに残っているものを「戻す」必要は無い）。
+///
+/// # 入れ子は勝手に伝わる
+///
+/// 戻した見出し Unit を frontier へ積み直すので、`### 費用` が戻れば
+/// その親の `## 決定事項` も戻り、さらにその親も戻る。**節の入れ子を
+/// この層が知る必要は無い** — 見出し Unit 自身の `section_of` が親を
+/// 指しているだけで連鎖する。
+///
+/// # 循環でも止まる
+///
+/// 節の見出しは自分より前にあるので辺は後ろ向きにしか立たないが、
+/// **ここはそれに依存していない**。印の付いた添字を二度積まないので、
+/// 前向きの辺が混ざっても循環があっても必ず止まる。知らない id は
+/// 黙って飛ばす（弾くのは [`SemanticDocument::validate`] の仕事）。
+fn restore_section_heads(
+    doc: &SemanticDocument,
+    by_id: &HashMap<&str, usize>,
+    kept: &[bool],
+) -> Vec<bool> {
+    let mut restored = vec![false; doc.units.len()];
+    let mut frontier: Vec<usize> = (0..doc.units.len()).filter(|&index| kept[index]).collect();
+    while let Some(current) = frontier.pop() {
+        let Some(unit) = doc.units.get(current) else {
+            continue;
+        };
+        let Some(head) = unit.section_of.as_ref() else {
+            continue;
+        };
+        let Some(&index) = by_id.get(head.as_str()) else {
+            continue;
+        };
+        // すでに残っているか、もう戻したものは辿り直さない。
+        if kept.get(index).copied().unwrap_or(false) || restored[index] {
+            continue;
+        }
+        restored[index] = true;
+        frontier.push(index);
+    }
+    restored
 }
 
 /// Unit を「残したい順」に並べた添字列を返す。Budget には依存しない。
@@ -1359,6 +1541,266 @@ mod tests {
         // 予算で買っていた。
         assert_eq!(kept_units(&doc, 55), [1]);
         assert_eq!(kept_units(&doc, 100), [0, 1]);
+    }
+
+    // ---- 見出しの復帰 ---------------------------------------------------
+
+    /// 節を持つ文書を組み立てる。`spec` は `(見出しか, Tier, バイト長,
+    /// 属する節の Unit 番号)` で、Atom 1 つ = Unit 1 つ。
+    fn sections(spec: &[(bool, ReadingTier, usize, Option<usize>)]) -> SemanticDocument {
+        let mut atoms = Vec::new();
+        let mut at = 0;
+        for &(heading, _, len, _) in spec {
+            let kind = if heading {
+                AtomKind::Heading
+            } else {
+                AtomKind::Sentence
+            };
+            atoms.push(Atom::new(at..at + len, kind));
+            at += len;
+        }
+        let units = spec
+            .iter()
+            .enumerate()
+            .map(|(i, &(_, tier, _, head))| {
+                let mut unit = SemanticUnit::new(format!("u{i}"), [AtomIndex(i)], tier);
+                unit.section_of = head.map(|h| format!("u{h}").into());
+                unit
+            })
+            .collect();
+        SemanticDocument::new(atoms, units)
+    }
+
+    /// **rule の本体。** 節の中の Unit が 1 つでも残るなら、その節の見出しも
+    /// 残す。規則 4 で中身が複数 Unit に割れたあと、境界規則 2 の意図を
+    /// 守るのはここだけである。
+    #[test]
+    fn a_section_head_comes_back_when_anything_in_the_section_survives() {
+        // u0 見出し（10）／ u1 短い本文（10）／ u2 長い本文（80）。
+        let doc = sections(&[
+            (true, ReadingTier::Context, 10, None),
+            (false, ReadingTier::Essential, 10, Some(0)),
+            (false, ReadingTier::Detail, 80, Some(0)),
+        ]);
+        // 20 % = 20 バイト。ESSENTIAL の u1 だけが入り、見出しの u0 は
+        // 予算の取り合いに負けている。それでも見出しは戻る。
+        assert_eq!(
+            states(&doc, 20),
+            [
+                DisplayState::Normal,
+                DisplayState::Marked,
+                DisplayState::Dim
+            ]
+        );
+    }
+
+    /// **逆向きは直さない。** 節ごと沈むなら見出しも沈んだままである。
+    /// 実測でも、節ごと沈む 6 件すべてで見出しは DIM だった。
+    #[test]
+    fn a_section_that_sinks_whole_keeps_its_head_dim() {
+        let doc = sections(&[
+            (false, ReadingTier::Essential, 10, None),
+            (true, ReadingTier::Detail, 10, None),
+            (false, ReadingTier::Detail, 80, Some(1)),
+        ]);
+        assert_eq!(
+            states(&doc, 15),
+            [DisplayState::Marked, DisplayState::Dim, DisplayState::Dim]
+        );
+    }
+
+    /// 見出しの Unit に本文が同居していたら、**戻るのは見出しの行だけ**。
+    /// Unit ごと戻すと、その第 1 文も一緒に戻ってくる。
+    #[test]
+    fn only_the_heading_atom_comes_back_not_the_rest_of_its_unit() {
+        let atoms = vec![
+            Atom::new(0..10, AtomKind::Heading),
+            Atom::new(10..50, AtomKind::Sentence),
+            Atom::new(50..60, AtomKind::Sentence),
+        ];
+        // u0 は「見出し + 第 1 文」。規則 2 がこの形を作る。
+        let head = SemanticUnit::new("u0", [AtomIndex(0), AtomIndex(1)], ReadingTier::Detail);
+        let mut body = SemanticUnit::new("u1", [AtomIndex(2)], ReadingTier::Essential);
+        body.section_of = Some("u0".into());
+        let doc = SemanticDocument::new(atoms, vec![head, body]);
+        assert_eq!(
+            states(&doc, 20),
+            [
+                DisplayState::Normal,
+                DisplayState::Dim,
+                DisplayState::Marked
+            ]
+        );
+    }
+
+    /// 入れ子は勝手に伝わる。`###` が戻れば `##` が戻り、それが `#` を戻す。
+    /// **この層は `#` の数を知らない** — 見出し Unit 自身の `section_of` が
+    /// 親を指しているだけで連鎖する。
+    #[test]
+    fn restoring_a_nested_head_walks_up_to_the_root() {
+        let doc = sections(&[
+            (true, ReadingTier::Context, 10, None),       // u0 `#`
+            (true, ReadingTier::Context, 10, Some(0)),    // u1 `##`
+            (true, ReadingTier::Context, 10, Some(1)),    // u2 `###`
+            (false, ReadingTier::Essential, 10, Some(2)), // u3 中身
+            (false, ReadingTier::Detail, 60, Some(2)),    // u4 長い中身
+        ]);
+        // 10 % = 10 バイト。入るのは核を持つ u3 だけ。そこから 3 段戻る。
+        assert_eq!(
+            states(&doc, 10),
+            [
+                DisplayState::Normal,
+                DisplayState::Normal,
+                DisplayState::Normal,
+                DisplayState::Marked,
+                DisplayState::Dim
+            ]
+        );
+    }
+
+    /// 戻した見出しは **NORMAL であって MARKED ではない**。予算の取り合いに
+    /// 負けた見出しが光ると、ラベルだけが光る状態になる
+    /// （`docs/gotchas/semantic-reading.md`「箇条書きのラベルが MARKED に
+    /// なる」）。
+    #[test]
+    fn a_restored_head_is_normal_never_marked() {
+        let mut doc = sections(&[
+            (true, ReadingTier::Essential, 10, None),
+            (false, ReadingTier::Essential, 10, Some(0)),
+            (false, ReadingTier::Detail, 80, Some(0)),
+        ]);
+        // 見出しは ESSENTIAL だが**核を持たない**ので一段目に入らない。
+        doc.units[0].set_core([]);
+        assert_eq!(
+            states(&doc, 20),
+            [
+                DisplayState::Normal,
+                DisplayState::Marked,
+                DisplayState::Dim
+            ]
+        );
+    }
+
+    /// **予算には数えない。** 見出しが戻っても、残る Unit の集合は
+    /// `section_of` が 1 本も無い文書と 1 ビットも変わらない。数えると
+    /// 「見出しが戻ったせいで本文が沈む」が起きる。
+    #[test]
+    fn restoring_a_head_does_not_charge_the_budget() {
+        let spec = &[
+            (true, ReadingTier::Context, 10, None),
+            (false, ReadingTier::Essential, 10, Some(0)),
+            (false, ReadingTier::Supporting, 20, Some(0)),
+            (false, ReadingTier::Detail, 60, Some(0)),
+        ];
+        let with = sections(spec);
+        let mut without = sections(spec);
+        for unit in &mut without.units {
+            unit.section_of = None;
+        }
+        for budget in MIN_BUDGET..=MAX_BUDGET {
+            // 見出し（atom 0）の外は 1 ビットも変わらない。
+            assert_eq!(
+                states(&with, budget)[1..],
+                states(&without, budget)[1..],
+                "budget {budget}"
+            );
+        }
+        // そして見出しのほうは、実際に戻っている Budget がある。
+        assert_eq!(states(&without, 20)[0], DisplayState::Dim);
+        assert_eq!(states(&with, 20)[0], DisplayState::Normal);
+    }
+
+    /// 単調性を **Atom で**見る。`kept_units` は Unit 単位なので、見出しが
+    /// 1 Atom だけ戻った Unit を「丸ごと残った」と数えてしまう。
+    fn assert_atoms_monotone(doc: &SemanticDocument, label: &str) {
+        let mut previous = states(doc, MIN_BUDGET);
+        for budget in MIN_BUDGET..=MAX_BUDGET {
+            let now = states(doc, budget);
+            for (index, (before, after)) in previous.iter().zip(&now).enumerate() {
+                assert!(
+                    after.attention() >= before.attention(),
+                    "{label}: budget {budget} で atom {index} が                      {before:?} -> {after:?} と弱まった"
+                );
+            }
+            previous = now;
+        }
+    }
+
+    /// 予算を上げたら見えるものが増えるだけ。見出しが戻る条件は「節に残る
+    /// Unit があるか」なので、`kept` が入れ子である限りその閉包も入れ子で
+    /// ある。
+    #[test]
+    fn heading_restoration_stays_monotone() {
+        let nested = sections(&[
+            (true, ReadingTier::Context, 10, None),
+            (true, ReadingTier::Detail, 10, Some(0)),
+            (false, ReadingTier::Essential, 15, Some(1)),
+            (false, ReadingTier::Supporting, 40, Some(1)),
+            (true, ReadingTier::Context, 10, Some(0)),
+            (false, ReadingTier::Detail, 70, Some(4)),
+        ]);
+        assert_atoms_monotone(&nested, "nested");
+        assert_monotone(&nested, "nested");
+
+        // 前提と混ざっても崩れない（一段目・二段目・復帰の 3 つが同居する）。
+        let mut mixed = sections(&[
+            (true, ReadingTier::Context, 10, None),
+            (false, ReadingTier::Detail, 30, Some(0)),
+            (false, ReadingTier::Essential, 10, Some(0)),
+            (true, ReadingTier::Context, 10, Some(0)),
+            (false, ReadingTier::Supporting, 50, Some(3)),
+        ]);
+        presuppose(&mut mixed, 2, 1);
+        assert_atoms_monotone(&mixed, "mixed");
+    }
+
+    /// 節の辺が循環していても止まる（無限ループにならない）。
+    #[test]
+    fn a_cycle_in_the_section_heads_terminates() {
+        let mut doc = sections(&[
+            (true, ReadingTier::Context, 10, Some(1)),
+            (true, ReadingTier::Context, 10, Some(0)),
+            (false, ReadingTier::Essential, 10, Some(0)),
+        ]);
+        doc.units[2].section_of = Some("u0".into());
+        assert_eq!(
+            states(&doc, 40)[2],
+            DisplayState::Marked,
+            "循環を辿っても戻ってくる"
+        );
+    }
+
+    /// 知らない id を指す `section_of` は黙って飛ばす — `decorate` は壊れた
+    /// 入力でも panic しない（弾くのは [`SemanticDocument::validate`] の
+    /// 仕事）。
+    #[test]
+    fn a_section_head_pointing_nowhere_does_not_panic() {
+        let mut doc = sections(&[
+            (true, ReadingTier::Context, 10, None),
+            (false, ReadingTier::Essential, 10, Some(0)),
+        ]);
+        doc.units[1].section_of = Some("nope".into());
+        assert_eq!(states(&doc, 30), [DisplayState::Dim, DisplayState::Marked]);
+    }
+
+    /// `section_of` を知らない判定器・既存の fixture では、表示が 1 ビットも
+    /// 変わらない。
+    #[test]
+    fn a_document_without_sections_decorates_exactly_as_before() {
+        let doc = doc(&[
+            (ReadingTier::Essential, false),
+            (ReadingTier::Context, false),
+            (ReadingTier::Detail, false),
+        ]);
+        assert!(doc.units.iter().all(|unit| unit.section_of.is_none()));
+        assert_eq!(
+            states(&doc, 70),
+            [
+                DisplayState::Marked,
+                DisplayState::Normal,
+                DisplayState::Dim
+            ]
+        );
     }
 
     #[test]

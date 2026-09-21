@@ -73,10 +73,16 @@ impl SemanticDocument {
     /// - Unit の識別子が重複していないこと
     /// - relation（`RedundantWith` / `Presupposes`）の参照先が実在し、
     ///   自分自身でないこと
+    /// - `section_of` の参照先が実在し、自分自身でないこと
     /// - `source_sha256` があるなら hex 64 桁であること
     ///
-    /// の 6 点。Atom がどの Unit にも属さないことは**エラーにしない**
+    /// の 7 点。Atom がどの Unit にも属さないことは**エラーにしない**
     /// （未判断の Atom は NORMAL のまま表示されればよい）。
+    ///
+    /// `section_of` の参照先が**見出しを含む Unit かどうかは見ない**。
+    /// この crate は節の作り方を知らないし、知る必要もない
+    /// （[`crate::SemanticUnit::section_of`]）。見るのは relation と同じ
+    /// 2 点、実在と自己参照だけである。
     ///
     /// # `Presupposes` の向きと循環は検査しない
     ///
@@ -93,6 +99,10 @@ impl SemanticDocument {
     ///
     /// 「構造上ありえないものを弾く検査」は、通らない道のぶんだけ嘘を
     /// 言いやすい。実在と自己参照だけを見る。
+    ///
+    /// **`section_of` も同じ扱い**である。節の見出しは自分より前にあるので
+    /// 辺は後ろ向きにしか立たないが、それを検査しない。[`crate::policy`] の
+    /// 復帰は訪問済み集合で辿るので、前向きの辺や循環があっても止まる。
     ///
     /// `source_sha256` は**形だけ**を見る。実際の source と一致するかは
     /// クライアントの仕事で、ここには source そのものが無い。
@@ -137,6 +147,20 @@ impl SemanticDocument {
                     return Err(Error::Invalid(format!(
                         "core atom {1} is not an atom of unit `{0}`",
                         unit.id, index.0
+                    )));
+                }
+            }
+            if let Some(section) = &unit.section_of {
+                if section == &unit.id {
+                    return Err(Error::Invalid(format!(
+                        "unit `{}` is its own section head",
+                        unit.id
+                    )));
+                }
+                if self.unit(section).is_none() {
+                    return Err(Error::Invalid(format!(
+                        "unit `{}` belongs to unknown section head `{section}`",
+                        unit.id
                     )));
                 }
             }
@@ -268,6 +292,33 @@ mod tests {
         let mut outside = doc();
         outside.units[0].set_core([AtomIndex(7)]);
         assert!(matches!(outside.validate(), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn validate_rejects_a_dangling_or_self_referential_section_head() {
+        let mut good = doc();
+        good.units[1].section_of = Some(UnitId::from("u1"));
+        assert!(good.validate().is_ok(), "実在する見出し Unit なら通る");
+
+        let mut dangling = doc();
+        dangling.units[1].section_of = Some(UnitId::from("u9"));
+        let err = dangling.validate().unwrap_err().to_string();
+        assert!(err.contains("unknown section head"), "{err}");
+
+        let mut itself = doc();
+        itself.units[1].section_of = Some(UnitId::from("u2"));
+        let err = itself.validate().unwrap_err().to_string();
+        assert!(err.contains("its own section head"), "{err}");
+    }
+
+    /// 参照先が見出しを含むかどうかは**見ない**。この crate は節の作り方を
+    /// 知らない。
+    #[test]
+    fn validate_does_not_ask_whether_the_section_head_holds_a_heading() {
+        let mut doc = doc();
+        // u2 は sentence だけの Unit。それを節の見出しだと名乗っても通る。
+        doc.units[0].section_of = Some(UnitId::from("u2"));
+        assert!(doc.validate().is_ok());
     }
 
     #[test]

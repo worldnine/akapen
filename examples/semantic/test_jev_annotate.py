@@ -285,6 +285,78 @@ class PlanAndGroupTest(unittest.TestCase):
             )
 
 
+class SectionTest(unittest.TestCase):
+    """節の見出し（`section_of`）は構造だけで決まる。Jev は出てこない。"""
+
+    def sections(self, atoms, units):
+        built = [{"id": f"u{n}"} for n, _ in enumerate(units, start=1)]
+        jev.assign_sections(atoms, units, built)
+        return [unit.get("section_of") for unit in built]
+
+    def test_a_heading_level_is_the_number_of_hashes(self):
+        self.assertEqual(jev.heading_level(atom(0, "heading", "## 節")), 2)
+        self.assertEqual(jev.heading_level(atom(0, "heading", "#### 深い節")), 4)
+        # 引用の印は深さに数えない。
+        self.assertEqual(jev.heading_level(atom(0, "heading", "> ### 引用の中")), 3)
+        # 見出しでない Atom は None。
+        self.assertIsNone(jev.heading_level(atom(0, "sentence", "## ではない")))
+
+    def test_a_setext_heading_gets_its_level_from_the_underline(self):
+        self.assertEqual(jev.heading_level(atom(0, "heading", "見出し\n=====")), 1)
+        self.assertEqual(jev.heading_level(atom(0, "heading", "見出し\n-----")), 2)
+
+    def test_an_unreadable_heading_falls_to_the_deepest_level(self):
+        # 浅い側へ倒すと外側の節を誤って閉じる。深い側なら次の見出しが閉じる。
+        self.assertEqual(jev.heading_level(atom(0, "heading", "")), 6)
+
+    def test_content_belongs_to_the_nearest_heading_above_it(self):
+        atoms = [
+            atom(0, "heading", "# 表題"),
+            atom(1, "heading", "## 節"),
+            atom(2, "list_item", "- 一つ目"),
+            atom(3, "list_item", "- 二つ目"),
+        ]
+        # 規則 4 で項目ごとに割れた形。2 つ目以降が別 Unit として浮く。
+        self.assertEqual(
+            self.sections(atoms, [[0], [1, 2], [3]]),
+            [None, "u1", "u2"],
+        )
+
+    def test_a_heading_points_at_its_parent_section(self):
+        # 入れ子はこのフィールドだけで伝わる（crate は `#` の数を知らない）。
+        atoms = [
+            atom(0, "heading", "# 表題"),
+            atom(1, "heading", "## 決定"),
+            atom(2, "heading", "### 費用"),
+            atom(3, "sentence", "本文。"),
+        ]
+        self.assertEqual(
+            self.sections(atoms, [[0], [1], [2], [3]]),
+            [None, "u1", "u2", "u3"],
+        )
+
+    def test_a_sibling_heading_closes_the_previous_section(self):
+        atoms = [
+            atom(0, "heading", "## A"),
+            atom(1, "heading", "### A1"),
+            atom(2, "sentence", "本文。"),
+            atom(3, "heading", "## B"),
+            atom(4, "sentence", "本文。"),
+        ]
+        self.assertEqual(
+            self.sections(atoms, [[0], [1], [2], [3], [4]]),
+            [None, "u1", "u2", None, "u4"],
+        )
+
+    def test_text_before_the_first_heading_has_no_section(self):
+        atoms = [
+            atom(0, "sentence", "前書き。"),
+            atom(1, "heading", "# 表題"),
+            atom(2, "sentence", "本文。"),
+        ]
+        self.assertEqual(self.sections(atoms, [[0], [1], [2]]), [None, None, "u2"])
+
+
 class BuildUnitsTest(unittest.TestCase):
     """Jev のレスポンスを模したフィクスチャから Unit を組み立てる。"""
 

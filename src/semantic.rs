@@ -206,6 +206,11 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 /// MARKED、`[]` なら「核を持たない」でその Unit は MARKED にならない、
 /// `[i]` なら `i` だけが MARKED（`protocol.rs` の「`core_atoms` は 3 値」）。
 ///
+/// `section_of` も任意で、その Unit が属する節の見出し Unit を指す。
+/// 節に中身が残っているのに見出しだけ沈む、を防ぐために
+/// [`policy::decorate`] が読む（`policy.rs` の「見出しは中身に付いてくる」）。
+/// **Jev の判定ではなく構文から決まる値**なので `relations` には入れない。
+///
 /// # コマンドは range を返さない
 ///
 /// **Atom 生成は akapen 側**で行う（設計書「Jev に判断させないもの:

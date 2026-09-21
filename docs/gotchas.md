@@ -58,6 +58,7 @@
 - 要求 JSON の `range` はバイト位置 — Python の文字列添字で読むと全件ずれる
 - `cargo clippy --workspace --all-targets -- -D warnings` は緑になったことがない
 - 箇条書きを項目ごとに割ると MARKED が増える — 規則 4 の変更は条件を満たさなかった
+- 中身が残っているのに見出しが沈む — 規則 2 の意図は境界だけでは守れない
 
 ### [公開リポジトリとしての約束](gotchas/public-repo.md)
 

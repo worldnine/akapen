@@ -276,6 +276,21 @@ Unit）と、`block_quote` が規則 6 で単独になることは、**demo.md �
 測っていない**。箇条書きを 1 つにまとめるのは、著者が既にまとまりとして束ねた
 構造であり、半分だけ DIM になったリストは読み物として壊れるため。
 
+### 規則 2 の続きは `section_of` にある
+
+規則 2「見出しは直後の内容に付く」が防いでいるのは、見出しが中身から切り離
+されて単独では読めない Unit になることである。**中身が複数 Unit に割れると、
+境界だけではこれを守れない** — 見出しの Unit は「見出し ＋ せいぜい最初の
+項目」になり、残りが別 Unit として浮く。
+
+そこで各 Unit に `section_of`（属する節の見出し Unit）を付けて返し、
+`policy::decorate` が「節の中の Unit が 1 つでも残るなら見出しの行を戻す」を
+実行する。構造だけで決まるので **Jev には聞かない**。見出し Unit 自身の
+`section_of` は親の節を指すので、入れ子はこのフィールドだけで連鎖する。
+
+**規則 2 とこれは 1 つのこと**である。似た規則が 2 つあると読まないこと。
+前後の数字は [`measurements/section-heads.md`](measurements/section-heads.md)。
+
 ### redundancy は方向を指定する
 
 「これより**前**の箇所ですでに述べられた内容の言い直しか」と聞く。対称に
@@ -395,6 +410,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | run キャップ（リスト 1 本につき核は 1 つ）でどこまで戻るか | [`measurements/lists-and-run-cap.md`](measurements/lists-and-run-cap.md) |
 | 見出しが無い文書はどれだけ壊れるか（対照 3 対 + 実記事 3 本、各 4 ラン） | [`measurements/headless-documents.md`](measurements/headless-documents.md) |
 | MARKED が文書の中でどう散らばるか — 偶然との比較、光らない区間の中身、redundancy の位置 | [`measurements/mark-distribution.md`](measurements/mark-distribution.md) |
+| 節に中身が残るなら見出しも残す（規則 2 の言い直し）の前後 — 4 文書 18 ラン × READ 1 / 5 / 30 / 100 %、入れ子の連鎖と予算への影響 | [`measurements/section-heads.md`](measurements/section-heads.md) |
 | `context preservation` の依存を聞いたとき、根まで辿った閉包がどれだけ大きくなるか（4 文書 × 4 ラン。第 1 版は対の Noul を閾値 0.4〜0.7 で、第 2 版は Choice で `probabilities` に閾値を置かずに）。**第 3 版で実装し**、参照実装との一致 288 件と実機で穴が塞がったことまで。**第 4 版で台帳を二段にした**（READ 1 % でも核が出る。前半への偏りは戻らない） | [`measurements/context-preservation.md`](measurements/context-preservation.md) |
 | ESSENTIAL の例示を「未決の論点や宿題」まで広げたとき、議事録の未決の節がDETAIL を脱するか / 他の 4 文書で ESSENTIAL が縮まないか（5 文書 × 前後 × 4 ラン）。**READ 30 % では直っていない**ことまで | [`measurements/essential-unsettled.md`](measurements/essential-unsettled.md) |
 
