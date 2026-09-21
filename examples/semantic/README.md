@@ -395,7 +395,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | run キャップ（リスト 1 本につき核は 1 つ）でどこまで戻るか | [`measurements/lists-and-run-cap.md`](measurements/lists-and-run-cap.md) |
 | 見出しが無い文書はどれだけ壊れるか（対照 3 対 + 実記事 3 本、各 4 ラン） | [`measurements/headless-documents.md`](measurements/headless-documents.md) |
 | MARKED が文書の中でどう散らばるか — 偶然との比較、光らない区間の中身、redundancy の位置 | [`measurements/mark-distribution.md`](measurements/mark-distribution.md) |
-| `context preservation` の依存を聞いたとき、根まで辿った閉包がどれだけ大きくなるか（4 文書 × 4 ラン、閾値 0.4〜0.7） | [`measurements/context-preservation.md`](measurements/context-preservation.md) |
+| `context preservation` の依存を聞いたとき、根まで辿った閉包がどれだけ大きくなるか（4 文書 × 4 ラン。第 1 版は対の Noul を閾値 0.4〜0.7 で、第 2 版は Choice で `probabilities` に閾値を置かずに） | [`measurements/context-preservation.md`](measurements/context-preservation.md) |
 
 **バイト数と Unit 数は分割前の値。** この README と `docs/gotchas.md` は
 どちらも測定対象なので、分割でどちらも小さくなっている
