@@ -94,43 +94,77 @@ Phase 1 Range Attribution / 2 Range Decoration / 3 Render Mapping 強化 /
 `tier_confidence` / `redundancy_noul` を書いていること。
 `docs/design/jev.md` に未解決として記録済みであること。
 
-### 4. 同一 Tier 内の rule に逐次性が無い（`context preservation`）
+### 4. 同一 Tier 内の rule の逐次性 — `context preservation`（**解決済み。2026-09-21**）
+
+> **2026-09-21 に実装しました。** 以下は「何が未解決だったか」と「何を決めて
+> 解決したか」の記録です。**まだ残っている部分**は末尾にあります。
 
 設計書は同一 Tier 内の rule として
 `redundancy / length / document position / context preservation` の 4 つを
-挙げ、`policy::keep_order` は最初の 3 つしか使っていません。これは
+挙げ、`policy::keep_order` は最初の 3 つしか使っていませんでした。これは
 **「4 つのうち 1 つを落とした」ではありません。**
 
 最初の 3 つは Unit 単体の属性から決まる静的な値です（重複しているか・
 何バイトか・文書のどこにあるか）。4 つ目だけが
 **「残った Unit を順に読んだとき文脈が繋がるか」**という、選択の結果に依存する
-性質を指しています。そして satisficing は「読み進めて information gain が
-落ちたら次へ移る」という**逐次的**なモデルなので、4 つ目はこの層で
-**逐次性を担う唯一の項目**でした。`decorate` がしているのは「集合を選ぶ」
-ことまでで、**選んだ集合が読む経路として成立しているかは誰も見ていません。**
+性質を指しています。satisficing は逐次的なモデルなので、4 つ目はこの層で
+**逐次性を担う唯一の項目**でした。
 
-**設計書は `context preservation` の中身を定義していません。** 語が出てくるのは
-rule の列挙 1 箇所だけです。直すには設計判断が要り、ここで定義を足すのは
-「設計書に無い設計」を足すことになります。
+#### 何を決めたか
 
-**材料は測ってあります（2026-09-21）。**
+**設計書は `context preservation` の中身を定義していません**（語が出てくるのは
+rule の列挙 1 箇所だけ）。**設計書は列挙のままにして、定義は実測と
+`crates/semantic-reading/src/policy.rs` に置く**ことにしました。勝手に設計書へ
+書き足すのではなく、「測って選ばれた形を実装した」という形にしてあります。
+
+材料は
 [`examples/semantic/measurements/context-preservation.md`](../../examples/semantic/measurements/context-preservation.md)
-に、依存を Jev に聞いて根まで辿った閉包の実測（4 文書 × 4 ラン）があります。
-**まだ決まっていないのは閾値です** — 実文書で見つけた穴を捕まえる 0.4 では
-閉包が文書の 17〜58 %（中央値）に膨らみ、閉包の収まる 0.5 では穴の片方を
-取り逃がします。`redundancy` の 0.7 はこの question では使えません
-（閉包の中央値が 4 文書とも 0 になる）。`policy::keep_order` には**まだ何も
-足していません**。
+（4 文書 × 4 ラン × 2 版）。
 
-**確認したこと**: `policy::keep_order` の並び替え鍵
-`(実効 Tier, redundant か, バイト長, 先頭バイト位置, 添字)` が、すべて
-`doc.units[index]` 1 つから計算されていること。とくに `redundant` は
-`SemanticUnit::is_redundant()` であって、`REDUNDANT_WITH` の参照先がその
-Budget で残っているかを見ていないこと（`policy::decorate` の `kept` は
-`keep_order` を呼んだ**後**に作られ、順序の計算には戻りません）。
-`grep -n "context preservation" docs/design/semantic-reading-layer.md` の
-ヒットが rule 列挙の 1 行だけであること。同じ話は
-`crates/semantic-reading/src/policy.rs` のモジュールドキュメントにあります。
+| | 決めたこと |
+| --- | --- |
+| 依存の判定 | 判定器（`jev-annotate.py`）。段階 1 Noul →段階 2 **Choice** →当て木 Noul。直接の前提は最大 2、**閾値はどこにも置かない** |
+| 選択肢 | **DETAIL だけ落とす。** 字義の「SUPPORTING 以上」だと、実測で穴の相手（2 つとも CONTEXT）が構造的に死ぬ |
+| 運搬 | `Relation::Presupposes`。**`RedundantWith` とは向きは同じで効き方が逆**（あちらは持ち主を弱め、こちらは指した先を引き上げる） |
+| 閉包と予算 | `policy::decorate`。`keep_order` の順に、その Unit と未払いの閉包を一緒に払う。**根まで辿り、前提も予算に数える**（数えないと「30 % と言って 45 % 出る」） |
+| 表示 | **変えない。** 前提は読み手に知らせるものではなく、一緒に生き残らせるもの |
+| 版 | 上げない（理由は `protocol.rs`） |
+
+**第 1 版の「0.4 なら閉包が爆発、0.5 なら穴を取り逃がす」という二択は、
+閾値の問題ではなく primitive の取り違えでした。** 対の Noul は依存ではなく
+**関連**を測っていて（役を入れ替えても「はい」になる対が 0.4 で 7.6〜32 %）、
+関連は沢山あるから扇が広がります。Choice は突き合わせて 1 つ返すので扇が
+構造的に 1 になり、**閉包は 0.5 の大きさのまま 0.4 の再現率**になりました。
+
+#### 単調性は壊れていません
+
+支えているのは「`keep_order` が Budget に依存しない」と「打ち切りが `break`
+である」の 2 点だけで、**どちらも辺の構造を使っていません**。各 rank で払う額は
+rank だけの関数なので、累積額の列は Budget に依存しない固定列になり、Budget が
+決めるのは「どこで初めて越えるか」だけです。詳細は `policy.rs`。
+
+#### まだ残っていること
+
+- **逆転。** 前提を予算に数えると、長い系譜を持つ ESSENTIAL が払えずに落ち、
+  系譜の無い格下が繰り上がります。実測で 26 Unit の小さい文書は MARKED
+  5 つのうち 2 つが落ちたまま（第 1 版と同じ）。**これは「前提を数える」と
+  決めた時点で決まる帰結**であって、拾い直すと best-fit になり単調性が壊れます
+- **`REDUNDANT_WITH` の側は相対になっていません。** `keep_order` の
+  `redundant` は `SemanticUnit::is_redundant()` であって、参照先がその Budget で
+  残っているかを見ていません。u0 を参照して弱められた Unit は、u0 自身が DIM に
+  なる Budget でも弱められたままです。**今回入れたのは `PRESUPPOSES` の側だけ**
+- **節点が小さい文書。** 1 Unit 平均 54 バイトの文書では、採った辺の 8 本に
+  1 本が逆向きにも立ちます。primitive を替えても残りました（むしろ悪化）。
+  **question の形ではなく節点の大きさの問題**で、そこは測っていません
+- **当て木が境目すれすれ。** 実測で穴 A の 2 本目は Noul 0.52（境目 0.5 の
+  0.02 上）でした。`docs/design/jev.md` が挙げる `confidence` の揺れ ±0.07 が
+  ここに乗れば裏返ります。「捕まえた」であって「安定して捕まえる」ではない
+
+**確認したこと**: `policy::decorate` の打ち切りループが
+`need = {i} ∪ closure(i)` を払って `break` すること。実測の集計スクリプト
+`charged_kept` と `decorate` の残る集合が、4 文書 × 2 条件 × 4 ラン ×
+9 予算 = 288 件で完全に一致したこと（突き合わせは repo 外で実施）。
+実機 1 文書の予算 1..=100 で単調性違反が 0 件だったこと。
 
 ### 5. Jev の context window は **2 つ**の制約で縛られている
 

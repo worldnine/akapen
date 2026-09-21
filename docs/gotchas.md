@@ -77,7 +77,7 @@
 - 1. `cache` と `incremental reanalysis` は、実測して作らないと決めた
 - 2. Phase 番号が 2 つの意味で使われている（アーカイブ側）
 - 3. `--semantic-cmd` が `confidence` / `probabilities` を運ばない
-- 4. 同一 Tier 内の rule に逐次性が無い（`context preservation`）
+- 4. 同一 Tier 内の rule の逐次性 — `context preservation`（**解決済み。2026-09-21**）
 - 5. Jev の context window は **2 つ**の制約で縛られている
   - 5.1 Tier 一致率の「揺れの床」を先に測ること
   - 5.2 4 文書 × 方式の実測（2026-09-21）
