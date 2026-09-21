@@ -91,14 +91,36 @@ impl ReadingTier {
 /// は [`ReadingTier`] の 5 番目の値ではなく、独立した列挙として
 /// [`SemanticUnit::relations`] に並ぶ。
 ///
-/// MVP で必要な relation は `REDUNDANT_WITH` のみ。将来 relation が増えても
-/// 既存のパターンマッチが壊れないよう `#[non_exhaustive]` にしてある。
+/// # 2 つの関係は、向きは同じで効き方が逆である
+///
+/// どちらも参照先は**自分より前の Unit**で、矢印はこの Unit から前へ向く。
+/// **そこだけが同じで、あとは別物である。**
+///
+/// | | 意味 | 誰に効くか |
+/// | --- | --- | --- |
+/// | [`Relation::RedundantWith`] | 参照先と実質同じ内容を言い直している | **持ち主を弱める**（[`ReadingTier::weakened`] で 1 段下げる） |
+/// | [`Relation::Presupposes`] | 参照先を読んでいないと持ち主の意味が決まらない | **指した先を引き上げる**（持ち主が残るなら参照先も一緒に残す） |
+///
+/// 「重複しているから沈めてよい」と「前提だから一緒に残す」は、**判断の
+/// 向きが逆**である。名前で取り違えると、前提を沈める実装になる。
+///
+/// 将来 relation が増えても既存のパターンマッチが壊れないよう
+/// `#[non_exhaustive]` にしてある。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Relation {
     /// この Unit は、参照先の Unit と実質同じ内容である。
     RedundantWith(UnitId),
+    /// この Unit は、参照先の Unit を**前提**にしている — 参照先を読まずに
+    /// ここだけを読むと、何を指しているのかが決まらない。
+    ///
+    /// [`crate::policy::decorate`] はこれを閉包で辿り、**前提のバイト数も
+    /// 一緒に Budget から払う**。払えなければ持ち主のほうが残らない。
+    /// 実装と実測は [`crate::policy`] の「context preservation」を参照。
+    ///
+    /// **`RedundantWith` と逆向きに効く。** 上の表を読むこと。
+    Presupposes(UnitId),
 }
 
 /// Jev が知覚した意味的まとまり 1 つ。
@@ -175,19 +197,39 @@ impl SemanticUnit {
     }
 
     /// この Unit が重複だと判断された先。複数あれば最初のもの。
+    ///
+    /// **先頭 1 つを見るのではなく `RedundantWith` を探す。** relation が
+    /// 1 種類だった頃は `relations.first()` で足りたが、
+    /// [`Relation::Presupposes`] が入ってからは先頭が前提のこともある。
+    /// 先頭だけを見ると、**前提を持つ Unit が「重複していない」と正しく
+    /// 答えられる一方で、前提のあとに重複が並んだ Unit を見落とす** —
+    /// 見落とした側は `weakened()` を受けずに実 Tier のまま残る。
     pub fn redundant_with(&self) -> Option<&UnitId> {
-        // MVP の relation は `RedundantWith` 1 種類なので先頭を見れば足りる。
-        // 種類が増えたらこの match が網羅でなくなってコンパイルが止まる —
-        // それがここを書き直す合図になる。
-        match self.relations.first() {
-            Some(Relation::RedundantWith(target)) => Some(target),
-            None => None,
-        }
+        self.relations.iter().find_map(|relation| match relation {
+            Relation::RedundantWith(target) => Some(target),
+            Relation::Presupposes(_) => None,
+        })
     }
 
     /// 何かの重複として印が付いているか。
+    ///
+    /// **`relations` が空でないこと**ではない。[`Relation::Presupposes`] しか
+    /// 持たない Unit は重複ではないので、ESSENTIAL なら MARKED になれる。
     pub fn is_redundant(&self) -> bool {
         self.redundant_with().is_some()
+    }
+
+    /// この Unit が前提にしている Unit（[`Relation::Presupposes`] の参照先）を
+    /// 文書順ではなく **relation に並んだ順**で返す。
+    ///
+    /// 参照先が実在することは [`crate::SemanticDocument::validate`] が保証
+    /// する。閉包を辿るのは [`crate::policy`] の仕事で、ここは 1 段だけを
+    /// 返す。
+    pub fn presupposes(&self) -> impl Iterator<Item = &UnitId> {
+        self.relations.iter().filter_map(|relation| match relation {
+            Relation::Presupposes(target) => Some(target),
+            Relation::RedundantWith(_) => None,
+        })
     }
 }
 
@@ -276,5 +318,55 @@ mod tests {
         let json = serde_json::to_string(&relation).unwrap();
         assert_eq!(json, r#"{"redundant_with":"u3"}"#);
         assert_eq!(serde_json::from_str::<Relation>(&json).unwrap(), relation);
+    }
+
+    #[test]
+    fn a_prerequisite_round_trips_under_its_own_key() {
+        let relation = Relation::Presupposes("u6".into());
+        let json = serde_json::to_string(&relation).unwrap();
+        assert_eq!(json, r#"{"presupposes":"u6"}"#);
+        assert_eq!(serde_json::from_str::<Relation>(&json).unwrap(), relation);
+    }
+
+    /// **いちばん大事な区別。** 前提を持つことは重複ではない。ここを混ぜると
+    /// 「前提を足したら MARKED が消えた」になる — context preservation は
+    /// 光らせ続けるための rule なので、真逆へ倒れる。
+    #[test]
+    fn a_unit_that_only_presupposes_is_not_redundant() {
+        let mut unit = SemanticUnit::new("u10", [AtomIndex(0)], ReadingTier::Essential);
+        unit.relations.push(Relation::Presupposes("u6".into()));
+        assert!(!unit.is_redundant());
+        assert_eq!(unit.redundant_with(), None);
+        assert_eq!(
+            unit.presupposes().collect::<Vec<_>>(),
+            [&UnitId::from("u6")]
+        );
+    }
+
+    /// 前提が先に並んでいても重複は見つかる（`relations.first()` では
+    /// 見落とす形）。
+    #[test]
+    fn a_redundancy_behind_a_prerequisite_is_still_found() {
+        let mut unit = SemanticUnit::new("u10", [AtomIndex(0)], ReadingTier::Essential);
+        unit.relations.push(Relation::Presupposes("u6".into()));
+        unit.relations.push(Relation::RedundantWith("u3".into()));
+        assert!(unit.is_redundant());
+        assert_eq!(unit.redundant_with(), Some(&UnitId::from("u3")));
+        // 前提のほうも消えていない。
+        assert_eq!(unit.presupposes().count(), 1);
+    }
+
+    /// 直接の前提は最大 2（判定器の当て木がそこで止まる）。型としては
+    /// 制限していないので、2 本並んだ形が読めることだけ固定する。
+    #[test]
+    fn a_unit_can_carry_two_prerequisites() {
+        let mut unit = SemanticUnit::new("u10", [AtomIndex(0)], ReadingTier::Essential);
+        unit.relations.push(Relation::Presupposes("u6".into()));
+        unit.relations.push(Relation::Presupposes("u9".into()));
+        assert_eq!(
+            unit.presupposes().collect::<Vec<_>>(),
+            [&UnitId::from("u6"), &UnitId::from("u9")]
+        );
+        assert!(!unit.is_redundant());
     }
 }
