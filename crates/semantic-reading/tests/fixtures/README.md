@@ -46,6 +46,19 @@ Unit の合計は 1374 バイト（空行と改行は Atom に含めないので
 
 `tests/policy.rs` の budget 100 / 70 / 30 / 10 の期待値はこの表の累積 % から出している。
 
+## 台帳は二段
+
+`policy::decorate` は**核（ESSENTIAL かつ非 REDUNDANT かつ核を持つ）を先に、
+Budget を見ずに確保する**。この fixture では u1 / u3 / u5 がそれで、合計
+251 バイト = 18.3 % になる。残りの 7 Unit が二段目で残りの予算を奪い合う。
+
+**この fixture では累積の列は上の表のままである** — 核がちょうど keep 順の
+先頭 3 つなので、一段目の合計は表の 3 行目の累積と一致する。変わるのは
+**18.3 % より小さい Budget** で、そこでは表の打ち切り位置に関係なく
+u1 / u3 / u5 の 3 つが出る（`budget_1_keeps_the_cores_and_100_keeps_them_all`）。
+
+前提（`PRESUPPOSES`）はこの fixture には無いので、一段目は閉包を連れてこない。
+
 ## `source_sha256`
 
 このファイルには入れていないが、`SemanticDocument` は任意フィールド

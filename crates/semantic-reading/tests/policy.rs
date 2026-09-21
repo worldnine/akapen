@@ -98,20 +98,23 @@ fn budget_30_keeps_only_the_essentials_and_the_problem_statement() {
 }
 
 #[test]
-fn budget_10_keeps_the_title_and_the_conclusion() {
+fn budget_10_keeps_every_essential_and_nothing_else() {
     let doc = fixture();
-    // u3（9.3 %）まで。u5 は 18.3 % なので落ちる。
+    // 一段目は ESSENTIAL 3 つ（u1 / u3 / u5）で 18.3 %。**Budget 10 % を
+    // 超えるが、一段目は Budget を見ない。** 二段目の先頭 u2 は
+    // 26.3 % なので入らない。
     let states = unit_states(&doc, 10);
     assert_eq!(states["u1"], DisplayState::Marked);
     assert_eq!(states["u3"], DisplayState::Marked);
+    assert_eq!(states["u5"], DisplayState::Marked);
     assert_eq!(
         dimmed(&doc, 10),
-        ["u10", "u2", "u4", "u5", "u6", "u7", "u8", "u9"]
+        ["u10", "u2", "u4", "u6", "u7", "u8", "u9"]
     );
 }
 
 #[test]
-fn budget_1_keeps_exactly_one_unit_and_100_keeps_them_all() {
+fn budget_1_keeps_the_cores_and_100_keeps_them_all() {
     let doc = fixture();
     let at_one = unit_states(&doc, 1);
     let survivors: Vec<&str> = at_one
@@ -119,10 +122,22 @@ fn budget_1_keeps_exactly_one_unit_and_100_keeps_them_all() {
         .filter(|(_, s)| **s != DisplayState::Dim)
         .map(|(id, _)| id.as_str())
         .collect();
-    // Budget 1 % でも「読む場所ゼロ」にはしない。残るのは keep 順の先頭
-    // （最短の ESSENTIAL = 見出し）だけ。
-    assert_eq!(survivors, ["u1"]);
-    assert_eq!(at_one["u1"], DisplayState::Marked);
+    // **READ 1 % は核だけが出る。** 「これさえ見れば」なら、いちばん
+    // 少ない予算で出るのは MARKED の全部である。台帳が一段だった頃は
+    // ここが `["u1"]` で、READ を下げると MARKED が 3 つから 1 つへ
+    // 減っていた。
+    assert_eq!(survivors, ["u1", "u3", "u5"]);
+    for id in ["u1", "u3", "u5"] {
+        assert_eq!(at_one[id], DisplayState::Marked, "{id}");
+    }
+    // MARKED は 100 % と同じ集合である（Budget に依存しない）。
+    let full = unit_states(&doc, 100);
+    let at_full: Vec<&str> = full
+        .iter()
+        .filter(|(_, s)| **s == DisplayState::Marked)
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(survivors, at_full);
 
     assert_eq!(unit_states(&doc, 100).len(), doc.units.len());
     assert!(dimmed(&doc, 100).is_empty());
