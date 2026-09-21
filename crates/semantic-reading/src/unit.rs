@@ -116,14 +116,24 @@ pub struct SemanticUnit {
     /// [`Self::atoms`] の部分集合でなければならない（[`crate::SemanticDocument::validate`]）。
     ///
     /// MARKED をこの Atom だけに絞るために使う（[`crate::policy::decorate`]）。
-    /// **空は「絞り込み無し」**であって「核が無い」ではない — 判定器が核を
-    /// 選ばなかった Unit は、従来どおり全体が MARKED になる。この既定が
-    /// あるので、このフィールドを知らない判定器・fixture もそのまま動く。
-    ///
     /// 効くのは MARKED になる Unit（ESSENTIAL かつ非 REDUNDANT）だけである。
     /// NORMAL と DIM は Unit 全体に一律で掛かる。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub core_atoms: Vec<AtomIndex>,
+    ///
+    /// **3 値である。** 「無い」と「空」を区別する:
+    ///
+    /// | 値 | wire 形 | 意味 |
+    /// |---|---|---|
+    /// | `None` | フィールドが無い | **絞り込みを受けていない** — Unit 全体が MARKED |
+    /// | `Some([])` | `"core_atoms":[]` | **核を持たない** — この Unit は MARKED にならない |
+    /// | `Some([i])` | `"core_atoms":[i]` | `i` だけが MARKED |
+    ///
+    /// `None` が既定なので、このフィールドを知らない判定器・fixture は従来
+    /// どおり動く。`Some([])` は、判定器が「この Unit に核は要らない」と
+    /// **積極的に決めた**場合のためにある — リスト 1 本につき核を 1 つに絞る
+    /// とき、選に漏れた Unit がこれになる（[`crate::policy`] の「run キャップ」）。
+    /// ここを 2 値にすると、選に漏れた Unit が丸ごと光ってしまい絞れない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_atoms: Option<Vec<AtomIndex>>,
     /// 他 Unit との関係。空でよい。
     #[serde(default)]
     pub relations: Vec<Relation>,
@@ -140,18 +150,28 @@ impl SemanticUnit {
             id: id.into(),
             atoms: atoms.into_iter().collect(),
             reading_tier,
-            core_atoms: Vec::new(),
+            core_atoms: None,
             relations: Vec::new(),
         }
     }
 
     /// この Atom は、MARKED を絞る先として残るか。
     ///
-    /// [`Self::core_atoms`] が空なら**すべての Atom が核**である（絞り込みを
-    /// 受けていない Unit は丸ごと MARKED になる、という従来の振る舞い）。
-    /// 空でなければ、そこに挙がっている Atom だけが核になる。
+    /// [`Self::core_atoms`] が `None` なら**すべての Atom が核**である
+    /// （絞り込みを受けていない Unit は丸ごと MARKED になる、という従来の
+    /// 振る舞い）。`Some` なら、そこに挙がっている Atom だけが核になる —
+    /// **空の `Some` はどの Atom も核でない**、という意味になる。
     pub fn is_core(&self, atom: AtomIndex) -> bool {
-        self.core_atoms.is_empty() || self.core_atoms.contains(&atom)
+        match &self.core_atoms {
+            None => true,
+            Some(core) => core.contains(&atom),
+        }
+    }
+
+    /// 核を明示的に決める。空を渡すと「**核を持たない**」になり、この Unit は
+    /// MARKED にならない（[`Self::core_atoms`] の 3 値のうち `Some([])`）。
+    pub fn set_core(&mut self, atoms: impl IntoIterator<Item = AtomIndex>) {
+        self.core_atoms = Some(atoms.into_iter().collect());
     }
 
     /// この Unit が重複だと判断された先。複数あれば最初のもの。
@@ -202,13 +222,39 @@ mod tests {
 
     #[test]
     fn an_unrefined_unit_treats_every_atom_as_its_core() {
-        // 空の core_atoms は「核が無い」ではなく「絞り込みを受けていない」。
+        // core_atoms が無いのは「核が無い」ではなく「絞り込みを受けていない」。
         let mut unit = SemanticUnit::new("u1", [AtomIndex(0), AtomIndex(1)], ReadingTier::Essential);
+        assert_eq!(unit.core_atoms, None);
         assert!(unit.is_core(AtomIndex(0)));
         assert!(unit.is_core(AtomIndex(1)));
-        unit.core_atoms.push(AtomIndex(1));
+        unit.set_core([AtomIndex(1)]);
         assert!(!unit.is_core(AtomIndex(0)));
         assert!(unit.is_core(AtomIndex(1)));
+    }
+
+    #[test]
+    fn an_empty_core_means_the_unit_has_no_core_at_all() {
+        // 「絞り込みを受けていない」(None) と「核を持たない」(Some([])) は別物。
+        // 後者はリスト 1 本につき核を 1 つに絞るときに、選に漏れた Unit が
+        // 受け取る値である。ここを混ぜると選に漏れた Unit が丸ごと光る。
+        let mut unit = SemanticUnit::new("u1", [AtomIndex(0), AtomIndex(1)], ReadingTier::Essential);
+        unit.set_core([]);
+        assert_eq!(unit.core_atoms, Some(Vec::new()));
+        assert!(!unit.is_core(AtomIndex(0)));
+        assert!(!unit.is_core(AtomIndex(1)));
+    }
+
+    #[test]
+    fn an_empty_core_survives_the_wire_round_trip() {
+        // `[]` が `skip_serializing_if` で消えると「絞り込み無し」に化ける。
+        let mut unit = SemanticUnit::new("u1", [AtomIndex(0)], ReadingTier::Essential);
+        unit.set_core([]);
+        let json = serde_json::to_string(&unit).unwrap();
+        assert_eq!(
+            json,
+            r#"{"id":"u1","atoms":[0],"reading_tier":"essential","core_atoms":[],"relations":[]}"#
+        );
+        assert_eq!(serde_json::from_str::<SemanticUnit>(&json).unwrap(), unit);
     }
 
     #[test]

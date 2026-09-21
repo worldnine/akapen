@@ -55,8 +55,8 @@ def atom(index, kind, text):
 class BoundaryRuleTest(unittest.TestCase):
     """構造ルール — パーサが既に知っている境界は Jev に聞かない。"""
 
-    def decide(self, current, following):
-        return jev.boundary_rule(current, following)[0]
+    def decide(self, current, following, next_indent=None):
+        return jev.boundary_rule(current, following, next_indent)[0]
 
     def test_a_heading_always_starts_a_new_unit(self):
         for kind in ("sentence", "list_item", "code_block", "block_quote", "heading"):
@@ -77,8 +77,19 @@ class BoundaryRuleTest(unittest.TestCase):
             self.assertEqual(self.decide(kind, "sentence"), NEW, kind)
             self.assertEqual(self.decide(kind, kind), NEW, kind)
 
-    def test_consecutive_list_items_stay_in_one_unit(self):
-        self.assertEqual(self.decide("list_item", "list_item"), SAME)
+    def test_a_new_top_level_list_item_starts_a_new_unit(self):
+        # 別項目どうしは NEW。箇条書きが丸ごと 1 Unit だと、10 個の決定事項が
+        # 全部同じ Tier になってしまう。
+        self.assertEqual(self.decide("list_item", "list_item", 0), NEW)
+
+    def test_a_nested_list_item_stays_with_its_parent(self):
+        # 「決定事項」は親項目 + その詳細の束なので、そこでは割らない。
+        for indent in (1, 2, 3, 4, 8):
+            self.assertEqual(self.decide("list_item", "list_item", indent), SAME, indent)
+
+    def test_a_continuation_sentence_stays_in_the_same_item(self):
+        # マーカーが無い = 同じ項目の 2 文目以降。
+        self.assertEqual(self.decide("list_item", "list_item", None), SAME)
 
     def test_a_block_quote_never_merges_with_its_neighbour(self):
         self.assertEqual(self.decide("sentence", "block_quote"), NEW)
@@ -98,12 +109,150 @@ class BoundaryRuleTest(unittest.TestCase):
     def test_the_reason_says_which_rule_fired(self):
         self.assertEqual(jev.boundary_rule("sentence", "heading")[1], "rule:next_is_heading")
         self.assertEqual(jev.boundary_rule("sentence", "sentence")[1], "jev")
+        self.assertEqual(
+            jev.boundary_rule("list_item", "list_item", 0)[1], "rule:new_list_item"
+        )
+        self.assertEqual(
+            jev.boundary_rule("list_item", "list_item", 2)[1], "rule:nested_list_item"
+        )
+        self.assertEqual(
+            jev.boundary_rule("list_item", "list_item", None)[1], "rule:same_list_item"
+        )
+
+
+def atoms_from(source, *items):
+    """実際の Markdown から、**バイト位置の正しい** Atom 列を作る。
+
+    `items` は `(種別, 本文)` の並びで、本文は `source` の中を先頭から順に探す。
+    上の `atom()` は `range` を `index * 100` で捏造するので、行頭を source から
+    探す `list_marker_indent` のテストには使えない。
+
+    `range` はバイト位置である。Python の文字列添字は符号位置なので、日本語を
+    含む文書ではここを取り違えると全 Atom がずれる。
+    """
+    raw = source.encode()
+    atoms, cursor = [], 0
+    for index, (kind, text) in enumerate(items):
+        start = raw.index(text.encode(), cursor)
+        end = start + len(text.encode())
+        atoms.append(
+            {
+                "index": index,
+                "kind": kind,
+                "range": {"start": start, "end": end},
+                "text": text,
+            }
+        )
+        cursor = end
+    return atoms
+
+
+class ListMarkerIndentTest(unittest.TestCase):
+    """項目の先頭か継続文か、先頭ならどの深さか — 構造だけで判別する。"""
+
+    def indents(self, source, *items):
+        raw = source.encode()
+        return [jev.list_marker_indent(raw, a) for a in atoms_from(source, *items)]
+
+    def test_top_level_items_are_indent_zero(self):
+        self.assertEqual(
+            self.indents(
+                "- 一つ目。\n- 二つ目。\n",
+                ("list_item", "- 一つ目。"),
+                ("list_item", "- 二つ目。"),
+            ),
+            [0, 0],
+        )
+
+    def test_an_ordered_marker_counts_too(self):
+        self.assertEqual(
+            self.indents(
+                "1. 一つ目\n2) 二つ目\n",
+                ("list_item", "1. 一つ目"),
+                ("list_item", "2) 二つ目"),
+            ),
+            [0, 0],
+        )
+
+    def test_a_continuation_sentence_has_no_marker(self):
+        # 同じ行の 2 文目。行の途中から始まるので項目の先頭ではない。
+        self.assertEqual(
+            self.indents(
+                "1. 一文目。二文目。\n",
+                ("list_item", "1. 一文目。"),
+                ("list_item", "二文目。"),
+            ),
+            [0, None],
+        )
+
+    def test_a_continuation_on_its_own_line_has_no_marker_either(self):
+        self.assertEqual(
+            self.indents(
+                "- 一文目。\n  二文目。\n",
+                ("list_item", "- 一文目。"),
+                ("list_item", "二文目。"),
+            ),
+            [0, None],
+        )
+
+    def test_nested_items_carry_their_indent(self):
+        self.assertEqual(
+            self.indents(
+                "- 親\n  - 子 1\n  - 子 2\n- 別の親\n",
+                ("list_item", "- 親"),
+                ("list_item", "- 子 1"),
+                ("list_item", "- 子 2"),
+                ("list_item", "- 別の親"),
+            ),
+            [0, 2, 2, 0],
+        )
+
+    def test_a_quote_marker_is_not_indentation(self):
+        # `>` と直後の空白 1 つまでが引用の印。ここを数えると、引用の中の
+        # トップレベルの項目がすべて「子項目」に見えてしまう。
+        self.assertEqual(
+            self.indents(
+                "> - 一つ目。\n> - 二つ目。\n",
+                ("list_item", "> - 一つ目。"),
+                ("list_item", "> - 二つ目。"),
+            ),
+            [0, 0],
+        )
+
+    def test_nesting_inside_a_quote_still_counts(self):
+        self.assertEqual(
+            self.indents(
+                "> - 親\n>   - 子\n",
+                ("list_item", "> - 親"),
+                ("list_item", ">   - 子"),
+            ),
+            [0, 2],
+        )
+
+    def test_the_whole_rule_runs_end_to_end(self):
+        source = "- 決定A\n  - 詳細A1。二文目。\n- 決定B\n"
+        atoms = atoms_from(
+            source,
+            ("list_item", "- 決定A"),
+            ("list_item", "- 詳細A1。"),
+            ("list_item", "二文目。"),
+            ("list_item", "- 決定B"),
+        )
+        plan = jev.plan_boundaries(atoms, source)
+        self.assertEqual(
+            [(e["decision"], e["by"]) for e in plan],
+            [
+                (SAME, "rule:nested_list_item"),
+                (SAME, "rule:same_list_item"),
+                (NEW, "rule:new_list_item"),
+            ],
+        )
 
 
 class PlanAndGroupTest(unittest.TestCase):
     def test_an_empty_atom_is_not_asked_about(self):
         atoms = [atom(0, "sentence", "本文がある。"), atom(1, "sentence", "   ")]
-        plan = jev.plan_boundaries(atoms)
+        plan = jev.plan_boundaries(atoms, "")
         self.assertEqual(plan[0]["decision"], NEW)
         self.assertEqual(plan[0]["by"], "rule:empty_text")
         self.assertEqual(jev.boundary_questions(atoms, plan), {})
@@ -361,6 +510,235 @@ class CoreQuestionTest(unittest.TestCase):
         self.assertNotIn("core_atoms", units[0])
 
 
+class RunCapTest(unittest.TestCase):
+    """1 本のリストにつき核は 1 つ。Tier（沈む側）は項目ごとのまま。"""
+
+    #: `- 決定A。` / `- 決定B。` / `- 決定C。` の 3 項目。
+    SOURCE = "- 決定A。\n- 決定B。\n- 決定C。\n"
+
+    def setUp(self):
+        self.atoms = atoms_from(
+            self.SOURCE,
+            ("list_item", "- 決定A。"),
+            ("list_item", "- 決定B。"),
+            ("list_item", "- 決定C。"),
+        )
+        self.plan = jev.plan_boundaries(self.atoms, self.SOURCE)
+
+    def units(self, *tiers):
+        return [
+            {
+                "id": f"u{n}",
+                "atoms": [n - 1],
+                "reading_tier": tier,
+                "relations": [],
+                "jev": {},
+            }
+            for n, tier in enumerate(tiers, start=1)
+        ]
+
+    def test_a_run_is_the_stretch_joined_by_rule_four(self):
+        # 3 項目とも別 Unit で、規則4 の境界 2 本でつながっている。
+        self.assertEqual(
+            [e["by"] for e in self.plan],
+            ["rule:new_list_item", "rule:new_list_item"],
+        )
+        self.assertEqual(jev.unit_runs([[0], [1], [2]], self.plan), [[0, 1, 2]])
+
+    def test_a_boundary_that_is_not_rule_four_breaks_the_run(self):
+        # 見出しや散文で切れたら別のリスト。
+        plan = [
+            {"after_atom": 0, "decision": jev.NEW, "by": "rule:new_list_item"},
+            {"after_atom": 1, "decision": jev.NEW, "by": "rule:next_is_heading"},
+            {"after_atom": 2, "decision": jev.NEW, "by": "rule:new_list_item"},
+        ]
+        self.assertEqual(
+            jev.unit_runs([[0], [1], [2], [3]], plan), [[0, 1], [2, 3]]
+        )
+
+    def test_one_question_covers_the_whole_run(self):
+        units = self.units("essential", "essential", "essential")
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        self.assertEqual(list(questions), ["core:run:1"])
+        self.assertEqual(
+            questions["core:run:1"]["criteria"],
+            {"atom:0": "- 決定A。", "atom:1": "- 決定B。", "atom:2": "- 決定C。"},
+        )
+        self.assertEqual(scope, {"core:run:1": [0, 1, 2]})
+        self.assertEqual(handled, frozenset({0, 1, 2}))
+        self.assertEqual(fixed, {})
+
+    def test_the_losers_of_a_run_get_an_empty_core_not_a_missing_one(self):
+        # ここが肝。`[]` は「核を持たない」で MARKED にならない。省くと
+        # 「絞り込み無し」になって Unit 全体が光る。
+        units = self.units("essential", "essential", "essential")
+        questions, fixed, scope, _ = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        jev.apply_run_cores(
+            units, questions, fixed, scope, {"core:run:1": {"choice": "atom:1"}}
+        )
+        self.assertEqual(units[0]["core_atoms"], [])
+        self.assertEqual(units[1]["core_atoms"], [1])
+        self.assertEqual(units[2]["core_atoms"], [])
+        self.assertEqual(units[0]["jev"]["core_by"], "rule:run_cap")
+        self.assertEqual(units[1]["jev"]["core_choice"], "atom:1")
+
+    def test_only_units_that_can_become_marked_join_the_run(self):
+        # CONTEXT の項目は核の話に加わらない（Tier は項目ごとのまま効く）。
+        units = self.units("essential", "context", "essential")
+        questions, _, scope, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        self.assertEqual(
+            questions["core:run:1"]["criteria"],
+            {"atom:0": "- 決定A。", "atom:2": "- 決定C。"},
+        )
+        self.assertEqual(scope["core:run:1"], [0, 2])
+        self.assertEqual(handled, frozenset({0, 2}))
+
+    def test_a_run_with_a_single_marked_unit_is_left_alone(self):
+        # 畳む相手がいないので従来どおり。
+        units = self.units("essential", "context", "context")
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        self.assertEqual((questions, fixed, scope, handled), ({}, {}, {}, frozenset()))
+
+    def test_a_single_candidate_in_a_run_is_settled_without_asking(self):
+        source = "- 決定A。\n-\n"
+        atoms = atoms_from(source, ("list_item", "- 決定A。"))
+        units = self.units("essential", "essential")
+        units[1]["atoms"] = []          # 本文の無い項目は候補を出せない
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            atoms, units, [[0, 1]], source
+        )
+        self.assertEqual(questions, {})
+        self.assertEqual(fixed, {0: [0], 1: []})
+        self.assertEqual(handled, frozenset({0, 1}))
+        self.assertEqual(units[0]["jev"]["core_by"], "rule:only_prose_atom_in_run")
+        self.assertEqual(units[1]["jev"]["core_by"], "rule:run_cap")
+
+    def test_a_run_over_budget_falls_back_to_per_unit_cores(self):
+        """run では予算を超えるが Unit ごとなら収まる、という境目を必ず通す。
+
+        **実文書では 1 度も通っていない枝である**（5 文書で 0 回。`CLAUDE.md` の
+        いちばん大きい run も収まった）。ここが間違っていると
+        **そのリストの全項目が光る**という最悪の壊れ方をするので、
+        予算を人工的に挟んでここで踏んでおく。
+        """
+        prose = "- " + "あ" * 400                  # 1 Atom あたり約 1,202 バイト
+        atoms = [atom(i, "list_item", prose) for i in range(6)]
+        units = [
+            {
+                "id": f"u{n + 1}",
+                "atoms": [2 * n, 2 * n + 1],
+                "reading_tier": "essential",
+                "relations": [],
+                "jev": {},
+            }
+            for n in range(3)
+        ]
+        body = len(prose.encode()) * jev.TOKENS_PER_BYTE
+        # 1 Unit は 2 Atom、run 全体は 6 Atom。その真ん中に予算が来る state を選ぶ。
+        target = (2 * body + 6 * body) / 2
+        source = "x" * int(
+            (jev.STATE_PLUS_QUESTION_LIMIT - jev.CORE_QUESTION_MARGIN - target)
+            / jev.TOKENS_PER_BYTE
+        )
+        budget = jev.core_budget(source)
+        self.assertLessEqual(2 * body, budget, "1 Unit ぶんは収まる予算であること")
+        self.assertGreater(6 * body, budget, "run 全体は収まらない予算であること")
+
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            atoms, units, [[0, 1, 2]], source
+        )
+        # run としては面倒を見ない。
+        self.assertEqual((questions, fixed, scope, handled), ({}, {}, {}, frozenset()))
+        # そして Unit ごとの経路がちゃんと拾う — ここが「全項目が光る」との分かれ目。
+        per_unit = jev.core_questions(atoms, units, source, handled)
+        self.assertEqual(sorted(per_unit), ["core:u1", "core:u2", "core:u3"])
+        for question in per_unit.values():
+            self.assertEqual(len(question["criteria"]), 2)
+        jev.apply_core_answers(
+            units, per_unit, {key: {"choice": f"atom:{2 * n}"}
+                              for n, key in enumerate(sorted(per_unit))}
+        )
+        for n, unit in enumerate(units):
+            self.assertEqual(unit["core_atoms"], [2 * n])
+            self.assertNotEqual(unit["core_atoms"], [], "核を持たない扱いにしない")
+
+    def test_the_per_unit_path_skips_what_the_run_already_handled(self):
+        units = self.units("essential", "essential", "essential")
+        _, _, _, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        self.assertEqual(
+            jev.core_questions(self.atoms, units, self.SOURCE, handled), {}
+        )
+        jev.assign_lone_cores(self.atoms, units, handled)
+        for unit in units:
+            self.assertNotIn("core_atoms", unit, "run キャップの決定を上書きしない")
+
+
+class ReferenceImplementationTest(unittest.TestCase):
+    """隣の決定論的な参照実装 `annotate-doc.py` が 3 値の意味を壊さないこと。
+
+    `core_atoms` の空の配列は「**核を持たない** = MARKED にならない」という
+    意味を持つようになった（`crates/semantic-reading/src/protocol.rs`）。
+    `annotate-doc.py` は run のロジックを持たないので、ここが `[]` を出すと
+    **意味が変わって黙って何も光らなくなる。**
+
+    いまは `core_atoms` を一切出さない（= `None` = 絞り込み無し = Unit 全体が
+    MARKED）。それが正しい振る舞いなので、**出さないことを固定する**。
+    """
+
+    REFERENCE = HERE / "annotate-doc.py"
+
+    def units(self):
+        source = "# 見出し\n\n本文である。二文目。\n\n- 一つ目。\n- 二つ目。\n"
+        raw = source.encode()
+        atoms, cursor = [], 0
+        for kind, text in [
+            ("heading", "# 見出し"),
+            ("sentence", "本文である。"),
+            ("sentence", "二文目。"),
+            ("list_item", "- 一つ目。"),
+            ("list_item", "- 二つ目。"),
+        ]:
+            start = raw.index(text.encode(), cursor)
+            atoms.append(
+                {
+                    "index": len(atoms),
+                    "kind": kind,
+                    "range": {"start": start, "end": start + len(text.encode())},
+                    "text": text,
+                }
+            )
+            cursor = start + len(text.encode())
+        proc = subprocess.run(
+            [sys.executable, str(self.REFERENCE)],
+            input=json.dumps({"version": 1, "source": source, "atoms": atoms}),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)["units"]
+
+    def test_the_reference_never_emits_core_atoms(self):
+        units = self.units()
+        self.assertTrue(units, "Unit が 1 つも返っていない")
+        for unit in units:
+            self.assertNotIn(
+                "core_atoms",
+                unit,
+                "`[]` を出すと「核を持たない」の意味になり、何も光らなくなる",
+            )
+
+
 class CoreBudgetTest(unittest.TestCase):
     """核 question の上限は state の大きさから決まる。
 
@@ -507,7 +885,7 @@ class DryRunTest(unittest.TestCase):
                     self.request["atoms"],
                     [
                         dict(entry, decision=entry["decision"] or jev.NEW)
-                        for entry in jev.plan_boundaries(self.request["atoms"])
+                        for entry in jev.plan_boundaries(self.request["atoms"], self.request["source"])
                     ],
                 ),
                 start=1,

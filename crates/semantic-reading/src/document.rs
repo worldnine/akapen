@@ -113,7 +113,7 @@ impl SemanticDocument {
                     )));
                 }
             }
-            for index in &unit.core_atoms {
+            for index in unit.core_atoms.iter().flatten() {
                 // 核は「この Unit の中のどこを読むか」なので、Unit の外の
                 // Atom は指せない。範囲外の添字もここで落ちる。
                 if !unit.atoms.contains(index) {
@@ -235,18 +235,18 @@ mod tests {
     #[test]
     fn validate_rejects_a_core_atom_outside_its_own_unit() {
         let mut own = doc();
-        own.units[0].core_atoms.push(AtomIndex(0));
+        own.units[0].set_core([AtomIndex(0)]);
         assert!(own.validate().is_ok(), "自分の atom なら通る");
 
         // 隣の Unit の atom は核にできない。
         let mut neighbour = doc();
-        neighbour.units[0].core_atoms.push(AtomIndex(1));
+        neighbour.units[0].set_core([AtomIndex(1)]);
         let err = neighbour.validate().unwrap_err().to_string();
         assert!(err.contains("core atom 1"), "{err}");
 
         // 範囲外も同じ経路で落ちる。
         let mut outside = doc();
-        outside.units[0].core_atoms.push(AtomIndex(7));
+        outside.units[0].set_core([AtomIndex(7)]);
         assert!(matches!(outside.validate(), Err(Error::Invalid(_))));
     }
 

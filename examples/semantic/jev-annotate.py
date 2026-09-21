@@ -244,8 +244,76 @@ class JevError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str | None, str]:
+#: 行頭マーカー（`-` / `*` / `+` / `1.` / `3)`）を捕まえる正規表現。
+#:
+#: `crates/semantic-reading/src/atomize.rs` の `marker_len` と同じ規則である。
+#: `atomize` は list item の Atom を**マーカーから**始めるので、この正規表現に
+#: 当たるかどうかが「項目の 1 文目か、それとも継続文か」をそのまま分ける。
+LIST_MARKER = re.compile(r"[-*+]|\d+[.)]")
+
+
+def list_marker_indent(source: bytes, atom: dict) -> int | None:
+    """list_item の Atom が**項目の先頭**なら、その行頭インデント幅を返す。
+
+    返り値が `None` なら、その Atom は項目の先頭ではない — 同じ項目の 2 文目
+    以降（継続文）か、そもそもマーカーが読めなかった場合である。
+
+    **`range` はバイト位置なので `source` もバイト列で受ける。** Python の
+    文字列添字は符号位置なので、日本語の文書では全 Atom がずれる（実測: 45.6 KB
+    の文書で 372/372 件が不一致）。`docs/gotchas.md` にも書いた。
+
+    判別は構造だけで行う。設計書「Jev に判断させないもの: **syntax parsing**」の
+    とおり、ここに Jev は出てこない。手がかりは 2 つ:
+
+    - `atomize` は項目の Atom を**マーカーから**始める（`- 一つ目。` /
+      `1. 一文目。`）。継続文にはマーカーが無い（`二文目。`）
+    - 行頭から Atom の先頭までが引用符と空白だけなら、その Atom は行頭に立って
+      いる。途中から始まっていれば、それは同じ行の 2 文目である
+
+    引用マーカーは**インデントとして数えない**。CommonMark の `>` は「`>` と、
+    その直後の空白 1 つ」までが引用の印なので、そこまでを読み飛ばして数え直す。
+    こうしないと `> - 一つ目` の指標が 1 になり、引用の中のリストが丸ごと
+    「子項目」に見える。
+
+    インデント幅は 0 か否かだけを見る（[`boundary_rule`] の規則 4）ので、タブ幅の
+    厳密さは要らない。
+    """
+    start = atom["range"]["start"]
+    line_start = source.rfind(b"\n", 0, start) + 1
+    prefix = source[line_start:start].decode("utf-8", "replace")
+    if prefix.strip(" \t>"):
+        # 行の途中から始まっている = 同じ行の 2 文目。
+        return None
+    lead = prefix + (atom.get("text") or "")
+    i = indent = 0
+    while i < len(lead):
+        char = lead[i]
+        if char == ">":
+            # 引用の印は `>` と直後の空白 1 つ。そこまではインデントではない。
+            i += 1
+            if i < len(lead) and lead[i] == " ":
+                i += 1
+            indent = 0
+        elif char == " ":
+            indent += 1
+            i += 1
+        elif char == "\t":
+            indent += 4
+            i += 1
+        else:
+            break
+    return indent if LIST_MARKER.match(lead, i) else None
+
+
+def boundary_rule(
+    current_kind: str | None,
+    next_kind: str | None,
+    next_indent: int | None = None,
+) -> tuple[str | None, str]:
     """隣り合う 2 つの Atom の境界を、構造だけで決められるなら決める。
+
+    `next_indent` は後ろの Atom が項目の先頭なら [`list_marker_indent`] が返す
+    インデント幅、そうでなければ `None`。規則 4 だけがこれを見る。
 
     返り値は `(SAME / NEW / None, 理由)`。`None` は「構造では決まらないので
     Jev に聞く」を意味する。
@@ -259,7 +327,7 @@ def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str 
     1. 次が heading         -> NEW  見出しは必ず新しいまとまりを始める
     2. 現在が heading       -> SAME 見出しは直後の内容に付く
     3. どちらかが code_block / table -> NEW  単独の Unit にする
-    4. どちらも list_item   -> SAME 同じリストの項目は 1 つのまとまり
+    4. どちらも list_item   -> 別項目なら NEW / 同じ項目の中なら SAME
     5. どちらも sentence    -> None Jev に聞く
     6. それ以外             -> NEW  既定（引用と散文の間など）
 
@@ -270,15 +338,32 @@ def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str 
     1 つの Unit になる（見出しだけの Unit は単独では Tier を判定しづらい）。
     ただし **この組み合わせは測っていない** — demo.md に出てこない。
 
-    規則 4 と規則 6 の引用の扱い（block_quote どうしは NEW になる）も
-    **測っていない**。判断の根拠は:
+    ## 規則 4 — 箇条書きは項目ごとに割る。ただし**トップレベルだけ**
 
-    - list_item どうし: 箇条書きは著者が既に 1 つのまとまりとして束ねた構造で、
-      半分だけ DIM になったリストは読み物として壊れる。なお Atom には
-      ネスト段階が載らないので、別々のリストが隣接していても区別できない。
-    - block_quote: 引用は自己完結した挿入で、「引用した」こと自体が周囲の散文と
-      読む優先度が違うという著者の表明である。連続する引用は別々の引用なので
-      規則 6 で NEW になる。
+    以前はリスト項目どうしを一律 SAME にしていた。それだと箇条書きが丸ごと
+    1 Unit になり、**10 個の決定事項が全部同じ Tier**になる。しょうもない
+    決定事項が個別に沈めない。
+
+    いま割るのは**トップレベルの項目の切れ目だけ**である。
+
+        - 決定A          ← ここで NEW
+          - 詳細A1       ← 親に SAME（インデント > 0）
+          - 詳細A2       ← 親に SAME
+        - 決定B          ← ここで NEW（インデント 0）
+          二文目。       ← 同じ項目の中なので SAME（マーカーが無い）
+
+    子項目を割らないのは、ユーザーの言う「決定事項」が**親項目＋その詳細の
+    束**だからである。そこで割ると、下の「半分だけ DIM のリスト」が親と子の
+    あいだで起きる。
+
+    規則 6 の引用の扱い（block_quote どうしは NEW になる）は**測っていない**。
+    判断の根拠は、引用は自己完結した挿入で、「引用した」こと自体が周囲の散文と
+    読む優先度が違うという著者の表明である、というもの。連続する引用は別々の
+    引用なので規則 6 で NEW になる。
+
+    **半分だけ DIM のリストは、依然として起こしてはいけない。** いま起こらない
+    のは、割る単位を「親 + その子 + 継続文」に揃えているからで、規則 4 を
+    さらに細かくするなら、まずそこを測ること。
     """
     if next_kind == "heading":
         return NEW, "rule:next_is_heading"
@@ -287,7 +372,11 @@ def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str 
     if current_kind in STANDALONE_KINDS or next_kind in STANDALONE_KINDS:
         return NEW, "rule:standalone_block"
     if current_kind == "list_item" and next_kind == "list_item":
-        return SAME, "rule:same_list"
+        if next_indent == 0:
+            return NEW, "rule:new_list_item"
+        if next_indent is None:
+            return SAME, "rule:same_list_item"
+        return SAME, "rule:nested_list_item"
     if current_kind == "sentence" and next_kind == "sentence":
         return None, "jev"
     return NEW, "rule:default"
@@ -298,15 +387,27 @@ def atom_text(atom: dict) -> str:
     return (atom.get("text") or "").strip()
 
 
-def plan_boundaries(atoms: list[dict]) -> list[dict]:
+def plan_boundaries(atoms: list[dict], source: str) -> list[dict]:
     """すべての境界について、構造で決まったか Jev に聞くかを並べる。
 
     要素は `{"after_atom": i, "decision": SAME/NEW/None, "by": 理由}`。
     `decision` が `None` のものだけがラウンド 1 の question になる。
+
+    `source` が要るのは規則 4 のためだけである — 項目のインデントは Atom の
+    `range` の**手前**（行頭からマーカーまで）にあるので、Atom だけでは読めない。
+    `range` はバイト位置なので、ここで 1 度だけバイト列にして渡す。
     """
+    raw = source.encode()
     plan = []
     for i in range(len(atoms) - 1):
-        decision, why = boundary_rule(atoms[i].get("kind"), atoms[i + 1].get("kind"))
+        following = atoms[i + 1]
+        decision, why = boundary_rule(
+            atoms[i].get("kind"),
+            following.get("kind"),
+            list_marker_indent(raw, following)
+            if following.get("kind") == "list_item"
+            else None,
+        )
         # 本文が空の Atom は Jev に見せても判断材料が無い。既定側へ倒す。
         if decision is None and not (atom_text(atoms[i]) and atom_text(atoms[i + 1])):
             decision, why = NEW, "rule:empty_text"
@@ -619,7 +720,9 @@ def core_fits(options: dict, budget: int) -> bool:
     return body * TOKENS_PER_BYTE <= budget
 
 
-def assign_lone_cores(atoms: list[dict], units: list[dict]) -> None:
+def assign_lone_cores(
+    atoms: list[dict], units: list[dict], handled: frozenset[int] = frozenset()
+) -> None:
     """候補が 1 つしかない Unit の核を、聞かずに決める。
 
     絞り込んだ結果 1 つになった場合に**聞かないだけ**だと、核が空のまま
@@ -628,9 +731,12 @@ def assign_lone_cores(atoms: list[dict], units: list[dict]) -> None:
 
     実測ではこれで核の question が 33〜89% 減った（design.md は 19 Unit 中
     17 が聞かずに決まった）。
+
+    `handled` は [`plan_run_cores`] が既に面倒を見た Unit の添字。run キャップ
+    （1 本のリストにつき核 1 つ）に入った Unit をここで上書きしないためにある。
     """
-    for unit in units:
-        if not wants_core(unit):
+    for position, unit in enumerate(units):
+        if position in handled or not wants_core(unit):
             continue
         options = core_candidates(atoms, unit)
         if len(options) == 1:
@@ -640,7 +746,12 @@ def assign_lone_cores(atoms: list[dict], units: list[dict]) -> None:
             unit["jev"]["core_by"] = "rule:only_prose_atom"
 
 
-def core_questions(atoms: list[dict], units: list[dict], source: str) -> dict:
+def core_questions(
+    atoms: list[dict],
+    units: list[dict],
+    source: str,
+    handled: frozenset[int] = frozenset(),
+) -> dict:
     """ラウンド 3 の questions のうち核の分。
 
     選択肢は Unit を構成する散文 Atom の本文そのもので、キーは `atom:<index>`。
@@ -657,8 +768,8 @@ def core_questions(atoms: list[dict], units: list[dict], source: str) -> dict:
     """
     budget = core_budget(source)
     questions = {}
-    for unit in units:
-        if not wants_core(unit):
+    for position, unit in enumerate(units):
+        if position in handled or not wants_core(unit):
             continue
         options = core_candidates(atoms, unit)
         if len(options) < 2 or not core_fits(options, budget):
@@ -669,6 +780,135 @@ def core_questions(atoms: list[dict], units: list[dict], source: str) -> dict:
             "criteria": options,
         }
     return questions
+
+
+#: run（= 1 本のリスト）をつなぐ境界の理由。[`boundary_rule`] の規則 4 が
+#: 「別項目なので NEW」と判断した切れ目だけが、同じリストの中の切れ目である。
+RUN_BOUNDARY = "rule:new_list_item"
+
+
+def unit_runs(units: list[list[int]], plan: list[dict]) -> list[list[int]]:
+    """規則 4 由来の境界でつながった Unit の並び ＝ **1 本のリスト**を並べる。
+
+    返すのは Unit の添字の列で、**長さ 2 以上のものだけ**（1 つしかない並びは
+    リストとして束ねる意味が無い）。
+
+    見出しや散文で切れた境界はつながない。だから「箇条書き → 段落 → 箇条書き」は
+    2 本の別のリストになり、リストの途中に引用やコードブロックが挟まればそこで
+    切れる（規則 3 が NEW を返し、理由が `rule:standalone_block` になるため）。
+    """
+    if not units:
+        return []
+    by = {entry["after_atom"]: entry["by"] for entry in plan}
+    runs, current = [], [0]
+    for position in range(len(units) - 1):
+        if by.get(units[position][-1]) == RUN_BOUNDARY:
+            current.append(position + 1)
+        else:
+            runs.append(current)
+            current = [position + 1]
+    runs.append(current)
+    return [run for run in runs if len(run) > 1]
+
+
+def plan_run_cores(
+    atoms: list[dict], units: list[dict], runs: list[list[int]], source: str
+) -> tuple[dict, dict, dict, frozenset[int]]:
+    """**1 本のリストにつき核を 1 つ**に絞る。Tier（沈む側）は触らない。
+
+    返り値は `(questions, fixed, scope, handled)`:
+
+    - `questions` … run ごとの核 question（キーは `core:run:<先頭 Unit の番号>`）
+    - `fixed` … 聞かずに決まったぶん `{Unit の添字: [atom] または []}`
+    - `scope` … `{question のキー: その答えが核を決める Unit の添字の列}`
+    - `handled` … この関数が面倒を見た Unit の添字。残りは従来の Unit ごとの
+      経路（[`core_questions`] / [`assign_lone_cores`]）が拾う
+
+    ## なぜ要るか
+
+    規則 4 で箇条書きを項目ごとに割ると、1 本のリストの中に ESSENTIAL な Unit が
+    いくつも立ち、**そのすべてが光る**。実測では業務 `CLAUDE.md` の MARKED が
+    3.3〜3.7 % から 10.8〜11.2 % へ増えた。**沈む側（Tier）と光る側（核）は
+    別のメカニズム**なので、Tier を項目ごとのままにして核だけをリスト単位に
+    畳める。
+
+    選に漏れた Unit には `core_atoms` に**空の配列**を入れる。プロトコルは
+    「無い」と「空」を区別していて、空は「**核を持たない**」＝ MARKED に
+    ならない、を意味する（`crates/semantic-reading/src/protocol.rs`
+    「`core_atoms` は 3 値」）。ここを省くと、選に漏れた Unit が丸ごと光る。
+
+    ## 予算を超えた run は面倒を見ない
+
+    run 全体の散文を選択肢にすると [`core_budget`] を超えることがある。その run は
+    `handled` に入れず、**従来の Unit ごとの核へ落とす**。「核が無ければ Unit
+    全体が MARKED」を run に当てると、そのリストの**全項目が光って最悪**になる。
+    そこへは落とさない。
+    """
+    budget = core_budget(source)
+    questions: dict = {}
+    fixed: dict[int, list[int]] = {}
+    scope: dict[str, list[int]] = {}
+    handled: set[int] = set()
+    for run in runs:
+        members = [position for position in run if wants_core(units[position])]
+        if len(members) < 2:
+            # MARKED になりうる Unit が 1 つ以下の run は、畳む相手がいない。
+            continue
+        options, owner = {}, {}
+        for position in members:
+            for key, text in core_candidates(atoms, units[position]).items():
+                options[key] = text
+                owner[key] = position
+        if not options:
+            # 散文が 1 つも無い run。従来どおり Unit ごとに任せる。
+            continue
+        if len(options) == 1:
+            key = next(iter(options))
+            index = int(key.split(":")[1])
+            for position in members:
+                won = position == owner[key]
+                fixed[position] = [index] if won else []
+                units[position]["jev"]["core_by"] = (
+                    "rule:only_prose_atom_in_run" if won else "rule:run_cap"
+                )
+            handled.update(members)
+            continue
+        if not core_fits(options, budget):
+            continue
+        key = f"core:run:{members[0] + 1}"
+        questions[key] = {
+            "type": "choice",
+            "instructions": CORE_INSTRUCTIONS,
+            "criteria": options,
+        }
+        scope[key] = members
+        handled.update(members)
+    return questions, fixed, scope, frozenset(handled)
+
+
+def apply_run_cores(
+    units: list[dict], questions: dict, fixed: dict, scope: dict, answers: dict
+) -> None:
+    """[`plan_run_cores`] の決定を Unit へ書き戻す。
+
+    答えが無い / criteria に無い値だった question は [`choice_of`] が失敗させる。
+    他のラウンドと同じで、黙って埋めない。
+    """
+    for position, core in fixed.items():
+        units[position]["core_atoms"] = list(core)
+    for key, members in scope.items():
+        choice = choice_of(answers, key, questions[key]["criteria"])
+        winner = int(choice.split(":")[1])
+        for position in members:
+            unit = units[position]
+            if winner in unit["atoms"]:
+                unit["core_atoms"] = [winner]
+                unit["jev"]["core_choice"] = choice
+                unit["jev"]["core_confidence"] = confidence_of(answers, key)
+            else:
+                # 同じリストの別項目が核に選ばれた。この Unit は光らせない。
+                unit["core_atoms"] = []
+                unit["jev"]["core_by"] = "rule:run_cap"
 
 
 def apply_core_answers(units: list[dict], questions: dict, answers: dict) -> None:
@@ -806,7 +1046,7 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     rounds = []
 
     # --- ラウンド 1: 散文どうしの境界 -> Unit --------------------------
-    plan = plan_boundaries(atoms)
+    plan = plan_boundaries(atoms, state)
     questions = boundary_questions(atoms, plan)
     if questions:
         payload = ask_jev(state, questions, model, timeout)
@@ -831,18 +1071,33 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     # 実測では 4 文書とも「ESSENTIAL かつ REDUNDANT」は 0〜1 件しかないので、
     # 捨てることになる核の question はほぼ出ない。
     provisional = [
-        {"id": f"u{n}", "atoms": list(ix), "reading_tier": tiers[n - 1], "relations": []}
+        {
+            "id": f"u{n}",
+            "atoms": list(ix),
+            "reading_tier": tiers[n - 1],
+            "relations": [],
+            "jev": {},
+        }
         for n, ix in enumerate(units, start=1)
     ]
+    # run キャップ（1 本のリストにつき核 1 つ）を先に決める。残りは従来どおり
+    # Unit ごとに聞く。
+    runs = unit_runs(units, plan)
+    run_questions, fixed, scope, handled = plan_run_cores(atoms, provisional, runs, state)
     questions = redundancy_questions(atoms, units, tiers)
-    questions.update(core_questions(atoms, provisional, state))
+    questions.update(run_questions)
+    questions.update(core_questions(atoms, provisional, state, handled))
     if questions:
         payload = ask_jev(state, questions, model, timeout)
         rounds.append(round_record(payload, len(questions)))
         answers.update(payload["answers"])
 
     built = build_units(atoms, units, tiers, answers)
-    assign_lone_cores(atoms, built)
+    # `provisional` に溜めた `core_by` を引き継ぐ（run キャップの記録）。
+    for unit, source_unit in zip(built, provisional):
+        unit["jev"].update(source_unit["jev"])
+    apply_run_cores(built, questions, fixed, scope, answers)
+    assign_lone_cores(atoms, built, handled)
     apply_core_answers(built, questions, answers)
     # REDUNDANT だった Unit は MARKED にならないので、核は使われない。
     for unit in built:
@@ -874,7 +1129,7 @@ def dry_run(request: dict, model: str) -> dict:
     """
     atoms = request.get("atoms") or []
     state = request.get("source") or ""
-    plan = plan_boundaries(atoms)
+    plan = plan_boundaries(atoms, state)
     first = boundary_questions(atoms, plan)
     for entry in plan:
         if entry["decision"] is None:
@@ -882,11 +1137,21 @@ def dry_run(request: dict, model: str) -> dict:
     units = group_units(atoms, plan)
     tiers = ["essential"] * len(units)
     as_essential = [
-        {"id": f"u{number}", "atoms": indices, "reading_tier": "essential", "relations": []}
+        {
+            "id": f"u{number}",
+            "atoms": indices,
+            "reading_tier": "essential",
+            "relations": [],
+            "jev": {},
+        }
         for number, indices in enumerate(units, start=1)
     ]
+    run_questions, _fixed, _scope, handled = plan_run_cores(
+        atoms, as_essential, unit_runs(units, plan), state
+    )
     third = redundancy_questions(atoms, units, tiers)
-    third.update(core_questions(atoms, as_essential, state))
+    third.update(run_questions)
+    third.update(core_questions(atoms, as_essential, state, handled))
     return {
         "assumptions": [
             "ラウンド 2 は「Jev に聞く境界はすべて new_unit」と仮定して組んでいる",

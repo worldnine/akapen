@@ -260,10 +260,11 @@ Unit が落ちた                  -> 全 Atom DIM（**一律**）
 
 刺さるのは次の 2 点です。
 
-- **`core_atoms` が空は「核が無い」ではなく「絞り込みを受けていない」**で、
+- **`core_atoms` が「無い」は「核が無い」ではなく「絞り込みを受けていない」**で、
   Unit 全体が MARKED になります。これが既存 fixture と古い判定器の経路です。
   ここを「空なら光らせない」に変えると、`demo.json` も `annotate-doc.py` も
-  黙って何も光らなくなります
+  黙って何も光らなくなります。**空の配列 `[]` は別の意味**（核を持たない =
+  MARKED にならない）で、下の「`core_atoms` は 3 値」を見てください
 - **DIM を同じように選択的にしないでください。** Unit が落ちたなら丸ごと
   沈むのが正しく、混ぜると「なぜこの行の一部だけ沈むのか」を読者に説明
   できなくなります
@@ -272,9 +273,12 @@ Unit が落ちた                  -> 全 Atom DIM（**一律**）
 `marks` の条件と `unit.is_core(atom)`、テスト
 `only_the_core_of_an_essential_unit_is_marked` /
 `a_dropped_unit_dims_whole_even_when_it_has_a_core` /
-`a_unit_without_a_core_still_marks_all_of_its_atoms`。核を選ぶ question は
-`examples/semantic/jev-annotate.py::core_questions`（ラウンド 3）、比率の
-実測は `examples/semantic/README.md`「MARKED を Unit の核だけに絞る」。
+`a_unit_without_a_core_still_marks_all_of_its_atoms` /
+`an_essential_unit_with_an_empty_core_is_normal_not_marked`。核を選ぶ question は
+`examples/semantic/jev-annotate.py` の `core_questions`（Unit ごと）と
+`plan_run_cores`（リスト 1 本ごと）で、どちらもラウンド 3。比率の実測は
+`examples/semantic/README.md`「MARKED を Unit の核だけに絞る」と
+「run キャップ」。
 
 ### 箇条書きのラベルが MARKED になる — 擬似見出しを構文で捕まえる案は却下した
 
@@ -332,6 +336,256 @@ MARKED のままでした。理由は経路が違うからです。ラベルは*
 4 件を 1 件ずつ目で確かめました。表示は `decorate-report` /
 `atom-states`（`policy::decorate` そのもの）を各条件 2 回。**空行・末尾の
 文字・長さの閾値の 3 点は引き継いだ記録**で、ここで取り直してはいません。
+
+---
+
+### 揺れの幅どうしを比べるときは、ラン数を揃える
+
+Jev の答えはランごとに揺れるので、判定品質は 1 点ではなく**幅**で見ます
+（`docs/gotchas.md` 5.1「揺れの床」）。このとき**ラン数が違うと比較が壊れます**
+— ランを増やせば観測される最大値は上がるので、4 ランの床と 7 ランの変種を
+並べると、**変種の側だけが超過して見えます**。
+
+実際に踏みました。床 4 ラン対 run キャップ 6〜7 ランで読んだときは
+`design`・業務議事録・業務 `CLAUDE.md` の 3 文書が「床を 0.4〜1.2 pt 超過」に
+見えました。床を同じラン数まで足すと、超過が残ったのは `CLAUDE.md` だけです。
+
+| 文書 | 床（4 ラン時） | 床（ラン数を揃えた後） | 変種 | 判定の変化 |
+| --- | --- | --- | --- | --- |
+| `design/…` | 22.9〜26.0 % | 22.9〜26.0 %（6 ラン） | 23.0〜26.9 % | 超過 → **重なる** |
+| この `README.md` | 2.9 %（2 ラン） | **1.2〜2.9 %**（4 ラン） | 1.5〜2.6 % | 超過 → **床の中** |
+| 業務議事録 | 9.6〜10.2 % | 9.6〜10.4 %（6 ラン） | 10.0〜11.4 % | 超過 → **重なる** |
+| 業務 `CLAUDE.md` | 3.3〜3.7 % | 3.3〜3.7 %（7 ラン） | 4.1〜4.5 % | 超過 → **超過のまま** |
+
+`README.md` がいちばん露骨で、**2 ランの床は 1 点（2.9 %）にしか見えません**。
+3・4 ラン目が 1.2 % を出して初めて 1.7 pt 幅が見えました。
+
+**2 ランの床を床と呼ばないこと。** 幅で判定するなら、床も変種も同じラン数で
+測ってから並べてください。
+
+**確認したこと**: 5 文書について変更前と run キャップを同じラン数
+（4 / 6 / 4 / 6 / 7）で測り直し、`decorate-report` の Budget 100 % の
+MARKED 比率を突き合わせたこと。数字は `examples/semantic/README.md`
+「run キャップ」。
+
+### `core_atoms` は 3 値 — `[]` を「無い」に丸めると選に漏れた Unit が丸ごと光る
+
+`SemanticUnit::core_atoms` は `Option<Vec<AtomIndex>>` で、**「無い」と「空」は
+別の意味**です。
+
+| wire 形 | 内部 | 意味 |
+| --- | --- | --- |
+| フィールドが無い | `None` | **絞り込みを受けていない** → Unit 全体が MARKED |
+| `"core_atoms":[]` | `Some([])` | **核を持たない** → この Unit は MARKED にならない |
+| `"core_atoms":[i]` | `Some([i])` | `i` だけが MARKED |
+
+`None` は後方互換のための既定で、このフィールドを知らない判定器・fixture を
+従来どおり動かします。`Some([])` は判定器が「この Unit に核は要らない」と
+**積極的に決めた**場合のためにあり、リスト 1 本につき核を 1 つに絞るときに
+選に漏れた Unit がこれを受け取ります。
+
+**刺さるのは丸めたときです。** `[]` を `None` と同一視すると「絞り込み無し」に
+なり、選に漏れた Unit が**丸ごと光ります** — 絞ったつもりが元より悪くなる、
+という向きに倒れます。だから `skip_serializing_if` は `Vec::is_empty` ではなく
+`Option::is_none` です。
+
+**`Some([])` は NORMAL であって DIM ではありません。** 沈めるかどうかは Tier と
+Budget が決めることで、核の選に漏れたことは「読まなくてよい」を意味しません。
+
+**版は上げません。** `[]` を知らない古い akapen はそれを空の Vec と読んで
+「絞り込み無し」に倒すので、表示が従来どおりに戻るだけで、位置を取り違える
+ことはありません。
+
+**確認したこと**: `crates/semantic-reading/src/unit.rs` の `core_atoms` /
+`is_core` / `set_core` と、テスト `an_unrefined_unit_treats_every_atom_as_its_core` /
+`an_empty_core_means_the_unit_has_no_core_at_all` /
+`an_empty_core_survives_the_wire_round_trip`。表示側は
+`crates/semantic-reading/src/policy.rs::an_essential_unit_with_an_empty_core_is_normal_not_marked`。
+Atom を隣の Unit に取られて核が全部落ちた場合に `Some([])` へ倒す（`None` へ
+戻さない）ことは `protocol.rs::overlapping_atoms_go_to_the_first_unit_that_claims_them`。
+
+### `core_atoms` は DIM に効かない — 「沈み方が変わった」は核のせいではない
+
+`policy::keep_order` と `cost` は核を読みません。**どの Unit が沈むかは Tier と
+Budget だけで決まります。** 核が決めるのは「残った Unit の中で MARKED か NORMAL か」
+だけです。
+
+だから核の選び方を変えたときに「沈む項目が変わった」と見えたら、それは
+**ラウンド 2 の Tier の揺れ**であって核の変更の効果ではありません。実測でも、
+同じ応答から `core_atoms` だけを抜いて通すと DIM の集合は Budget
+100 / 60 / 40 / 20 % のどれでも完全に一致しました（業務議事録と業務 `CLAUDE.md`）。
+
+**切り分け方**: 比べたい 2 条件のラウンド 2 の question が同一かを先に見ること。
+Unit の割り方が同じなら Tier の question は同一なので、沈み方の差は全部揺れです。
+
+**確認したこと**: `crates/semantic-reading/src/policy.rs::decorate` の `kept` の
+計算が `unit.is_core` を呼ばないこと（呼ぶのは表示状態の割り当てだけ）。
+上の DIM 集合の一致は `atom-states` を 2 条件 × 4 Budget で突き合わせて確認。
+
+### `examples/semantic/README.md` は測定対象の文書でもある — 測りながら書くと分母が動く
+
+実測の 5 文書のうち 1 つが **この README 自身**です。`decorate-report` /
+`atom-states` は渡されたファイルを**読み直して `atomize` する**ので、測ってから
+結果を README に書き足すと、次に測ったときの Atom 列が変わります。
+
+実際に踏みました。run キャップの節を書いた後に測り直すと、`README.md` の
+**「変更前」の値が 2.9 % から 2.0 % に変わりました** — 判定器の出力は 1 バイトも
+変わっていないのに、です。分母（Atom のバイト長の合計）が動いたためです。
+
+**要求 JSON に `source` が丸ごと入っている**ので、そこから書き出したものを
+`decorate-report` に渡してください。
+
+```sh
+jq -r .source request.json > frozen.md
+cargo run -p semantic-reading --example decorate-report -- frozen.md answer.json
+```
+
+同じ理由で `docs/gotchas.md`（この文書）も測定対象にしないほうが無難です。
+
+**確認したこと**: `crates/semantic-reading/examples/decorate-report.rs` と
+`atom-states.rs` がどちらも `std::fs::read_to_string(&doc)` してから
+`atomize(&source)` していること（応答 JSON の中の位置を信じてはいない）。
+5 文書の `source` を書き出して `cmp` すると、`demo.md` と
+`design/semantic-reading-layer.md` は現物と一致し、`README.md` だけ不一致。
+
+### 要求 JSON の `range` はバイト位置 — Python の文字列添字で読むと全件ずれる
+
+`AnalyzeRequest` の `range` は **source のバイト位置**です。Python の `str` の
+添字は符号位置なので、日本語を含む文書では `source[start:end]` が `text` と
+**1 件も一致しません**（実測: 45.6 KB の業務 `CLAUDE.md` で **372/372 件**が
+不一致）。
+
+刺さり方が意地悪なのは、**例外が出ないこと**です。返ってくるのは「もっともらしい
+別の場所の文字列」で、しかも ASCII だけの文書では正しく動きます。規則 4 の
+ネスト判定を最初に書いたときは、行頭を取りに行ったつもりで**別の項目の本文**を
+読んでいて、それでも 5 文書すべてで数字が出ました（子項目が 0 件、継続文が
+311/314 件という、いま思えばあり得ない内訳でしたが）。
+
+`source.encode()` でバイト列にしてから `rfind(b"\n", 0, start)` してください。
+[`list_marker_indent`](../examples/semantic/jev-annotate.py) がそうしています。
+`plan_boundaries` が `source` を受け取ってその場で 1 度だけ `encode()` するのも
+同じ理由で、境界ごとに `encode()` すると文書の長さ × 境界数になります。
+
+**`text` は使ってよい。** アダプタが source を自分で切り出さずに済むように
+`RequestAtom` が `text` を載せているので（`crates/semantic-reading/src/protocol.rs`）、
+本文が欲しいだけなら `range` に触る必要はありません。`range` が要るのは
+**Atom の外側**（行頭からマーカーまでのインデントなど）を見るときだけです。
+
+**確認したこと**: `crates/semantic-reading/src/protocol.rs` の `RequestAtom` が
+`atom.range` をそのまま載せ、`text` を `source.get(atom.range)` で切っていること
+（Rust の `str` の添字はバイト）。5 文書の要求 JSON について
+`source.encode()[start:end].decode() == text` が全件成立し、
+`source[start:end] == text` は日本語を含む 4 文書で全件不成立であること。
+テストは `examples/semantic/test_jev_annotate.py` の `ListMarkerIndentTest`
+（`atoms_from` が実際の Markdown からバイト位置で Atom を作る）。
+
+### `cargo clippy --workspace --all-targets -- -D warnings` は緑になったことがない
+
+CI は clippy を走らせていません（`.github/workflows/ci.yml` は `cargo build` /
+`cargo test --workspace` / `check-vendor-diff.sh` の 3 つだけ）。手で clippy を
+当てるときは**呼び方で結果が変わる**ので、「clippy が赤い」を回帰と読み違え
+ないでください。
+
+| 呼び方 | 結果 |
+| --- | --- |
+| `--workspace --all-targets -- -D warnings` | **赤**（14 件） |
+| `--workspace -- -D warnings`（`--all-targets` なし） | 緑 |
+| `--workspace --all-targets`（`-D warnings` なし） | 緑（warning 14 件） |
+| `-p akapen -p semantic-reading --all-targets -- -D warnings` | 緑 |
+
+**14 件はすべて `third_party/tui-markdown` のテストコード**（`#[cfg(test)]`）で、
+akapen 本体と `semantic-reading` は 0 件です。内訳は
+`unused import: super::*` が 10 件と `single_range_in_vec_init` が 4 件。
+
+**ツールチェーンで件数が変わります。** 同じツリーに当てた実測:
+
+| toolchain | 該当 warning |
+| --- | ---: |
+| clippy 0.1.90 (2025-09-14) | 4 |
+| clippy 0.1.92 (2025-12-08) | 4 |
+| clippy 0.1.98 (2026-09-01) | **14** |
+
+`unused import: super::*` の 10 件は新しい rustc で増えたぶんで、
+`single_range_in_vec_init` の 4 件は**1.90 の時点から赤**です。つまり
+`--workspace --all-targets -- -D warnings` はこのツリーで緑だったことがなく、
+「main は clippy 0」という記録は**上の表の下 3 行のいずれかの呼び方**を指します。
+
+**確認したこと**: `git diff main...HEAD -- '*.rs' '*.toml' 'Cargo.lock'` が空
+（ブランチ `rule4-list-boundary` の Rust は main と同一）。上の 4 通りの呼び方と
+3 つの toolchain を同じシェルで実行。`cargo clippy --message-format short` の
+出力がすべて `third_party/tui-markdown/src/renderer/*.rs` を指すこと。
+
+### 箇条書きを項目ごとに割ると MARKED が増える — 規則 4 の変更は条件を満たさなかった
+
+**現象**: 境界の構造ルール 4 を「`list_item` どうしは SAME」から「別項目どうしは
+NEW / 同じ項目の中は SAME」に変えると、**MARKED 比率が揺れの床を超えて増えます**。
+5 文書のうち 3 文書で増え、業務 `CLAUDE.md` は 3.3〜3.7 % → 10.8〜11.2 % と
+**約 3 倍**になりました。
+
+**原因は経路がはっきりしています。** MARKED は「ESSENTIAL かつ非 REDUNDANT な
+Unit」ごとに 1 つの核 Atom として付きます（`jev-annotate.py` の `wants_core`）。
+Unit が割れれば ESSENTIAL な Unit が増え、**MARKED はそれに比例して増えます**。
+箇条書きを細かく割る変更は、必ずこの経路を踏みます。
+
+**それでも要望そのものは叶っています。** 業務議事録の `## 決定事項`（8 項目）は、
+変更前は丸ごと 1 Unit で 8 項目が一斉に DIM になりました。変更後は 1・4・7・8 が
+沈み、2・3・5・6 が残ります — 「しょうもない決定事項が個別に沈む」は実際に
+起きています。数字と定性の評価が**正面から衝突している**のがこの変更の性質で、
+どちらかが間違っているのではありません。比較の表は
+`examples/semantic/README.md`「箇条書きを項目ごとに割る」にあります。
+
+**次に触る人へ、測る前に知っておくこと。**
+
+- **Unit 数で判定しないこと。** 決定事項が 8 Unit に割れれば最大 8 個 MARKED に
+  なりえます。効くのは MARKED 比率です
+- **Tier 一致率は使えません。** その床（`docs/gotchas.md` 5.1）は「同じ分割
+  どうし」で測った値で、**分割そのものを変える変更には当たりません**
+- **天井は超えませんでした。** 事前の見積もりは 1 Unit あたり 262 tokens
+  （Tier 181 + redundancy 81）で計算していましたが、redundancy は既にラウンド 3 へ
+  移っていて SUPPORTING 以上にしか聞かないので、**ラウンド 2 の固定費は 181 だけ**
+  です。`CLAUDE.md` は 62 % → 89 % で収まりました。ただし `README.md` の 90 % と
+  並んで余裕はありません（規則 4 と無関係の既存の崖。未解決 5）
+- **子項目を割らないこと。** 親項目＋その詳細の束で 1 つの「決定事項」なので、
+  そこで割ると「半分だけ DIM のリスト」が親子のあいだで起きます
+  （`policy::decorate` の docstring）。実測でも子を割らない判断が `CLAUDE.md` で
+  63 Unit を節約しています
+- **`is_marker_only` の親は取りこぼします。** 子だけを持つ親項目（`-` と改行だけの
+  行）は `atomize` が Atom にしないので、その子は直前の何かに付きます。
+  実文書では踏んでいませんが、直すなら `atomize` 側の話になります
+
+**増えたぶんは「1 Atom の Unit」だけに寄ってはいません。** MARKED になる Unit
+（ESSENTIAL かつ非 REDUNDANT）の内訳を数えると、業務 `CLAUDE.md` では
+11〜12 → 25〜26 に増えるうち、**Jev が核を選んだ Unit が 7〜8 → 16〜17**、
+`assign_lone_cores` が聞かずに決めた Unit が 4 → 9 で、**どちらも同じ比率で
+増えています**。つまり「1 Atom の Unit の扱いを直せば MARKED の増加だけ消せる」
+という逃げ道は**ありません** — 増加は分割そのものから来ています。上の
+「箇条書きのラベルが MARKED になる」とは別の経路です。
+
+**効いたのは run キャップです（後日実装）。** 沈む側（Tier）と光る側（核）は
+別のメカニズムなので、Tier を項目ごとのままにして**核だけをリスト 1 本につき
+1 つ**に畳めます（`jev-annotate.py` の `unit_runs` / `plan_run_cores`）。
+`CLAUDE.md` の MARKED は 10.8〜11.2 % → **4.1〜4.5 %** に戻り、1 本のリストから
+MARKED が 2 つ以上出るケースは全ランで 0 件になりました。
+
+**それでも床（3.3〜3.7 %）の中には戻りません**（7 ランずつ測って一度も
+重なりません。ほかの 4 文書は重なるので、落ちるのは `CLAUDE.md` だけです）。
+残差は 2 つに分かれ、**run キャップで消えるのは片方だけ**です:
+
+- **消える**: 1 本のリストの中で複数の項目が光る分
+- **消えない**: 丸ごと 1 Unit なら ESSENTIAL にならなかったリストが、割ると
+  中に ESSENTIAL な項目を持つ分。`CLAUDE.md` の `list_item` の MARKED は
+  3〜4 → 6 で、ここが残差の正体です。**1 本につき 1 つまでという上限を
+  守っている以上、原理的に消せません**
+
+次に縮めるなら、見るのは核ではなく**リスト全体の Tier の付け方**になります。
+数字は `examples/semantic/README.md`「run キャップ」。
+
+**確認したこと**: 5 文書 × 変更前後を 2〜4 回ずつ、合計 34 ラン。要求 JSON は
+`dump-request`、比率は `decorate-report`、Atom ごとの状態は `atom-states`。
+変更前のスクリプトを退避して同じ要求を食わせており、`atomize` は変えていないので
+Atom の range は前後で同一です。内訳は各応答の `units[].jev.core_by`
+（`rule:only_prose_atom` か否か）で数えました。表は
+`examples/semantic/README.md`「箇条書きを項目ごとに割る」。
 
 ---
 
