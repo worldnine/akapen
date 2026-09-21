@@ -394,6 +394,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | 箇条書きを項目ごとに割る（規則 4 の変更）と MARKED がどれだけ増えるか | [`measurements/lists-and-run-cap.md`](measurements/lists-and-run-cap.md) |
 | run キャップ（リスト 1 本につき核は 1 つ）でどこまで戻るか | [`measurements/lists-and-run-cap.md`](measurements/lists-and-run-cap.md) |
 | 見出しが無い文書はどれだけ壊れるか（対照 3 対 + 実記事 3 本、各 4 ラン） | [`measurements/headless-documents.md`](measurements/headless-documents.md) |
+| MARKED が文書の中でどう散らばるか — 偶然との比較、光らない区間の中身、redundancy の位置 | [`measurements/mark-distribution.md`](measurements/mark-distribution.md) |
 
 **バイト数と Unit 数は分割前の値。** この README と `docs/gotchas.md` は
 どちらも測定対象なので、分割でどちらも小さくなっている
