@@ -326,23 +326,73 @@ syntax parsing」の実証である。
 state を固定して question を 1 → 87（87 倍）にしても 0.91 → 1.42 秒だった。
 両軸を通した実測は `約 0.55 秒 + 1.3 マイクロ秒/token` で説明がつく。
 
-### 本当の上限は context window
+### 本当の上限は context window — **制約は 2 つある**
 
-「rate limit と context window は需要に応じて変わりうる」と原典にはあるが、
-**2026-09-21 時点の実測値は入力 65,536 tokens（2^16）と読める**。公式値は
-未確認である。超えると 2 秒台で HTTP 400 `max_tokens_exceeded` が返る。
+公式値が `https://docs.typesafe.ai/models.md` の Jev 1.13 の表にある。逐語:
+
+> Context length | 64k tokens per request; **32k tokens for `state` plus the
+> longest question**
+
+**「64k / request」だけを見ていると足をすくわれる。** `state` と最長 question の
+合計が 32k を超えると、**全体が 64k に収まっていても** HTTP 400
+`max_tokens_exceeded` が返る。実測（2026-09-21、ダミー question で両軸を独立に
+振った）:
+
+| `state` | 最長 question | 合計 | 結果 |
+| ---: | ---: | ---: | --- |
+| 20k | 12k | 32,305 | OK |
+| 20k | 14k | — | **失敗** |
+| 25k | 10k | — | **失敗** |
+| 30k | 1k | 31,281 | OK |
+| 30k | 3k | — | **失敗** |
+
+64k 側の切れ目も二分探索した。**`usage.input_tokens` が 65,771 で成功・
+65,874 で失敗**。公式の 64k（= 65,536）より約 235 上で切れるので、**budget は
+`usage` とは別の数え方をしている**らしい（そこは詰めていない）。分母には
+公式値 65,536 を使うこと。
 
 | 条件 | input tokens | 結果 |
 | --- | ---: | --- |
-| 実業務の `CLAUDE.md`（45,650 B）のラウンド 2 | 60,518〜63,152 | OK（**天井の 92〜96 %**） |
+| 実業務の `CLAUDE.md`（45,650 B）の旧ラウンド 2 | 60,518〜63,152 | OK（**天井の 92〜96 %**） |
 | 同じ文書を 1.04 倍 | 64,851 | OK |
 | 同じ文書を 1.06 倍 | — | **失敗** |
-| 二分探索の最大成功 | 65,033 | OK |
+| 二分探索の最大成功 | 65,771 | OK |
+| 同上 | 65,874 | **失敗** |
 
-ラウンド 2 が重いのは、`state`（文書全文）に加えて**各 Unit の本文を Tier と
-redundancy で 2 回引用する**ためで、およそ `3.6 × 文書のトークン数`になる。
-バイト数での上限は言語に依存する（この日本語文書で約 2.6 バイト/token）ので、
-**上限は tokens で言うこと**。
+**32k の側は、核（ラウンド 3）に効く。** 核の question は Unit の全散文 Atom を
+選択肢として引用するので、Atom を多く持つ Unit は単独で巨大になる。`CLAUDE.md`
+の最大 Unit は 96 Atom（散文 82 個）で question 5,469 tokens、`state` 込みで
+23,030 tokens ＝ 32k 枠の 70 %。だから選択肢の個数を固定値で切っても正しく
+ならず、`jev-annotate.py` は `state` の大きさから毎回計算している。
+
+`state` そのものの実測（バイトあたり 0.34〜0.39 tokens）:
+
+| 文書 | バイト | `state` tokens |
+| --- | ---: | ---: |
+| `demo.md` | 1,664 | 852 |
+| `design/semantic-reading-layer.md` | 9,857 | 3,626 |
+| `examples/semantic/README.md` | 28,172 | 11,180 |
+| 実業務の `CLAUDE.md` | 45,650 | 17,561 |
+
+バイト数での上限は言語に依存するので、**上限は tokens で言うこと**。
+
+### question の固定費は Unit 1 つあたり 262 tokens
+
+本文を除いた 1 question あたりの実測。Tier（Choice）が 181 = 器 68 +
+criteria の説明文 65 + 枠組み文 65、redundancy（Noul）が 81 = 器 8 +
+枠組み文 73。**器（型と criteria のキー名）の 68 は削れない。**
+
+`README.md`（113 Unit）の旧ラウンド 2 は `state` 11,180 + 本文の 2 度引き
+21,818 + 固定費 29,525 = 62,523 tokens で、**固定費が全体の 47 %** だった。
+だから効くのは「1 Unit あたりの question を減らす」ことで、文面を削ることでは
+ない（文面を削ると判定が壊れる — `docs/gotchas.md` の表）。
+
+redundancy を SUPPORTING 以上の Unit にだけ聞くようにして、`README.md` は
+62,523 → **50,895 tokens（78 %）**になり通るようになった。設計書が
+「重複は Reading Tier とは**別軸**」と定めているので、**Tier の Choice に
+5 つ目の選択肢として畳むことはしない** — 実測でも畳むと軸が消えた
+（`demo.md` の u9 / u10 は 4 つの Tier の probability がすべて 0.0 になり、
+Tier は tie-break 次第になった）。
 
 この上限は「ラウンドを分けると state が 2 回課金される」というコストの話とは
 別の、**機能するかしないかの線**である。

@@ -22,21 +22,36 @@ Tier の question は Unit について聞くものだが、Unit は境界判定
 
     ラウンド1  state=文書全文, questions={ 散文どうしの境界を Choice }
                  → Unit を確定
-    ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) と
-                                            redundancy(Noul) }
-                 → どの Unit が MARKED になるかが確定
-    ラウンド3  state=文書全文, questions={ MARKED になる Unit の核を Choice }
+    ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) }
+                 → 誰に redundancy を聞くか / 誰の核を聞くかが確定
+    ラウンド3  state=文書全文, questions={ SUPPORTING 以上の redundancy(Noul)
+                                            と、ESSENTIAL な Unit の核(Choice) }
 
-ラウンド 3 も前のラウンドの答えに依存するので畳めない。Jev は question を
-**並列・独立に**評価するので、ラウンド 2 の時点では「どの Unit が ESSENTIAL
-か」をまだ誰も知らない。そしてラウンド 3 が要るのは ESSENTIAL かつ非
-REDUNDANT な Unit だけなので、先に聞くと大半が無駄になる（実測: 45.6 KB の
-文書で 34 Unit 中 11 前後が ESSENTIAL、うち Atom が 2 つ以上あって核を聞く
-意味があるのは 7〜8 つ。幅があるのは、ラウンド 2 の Tier が実行ごとに 1 Unit
-揺れるためである）。
+Jev は question を**並列・独立に**評価するので、ラウンド 2 の時点では
+「どの Unit が ESSENTIAL か」をまだ誰も知らない。だから畳めない。
+
+**redundancy はラウンド 2 から 3 へ移してある。** 全 Unit に聞くのをやめ、
+Tier が SUPPORTING 以上の Unit だけに聞く — `policy::decorate` は REDUNDANT な
+Unit の Tier を `weakened()` で 1 段落とすだけなので、もともと下にいる
+CONTEXT / DETAIL は聞いても表示が変わらない。実測で question が 55〜95% 減り
+（`examples/semantic/README.md` の 113 Unit 中、聞くのは 8 個だけ）、28.2 KB の
+文書が context window に入るようになった。
+
+核をラウンド 3 で redundancy と**同時に**聞いているのは、本来なら
+「ESSENTIAL かつ非 REDUNDANT」に絞りたいがそれだとラウンドが 4 つになるため。
+実測では 4 文書とも「ESSENTIAL かつ REDUNDANT」は 0〜1 件しかなく、捨てる
+question はほぼ出ない。
 
 akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、3 ラウンドは
 このスクリプトの内部事情である。
+
+## context window は 2 つの制約で縛られている
+
+公式値は「**64k tokens per request; 32k tokens for `state` plus the longest
+question**」（`docs.typesafe.ai/models.md`）。**後者を見落とすと、合計が 64k に
+収まっているのに 400 で落ちる** — 実測でも state 30k + question 3k（合計 33k）
+が失敗した。核 question は Unit の全散文 Atom を選択肢として引用するので
+ここに当たりうる。上限は [`core_budget`] が state の大きさから毎回計算する。
 
 ## 境界は「構造は聞かない。散文どうしだけ聞く」
 
@@ -91,10 +106,9 @@ API_PATH = "/v1/systemone"
 #: ラウンドを 4 つ目まで増やすなら、ここを見直すこと。
 #:
 #: **大きな文書でもこの 20 秒は余っている**（2026-09-21 の実測）。45,650 バイトの
-#: 実業務文書で 1 ラウンドあたり 0.98〜1.53 秒、2 ラウンド込みのプロセス全体で
-#: 2.42〜2.63 秒（7 回）。いちばん遅かった条件でも 1 ラウンド 1.65 秒で、
-#: 20 秒には 12 倍の余裕がある。核を聞くラウンド 3 を足した後も同じで、
-#: ラウンド 3 は 0.99〜1.02 秒、プロセス全体で 3.54〜3.57 秒だった（2 回）。
+#: 実業務文書で 1 ラウンドあたり 0.98〜1.53 秒、いちばん遅かった条件でも
+#: 1.65 秒で、20 秒には 12 倍の余裕がある。redundancy をラウンド 3 へ移した
+#: 後の 3 ラウンド込みのプロセス全体は、4 文書で 2.2〜3.7 秒だった。
 #:
 #: 大文書で先に当たるのは**時間ではなく context window** である
 #: （[`http_error_message`]）。そこは 400 で即座に返るので、ここを延ばしても
@@ -152,23 +166,39 @@ CORE_INSTRUCTIONS = (
 #: **この値では切れていない** — 45.6 KB の実文書でいちばん大きい Unit でも
 #: Atom は 96 個だった。上限に当たる文書を測っていないので、当たったときの
 #: 振る舞いを「安全側（従来どおり）」に倒してあるだけである。
-#: **計測用**。`--trim frame` / `both` のときの短い文面。
-SHORT_CORE_INSTRUCTIONS = "このまとまりから 1 か所だけ読むなら、どこを読めば要点が取れるか。"
+#: Jev の context window の**2 つ目の**制約（`docs/gotchas.md`）。
+#: 公式は「64k tokens per request; **32k tokens for `state` plus the longest
+#: question**」で、後者は 1 つの question の大きさを直接縛る。実測でも
+#: state 30k + question 3k（合計 33k）は 64k に収まっていながら失敗した。
+STATE_PLUS_QUESTION_LIMIT = 32_768
 
-MAX_CORE_CHOICES = 255
+#: バイト数からトークン数を見積もる係数。**多めに出る側へ倒してある。**
+#:
+#: 実測（2026-09-21、4 文書の state）は 0.34〜0.39 tokens/byte、核 question の
+#: 選択肢本文は 0.496 tokens/byte だった。上限の判定に使うので、**足りないより
+#: 多く見積もる方が安全**である（見積もりが小さすぎると上限を超えた question を
+#: 送って 400 で落ちる）。日本語と英語が混ざる文書で最も高かった 0.496 を丸めた。
+TOKENS_PER_BYTE = 0.5
+
+#: 核 question の予算から引く安全マージン。内訳:
+#:
+#: - question の定型文と criteria のキー名（実測で 1 question あたり 68 tokens、
+#:   選択肢 1 つにつき数 tokens）
+#: - [`TOKENS_PER_BYTE`] の見積もり誤差。state が大きいほど絶対値で効く
+#: - 公式値 32k と実測の切れ目のずれ（state 20k + question 12k = 32,305 は
+#:   通り、合計 35k は落ちた。境界は 32,768 付近だが厳密には詰めていない）
+#:
+#: 45.6 KB の実文書（state 実測 17,561 tokens）で最大の Unit は選択肢 82 個・
+#: question 実測 5,469 tokens。この値でも予算 7,895 に収まる。
+CORE_QUESTION_MARGIN = 2_048
 
 #: 単独の Unit にする Atom 種別。中身は散文ではないので、隣の散文と読む優先度を
 #: 共有しない。
 STANDALONE_KINDS = frozenset({"code_block", "table"})
 
-#: **計測用**。核（R3 の選択肢）になれる Atom の種別。
-#:
-#:     all    すべての Atom（本番の挙動）
-#:     prose  散文だけ（`sentence` と `list_item`）。見出し・コードブロック
-#:            ・テーブルは「1 か所だけ読むならどこか」の答えにならない
-CORE_KIND_MODES = ("all", "prose")
-
-#: `prose` で候補に残す種別。
+#: 核（ラウンド 3 の選択肢）になれる Atom の種別 — **散文だけ**。
+#: 見出し・コードブロック・テーブルは「1 か所だけ読むならどこか」の答えに
+#: ならない（[`core_candidates`]）。
 PROSE_KINDS = frozenset({"sentence", "list_item"})
 
 #: redundancy の参照先を選ぶときに無視する、内容を持たない語
@@ -181,47 +211,6 @@ STOP_WORDS = frozenset(
 
 class JevError(Exception):
     """akapen のステータス行に 1 行で出したい失敗。"""
-
-
-class Trace:
-    """**計測用**。ラウンドごとの実測を、失敗しても残るように書き出す。
-
-    本番経路では使わない（`--trace` を渡したときだけ作られる）。`annotate` は
-    ラウンドの途中で失敗すると例外を投げてそこまでの計測を捨ててしまうが、
-    どのラウンドで天井に当たったかは測りたい情報そのものである。だから
-    1 ラウンド終わるたびに**上書きで**ファイルへ流す。
-    """
-
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self.data: dict = {"rounds": [], "units": None}
-
-    def round(
-        self,
-        number: int,
-        count: int,
-        usage: dict | None,
-        elapsed_s: float,
-        error: str | None,
-    ) -> None:
-        self.data["rounds"].append(
-            {
-                "round": number,
-                "questions": count,
-                "usage": usage,
-                "elapsed_s": elapsed_s,
-                "error": error,
-            }
-        )
-        self.flush()
-
-    def note(self, **fields: object) -> None:
-        self.data.update(fields)
-        self.flush()
-
-    def flush(self) -> None:
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -283,66 +272,15 @@ def atom_text(atom: dict) -> str:
     return (atom.get("text") or "").strip()
 
 
-#: **計測用**の境界モード。既定の `current` が本番の挙動で、`a` / `b` は
-#: 「散文どうしの境界をどこまでローカルに決めるか」を測るための切り替えである
-#: （どれを採るかはまだ決まっていない）。規則 1〜4 はどのモードでも変わらず、
-#: **規則 5（sentence どうし）の扱いだけ**が違う。
-#:
-#:     current  すべて Jev に聞く（本番）
-#:     a        空行で区切られていれば NEW_UNIT、同じ段落の中だけ Jev に聞く
-#:     b        空行で区切られていれば NEW_UNIT、でなければ SAME_UNIT
-#:              （境界 question を一切出さない）
-BOUNDARY_MODES = ("current", "a", "b", "b2")
-
-#: `b2` で「文が続いている」と見なす末尾。読点やコロンで終わる Atom は、
-#: 直後のリストや引用への**導入**であることが多い（design.md の実測で、
-#: Jev が段落をまたいで SAME と答えた 15 件のうち 8 件がこの形だった）。
-CONTINUES = ("、", ":", "：", "，", ",", "・")
-
-
-def paragraph_break(source: bytes, atoms: list[dict], i: int) -> bool:
-    """Atom `i` と `i+1` の間に**空行**があるか。
-
-    `range` は Rust の `&str` 由来で**バイト**単位なので、`source` も bytes の
-    まま切る（Python の str で切ると多バイト文字の後がずれる）。
-
-    Atom の range は末尾の改行を含むことがあるので、Atom 自身の末尾空白と
-    Atom 間の隙間を**繋げてから**改行を数える。改行が 2 つ以上あれば空行
-    （＝段落境界）である。
-
-    隙間に `---` のような水平線が入ることがあるが、水平線は前後に空行を伴う
-    ので、この判定では空行として拾われる。
-    """
-    own = source[atoms[i]["range"]["start"] : atoms[i]["range"]["end"]]
-    gap = source[atoms[i]["range"]["end"] : atoms[i + 1]["range"]["start"]]
-    tail = own[len(own.rstrip()) :]
-    return (tail + gap).count(b"\n") >= 2
-
-
-def plan_boundaries(
-    atoms: list[dict],
-    source: str = "",
-    mode: str = "current",
-) -> list[dict]:
+def plan_boundaries(atoms: list[dict]) -> list[dict]:
     """すべての境界について、構造で決まったか Jev に聞くかを並べる。
 
     要素は `{"after_atom": i, "decision": SAME/NEW/None, "by": 理由}`。
     `decision` が `None` のものだけがラウンド 1 の question になる。
-
-    `mode` は**計測用**の切り替えで、既定の `current` は本番の挙動。
-    `a` / `b` は [`BOUNDARY_MODES`] を参照（`source` が要る）。
     """
-    raw = source.encode() if mode != "current" else b""
     plan = []
     for i in range(len(atoms) - 1):
         decision, why = boundary_rule(atoms[i].get("kind"), atoms[i + 1].get("kind"))
-        if mode == "b2" and atom_text(atoms[i]).endswith(CONTINUES):
-            # 文が続いているので、空行があっても切らない。
-            decision, why = SAME, "rule:sentence_continues"
-        elif decision is None and mode != "current" and paragraph_break(raw, atoms, i):
-            decision, why = NEW, "rule:paragraph_break"
-        elif decision is None and mode in ("b", "b2"):
-            decision, why = SAME, "rule:same_paragraph"
         # 本文が空の Atom は Jev に見せても判断材料が無い。既定側へ倒す。
         if decision is None and not (atom_text(atoms[i]) and atom_text(atoms[i + 1])):
             decision, why = NEW, "rule:empty_text"
@@ -409,83 +347,47 @@ def unit_body(atoms: list[dict], indices: list[int]) -> str:
     return " ".join(filter(None, (atom_text(atoms[i]) for i in indices)))
 
 
-#: **計測用**。Tier と redundancy を 1 question にまとめる「まとめ方」。
+def unit_questions(atoms: list[dict], units: list[list[int]]) -> dict:
+    """ラウンド 2 の questions（Unit ごとの Tier）。
+
+    **redundancy はここでは聞かない。** Tier が決まってからでないと「誰に
+    聞くべきか」が分からないためで、[`redundancy_questions`] が後のラウンドで
+    SUPPORTING 以上の Unit にだけ聞く。
+
+    Tier と redundancy を 1 つの Choice（「既出の言い直し」を 5 つ目の選択肢に
+    足す）へ畳む案は**採らなかった**。設計書が「重複は Reading Tier とは
+    別軸」と定めていて、`policy::decorate` も 2 つを独立に使う
+    （`redundant -> weakened(tier)`）。実測でも畳むと軸が消えた — demo.md の
+    u9 / u10 は 4 つの Tier の probability がすべて 0.0 になり、Tier は
+    tie-break 次第（同じ question で detail と context の両方が出た）。
+    """
+    questions = {}
+    for number, indices in enumerate(units, start=1):
+        questions[f"tier:u{number}"] = {
+            "type": "choice",
+            "instructions": (
+                "この文書の中で、次の部分はどの読む優先度に当たりますか。\n\n"
+                f"――― 対象 ―――\n{unit_body(atoms, indices)}\n―――――――――"
+            ),
+            "criteria": dict(TIER_CRITERIA),
+        }
+    return questions
+
+
+#: redundancy を聞く Tier。DETAIL と CONTEXT には聞かない。
 #:
-#:     split   Choice(Tier) と Noul(redundancy) の 2 問（本番の挙動）
-#:     merged  Choice 1 問。Tier の 4 つに「既出の言い直し」を 5 つ目の
-#:             選択肢として足す。question 数が半分になり、本文の引用も
-#:             2 回から 1 回になる
-#:
-#: `merged` で `redundant` が選ばれたとき、Tier は残り 4 つの
-#: `probabilities` の argmax を立てる（Jev が redundant でなければ何と
-#: 答えたかの代わり）。**そのうえで `redundant_with` を出す** —
-#: `policy::decorate` が `is_redundant()` を見て `weakened()` を当てるので、
-#: Python 側でも弱めると**二重に弱まる**。
-UNIT_QUESTION_MODES = ("split", "merged", "tier_only")
-
-#: `merged` で足す 5 つ目の選択肢。
-REDUNDANT_CRITERION = (
-    "これより前の箇所ですでに述べられた内容を言い直しているだけで、"
-    "新しい情報を加えていない。"
-)
-
-#: **計測用**。question の定型文をどこまで削るか。
-#:
-#:     none   削らない（本番の挙動）
-#:     noframe `――― 対象 ―――` の枠だけを外す（問い文も criteria もそのまま）
-#:     shortask 問い文だけを短くする（枠は残す）
-#:     frame  枠を外し、かつ問い文も短くする（= noframe + shortask）
-#:     crit   criteria の説明文を短くする（設計書の逐語を崩す）
-#:     both   frame + crit
-#:
-#: `noframe` と `shortask` は `frame` を**分離して測る**ためにある。
-#: 枠と問い文を同時に削って壊れたとき、どちらが効いたのか分からないため。
-#:
-#: 実測の固定費（本文を除く 1 question あたり、2026-09-21）:
-#: Tier は 181 tok = 器 68 + criteria 説明文 65 + 枠組み文 65、
-#: redundancy は 81 tok = 器 8 + 枠組み文 73。合わせて Unit 1 つ 262 tok。
-#: **器（criteria のキー名と型）は削れない。**
-TRIM_MODES = ("none", "noframe", "shortask", "frame", "crit", "both")
-
-#: 枠を外すモード。
-NO_FRAME = ("noframe", "frame", "both")
-#: 問い文を短くするモード。
-SHORT_ASK = ("shortask", "frame", "both")
-
-#: `crit` で使う短い criteria。**設計書の逐語ではない** — 削ると判定が
-#: どれだけ動くかを測るための対照であって、採用案ではない。
-SHORT_TIER_CRITERIA = {
-    "essential": "落とすと要点や結論を取り違える。",
-    "supporting": "要点の理解に役立つ。",
-    "context": "背景や前提。",
-    "detail": "例や細部。",
-}
-SHORT_REDUNDANT_CRITERION = "前に述べた内容の言い直し。"
+#: `policy::decorate` は REDUNDANT な Unit の Tier を `weakened()` で 1 段
+#: 落とすだけなので、もともと下にいる CONTEXT / DETAIL は聞いても表示が
+#: 変わらない（CONTEXT -> DETAIL は Budget の並び順を少し動かすが、MARKED
+#: にも DIM の閾値にも効かない）。聞く相手を絞ると question が実測で
+#: 55〜95% 減る（README.md は 113 Unit 中 8 個だけが対象だった）。
+REDUNDANCY_TIERS = frozenset({"essential", "supporting"})
 
 
-def framed(instruction: str, body: str, trim: str) -> str:
-    """question の instructions を組む。`trim` が `frame` / `both` なら枠を省く。"""
-    if trim in NO_FRAME:
-        return f"{instruction}\n{body}"
-    return f"{instruction}\n\n――― 対象 ―――\n{body}\n―――――――――"
-
-
-def tier_criteria(merged: bool, trim: str) -> dict:
-    """Tier の criteria（`merged` なら 5 つ目を足す）。"""
-    short = trim in ("crit", "both")
-    out = dict(SHORT_TIER_CRITERIA if short else TIER_CRITERIA)
-    if merged:
-        out["redundant"] = SHORT_REDUNDANT_CRITERION if short else REDUNDANT_CRITERION
-    return out
-
-
-def unit_questions(
-    atoms: list[dict],
-    units: list[list[int]],
-    unit_mode: str = "split",
-    trim: str = "none",
+def redundancy_questions(
+    atoms: list[dict], units: list[list[int]], tiers: list[str]
 ) -> dict:
-    """ラウンド 2 の questions（Unit ごとの Tier と redundancy）。
+    """ラウンド 3 の questions のうち redundancy の分。
 
     redundancy は**方向を必ず指定する**。「これより前の箇所ですでに述べられた
     内容を言い直しているだけか」であって、対称に「重複しているか」と聞いては
@@ -498,61 +400,20 @@ def unit_questions(
     で、設計書も「**既読内容との** redundancy」と書いている。redundancy は
     既読との相対で決まるので、方向が本質である。
 
-    先頭の Unit には redundancy を聞かない —「これより前」が存在せず、
-    REDUNDANT_WITH の参照先も作れない。
+    先頭の Unit には聞かない —「これより前」が存在せず、REDUNDANT_WITH の
+    参照先も作れない。
     """
-    ask = "どの読む優先度か。" if trim in SHORT_ASK else (
-        "この文書の中で、次の部分はどの読む優先度に当たりますか。"
-    )
-    repeat = "前に述べた内容の言い直しか。" if trim in SHORT_ASK else (
-        "次の部分は、これより**前**の箇所ですでに述べられた内容を"
-        "言い直しているだけで、新しい情報を加えていない。"
-    )
     questions = {}
     for number, indices in enumerate(units, start=1):
-        uid = f"u{number}"
-        body = unit_body(atoms, indices)
-        merged = unit_mode == "merged" and number > 1
-        questions[f"tier:{uid}"] = {
-            "type": "choice",
-            "instructions": framed(ask, body, trim),
-            "criteria": tier_criteria(merged, trim),
-        }
-        if unit_mode == "split" and number > 1:
-            questions[f"redundant:{uid}"] = {
-                "type": "noul",
-                "instructions": framed(repeat, body, trim),
-            }
-    return questions
-
-
-def redundancy_questions(
-    atoms: list[dict], units: list[list[int]], tiers: list[str], trim: str = "none"
-) -> dict:
-    """**計測用 (a')**。redundancy を SUPPORTING 以上の Unit にだけ後から聞く。
-
-    設計書は「重複は Reading Tier とは**別軸**」と書いていて、`policy` も
-    `redundant -> weakened(tier)` と 2 つを独立に使う。だから Tier の Choice に
-    5 つ目の選択肢として畳むことはできない（畳むと、重複と答えた Unit の
-    Tier が返らない）。軸を保ったまま question を減らすには、**聞く相手を
-    絞る**しかない。
-
-    DETAIL と CONTEXT の重複は聞かない — どうせ DIM に落ちるので、
-    `weakened()` を当てても表示が変わらない。
-
-    先頭の Unit には聞かない（「これより前」が無い）。
-    """
-    repeat = "前に述べた内容の言い直しか。" if trim in SHORT_ASK else (
-        "次の部分は、これより**前**の箇所ですでに述べられた内容を"
-        "言い直しているだけで、新しい情報を加えていない。"
-    )
-    questions = {}
-    for number, indices in enumerate(units, start=1):
-        if number == 1 or tiers[number - 1] not in ("essential", "supporting"):
+        if number == 1 or tiers[number - 1] not in REDUNDANCY_TIERS:
             continue
         questions[f"redundant:u{number}"] = {
             "type": "noul",
-            "instructions": framed(repeat, unit_body(atoms, indices), trim),
+            "instructions": (
+                "次の部分は、これより**前**の箇所ですでに述べられた内容を"
+                "言い直しているだけで、新しい情報を加えていない。\n\n"
+                f"――― 対象 ―――\n{unit_body(atoms, indices)}\n―――――――――"
+            ),
         }
     return questions
 
@@ -637,65 +498,32 @@ def noul_of(answers: dict, key: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def merged_tier(answers: dict, key: str, criteria: dict) -> tuple[str, bool]:
-    """**計測用**。5 択の答えから `(Tier, redundant か)` を取り出す。
-
-    `redundant` が選ばれたときは、残り 4 つの `probabilities` の argmax を
-    Tier に立てる。**弱めない** — `policy::decorate` が `is_redundant()` を
-    見て `weakened()` を当てるので、ここで弱めると二重になる。
-    """
-    choice = choice_of(answers, key, criteria)
-    if choice != "redundant":
-        return choice, False
-    probs = answer_of(answers, key).get("probabilities") or {}
-    tiers = {k: v for k, v in probs.items() if k in TIER_CRITERIA}
-    if not tiers:
-        raise JevError(f"{key}: redundant が選ばれたのに Tier の probabilities がありません")
-    return max(tiers, key=lambda k: tiers[k]), True
-
-
 def build_units(
-    atoms: list[dict],
-    units: list[list[int]],
-    answers: dict,
-    unit_mode: str = "split",
-    trim: str = "none",
-    tiers: list[str] | None = None,
+    atoms: list[dict], units: list[list[int]], tiers: list[str], answers: dict
 ) -> list[dict]:
-    """ラウンド 2 の答えから、プロトコルの `units` を組む。
+    """ラウンド 2・3 の答えから、プロトコルの `units` を組む。
 
     `confidence` と `noul` は**捨てず**、各 Unit の `jev` フィールドに記録する
     （プロトコルは未知のフィールドを拒否しないので akapen 側は無視する）。
-    使い道は実測してから決める。閾値で判定を倒すことは**していない** —
-    実測で閾値が値の真上に乗り、実行ごとに答えが揺れたため。
+    閾値で判定を倒すことは redundancy 以外では**していない** — 実測で閾値が
+    値の真上に乗り、実行ごとに答えが揺れたため。
+
+    redundancy を聞いていない Unit（CONTEXT / DETAIL と先頭）は、そもそも
+    REDUNDANT になりえないので `relations` は空のままになる。
     """
     bodies = [unit_body(atoms, indices) for indices in units]
     out = []
     for number, indices in enumerate(units, start=1):
         uid = f"u{number}"
-        merged = unit_mode == "merged" and number > 1
-        if tiers is not None:
-            tier, is_redundant = tiers[number - 1], False
-        elif merged:
-            tier, is_redundant = merged_tier(
-                answers, f"tier:{uid}", tier_criteria(True, trim)
-            )
-        else:
-            tier = choice_of(answers, f"tier:{uid}", tier_criteria(False, trim))
-            is_redundant = False
         record: dict = {
-            "tier_choice": tier,
+            "tier_choice": tiers[number - 1],
             "tier_confidence": confidence_of(answers, f"tier:{uid}"),
         }
         relations: list[dict] = []
-        if number > 1:
-            if unit_mode == "split" and (tiers is None or f"redundant:{uid}" in answers):
-                noul = noul_of(answers, f"redundant:{uid}")
-                record["redundancy_noul"] = noul
-                is_redundant = noul >= REDUNDANCY_THRESHOLD
-            else:
-                record["redundant_choice"] = is_redundant
-            if is_redundant:
+        if f"redundant:{uid}" in answers:
+            noul = noul_of(answers, f"redundant:{uid}")
+            record["redundancy_noul"] = noul
+            if noul >= REDUNDANCY_THRESHOLD:
                 target = redundancy_target(bodies, number)
                 record["redundant_with"] = target
                 if target is not None:
@@ -704,17 +532,12 @@ def build_units(
             {
                 "id": uid,
                 "atoms": list(indices),
-                "reading_tier": tier,
+                "reading_tier": tiers[number - 1],
                 "relations": relations,
                 "jev": record,
             }
         )
     return out
-
-
-# ---------------------------------------------------------------------------
-# 核 — Unit の中で「これだけ読めば要点が取れる」Atom
-# ---------------------------------------------------------------------------
 
 
 def wants_core(unit: dict) -> bool:
@@ -732,32 +555,58 @@ def wants_core(unit: dict) -> bool:
     return unit["reading_tier"] == "essential" and not unit["relations"]
 
 
-def core_candidates(atoms: list[dict], unit: dict, core_kinds: str) -> dict:
-    """核の選択肢。`core_kinds` が `prose` なら散文の Atom だけに絞る。
+def core_candidates(atoms: list[dict], unit: dict) -> dict:
+    """核の選択肢。**散文の Atom だけ**を候補にする。
 
-    見出し・コードブロック・テーブルは「1 か所だけ読むならどこか」の答えに
-    ならない。種別は構文の話なので、設計書「Jev に判断させないもの:
-    syntax parsing」のとおりここで落とす。
+    `heading` / `code_block` / `table` は「このまとまりから 1 か所だけ読むなら
+    どこか」の答えにならない。見出しは中身を持たないし、コード例や表は要点の
+    言い換えではない。種別は構文の話なので、設計書「Jev に判断させないもの:
+    **syntax parsing**」のとおりここで落とす — 実測でも、候補に見出しがあると
+    Jev は見出しを選んだ（demo.md の `## 結論` / `## 制約`）。
+
+    本文が空の Atom は選択肢にしない（選ばれても光らせる中身が無い）。
     """
     return {
         f"atom:{i}": atom_text(atoms[i])
         for i in unit["atoms"]
-        if atom_text(atoms[i])
-        and (core_kinds == "all" or atoms[i].get("kind") in PROSE_KINDS)
+        if atom_text(atoms[i]) and atoms[i].get("kind") in PROSE_KINDS
     }
 
 
-def assign_lone_cores(atoms: list[dict], units: list[dict], core_kinds: str) -> None:
+def core_budget(source: str) -> int:
+    """1 つの核 question に使えるトークン数の上限。
+
+    「`state` + 最長 question ≦ 32k」という制約は、**state の大きさによって
+    1 question に使える量が変わる**ということである。だから選択肢の個数を
+    固定値で切っても正しくならない — 45.6 KB の文書では 82 個で 5,469 tokens
+    だが、同じ個数でも state が小さければ余裕があり、大きければ足りない。
+
+    返り値が 0 以下なら、その文書ではどんな核 question も送れない。
+    """
+    state = len(source.encode()) * TOKENS_PER_BYTE
+    return int(STATE_PLUS_QUESTION_LIMIT - CORE_QUESTION_MARGIN - state)
+
+
+def core_fits(options: dict, budget: int) -> bool:
+    """この選択肢の集合が予算に収まるか（見積もり）。"""
+    body = sum(len(text.encode()) for text in options.values())
+    return body * TOKENS_PER_BYTE <= budget
+
+
+def assign_lone_cores(atoms: list[dict], units: list[dict]) -> None:
     """候補が 1 つしかない Unit の核を、聞かずに決める。
 
-    絞り込みの結果 1 つになった場合に**聞かない**だけだと、核が空のまま
-    Unit 全体（見出しを含む）が MARKED に戻ってしまう。候補が 1 つなら
-    答えは決まっているので、question を使わずにそれを核にする。
+    絞り込んだ結果 1 つになった場合に**聞かないだけ**だと、核が空のまま
+    Unit 全体（見出しを含む）が MARKED に戻ってしまう。候補が 1 つなら答えは
+    決まっているので、question を使わずにそれを核にする。
+
+    実測ではこれで核の question が 33〜89% 減った（design.md は 19 Unit 中
+    17 が聞かずに決まった）。
     """
     for unit in units:
         if not wants_core(unit):
             continue
-        options = core_candidates(atoms, unit, core_kinds)
+        options = core_candidates(atoms, unit)
         if len(options) == 1:
             index = int(next(iter(options)).split(":")[1])
             unit["core_atoms"] = [index]
@@ -765,31 +614,32 @@ def assign_lone_cores(atoms: list[dict], units: list[dict], core_kinds: str) -> 
             unit["jev"]["core_by"] = "rule:only_prose_atom"
 
 
-def core_questions(
-    atoms: list[dict], units: list[dict], trim: str = "none", core_kinds: str = "all"
-) -> dict:
-    """ラウンド 3 の questions（MARKED になる Unit の核）。
+def core_questions(atoms: list[dict], units: list[dict], source: str) -> dict:
+    """ラウンド 3 の questions のうち核の分。
 
-    選択肢は Unit を構成する Atom の本文そのもので、キーは `atom:<index>`。
-    本文が空の Atom は選択肢にしない（選ばれても光らせる中身が無い）。
+    選択肢は Unit を構成する散文 Atom の本文そのもので、キーは `atom:<index>`。
 
-    **Atom が 1 つしかない Unit には聞かない。** 選択肢が 1 つの Choice は
-    答えが決まっていて、question を 1 つ使う意味が無い。このとき核は空の
-    ままになり、Unit 全体が MARKED になる — Atom が 1 つなのだから同じこと
-    である。
+    **候補が 1 つの Unit には聞かない** — 答えが決まっているので
+    [`assign_lone_cores`] が先に埋めている。**散文が 1 つも無い Unit にも
+    聞かない**。このとき核は空のままで Unit 全体が MARKED になるが、実測では
+    4 文書のいずれにも「MARKED になる Atom 2 個以上の Unit で散文が 0 個」は
+    無かった。
+
+    **予算を超える Unit にも聞かない**（[`core_budget`]）。核が無ければ Unit
+    全体が MARKED になる — 絞り込めないだけで、注釈としては壊れない安全側の
+    振る舞いである。
     """
+    budget = core_budget(source)
     questions = {}
     for unit in units:
         if not wants_core(unit):
             continue
-        options = core_candidates(atoms, unit, core_kinds)
-        if not 2 <= len(options) <= MAX_CORE_CHOICES:
+        options = core_candidates(atoms, unit)
+        if len(options) < 2 or not core_fits(options, budget):
             continue
         questions[f"core:{unit['id']}"] = {
             "type": "choice",
-            "instructions": SHORT_CORE_INSTRUCTIONS
-            if trim in SHORT_ASK
-            else CORE_INSTRUCTIONS,
+            "instructions": CORE_INSTRUCTIONS,
             "criteria": options,
         }
     return questions
@@ -865,15 +715,7 @@ def http_error_message(code: int, detail: str) -> str:
     return f"Jev が HTTP {code} を返しました: {detail}"
 
 
-def ask_jev(
-    state: str,
-    questions: dict,
-    model: str,
-    timeout: float,
-    trace: Trace | None = None,
-    number: int = 0,
-    count: int = 0,
-) -> dict:
+def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
     """1 リクエストで questions をまとめて評価させる。
 
     Jev は「すべての question を同じ state に対して並列かつ独立に評価する」
@@ -898,8 +740,6 @@ def ask_jev(
     except urllib.error.HTTPError as e:
         # 本文には鍵は載らない（載せていない）。要点だけ 1 行にする。
         detail = one_line(e.read().decode("utf-8", "replace"))[:200]
-        if trace is not None:
-            trace.round(number, count, None, round(time.monotonic() - started, 3), detail)
         raise JevError(http_error_message(e.code, detail)) from e
     except urllib.error.URLError as e:
         raise JevError(f"Jev に接続できません: {one_line(str(e.reason))}") from e
@@ -910,8 +750,6 @@ def ask_jev(
     if not isinstance(payload.get("answers"), dict):
         raise JevError("Jev の応答に answers がありません")
     payload["elapsed_s"] = round(time.monotonic() - started, 3)
-    if trace is not None:
-        trace.round(number, count, payload.get("usage"), payload["elapsed_s"], None)
     return payload
 
 
@@ -930,16 +768,7 @@ def round_record(payload: dict, count: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def annotate(
-    request: dict,
-    model: str,
-    timeout: float,
-    mode: str = "current",
-    trace: Trace | None = None,
-    unit_mode: str = "split",
-    trim: str = "none",
-    core_kinds: str = "all",
-) -> dict:
+def annotate(request: dict, model: str, timeout: float) -> dict:
     version = request.get("version")
     if version != VERSION:
         raise JevError(f"対応していないプロトコル版です: {version!r}")
@@ -951,119 +780,92 @@ def annotate(
     rounds = []
 
     # --- ラウンド 1: 散文どうしの境界 -> Unit --------------------------
-    plan = plan_boundaries(atoms, state, mode)
+    plan = plan_boundaries(atoms)
     questions = boundary_questions(atoms, plan)
     if questions:
-        payload = ask_jev(state, questions, model, timeout, trace, 1, len(questions))
+        payload = ask_jev(state, questions, model, timeout)
         apply_boundary_answers(plan, payload["answers"])
         rounds.append(round_record(payload, len(questions)))
     units = group_units(atoms, plan)
-    if trace is not None:
-        trace.note(boundaries=plan, units=len(units))
 
-    # --- ラウンド 2: Unit ごとの Tier と redundancy ---------------------
-    questions = unit_questions(atoms, units, unit_mode, trim)
-    payload = ask_jev(state, questions, model, timeout, trace, 2, len(questions))
+    # --- ラウンド 2: Unit ごとの Tier ----------------------------------
+    questions = unit_questions(atoms, units)
+    payload = ask_jev(state, questions, model, timeout)
     rounds.append(round_record(payload, len(questions)))
     answers = dict(payload["answers"])
+    tiers = [
+        choice_of(answers, f"tier:u{n}", TIER_CRITERIA)
+        for n in range(1, len(units) + 1)
+    ]
 
-    if unit_mode == "tier_only":
-        # (a'): Tier だけ先に確定し、redundancy は SUPPORTING 以上にだけ聞く。
-        # 核も同じラウンドで聞いてしまう（ESSENTIAL かつ REDUNDANT は実測で
-        # 4 文書とも 0〜1 件しかないので、捨てる question はほぼ出ない）。
-        tiers = [
-            choice_of(answers, f"tier:u{n}", tier_criteria(False, trim))
-            for n in range(1, len(units) + 1)
-        ]
-        later = redundancy_questions(atoms, units, tiers, trim)
-        provisional = [
-            {"id": f"u{n}", "atoms": list(ix), "reading_tier": tiers[n - 1], "relations": []}
-            for n, ix in enumerate(units, start=1)
-        ]
-        later.update(core_questions(atoms, provisional, trim, core_kinds))
-        if later:
-            payload = ask_jev(state, later, model, timeout, trace, 3, len(later))
-            rounds.append(round_record(payload, len(later)))
-            answers.update(payload["answers"])
-        built = build_units(atoms, units, answers, "split", trim, tiers)
-        assign_lone_cores(atoms, built, core_kinds)
-        apply_core_answers(built, later, answers)
-        # REDUNDANT になった Unit の核は使われない（MARKED にならない）ので落とす。
-        for unit in built:
-            if unit["relations"]:
-                unit.pop("core_atoms", None)
-        return {
-            "version": VERSION,
-            "units": built,
-            "jev": {
-                "rounds": rounds,
-                "boundaries": plan,
-                "boundary_mode": mode,
-                "unit_question_mode": unit_mode,
-                "trim": trim,
-                "core_kinds": core_kinds,
-            },
-        }
-
-    built = build_units(atoms, units, answers, unit_mode, trim)
-
-    # --- ラウンド 3: MARKED になる Unit の核 ---------------------------
-    assign_lone_cores(atoms, built, core_kinds)
-    questions = core_questions(atoms, built, trim, core_kinds)
+    # --- ラウンド 3: redundancy（SUPPORTING 以上）と、核 ----------------
+    #
+    # 2 つを 1 ラウンドにまとめている。核を聞く相手は本来「ESSENTIAL かつ非
+    # REDUNDANT」だが、redundancy の答えを待つとラウンドが 4 つになる。
+    # 実測では 4 文書とも「ESSENTIAL かつ REDUNDANT」は 0〜1 件しかないので、
+    # 捨てることになる核の question はほぼ出ない。
+    provisional = [
+        {"id": f"u{n}", "atoms": list(ix), "reading_tier": tiers[n - 1], "relations": []}
+        for n, ix in enumerate(units, start=1)
+    ]
+    questions = redundancy_questions(atoms, units, tiers)
+    questions.update(core_questions(atoms, provisional, state))
     if questions:
-        payload = ask_jev(state, questions, model, timeout, trace, 3, len(questions))
-        apply_core_answers(built, questions, payload["answers"])
+        payload = ask_jev(state, questions, model, timeout)
         rounds.append(round_record(payload, len(questions)))
+        answers.update(payload["answers"])
+
+    built = build_units(atoms, units, tiers, answers)
+    assign_lone_cores(atoms, built)
+    apply_core_answers(built, questions, answers)
+    # REDUNDANT だった Unit は MARKED にならないので、核は使われない。
+    for unit in built:
+        if unit["relations"]:
+            unit.pop("core_atoms", None)
+            unit["jev"].pop("core_choice", None)
+            unit["jev"].pop("core_by", None)
 
     return {
         "version": VERSION,
         "units": built,
-        "jev": {
-            "rounds": rounds,
-            "boundaries": plan,
-            "boundary_mode": mode,
-            "unit_question_mode": unit_mode,
-            "trim": trim,
-            "core_kinds": core_kinds,
-        },
+        "jev": {"rounds": rounds, "boundaries": plan},
     }
 
 
-def dry_run(
-    request: dict, model: str, mode: str = "current",
-    unit_mode: str = "split", trim: str = "none",
-) -> dict:
+def dry_run(request: dict, model: str) -> dict:
     """API を叩かずに、送る 3 ラウンドのリクエストの形を出す。
 
     後のラウンドは前のラウンドの答えに依存するので、仮定を置いて組む。
 
     - ラウンド 2: **Jev に聞く境界はすべて NEW_UNIT だった**と仮定する
       （構造ルールで決まった境界はそのまま効く）
-    - ラウンド 3: **すべての Unit が ESSENTIAL かつ非 REDUNDANT だった**と
-      仮定する。本番では [`wants_core`] がここを絞るので、実際に送る
-      question はこれより少ない
+    - ラウンド 3: **すべての Unit が ESSENTIAL だった**と仮定する。本番では
+      redundancy は SUPPORTING 以上にだけ、核は ESSENTIAL かつ散文の候補が
+      2 つ以上ある Unit にだけ聞くので、実際に送る question はこれより少ない
 
     仮定は戻り値の `assumptions` にも載せる — 形だけ見て「これが本番で送る
     question 数だ」と読まれると困るため。
     """
     atoms = request.get("atoms") or []
     state = request.get("source") or ""
-    plan = plan_boundaries(atoms, state, mode)
+    plan = plan_boundaries(atoms)
     first = boundary_questions(atoms, plan)
     for entry in plan:
         if entry["decision"] is None:
             entry["decision"] = NEW
     units = group_units(atoms, plan)
-    # ラウンド 3 は Tier の答えを要るので、全部 ESSENTIAL だと仮定して組む。
+    tiers = ["essential"] * len(units)
     as_essential = [
         {"id": f"u{number}", "atoms": indices, "reading_tier": "essential", "relations": []}
         for number, indices in enumerate(units, start=1)
     ]
+    third = redundancy_questions(atoms, units, tiers)
+    third.update(core_questions(atoms, as_essential, state))
     return {
         "assumptions": [
             "ラウンド 2 は「Jev に聞く境界はすべて new_unit」と仮定して組んでいる",
-            "ラウンド 3 は「すべての Unit が essential かつ非 redundant」と仮定して"
-            "組んでいる（本番はここが絞られるので question はもっと少ない）",
+            "ラウンド 3 は「すべての Unit が essential」と仮定して組んでいる"
+            "（本番はここが絞られるので question はもっと少ない）",
         ],
         "rounds": [
             {"round": 1, "state": state, "model": model, "questions": first},
@@ -1071,14 +873,9 @@ def dry_run(
                 "round": 2,
                 "state": state,
                 "model": model,
-                "questions": unit_questions(atoms, units, unit_mode, trim),
+                "questions": unit_questions(atoms, units),
             },
-            {
-                "round": 3,
-                "state": state,
-                "model": model,
-                "questions": core_questions(atoms, as_essential, trim),
-            },
+            {"round": 3, "state": state, "model": model, "questions": third},
         ],
     }
 
@@ -1099,36 +896,6 @@ def main() -> int:
         help=f"1 リクエストのタイムアウト秒（既定 {DEFAULT_TIMEOUT}）",
     )
     parser.add_argument(
-        "--boundary-mode",
-        choices=BOUNDARY_MODES,
-        default="current",
-        help="【計測用】散文どうしの境界の決め方（既定 current が本番の挙動）",
-    )
-    parser.add_argument(
-        "--unit-question",
-        choices=UNIT_QUESTION_MODES,
-        default="split",
-        help="【計測用】Tier と redundancy を分けるか 1 問にまとめるか（既定 split が本番）",
-    )
-    parser.add_argument(
-        "--trim",
-        choices=TRIM_MODES,
-        default="none",
-        help="【計測用】定型文をどこまで削るか（既定 none が本番）",
-    )
-    parser.add_argument(
-        "--core-kinds",
-        choices=CORE_KIND_MODES,
-        default="all",
-        help="【計測用】核の選択肢にできる Atom の種別（既定 all が本番）",
-    )
-    parser.add_argument(
-        "--trace",
-        metavar="PATH",
-        help="【計測用】ラウンドごとの usage と所要をこのファイルへ逐次書き出す"
-        "（途中で失敗しても残る）",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="API を叩かず、送る 3 ラウンドのリクエストの形だけを出す"
@@ -1143,15 +910,9 @@ def main() -> int:
         return 1
     try:
         if args.dry_run:
-            response = dry_run(
-                request, args.model, args.boundary_mode, args.unit_question, args.trim
-            )
+            response = dry_run(request, args.model)
         else:
-            trace = Trace(args.trace) if args.trace else None
-            response = annotate(
-                request, args.model, args.timeout, args.boundary_mode, trace,
-                args.unit_question, args.trim, args.core_kinds,
-            )
+            response = annotate(request, args.model, args.timeout)
     except JevError as e:
         # akapen はステータス行に stderr の**最後の非空行**を 160 字まで出す
         # （`src/export.rs` の `Capture::tail`）。だから 1 行に収める。

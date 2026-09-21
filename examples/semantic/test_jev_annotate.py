@@ -154,8 +154,10 @@ class BuildUnitsTest(unittest.TestCase):
         "redundant:u3": {"noul": 0.93},
     }
 
+    TIERS = ["essential", "detail", "supporting"]
+
     def build(self):
-        return jev.build_units(self.ATOMS, self.UNITS, self.ANSWERS)
+        return jev.build_units(self.ATOMS, self.UNITS, self.TIERS, self.ANSWERS)
 
     def test_units_keep_the_protocol_shape(self):
         units = self.build()
@@ -182,19 +184,24 @@ class BuildUnitsTest(unittest.TestCase):
         # 答えが揺れたため）。confidence が低くても choice がそのまま通る。
         answers = dict(self.ANSWERS)
         answers["tier:u1"] = {"choice": "essential", "confidence": 0.01}
-        units = jev.build_units(self.ATOMS, self.UNITS, answers)
+        units = jev.build_units(self.ATOMS, self.UNITS, self.TIERS, answers)
         self.assertEqual(units[0]["reading_tier"], "essential")
-
-    def test_a_missing_tier_answer_fails_loudly(self):
-        answers = {k: v for k, v in self.ANSWERS.items() if k != "tier:u2"}
-        with self.assertRaises(jev.JevError):
-            jev.build_units(self.ATOMS, self.UNITS, answers)
 
     def test_a_missing_noul_fails_loudly(self):
         answers = dict(self.ANSWERS)
         answers["redundant:u3"] = {"confidence": 0.5}
         with self.assertRaises(jev.JevError):
-            jev.build_units(self.ATOMS, self.UNITS, answers)
+            jev.build_units(self.ATOMS, self.UNITS, self.TIERS, answers)
+
+    def test_a_unit_that_was_not_asked_about_redundancy_has_no_relation(self):
+        # CONTEXT / DETAIL には redundancy を聞かないので、答えが無い。
+        # 黙って REDUNDANT 扱いにも非 REDUNDANT 扱いにもせず、relation を
+        # 付けずに通す（聞いていないことは記録にも残らない）。
+        answers = {k: v for k, v in self.ANSWERS.items() if not k.startswith("redundant:")}
+        units = jev.build_units(self.ATOMS, self.UNITS, self.TIERS, answers)
+        self.assertEqual([u["relations"] for u in units], [[], [], []])
+        for unit in units:
+            self.assertNotIn("redundancy_noul", unit["jev"])
 
     def test_the_relation_is_dropped_when_no_earlier_unit_overlaps(self):
         # Noul が高くても参照先が選べなければ relation は付けない
@@ -203,9 +210,10 @@ class BuildUnitsTest(unittest.TestCase):
         units = jev.build_units(
             atoms,
             [[0], [1]],
+            ["essential", "supporting"],
             {
                 "tier:u1": {"choice": "essential", "confidence": 0.5},
-                "tier:u2": {"choice": "detail", "confidence": 0.5},
+                "tier:u2": {"choice": "supporting", "confidence": 0.5},
                 "redundant:u2": {"noul": 0.99},
             },
         )
@@ -236,24 +244,58 @@ class CoreQuestionTest(unittest.TestCase):
         unit.update(overrides)
         return [unit]
 
-    def test_a_marked_unit_offers_each_of_its_atoms_as_a_choice(self):
-        asked = jev.core_questions(self.ATOMS, self.units())
+    SOURCE = "結論\n\n採用する方式は差分配信である。帯域は 3 割減る見込み。\n"
+
+    def ask(self, units):
+        return jev.core_questions(self.ATOMS, units, self.SOURCE)
+
+    def test_a_marked_unit_offers_its_prose_atoms_as_choices(self):
+        # 見出しは候補に入らない（「1 か所だけ読むなら」の答えにならない）。
+        asked = self.ask(self.units())
         self.assertEqual(list(asked), ["core:u1"])
         question = asked["core:u1"]
         self.assertEqual(question["type"], "choice")
         self.assertEqual(
             question["criteria"],
             {
-                "atom:0": "結論",
                 "atom:1": "採用する方式は差分配信である。",
                 "atom:2": "帯域は 3 割減る見込み。",
             },
         )
 
+    def test_code_blocks_and_tables_are_not_core_candidates(self):
+        atoms = [
+            atom(0, "sentence", "設定はこうする。"),
+            atom(1, "code_block", "```\nkey: value\n```"),
+            atom(2, "table", "| a | b |"),
+        ]
+        unit = {"id": "u1", "atoms": [0, 1, 2], "reading_tier": "essential",
+                "relations": [], "jev": {}}
+        self.assertEqual(set(jev.core_candidates(atoms, unit)), {"atom:0"})
+
+    def test_a_unit_with_no_prose_is_not_asked(self):
+        atoms = [atom(0, "heading", "## 設定例"), atom(1, "code_block", "```\nx\n```")]
+        unit = {"id": "u1", "atoms": [0, 1], "reading_tier": "essential",
+                "relations": [], "jev": {}}
+        self.assertEqual(jev.core_questions(atoms, [unit], "## 設定例"), {})
+        jev.assign_lone_cores(atoms, [unit])
+        # 核が付かないので Unit 全体が MARKED になる（安全側）。
+        self.assertNotIn("core_atoms", unit)
+
+    def test_a_single_prose_candidate_becomes_the_core_without_asking(self):
+        # 聞かないだけだと核が空になり、見出しごと MARKED に戻ってしまう。
+        atoms = [atom(0, "heading", "## 結論"), atom(1, "sentence", "差分配信にする。")]
+        unit = {"id": "u1", "atoms": [0, 1], "reading_tier": "essential",
+                "relations": [], "jev": {}}
+        self.assertEqual(jev.core_questions(atoms, [unit], "## 結論"), {})
+        jev.assign_lone_cores(atoms, [unit])
+        self.assertEqual(unit["core_atoms"], [1])
+        self.assertEqual(unit["jev"]["core_by"], "rule:only_prose_atom")
+
     def test_the_question_does_not_repeat_the_body_it_already_sends_as_choices(self):
         # 本文を instructions にも入れると同じテキストを 2 回送ることになり、
         # context window を無駄に食う。
-        question = jev.core_questions(self.ATOMS, self.units())["core:u1"]
+        question = self.ask(self.units())["core:u1"]
         for text in question["criteria"].values():
             self.assertNotIn(text, question["instructions"])
         self.assertIn("1 か所だけ", question["instructions"])
@@ -261,26 +303,21 @@ class CoreQuestionTest(unittest.TestCase):
     def test_only_units_that_can_become_marked_are_asked(self):
         # MARKED は「ESSENTIAL かつ非 REDUNDANT」だけ。
         for tier in ["supporting", "context", "detail"]:
-            self.assertEqual(
-                jev.core_questions(self.ATOMS, self.units(reading_tier=tier)), {}
-            )
+            self.assertEqual(self.ask(self.units(reading_tier=tier)), {})
         self.assertEqual(
-            jev.core_questions(
-                self.ATOMS, self.units(relations=[{"redundant_with": "u0"}])
-            ),
-            {},
+            self.ask(self.units(relations=[{"redundant_with": "u0"}])), {}
         )
 
     def test_a_unit_with_one_usable_atom_is_not_asked(self):
         # 選択肢が 1 つの Choice は答えが決まっている。核は空のままになり、
         # Atom が 1 つなのだから Unit 全体 = その Atom が MARKED になる。
-        self.assertEqual(jev.core_questions(self.ATOMS, self.units(atoms=[1])), {})
+        self.assertEqual(self.ask(self.units(atoms=[1])), {})
         # 本文が空の Atom は選択肢にならないので、これも 1 つ扱い。
-        self.assertEqual(jev.core_questions(self.ATOMS, self.units(atoms=[3, 4])), {})
+        self.assertEqual(self.ask(self.units(atoms=[3, 4])), {})
 
     def test_an_answer_becomes_a_single_core_atom(self):
         units = self.units()
-        questions = jev.core_questions(self.ATOMS, units)
+        questions = self.ask(units)
         jev.apply_core_answers(
             units, questions, {"core:u1": {"choice": "atom:2", "confidence": 0.42}}
         )
@@ -290,15 +327,15 @@ class CoreQuestionTest(unittest.TestCase):
     def test_confidence_never_flips_the_core(self):
         # 閾値で倒すのは採用していない（`probabilities` も見ない）。
         units = self.units()
-        questions = jev.core_questions(self.ATOMS, units)
+        questions = self.ask(units)
         jev.apply_core_answers(
-            units, questions, {"core:u1": {"choice": "atom:0", "confidence": 0.01}}
+            units, questions, {"core:u1": {"choice": "atom:1", "confidence": 0.01}}
         )
-        self.assertEqual(units[0]["core_atoms"], [0])
+        self.assertEqual(units[0]["core_atoms"], [1])
 
     def test_a_missing_or_unknown_core_answer_fails_loudly(self):
         units = self.units()
-        questions = jev.core_questions(self.ATOMS, units)
+        questions = self.ask(units)
         with self.assertRaises(jev.JevError):
             jev.apply_core_answers(units, questions, {})
         with self.assertRaises(jev.JevError):
@@ -309,6 +346,41 @@ class CoreQuestionTest(unittest.TestCase):
         units = self.units(reading_tier="detail")
         jev.apply_core_answers(units, {}, {"core:u1": {"choice": "atom:0"}})
         self.assertNotIn("core_atoms", units[0])
+
+
+class CoreBudgetTest(unittest.TestCase):
+    """核 question の上限は state の大きさから決まる。
+
+    制約は「`state` + 最長 question ≦ 32k」なので、固定の選択肢数では
+    正しくならない（`docs/gotchas.md`）。
+    """
+
+    def test_the_budget_shrinks_as_the_state_grows(self):
+        small = jev.core_budget("あ" * 100)
+        large = jev.core_budget("あ" * 100_000)
+        self.assertGreater(small, large)
+
+    def test_a_huge_state_leaves_no_budget_at_all(self):
+        # state だけで 32k を使い切る文書では、核はどうやっても聞けない。
+        self.assertLessEqual(jev.core_budget("あ" * 40_000), 0)
+
+    def test_the_measured_worst_case_still_fits(self):
+        # 実測（2026-09-21）: 45,650 バイトの文書の最大 Unit は選択肢 82 個・
+        # 本文 11,026 バイトで、question は 5,469 tokens だった。
+        budget = jev.core_budget("x" * 45_650)
+        self.assertGreater(budget, 0)
+        self.assertTrue(jev.core_fits({f"atom:{i}": "x" * 134 for i in range(82)}, budget))
+
+    def test_a_unit_over_the_budget_is_not_asked(self):
+        # 上限を超えたら核を聞かない。核が無ければ Unit 全体が MARKED に
+        # なるだけで、注釈としては壊れない（安全側）。
+        source = "あ" * 20_000
+        atoms = [atom(i, "sentence", "文" * 4_000) for i in range(4)]
+        unit = {"id": "u1", "atoms": [0, 1, 2, 3], "reading_tier": "essential",
+                "relations": [], "jev": {}}
+        self.assertEqual(jev.core_questions(atoms, [unit], source), {})
+        # 同じ Unit でも state が小さければ聞ける。
+        self.assertIn("core:u1", jev.core_questions(atoms, [unit], "短い。"))
 
 
 class DryRunTest(unittest.TestCase):
@@ -382,21 +454,37 @@ class DryRunTest(unittest.TestCase):
         }
         self.assertFalse(asked & structural)
 
-    def test_round_two_asks_a_tier_for_every_unit_and_redundancy_for_the_rest(self):
+    def test_round_two_asks_only_a_tier_and_asks_it_for_every_unit(self):
+        # redundancy はここでは聞かない — Tier が決まるまで「誰に聞くか」が
+        # 分からないため。
         asked = self.payload()["rounds"][1]["questions"]
-        tiers = sorted(k for k in asked if k.startswith("tier:"))
+        self.assertTrue(asked)
+        self.assertEqual([k for k in asked if not k.startswith("tier:")], [])
+        for key, question in asked.items():
+            self.assertEqual(question["type"], "choice")
+            self.assertEqual(set(question["criteria"]), set(jev.TIER_CRITERIA))
+
+    def test_round_three_asks_redundancy_only_for_supporting_or_better(self):
+        # dry-run は全 Unit を essential と仮定するので、先頭以外すべてに付く。
+        asked = self.payload()["rounds"][2]["questions"]
         redundant = sorted(k for k in asked if k.startswith("redundant:"))
-        self.assertEqual(len(tiers), len(redundant) + 1, "先頭 Unit だけ聞かない")
+        tiers = self.payload()["rounds"][1]["questions"]
+        self.assertEqual(len(redundant), len(tiers) - 1, "先頭 Unit だけ聞かない")
         self.assertNotIn("redundant:u1", asked)
-        for key in tiers:
-            self.assertEqual(asked[key]["type"], "choice")
-            self.assertEqual(set(asked[key]["criteria"]), set(jev.TIER_CRITERIA))
         for key in redundant:
             self.assertEqual(asked[key]["type"], "noul")
             # redundancy は方向を必ず指定する（対称に聞くと結論まで拾う）。
             self.assertIn("これより**前**の箇所", asked[key]["instructions"])
 
-    def test_round_three_asks_for_the_core_of_multi_atom_units_only(self):
+    def test_redundancy_skips_context_and_detail(self):
+        atoms = [atom(i, "sentence", f"文{i}。") for i in range(4)]
+        units = [[0], [1], [2], [3]]
+        tiers = ["essential", "supporting", "context", "detail"]
+        asked = jev.redundancy_questions(atoms, units, tiers)
+        # u1 は先頭なので聞かない。u3 / u4 は CONTEXT / DETAIL なので聞かない。
+        self.assertEqual(sorted(asked), ["redundant:u2"])
+
+    def test_round_three_asks_for_the_core_of_multi_prose_units_only(self):
         rounds = self.payload()["rounds"]
         self.assertEqual(len(rounds), 3)
         units = {
@@ -412,17 +500,18 @@ class DryRunTest(unittest.TestCase):
                 start=1,
             )
         }
-        asked = rounds[2]["questions"]
+        asked = {k: v for k, v in rounds[2]["questions"].items() if k.startswith("core:")}
         self.assertTrue(asked, "核を聞ける Unit が 1 つも無い")
+        kinds = {a["index"]: a["kind"] for a in self.request["atoms"]}
         for key, question in asked.items():
             uid = key.split(":", 1)[1]
             self.assertEqual(question["type"], "choice")
             self.assertGreaterEqual(len(question["criteria"]), 2)
-            # 選択肢はその Unit の Atom だけ。
-            self.assertLessEqual(
-                {int(k.split(":")[1]) for k in question["criteria"]},
-                set(units[uid]),
-            )
+            chosen = {int(k.split(":")[1]) for k in question["criteria"]}
+            # 選択肢はその Unit の Atom だけで、かつ散文だけ。
+            self.assertLessEqual(chosen, set(units[uid]))
+            for index in chosen:
+                self.assertIn(kinds[index], jev.PROSE_KINDS)
         # Atom が 1 つの Unit は聞かれない。
         for uid, indices in units.items():
             if len(indices) == 1:

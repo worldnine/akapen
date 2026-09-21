@@ -225,13 +225,21 @@ Tier の question は Unit について聞くものだが、Unit は境界判定
 
 ```text
 ラウンド1  state=文書全文, questions={ 散文どうしの境界を Choice } → Unit を確定
-ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) と redundancy(Noul) }
-             → どの Unit が MARKED になるかが確定
-ラウンド3  state=文書全文, questions={ MARKED になる Unit の核を Choice }
+ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) }
+             → 誰に redundancy を聞くか / 誰の核を聞くかが確定
+ラウンド3  state=文書全文, questions={ SUPPORTING 以上の redundancy(Noul) と、
+                                        ESSENTIAL な Unit の核(Choice) }
 ```
 
 ラウンド 3 も畳めない。Jev は question を**並列・独立に**評価するので、
 ラウンド 2 の時点では「どの Unit が ESSENTIAL か」をまだ誰も知らない。
+
+**redundancy はラウンド 2 ではなく 3 で聞く。** 全 Unit ではなく、Tier が
+SUPPORTING 以上の Unit だけに聞く — `policy::decorate` は REDUNDANT な Unit の
+Tier を `weakened()` で 1 段落とすだけなので、もともと下にいる CONTEXT /
+DETAIL は聞いても表示が変わらない。これで question が実測 55〜95 % 減り、
+28.2 KB のこの README 自身が context window に入るようになった
+（ラウンド 2 が 62,523 → 50,895 tokens、天井の 95 % → 78 %）。
 
 akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、3 ラウンドは
 このスクリプトの内部事情である。
@@ -299,14 +307,14 @@ Noul は「言い直しか」までしか答えないので、`REDUNDANT_WITH` �
 
 ### demo.md での実測
 
-| | ラウンド 1 | ラウンド 2 |
-| - | --------- | --------- |
-| question 数 | 9（境界 26 件のうち散文どうしだけ） | 31（Unit 16 の Tier + 先頭以外の redundancy 15） |
-| 所要 | 0.73 秒 | 0.67 秒 |
-| input tokens | 3,197 | 6,032 |
+| | ラウンド 1 | ラウンド 2 | ラウンド 3 |
+| - | --------- | --------- | --------- |
+| question 数 | 9（境界 26 件のうち散文どうしだけ） | 16（Unit 16 の Tier） | 6（redundancy 5 + 核 1） |
+| 所要 | 0.71 秒 | 0.72 秒 | 0.51 秒 |
+| input tokens | 3,197 | 4,329 | 1,642 |
 
-合計 9,229 input tokens ＝ **約 $0.0004**（出力トークンは無料）。1 回の解析で
-往復は 2 回。Budget の上げ下げでは Jev を呼ばない。
+合計 9,168 input tokens ＝ **約 $0.0004**（出力トークンは無料）。1 回の解析で
+往復は 3 回。Budget の上げ下げでは Jev を呼ばない。
 
 ### 大きな文書での実測（2026-09-21）
 
@@ -342,8 +350,10 @@ HTTP 400 `max_tokens_exceeded` が返る（待っても変わらない）。
 バイト数での上限（この日本語文書では約 2.6 バイト/token）は文書の言語に依存する
 ので、**上限は tokens で言うこと**。
 
-ラウンド 2 が重いのは、`state`（文書全文）に加えて**各 Unit の本文を Tier と
-redundancy の 2 回引用する**ためで、およそ `3.6 × 文書のトークン数`になる。
+ラウンド 2 が重かったのは、`state`（文書全文）に加えて**各 Unit の本文を Tier と
+redundancy で 2 回引用していた**ためである。redundancy を SUPPORTING 以上へ
+絞ってからは引用が原則 1 回になり、この README で 62,523 → 50,895 tokens に
+下がった。**この表の数字は絞り込み前のものである。**
 
 ### 何が時間を使っているかの切り分け
 

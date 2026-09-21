@@ -1,15 +1,13 @@
-//! **計測用**。応答 JSON を当てたときの、Atom 1 つ 1 つの表示状態を並べる。
+//! 応答 JSON を当てたときの、Atom 1 つ 1 つの表示状態を並べる。
 //!
 //! ```sh
 //! cargo run -p semantic-reading --example atom-states -- doc.md response.json 60
 //! ```
 //!
 //! 隣の `decorate-report.rs` は比率だけを出すので、「**この行のここが**
-//! MARKED から NORMAL に変わったか」を確かめられない。境界の決め方を変えた
-//! ときに行の途中の切り替わりが残るかどうかを測るために、[`policy::decorate`]
-//! の結果をそのまま 1 行ずつ出す。
-//!
-//! 最終的な方式を決める道具ではなく、方式を**比べる**ための道具である。
+//! MARKED から NORMAL に変わったか」を確かめられない。判定を変えたときに
+//! 行の途中の切り替わりが残るかどうかを見るために、[`policy::decorate`] の
+//! 結果をそのまま 1 行ずつ出す。
 
 use std::process::ExitCode;
 
