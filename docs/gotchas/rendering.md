@@ -46,9 +46,11 @@
 attribution が `attr.as_ref().map(Attr::demoted)`（range は維持、exact は
 落とす）であること。使い捨てのテストで実測: 幅 20 で折り返した
 `- これは折り返すほど長いリスト項目の…` を文書全体 mark すると、継続行
-先頭の `"  "` span の bg が `mark_style().bg`（既定ダークテーマで
-`Rgb(68, 70, 89)`）になりました。pad が exact を名乗らないことは
-`src/render.rs::a_hanging_pad_is_never_exact` が固定しています。
+先頭の `"  "` span の bg が `mark_style().bg`（測定時のダークテーマで
+`Rgb(68, 70, 89)`。**いまは amber の `Rgb(90, 69, 33)`** —
+下の「MARKED の天井の理由が変わった」参照）になりました。pad が exact を
+名乗らないことは `src/render.rs::a_hanging_pad_is_never_exact` が
+固定しています。
 
 ### タブを含む行は、fragment の途中で終わる装飾が効かない
 
@@ -156,3 +158,89 @@ exact / 上位集合の一覧は
 `third_party/tui-markdown/src/renderer/mod.rs::exactness_by_markdown_construct`
 が正典で、link の URL が意図的に非 exact であること（理由のコメント付き）も
 そこに書かれています。
+
+### MARKED の天井の理由が変わった — 帯との混同ではなく、字が読めるか
+
+`MARK_BG_BLEND_CEILING` は **0.25 → 0.40**、理由ごと差し替わりました。
+数字だけ見て古い理屈を引き継がないでください。
+
+| | 以前 | いま |
+|---|---|---|
+| ブレンド先 | テーマの**前景色** | `MARK_TINT`（amber `#ffb000`）|
+| 既定値 | 0.22 | **0.27** |
+| ダークで出る色 | `rgb(68,70,89)` 灰 | `rgb(90,69,33)` |
+| ライトで出る色 | `rgb(219,218,205)` | `rgb(253,227,165)` |
+| 天井 | 0.25 | **0.40** |
+| 天井の理由 | 濃くすると**選択帯 `rgb(88,91,112)` と見分けがつかない** | 濃くすると**マークの上の字が読めない** |
+
+**古い理由はもう成り立ちません。** 灰色だった頃は明るさだけが違いで、
+濃くするほど帯に近づきました。いまは色相で分かれます — `rgb(90,69,33)` と
+`rgb(88,91,112)` は**明るさがほぼ同じでも混ざりません**（暖色 vs 寒色）。
+実機の ANSI で 4 色を同一画面に出して確認済みです:
+
+| 役割 | 実測 SGR |
+|---|---|
+| MARKED（dark） | `48;2;90;69;33` |
+| MARKED（light） | `48;2;253;227;165` |
+| 選択 / カーソル帯 | `48;2;88;91;112`（light `210;210;220`）|
+| diff 緑 / 赤 | `48;2;35;61;47` / `48;2;61;35;35` |
+
+代わりに効くのはコントラストです。ブレンドを上げると amber は明るく
+なり、上に乗る文字は動かないので、ダークの本文 `#cdd6f4` は既定で
+約 6:1、0.40 で約 4.5:1、0.55 で 4.5:1 を割ります。天井はそこから
+決めました。テストは `src/decoration.rs` の
+`the_ceiling_is_where_the_text_on_the_mark_stays_readable` と
+`the_mark_background_stays_clear_of_the_selection_band`（距離ではなく
+**寒暖**を見る形に書き換えてあります）。
+
+**帯とマークが重なったとき**: 帯が勝ってセル全体を塗るので、amber の
+穴は空きません（`src/view.rs` の `s.style.bg(selected_bg)` は無条件）。
+ただし**行が複数の source 行から折り畳まれている場合**、選択されて
+いない側の phrase segment は amber のまま残ります。これは以前から
+そうでしたが、**灰色どうしだったので見えていませんでした。**
+いまは継ぎ目がはっきり見えます — バグではなく、選択の粒度が
+行であることが可視化されただけです。
+
+**確認したこと**: `src/decoration.rs::mark_background` の blend 先が
+`MARK_TINT`。実機（別ペインで `herdr pane read --format ansi`）で
+ダーク / `--light` / `--theme DarkNeon` / source モードの diff 帯を確認。
+
+### `MARK_SCOPES` に背景を持つ埋め込みテーマは **DarkNeon 1 本だけ**
+
+「テーマが自前の highlight 背景を持つならそれが勝つ」という分岐
+（`src/decoration.rs::mark_background` の先頭ループ）は、**書かれてから
+一度も実機で走っていませんでした。** 次に触る人が試すテーマが
+分からない、というのがその原因です。総なめした結果を置いておきます。
+
+two-face の埋め込みテーマ **32 本中 1 本**だけが到達します:
+
+```sh
+./target/debug/akapen <file> --theme DarkNeon --decorations '[{"range":[0,20],"kind":"mark"}]'
+```
+
+| テーマ | scope | 背景 |
+|---|---|---|
+| DarkNeon | `markup.quote.highlight` | `rgb(254,224,156)` |
+
+**ただし、この到達の仕方は事故に近いものです。** 3 点:
+
+1. DarkNeon は `markup.quote.highlight` を定義していません。定義して
+   いるのは **`markup.quote`（ただの引用ブロック）** で、syntect の
+   前方一致で `markup.quote.highlight` にも当たります。つまりこの分岐は
+   「テーマが highlight 色を持っている」ではなく
+   **「テーマが引用ブロックに背景を付けている」**を拾っています
+2. その背景は **アルファ 18/255 の重ね色**です。`Highlighter::scope_style`
+   はアルファを捨てるので、本来ほぼ透明な指定が**べた塗りのクリーム色**
+   になります
+3. 結果、**紙が黒い DarkNeon の上にほぼ白い帯**が出ます。本文 span は
+   前景色を持たず端末既定（ダーク端末では白に近い）で描かれるため、
+   実測で白 `38;2;255;255;255` on `48;2;254;224;156` = **約 1.3:1** —
+   字が読めません
+
+この分岐を残すか落とすか、`MARK_SCOPES` から `markup.quote.highlight` を
+外すか、`scope_style` でアルファを合成するかは**設計の判断**なので、
+ここでは何も変えていません。テーマ優先そのものは
+`a_theme_that_styles_a_highlight_scope_wins_over_the_amber`
+（`.tmTheme` を書いて固定）で保証されています。顔ぶれが変わったら
+`the_only_embedded_theme_that_reaches_the_scope_branch` が落ちるので、
+**そのときはこの表も直してください。**

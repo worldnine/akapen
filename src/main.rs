@@ -114,7 +114,7 @@ fn main() -> Result<()> {
                  \x20                   see examples/semantic/annotate-doc.py.\n\
                  \x20                   Exclusive with --semantic\n\
                  \x20 --mark-blend <f>  how far the MARKED background is lifted off\n\
-                 \x20                   the page, 0.0..1.0 (default 0.22)\n\
+                 \x20                   the page, 0.0..1.0 (default 0.27)\n\
                  \x20 --dim-blend <f>   how far a DIM foreground is moved toward the\n\
                  \x20                   page, 0.0..1.0 (default 0.60; 1.0 is the page\n\
                  \x20                   itself, i.e. invisible)\n\
