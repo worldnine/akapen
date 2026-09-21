@@ -152,6 +152,9 @@ CORE_INSTRUCTIONS = (
 #: **この値では切れていない** — 45.6 KB の実文書でいちばん大きい Unit でも
 #: Atom は 96 個だった。上限に当たる文書を測っていないので、当たったときの
 #: 振る舞いを「安全側（従来どおり）」に倒してあるだけである。
+#: **計測用**。`--trim frame` / `both` のときの短い文面。
+SHORT_CORE_INSTRUCTIONS = "このまとまりから 1 か所だけ読むなら、どこを読めば要点が取れるか。"
+
 MAX_CORE_CHOICES = 255
 
 #: 単独の Unit にする Atom 種別。中身は散文ではないので、隣の散文と読む優先度を
@@ -388,7 +391,72 @@ def unit_body(atoms: list[dict], indices: list[int]) -> str:
     return " ".join(filter(None, (atom_text(atoms[i]) for i in indices)))
 
 
-def unit_questions(atoms: list[dict], units: list[list[int]]) -> dict:
+#: **計測用**。Tier と redundancy を 1 question にまとめる「まとめ方」。
+#:
+#:     split   Choice(Tier) と Noul(redundancy) の 2 問（本番の挙動）
+#:     merged  Choice 1 問。Tier の 4 つに「既出の言い直し」を 5 つ目の
+#:             選択肢として足す。question 数が半分になり、本文の引用も
+#:             2 回から 1 回になる
+#:
+#: `merged` で `redundant` が選ばれたとき、Tier は残り 4 つの
+#: `probabilities` の argmax を立てる（Jev が redundant でなければ何と
+#: 答えたかの代わり）。**そのうえで `redundant_with` を出す** —
+#: `policy::decorate` が `is_redundant()` を見て `weakened()` を当てるので、
+#: Python 側でも弱めると**二重に弱まる**。
+UNIT_QUESTION_MODES = ("split", "merged")
+
+#: `merged` で足す 5 つ目の選択肢。
+REDUNDANT_CRITERION = (
+    "これより前の箇所ですでに述べられた内容を言い直しているだけで、"
+    "新しい情報を加えていない。"
+)
+
+#: **計測用**。question の定型文をどこまで削るか。
+#:
+#:     none   削らない（本番の挙動）
+#:     frame  `――― 対象 ―――` の枠と問い文を短くする（criteria は触らない）
+#:     crit   criteria の説明文を短くする（設計書の逐語を崩す）
+#:     both   両方
+#:
+#: 実測の固定費（本文を除く 1 question あたり、2026-09-21）:
+#: Tier は 181 tok = 器 68 + criteria 説明文 65 + 枠組み文 65、
+#: redundancy は 81 tok = 器 8 + 枠組み文 73。合わせて Unit 1 つ 262 tok。
+#: **器（criteria のキー名と型）は削れない。**
+TRIM_MODES = ("none", "frame", "crit", "both")
+
+#: `crit` で使う短い criteria。**設計書の逐語ではない** — 削ると判定が
+#: どれだけ動くかを測るための対照であって、採用案ではない。
+SHORT_TIER_CRITERIA = {
+    "essential": "落とすと要点や結論を取り違える。",
+    "supporting": "要点の理解に役立つ。",
+    "context": "背景や前提。",
+    "detail": "例や細部。",
+}
+SHORT_REDUNDANT_CRITERION = "前に述べた内容の言い直し。"
+
+
+def framed(instruction: str, body: str, trim: str) -> str:
+    """question の instructions を組む。`trim` が `frame` / `both` なら枠を省く。"""
+    if trim in ("frame", "both"):
+        return f"{instruction}\n{body}"
+    return f"{instruction}\n\n――― 対象 ―――\n{body}\n―――――――――"
+
+
+def tier_criteria(merged: bool, trim: str) -> dict:
+    """Tier の criteria（`merged` なら 5 つ目を足す）。"""
+    short = trim in ("crit", "both")
+    out = dict(SHORT_TIER_CRITERIA if short else TIER_CRITERIA)
+    if merged:
+        out["redundant"] = SHORT_REDUNDANT_CRITERION if short else REDUNDANT_CRITERION
+    return out
+
+
+def unit_questions(
+    atoms: list[dict],
+    units: list[list[int]],
+    unit_mode: str = "split",
+    trim: str = "none",
+) -> dict:
     """ラウンド 2 の questions（Unit ごとの Tier と redundancy）。
 
     redundancy は**方向を必ず指定する**。「これより前の箇所ですでに述べられた
@@ -405,26 +473,27 @@ def unit_questions(atoms: list[dict], units: list[list[int]]) -> dict:
     先頭の Unit には redundancy を聞かない —「これより前」が存在せず、
     REDUNDANT_WITH の参照先も作れない。
     """
+    ask = "どの読む優先度か。" if trim in ("frame", "both") else (
+        "この文書の中で、次の部分はどの読む優先度に当たりますか。"
+    )
+    repeat = "前に述べた内容の言い直しか。" if trim in ("frame", "both") else (
+        "次の部分は、これより**前**の箇所ですでに述べられた内容を"
+        "言い直しているだけで、新しい情報を加えていない。"
+    )
     questions = {}
     for number, indices in enumerate(units, start=1):
         uid = f"u{number}"
         body = unit_body(atoms, indices)
+        merged = unit_mode == "merged" and number > 1
         questions[f"tier:{uid}"] = {
             "type": "choice",
-            "instructions": (
-                "この文書の中で、次の部分はどの読む優先度に当たりますか。\n\n"
-                f"――― 対象 ―――\n{body}\n―――――――――"
-            ),
-            "criteria": dict(TIER_CRITERIA),
+            "instructions": framed(ask, body, trim),
+            "criteria": tier_criteria(merged, trim),
         }
-        if number > 1:
+        if unit_mode == "split" and number > 1:
             questions[f"redundant:{uid}"] = {
                 "type": "noul",
-                "instructions": (
-                    "次の部分は、これより**前**の箇所ですでに述べられた内容を"
-                    "言い直しているだけで、新しい情報を加えていない。\n\n"
-                    f"――― 対象 ―――\n{body}\n―――――――――"
-                ),
+                "instructions": framed(repeat, body, trim),
             }
     return questions
 
@@ -509,7 +578,30 @@ def noul_of(answers: dict, key: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def build_units(atoms: list[dict], units: list[list[int]], answers: dict) -> list[dict]:
+def merged_tier(answers: dict, key: str, criteria: dict) -> tuple[str, bool]:
+    """**計測用**。5 択の答えから `(Tier, redundant か)` を取り出す。
+
+    `redundant` が選ばれたときは、残り 4 つの `probabilities` の argmax を
+    Tier に立てる。**弱めない** — `policy::decorate` が `is_redundant()` を
+    見て `weakened()` を当てるので、ここで弱めると二重になる。
+    """
+    choice = choice_of(answers, key, criteria)
+    if choice != "redundant":
+        return choice, False
+    probs = answer_of(answers, key).get("probabilities") or {}
+    tiers = {k: v for k, v in probs.items() if k in TIER_CRITERIA}
+    if not tiers:
+        raise JevError(f"{key}: redundant が選ばれたのに Tier の probabilities がありません")
+    return max(tiers, key=lambda k: tiers[k]), True
+
+
+def build_units(
+    atoms: list[dict],
+    units: list[list[int]],
+    answers: dict,
+    unit_mode: str = "split",
+    trim: str = "none",
+) -> list[dict]:
     """ラウンド 2 の答えから、プロトコルの `units` を組む。
 
     `confidence` と `noul` は**捨てず**、各 Unit の `jev` フィールドに記録する
@@ -521,16 +613,27 @@ def build_units(atoms: list[dict], units: list[list[int]], answers: dict) -> lis
     out = []
     for number, indices in enumerate(units, start=1):
         uid = f"u{number}"
-        tier = choice_of(answers, f"tier:{uid}", TIER_CRITERIA)
+        merged = unit_mode == "merged" and number > 1
+        if merged:
+            tier, is_redundant = merged_tier(
+                answers, f"tier:{uid}", tier_criteria(True, trim)
+            )
+        else:
+            tier = choice_of(answers, f"tier:{uid}", tier_criteria(False, trim))
+            is_redundant = False
         record: dict = {
             "tier_choice": tier,
             "tier_confidence": confidence_of(answers, f"tier:{uid}"),
         }
         relations: list[dict] = []
         if number > 1:
-            noul = noul_of(answers, f"redundant:{uid}")
-            record["redundancy_noul"] = noul
-            if noul >= REDUNDANCY_THRESHOLD:
+            if unit_mode == "split":
+                noul = noul_of(answers, f"redundant:{uid}")
+                record["redundancy_noul"] = noul
+                is_redundant = noul >= REDUNDANCY_THRESHOLD
+            else:
+                record["redundant_choice"] = is_redundant
+            if is_redundant:
                 target = redundancy_target(bodies, number)
                 record["redundant_with"] = target
                 if target is not None:
@@ -567,7 +670,7 @@ def wants_core(unit: dict) -> bool:
     return unit["reading_tier"] == "essential" and not unit["relations"]
 
 
-def core_questions(atoms: list[dict], units: list[dict]) -> dict:
+def core_questions(atoms: list[dict], units: list[dict], trim: str = "none") -> dict:
     """ラウンド 3 の questions（MARKED になる Unit の核）。
 
     選択肢は Unit を構成する Atom の本文そのもので、キーは `atom:<index>`。
@@ -591,7 +694,9 @@ def core_questions(atoms: list[dict], units: list[dict]) -> dict:
             continue
         questions[f"core:{unit['id']}"] = {
             "type": "choice",
-            "instructions": CORE_INSTRUCTIONS,
+            "instructions": SHORT_CORE_INSTRUCTIONS
+            if trim in ("frame", "both")
+            else CORE_INSTRUCTIONS,
             "criteria": options,
         }
     return questions
@@ -738,6 +843,8 @@ def annotate(
     timeout: float,
     mode: str = "current",
     trace: Trace | None = None,
+    unit_mode: str = "split",
+    trim: str = "none",
 ) -> dict:
     version = request.get("version")
     if version != VERSION:
@@ -761,13 +868,13 @@ def annotate(
         trace.note(boundaries=plan, units=len(units))
 
     # --- ラウンド 2: Unit ごとの Tier と redundancy ---------------------
-    questions = unit_questions(atoms, units)
+    questions = unit_questions(atoms, units, unit_mode, trim)
     payload = ask_jev(state, questions, model, timeout, trace, 2, len(questions))
     rounds.append(round_record(payload, len(questions)))
-    built = build_units(atoms, units, payload["answers"])
+    built = build_units(atoms, units, payload["answers"], unit_mode, trim)
 
     # --- ラウンド 3: MARKED になる Unit の核 ---------------------------
-    questions = core_questions(atoms, built)
+    questions = core_questions(atoms, built, trim)
     if questions:
         payload = ask_jev(state, questions, model, timeout, trace, 3, len(questions))
         apply_core_answers(built, questions, payload["answers"])
@@ -776,11 +883,20 @@ def annotate(
     return {
         "version": VERSION,
         "units": built,
-        "jev": {"rounds": rounds, "boundaries": plan, "boundary_mode": mode},
+        "jev": {
+            "rounds": rounds,
+            "boundaries": plan,
+            "boundary_mode": mode,
+            "unit_question_mode": unit_mode,
+            "trim": trim,
+        },
     }
 
 
-def dry_run(request: dict, model: str, mode: str = "current") -> dict:
+def dry_run(
+    request: dict, model: str, mode: str = "current",
+    unit_mode: str = "split", trim: str = "none",
+) -> dict:
     """API を叩かずに、送る 3 ラウンドのリクエストの形を出す。
 
     後のラウンドは前のラウンドの答えに依存するので、仮定を置いて組む。
@@ -819,13 +935,13 @@ def dry_run(request: dict, model: str, mode: str = "current") -> dict:
                 "round": 2,
                 "state": state,
                 "model": model,
-                "questions": unit_questions(atoms, units),
+                "questions": unit_questions(atoms, units, unit_mode, trim),
             },
             {
                 "round": 3,
                 "state": state,
                 "model": model,
-                "questions": core_questions(atoms, as_essential),
+                "questions": core_questions(atoms, as_essential, trim),
             },
         ],
     }
@@ -853,6 +969,18 @@ def main() -> int:
         help="【計測用】散文どうしの境界の決め方（既定 current が本番の挙動）",
     )
     parser.add_argument(
+        "--unit-question",
+        choices=UNIT_QUESTION_MODES,
+        default="split",
+        help="【計測用】Tier と redundancy を分けるか 1 問にまとめるか（既定 split が本番）",
+    )
+    parser.add_argument(
+        "--trim",
+        choices=TRIM_MODES,
+        default="none",
+        help="【計測用】定型文をどこまで削るか（既定 none が本番）",
+    )
+    parser.add_argument(
         "--trace",
         metavar="PATH",
         help="【計測用】ラウンドごとの usage と所要をこのファイルへ逐次書き出す"
@@ -873,11 +1001,14 @@ def main() -> int:
         return 1
     try:
         if args.dry_run:
-            response = dry_run(request, args.model, args.boundary_mode)
+            response = dry_run(
+                request, args.model, args.boundary_mode, args.unit_question, args.trim
+            )
         else:
             trace = Trace(args.trace) if args.trace else None
             response = annotate(
-                request, args.model, args.timeout, args.boundary_mode, trace
+                request, args.model, args.timeout, args.boundary_mode, trace,
+                args.unit_question, args.trim,
             )
     except JevError as e:
         # akapen はステータス行に stderr の**最後の非空行**を 160 字まで出す
