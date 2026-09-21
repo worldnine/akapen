@@ -106,7 +106,7 @@
 //! **ここで実装しないこと。** 設計書は context preservation の中身を定義して
 //! いない（語が出てくるのは上の rule の列挙 1 箇所だけである）。何をもって
 //! 「文脈が繋がる」とするかをこの module で決めると、設計書に無い設計を足す
-//! ことになる。同じ話は `docs/gotchas.md` の未解決節にも置いてある。
+//! ことになる。同じ話は `docs/gotchas/open-questions.md` にも置いてある。
 //!
 //! # 表示状態の割り当て
 //!
@@ -157,7 +157,7 @@
 //! 「どちらも list_item → SAME」が箇条書き 1 つを丸ごと 1 Unit にするため、
 //! ESSENTIAL な項目は段落ごと光る。**半分が光っていれば、光っていない方が
 //! 目立つ。** 核だけを MARKED にすると、同じ文書・同じ Budget で 5.0 % に
-//! 落ちた（実測表は `examples/semantic/README.md`）。
+//! 落ちた（実測表は `examples/semantic/measurements/core-selection.md`）。
 //!
 //! **DIM は一律のままにする。** Unit が落ちたなら、その Unit は丸ごと沈むのが
 //! 正しい。ここを選択的にすると「なぜこの行の一部だけが沈んでいるのか」が
