@@ -2811,7 +2811,7 @@ fn adjust_reading_budget(app: &mut App, delta: i16) {
     if app.semantic_doc.is_none() && app.semantic_inflight.is_some() {
         // `--semantic-cmd` の答え待ち。まだ無いのは事実だが「使えない」
         // とは違う — 数秒後には来る。
-        app.flash("解析中…");
+        app.flash("analyzing…");
         return;
     }
     if app.semantic_doc.is_none() {

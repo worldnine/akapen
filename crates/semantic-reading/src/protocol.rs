@@ -246,7 +246,7 @@ impl AnalyzeResponse {
     pub fn into_document(self, atoms: Vec<Atom>) -> Result<SemanticDocument> {
         if self.version != VERSION {
             return Err(Error::Invalid(format!(
-                "protocol version {} は解釈できません（このビルドは {VERSION}）",
+                "cannot read protocol version {} (this build speaks {VERSION})",
                 self.version
             )));
         }
@@ -388,7 +388,7 @@ mod tests {
             ]}"#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("範囲外の atom 9"), "{err}");
+        assert!(err.to_string().contains("atom 9, which is out of range"), "{err}");
 
         // unit id の重複。
         let err = response(
@@ -398,7 +398,7 @@ mod tests {
             ]}"#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("重複"), "{err}");
+        assert!(err.to_string().contains("duplicate unit id"), "{err}");
 
         // 存在しない unit への relation。
         let err = response(
@@ -407,7 +407,7 @@ mod tests {
             ]}"#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("未知"), "{err}");
+        assert!(err.to_string().contains("unknown unit"), "{err}");
 
         // 自分自身との重複。
         let err = response(
@@ -416,7 +416,7 @@ mod tests {
             ]}"#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("自分自身"), "{err}");
+        assert!(err.to_string().contains("redundant with itself"), "{err}");
 
         // 未知の tier — ここは serde が落とす。
         let err = response(
@@ -518,7 +518,7 @@ mod tests {
             ]}"#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("範囲外の atom 42"), "{err}");
+        assert!(err.to_string().contains("atom 42, which is out of range"), "{err}");
     }
 
     /// 核はそのまま文書まで届き、MARKED を絞る。

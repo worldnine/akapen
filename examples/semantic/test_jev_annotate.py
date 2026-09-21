@@ -960,7 +960,48 @@ class MissingKeyTest(unittest.TestCase):
     def test_a_broken_request_never_reaches_the_network(self):
         out = DryRunTest.run_script([], {"version": 99, "source": "", "atoms": []})
         self.assertNotEqual(out.returncode, 0)
-        self.assertIn("プロトコル版", out.stderr)
+        self.assertIn("protocol version", out.stderr)
+
+    def test_akapen_does_not_get_a_second_prefix(self):
+        """akapen 経由（stderr はパイプ）では `jev-annotate:` と名乗らない。
+
+        受けた側が `(--semantic-cmd exited non-zero)` を添えるので、ここでも
+        名乗ると接頭辞が 2 段になり、ステータス行の幅を肝心の一文から奪う。
+        """
+        out = DryRunTest.run_script([], {"version": 99, "source": "", "atoms": []})
+        self.assertNotIn("jev-annotate:", out.stderr)
+        self.assertTrue(out.stderr.startswith("unsupported"), out.stderr)
+
+
+class StderrPrefixTest(unittest.TestCase):
+    """人が直接走らせたときだけ名乗る（[`stderr_prefix`]）。"""
+
+    class FakeStderr:
+        def __init__(self, tty):
+            self._tty = tty
+
+        def isatty(self):
+            if self._tty is None:
+                raise ValueError("I/O operation on closed file")
+            return self._tty
+
+    def with_stderr(self, fake):
+        real = jev.sys.stderr
+        jev.sys.stderr = fake
+        try:
+            return jev.stderr_prefix()
+        finally:
+            jev.sys.stderr = real
+
+    def test_a_terminal_gets_the_name(self):
+        self.assertEqual(self.with_stderr(self.FakeStderr(True)), "jev-annotate: ")
+
+    def test_a_pipe_does_not(self):
+        self.assertEqual(self.with_stderr(self.FakeStderr(False)), "")
+
+    def test_a_closed_stream_falls_back_to_no_name(self):
+        # 迷ったら名乗らない側へ倒す — akapen 経由のほうが多い。
+        self.assertEqual(self.with_stderr(self.FakeStderr(None)), "")
 
 
 class HttpErrorMessageTest(unittest.TestCase):
@@ -975,8 +1016,11 @@ class HttpErrorMessageTest(unittest.TestCase):
 
     def test_max_tokens_says_it_is_size_not_time(self):
         line = jev.http_error_message(400, self.MAX_TOKENS)
-        self.assertIn("大きすぎ", line)
-        self.assertIn("タイムアウトではない", line)
+        self.assertIn("too large", line)
+        self.assertIn("Not a timeout", line)
+        # 用を成す一文が**先頭に**来ていること（枠の幅は端末しだいなので、
+        # 後ろに置くと切られる）。
+        self.assertLess(line.index("too large"), 50)
         # 生の JSON を出さない（読み手に何も伝えないので）。
         self.assertNotIn("error_type", line)
 
@@ -1296,8 +1340,12 @@ class UnansweredTierTest(unittest.TestCase):
 
         with self.assertRaises(jev.JevError) as caught:
             with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
-        self.assertIn("大きすぎ", str(caught.exception))
-        self.assertIn("30800", str(caught.exception).replace(",", ""))
+        message = str(caught.exception)
+        self.assertIn("too large", message)
+        self.assertIn("30800", message.replace(",", ""))
+        # ステータス行は 160 字で切れる（`src/export.rs` の `Capture::tail`）。
+        self.assertLessEqual(len(message), 160)
+        self.assertLess(message.index("too large"), 50)
 
     def test_one_answerable_question_is_enough_to_keep_going(self):
         """一部だけ送れないなら、既定値へ倒して続ける（文書は失敗させない）。"""

@@ -654,14 +654,14 @@ def redundancy_target(bodies: list[str], number: int) -> str | None:
 def answer_of(answers: dict, key: str) -> dict:
     answer = answers.get(key)
     if not isinstance(answer, dict):
-        raise JevError(f"Jev の応答に {key} の答えがありません")
+        raise JevError(f"Jev answered nothing for {key}")
     return answer
 
 
 def choice_of(answers: dict, key: str, criteria: dict) -> str:
     got = answer_of(answers, key).get("choice")
     if not isinstance(got, str) or got not in criteria:
-        raise JevError(f"Jev が {key} に未知の choice を返しました: {got!r}")
+        raise JevError(f"Jev returned an unknown choice for {key}: {got!r}")
     return got
 
 
@@ -682,7 +682,7 @@ def confidence_of(answers: dict, key: str) -> float | None:
 def noul_of(answers: dict, key: str) -> float:
     got = answer_of(answers, key).get("noul")
     if not isinstance(got, (int, float)):
-        raise JevError(f"Jev が {key} に noul を返しませんでした: {got!r}")
+        raise JevError(f"Jev returned no noul for {key}: {got!r}")
     return float(got)
 
 
@@ -1000,14 +1000,32 @@ def one_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def stderr_prefix() -> str:
+    """直に走らせたときだけ `jev-annotate:` と名乗る。
+
+    akapen 経由では stderr はパイプで、受けた側（`src/export.rs` の
+    `run_child`）が `(--semantic-cmd exited non-zero)` を添えるので、ここでも
+    名乗ると**接頭辞が 2 段になる**。ステータス行の幅は端末しだいで、接頭辞に
+    食われたぶんだけ肝心の一文が枠の外へ出る。人が直接シェルで走らせたときは
+    どのコマンドの声か分からないと困るので、そのときだけ名乗る。
+
+    `isatty` は閉じた stream や差し替えられた stream で例外を投げうるので、
+    迷ったら**名乗らない**側に倒す（akapen 経由のほうが多いため）。
+    """
+    try:
+        return "jev-annotate: " if sys.stderr.isatty() else ""
+    except (AttributeError, ValueError):
+        return ""
+
+
 def api_key() -> str:
     """環境変数 `TYPESAFE_API_KEY` **だけ**を見る。値は絶対に出力しない。"""
     key = os.environ.get("TYPESAFE_API_KEY", "").strip()
     if not key:
         raise JevError(
-            "TYPESAFE_API_KEY が未設定です。export TYPESAFE_API_KEY=... して "
-            "akapen を起動し直してください（鍵の取り出し方は "
-            "examples/semantic/README.md）"
+            "TYPESAFE_API_KEY is not set. Run `export TYPESAFE_API_KEY=...` "
+            "and start akapen again (examples/semantic/README.md says where "
+            "the key lives)."
         )
     return key
 
@@ -1030,12 +1048,11 @@ def http_error_message(code: int, detail: str) -> str:
     """
     if "max_tokens_exceeded" in detail:
         return (
-            "文書が大きすぎて Jev の context window に入りません。分割は自動"
-            "なので、これは文書全文（state）だけで 32k tokens を使い切った状態"
-            "です。state は分割では外せません。タイムアウトではないので待っても"
-            "変わりません"
+            "Document too large for Jev — shrink it. Splitting is automatic, "
+            "so the text alone (state) fills the 32k-token window. Not a "
+            "timeout: waiting will not help."
         )
-    return f"Jev が HTTP {code} を返しました: {detail}"
+    return f"Jev returned HTTP {code}: {detail}"
 
 
 def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
@@ -1065,13 +1082,13 @@ def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
         detail = one_line(e.read().decode("utf-8", "replace"))[:200]
         raise JevError(http_error_message(e.code, detail)) from e
     except urllib.error.URLError as e:
-        raise JevError(f"Jev に接続できません: {one_line(str(e.reason))}") from e
+        raise JevError(f"cannot reach Jev: {one_line(str(e.reason))}") from e
     except json.JSONDecodeError as e:
-        raise JevError(f"Jev の応答が JSON ではありません: {one_line(str(e))}") from e
+        raise JevError(f"Jev's answer is not JSON: {one_line(str(e))}") from e
     except TimeoutError as e:
-        raise JevError(f"Jev が {timeout} 秒以内に応答しませんでした") from e
+        raise JevError(f"Jev did not answer within {timeout}s") from e
     if not isinstance(payload.get("answers"), dict):
-        raise JevError("Jev の応答に answers がありません")
+        raise JevError("Jev's answer has no answers")
     payload["elapsed_s"] = round(time.monotonic() - started, 3)
     return payload
 
@@ -1264,7 +1281,7 @@ def send_in_chunks(
         payload = ask_jev(state, chunk, model, timeout)
         for key, answer in payload["answers"].items():
             if key in answers:
-                raise JevError(f"{key} の答えが 2 つのチャンクから返りました")
+                raise JevError(f"{key} was answered by two chunks")
             answers[key] = answer
         records.append(round_record(payload, len(chunk)))
     return answers, records, dropped
@@ -1310,7 +1327,7 @@ UNANSWERED_TIER = "detail"
 def annotate(request: dict, model: str, timeout: float) -> dict:
     version = request.get("version")
     if version != VERSION:
-        raise JevError(f"対応していないプロトコル版です: {version!r}")
+        raise JevError(f"unsupported protocol version: {version!r}")
     state = request.get("source") or ""
     atoms = request.get("atoms") or []
     if not atoms:
@@ -1361,10 +1378,10 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     unanswered = set(unsent.get("tier", ()))
     if questions and len(unanswered) == len(questions):
         raise JevError(
-            f"文書が大きすぎます。state が {budget.state_tokens} tokens あり、"
-            f"32k の枠に question の余地が {max(budget.pair, 0)} tokens しか"
-            "残らないので、Tier を 1 つも聞けません。state はどのリクエストにも"
-            "乗るので分割では外せません。文書を小さくしてください"
+            "Document too large for Jev — shrink it. Splitting cannot help: "
+            f"state alone is {budget.state_tokens} tokens, leaving "
+            f"{max(budget.pair, 0)} of the 32k budget, so not one Tier "
+            "question fits."
         )
     tiers = [
         UNANSWERED_TIER
@@ -1498,12 +1515,12 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
         )
     return {
         "assumptions": [
-            "ラウンド 2 は「Jev に聞く境界はすべて new_unit」と仮定して組んでいる",
-            "ラウンド 3 は「すべての Unit が essential」と仮定して組んでいる"
-            "（本番はここが絞られるので question はもっと少ない）",
-            "`state` のトークン数が見積もり（0.5 tokens/byte）のときは、本番より"
-            "多くのチャンクに割れる。本番は大きい文書では実測する"
-            "（--state-tokens で実測値を渡せる）",
+            "round 2 assumes every boundary Jev is asked about is new_unit",
+            "round 3 assumes every Unit is essential (production narrows this, "
+            "so it sends fewer questions)",
+            "when the state token count is an estimate (0.5 tokens/byte) this "
+            "splits into more chunks than production, which measures the count "
+            "on large documents (--state-tokens passes a measured value in)",
         ],
         "budget": budget.record(),
         "rounds": rounds,
@@ -1512,39 +1529,43 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="akapen の --semantic-cmd を Jev に繋ぐアダプタ",
+        description="adapter that wires akapen's --semantic-cmd to Jev",
     )
     parser.add_argument(
         "--model",
         default=os.environ.get("TYPESAFE_DEFAULT_MODEL", DEFAULT_MODEL),
-        help=f"Jev のモデル（既定 {DEFAULT_MODEL}、TYPESAFE_DEFAULT_MODEL でも指定可）",
+        help=f"Jev model (default {DEFAULT_MODEL}; TYPESAFE_DEFAULT_MODEL also sets it)",
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=DEFAULT_TIMEOUT,
-        help=f"1 リクエストのタイムアウト秒（既定 {DEFAULT_TIMEOUT}）",
+        help=f"timeout in seconds for one request (default {DEFAULT_TIMEOUT})",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="API を叩かず、送る 3 ラウンドのリクエストの形だけを出す"
-        "（ラウンド 2 は全境界 new_unit、ラウンド 3 は全 Unit essential を仮定）",
+        help="print the shape of the 3 rounds without calling the API "
+        "(round 2 assumes every boundary is new_unit, round 3 that every "
+        "Unit is essential)",
     )
     parser.add_argument(
         "--state-tokens",
         type=int,
         default=None,
-        help="--dry-run で使う state のトークン数の実測値。省くと 0.5 tokens/byte "
-        "の見積もりを使うが、それは大きい文書では 1.4 倍ほど過大になり、"
-        "本番より多くのチャンクに割れて見える",
+        help="measured token count of state, for --dry-run. Without it a "
+        "0.5 tokens/byte estimate is used, which runs about 1.4x high on large "
+        "documents and splits into more chunks than production does",
     )
     args = parser.parse_args()
 
     try:
         request = json.load(sys.stdin)
     except json.JSONDecodeError as e:
-        print(f"jev-annotate: stdin が JSON ではありません: {one_line(str(e))}", file=sys.stderr)
+        print(
+            f"{stderr_prefix()}stdin is not JSON: {one_line(str(e))}",
+            file=sys.stderr,
+        )
         return 1
     try:
         if args.dry_run:
@@ -1554,10 +1575,13 @@ def main() -> int:
     except JevError as e:
         # akapen はステータス行に stderr の**最後の非空行**を 160 字まで出す
         # （`src/export.rs` の `Capture::tail`）。だから 1 行に収める。
-        print(f"jev-annotate: {one_line(str(e))}", file=sys.stderr)
+        print(f"{stderr_prefix()}{one_line(str(e))}", file=sys.stderr)
         return 1
     except (KeyError, TypeError, ValueError) as e:
-        print(f"jev-annotate: 要求を読めません: {one_line(str(e))}", file=sys.stderr)
+        print(
+            f"{stderr_prefix()}cannot read the request: {one_line(str(e))}",
+            file=sys.stderr,
+        )
         return 1
     json.dump(response, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")

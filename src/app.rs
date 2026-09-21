@@ -403,7 +403,7 @@ pub(crate) struct App {
     /// rather than by hope ([`App::accept_analysis`]).
     pub(crate) semantic_generation: u64,
     /// The generation of the external analysis currently running, if
-    /// any. Drives the `解析中…` readout and is cleared when THAT
+    /// any. Drives the `analyzing…` readout and is cleared when THAT
     /// generation's answer (or a newer one) arrives.
     pub(crate) semantic_inflight: Option<u64>,
     /// The worker threads' end of the line. Created with the source (so
@@ -594,7 +594,7 @@ impl App {
         // Nothing can answer on the old channel any more (its receiving
         // end goes with it), so a run that was in flight is over as far
         // as this session is concerned — otherwise the status line would
-        // say 解析中… for the rest of the session.
+        // say analyzing… for the rest of the session.
         self.semantic_inflight = None;
         self.semantic_results = match source {
             // A session without `--semantic-cmd` never allocates a
@@ -647,7 +647,7 @@ impl App {
             Some(SemanticSource::Command(provider)) => {
                 let Some(channel) = self.semantic_results.as_ref() else {
                     // set_semantic_source を通らずに組み立てられた App。
-                    self.flash_err("--semantic-cmd: 結果を受け取る口がありません");
+                    self.flash_err("--semantic-cmd: no channel to receive the answer");
                     return;
                 };
                 let provider = provider.clone();

@@ -84,13 +84,13 @@ impl SemanticDocument {
             && (digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
         {
             return Err(Error::Invalid(format!(
-                "source_sha256 は hex 64 桁であるべきです: `{digest}`"
+                "source_sha256 must be 64 hex digits: `{digest}`"
             )));
         }
         for (i, atom) in self.atoms.iter().enumerate() {
             if atom.range.start > atom.range.end {
                 return Err(Error::Invalid(format!(
-                    "atom {i} の範囲が逆転しています: {}..{}",
+                    "atom {i} has a reversed range: {}..{}",
                     atom.range.start, atom.range.end
                 )));
             }
@@ -99,14 +99,14 @@ impl SemanticDocument {
         for (i, unit) in self.units.iter().enumerate() {
             if self.units[..i].iter().any(|other| other.id == unit.id) {
                 return Err(Error::Invalid(format!(
-                    "unit 識別子 `{}` が重複しています",
+                    "duplicate unit id `{}`",
                     unit.id
                 )));
             }
             for index in &unit.atoms {
                 if index.0 >= self.atoms.len() {
                     return Err(Error::Invalid(format!(
-                        "unit `{}` が範囲外の atom {} を参照しています（atom は {} 個）",
+                        "unit `{}` refers to atom {}, which is out of range ({} atoms)",
                         unit.id,
                         index.0,
                         self.atoms.len()
@@ -118,7 +118,7 @@ impl SemanticDocument {
                 // Atom は指せない。範囲外の添字もここで落ちる。
                 if !unit.atoms.contains(index) {
                     return Err(Error::Invalid(format!(
-                        "unit `{}` の core atom {} はこの unit の atom ではありません",
+                        "core atom {1} is not an atom of unit `{0}`",
                         unit.id, index.0
                     )));
                 }
@@ -127,13 +127,13 @@ impl SemanticDocument {
                 let Relation::RedundantWith(target) = relation;
                 if target == &unit.id {
                     return Err(Error::Invalid(format!(
-                        "unit `{}` が自分自身との重複になっています",
+                        "unit `{}` is marked redundant with itself",
                         unit.id
                     )));
                 }
                 if self.unit(target).is_none() {
                     return Err(Error::Invalid(format!(
-                        "unit `{}` が未知の unit `{target}` を参照しています",
+                        "unit `{}` refers to unknown unit `{target}`",
                         unit.id
                     )));
                 }
@@ -229,7 +229,7 @@ mod tests {
         let mut doc = doc();
         doc.units[0].atoms.push(AtomIndex(7));
         let err = doc.validate().unwrap_err().to_string();
-        assert!(err.contains("範囲外の atom 7"), "{err}");
+        assert!(err.contains("atom 7, which is out of range"), "{err}");
     }
 
     #[test]
@@ -255,7 +255,7 @@ mod tests {
         let mut doc = doc();
         doc.units[1].id = UnitId::from("u1");
         let err = doc.validate().unwrap_err().to_string();
-        assert!(err.contains("重複"), "{err}");
+        assert!(err.contains("duplicate unit id"), "{err}");
     }
 
     #[test]
@@ -264,7 +264,13 @@ mod tests {
         broken.units[1]
             .relations
             .push(Relation::RedundantWith("u9".into()));
-        assert!(broken.validate().unwrap_err().to_string().contains("未知"));
+        assert!(
+            broken
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown unit")
+        );
     }
 
     #[test]
@@ -278,7 +284,7 @@ mod tests {
                 .validate()
                 .unwrap_err()
                 .to_string()
-                .contains("自分自身")
+                .contains("redundant with itself")
         );
     }
 
