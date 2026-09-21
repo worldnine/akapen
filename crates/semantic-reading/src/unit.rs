@@ -13,7 +13,8 @@ use crate::atom::AtomIndex;
 /// Semantic Unit の識別子。
 ///
 /// 値は provider（将来の Jev）が付ける文字列で、この crate は中身を
-/// 解釈しない。[`Relation::RedundantWith`] の参照先にだけ使う。
+/// 解釈しない。[`Relation`] の参照先にだけ使う
+/// （[`Relation::RedundantWith`] と [`Relation::Presupposes`]）。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UnitId(pub String);
