@@ -42,12 +42,29 @@
 //!
 //! | 組み合わせ | 起きること |
 //! | ---------- | ---------- |
-//! | 新しい akapen + 古い判定器 | フィールドが無い = 空 = 絞り込み無し。Unit 全体が MARKED（従来の表示） |
+//! | 新しい akapen + 古い判定器 | フィールドが無い = 絞り込み無し。Unit 全体が MARKED（従来の表示） |
 //! | 古い akapen + 新しい判定器 | 未知のフィールドとして無視される。従来の表示 |
 //!
 //! どちらも「意味を取り違える」側へは倒れない。版が守っているのは
 //! 「同じフィールドを双方が違う意味で読み書きする」事故であって、
 //! 追加されたフィールドを片方が知らないことではない。
+//!
+//! ## `core_atoms` は 3 値 — 「無い」と「空」は別の意味
+//!
+//! | wire 形 | 内部 | 意味 |
+//! | --- | --- | --- |
+//! | フィールドが無い | `None` | **絞り込みを受けていない** — Unit 全体が MARKED |
+//! | `"core_atoms":[]` | `Some([])` | **核を持たない** — この Unit は MARKED にならない |
+//! | `"core_atoms":[i]` | `Some([i])` | `i` だけが MARKED |
+//!
+//! **`[]` を「無い」に丸めてはならない。** 丸めると、核の選に漏れた Unit が
+//! 丸ごと光る — いちばん避けたい状態へ落ちる。`skip_serializing_if` が
+//! `Vec::is_empty` ではなく `Option::is_none` なのはこのためで、
+//! `an_empty_core_survives_the_wire_round_trip` が固定している。
+//!
+//! **これも版を上げない。** `[]` を知らない古い akapen は、それを空の Vec と
+//! 読んで「絞り込み無し」に倒す — 表示は従来どおり Unit 全体が MARKED に
+//! なるだけで、位置を取り違えることはない。
 //!
 //! # 検証は受け取る側の責務
 //!
@@ -255,9 +272,15 @@ impl AnalyzeResponse {
                 }
             });
             // 核は先勝ちの結果にだけ追従させる。取られた Atom を核に選んで
-            // いたら、その核も一緒に落ちる（全部落ちれば「絞り込み無し」に
-            // 戻り、Unit 全体が MARKED になる）。同じ Unit が同じ Atom を
-            // 2 回並べただけなら添字はまだ残っているので、核も残す。
+            // いたら、その核も一緒に落ちる。同じ Unit が同じ Atom を 2 回
+            // 並べただけなら添字はまだ残っているので、核も残す。
+            //
+            // **全部落ちても「絞り込み無し」には戻さない。** `Some([])` の
+            // まま、つまり「核を持たない」になる。戻すと、核に選んだ Atom を
+            // 他の Unit に取られた Unit が**丸ごと光る**ことになり、いちばん
+            // 避けたい状態（`docs/gotchas.md`「半分だけ DIM のリスト」の裏返し）
+            // に落ちる。核が指していた Atom はもう隣の Unit のものなので、
+            // この Unit に光らせるべき中身は残っていない。
             //
             // **ここで落とすのは取られた核だけである。** 最初から自分の
             // Atom でない核は落とさず、validate に弾かせる — そちらは
@@ -266,8 +289,10 @@ impl AnalyzeResponse {
                 .into_iter()
                 .filter(|index| !unit.atoms.contains(index))
                 .collect();
-            if !lost.is_empty() {
-                unit.core_atoms.retain(|index| !lost.contains(index));
+            if !lost.is_empty()
+                && let Some(core) = unit.core_atoms.as_mut()
+            {
+                core.retain(|index| !lost.contains(index));
             }
         }
         let document = SemanticDocument::new(atoms, units);
@@ -505,7 +530,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(document.units[0].core_atoms, [AtomIndex(1)]);
+        assert_eq!(document.units[0].core_atoms, Some(vec![AtomIndex(1)]));
         assert!(!document.units[0].is_core(AtomIndex(0)));
         let states = crate::policy::decorate(&document, 100);
         assert_eq!(
@@ -525,7 +550,7 @@ mod tests {
             r#"{"version":1,"units":[{"id":"u1","atoms":[0,1],"reading_tier":"essential"}]}"#,
         )
         .unwrap();
-        assert!(document.units[0].core_atoms.is_empty());
+        assert_eq!(document.units[0].core_atoms, None);
         let states = crate::policy::decorate(&document, 100);
         assert!(
             states[..2]
@@ -566,9 +591,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(document.units[1].atoms, [AtomIndex(2)]);
-        assert_eq!(document.units[1].core_atoms, [AtomIndex(2)], "1 は取られた");
+        assert_eq!(document.units[1].core_atoms, Some(vec![AtomIndex(2)]), "1 は取られた");
 
-        // 核が全部取られたら空になり、Unit 全体が MARKED に戻る。
+        // 核が全部取られたら「核を持たない」になる。**「絞り込み無し」には
+        // 戻さない** — 戻すと、核を隣に取られた Unit が丸ごと光ることになる。
         let document = response(
             r#"{"version":1,"units":[
                 {"id":"first","atoms":[1],"reading_tier":"detail"},
@@ -576,8 +602,8 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert!(document.units[1].core_atoms.is_empty());
-        assert!(document.units[1].is_core(AtomIndex(0)));
+        assert_eq!(document.units[1].core_atoms, Some(Vec::new()));
+        assert!(!document.units[1].is_core(AtomIndex(0)));
     }
 
     /// 未知のフィールドは無視する（将来の `stage` などのため）。

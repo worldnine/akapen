@@ -202,7 +202,9 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 ///
 /// `core_atoms` は任意で、「この Unit の中で、ここだけ読めば要点が取れる」
 /// と判定器が選んだ Atom である。MARKED をそこだけに絞るために
-/// [`policy::decorate`] が読む（省けば従来どおり Unit 全体が MARKED）。
+/// [`policy::decorate`] が読む。**3 値である** — 省けば従来どおり Unit 全体が
+/// MARKED、`[]` なら「核を持たない」でその Unit は MARKED にならない、
+/// `[i]` なら `i` だけが MARKED（`protocol.rs` の「`core_atoms` は 3 値」）。
 ///
 /// # コマンドは range を返さない
 ///

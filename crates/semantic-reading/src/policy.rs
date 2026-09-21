@@ -119,6 +119,24 @@
 //! どの Unit にも属さない Atom             -> NORMAL
 //! ```
 //!
+//! [`crate::SemanticUnit::core_atoms`] は 3 値で、`None`（絞り込み無し）なら
+//! Unit 全体が MARKED、`Some([])`（**核を持たない**）ならその Unit は MARKED に
+//! ならない。後者は ESSENTIAL のまま NORMAL になる — **DIM ではない**。沈めるか
+//! どうかは Tier と Budget が決めることで、核の選に漏れたことは「読まなくて
+//! よい」を意味しないからである。
+//!
+//! ## run キャップ — リスト 1 本につき核は 1 つ
+//!
+//! `Some([])` が要るのは判定器の側の事情である。箇条書きを項目ごとに割ると
+//! （`examples/semantic/jev-annotate.py` の境界規則 4）、1 本のリストの中で
+//! ESSENTIAL な Unit がいくつも立ち、**そのすべてが光る**。実測では業務
+//! `CLAUDE.md` の MARKED が 3.3〜3.7 % から 10.8〜11.2 % へ増えた。
+//!
+//! そこで判定器は、規則 4 でつながった Unit の並び（= 1 本のリスト）ごとに
+//! 核を 1 つだけ選び、選に漏れた Unit へ `Some([])` を返す。**この層は
+//! 変わらない** — run を知らないし、知る必要もない。ここが読むのは
+//! [`crate::SemanticUnit::is_core`] だけである。
+//!
 //! MARKED は Budget に依存しない。Budget 100% で全文を見せつつ ESSENTIAL に
 //! 薄い marker を重ねる、という設計書の最初のデモがそのままこの規則である。
 //!
@@ -329,7 +347,7 @@ mod tests {
             [AtomIndex(0), AtomIndex(1), AtomIndex(2)],
             ReadingTier::Essential,
         );
-        unit.core_atoms.push(AtomIndex(1));
+        unit.set_core([AtomIndex(1)]);
         let doc = SemanticDocument::new(atoms, vec![unit]);
         assert_eq!(
             states(&doc, 100),
@@ -355,9 +373,9 @@ mod tests {
             [AtomIndex(0), AtomIndex(1)],
             ReadingTier::Essential,
         );
-        essential.core_atoms.push(AtomIndex(0));
+        essential.set_core([AtomIndex(0)]);
         let mut dropped = SemanticUnit::new("drop", [AtomIndex(2)], ReadingTier::Essential);
-        dropped.core_atoms.push(AtomIndex(2));
+        dropped.set_core([AtomIndex(2)]);
         let doc = SemanticDocument::new(atoms, vec![essential, dropped]);
         // 60 バイト中、短い "keep"（20 バイト）だけが 70 % に入る。
         assert_eq!(
@@ -380,7 +398,7 @@ mod tests {
         ];
         let mut essential =
             SemanticUnit::new("u0", [AtomIndex(0), AtomIndex(1)], ReadingTier::Essential);
-        essential.core_atoms.push(AtomIndex(1));
+        essential.set_core([AtomIndex(1)]);
         let doc = SemanticDocument::new(
             atoms,
             vec![
@@ -407,7 +425,27 @@ mod tests {
         ];
         let mut unit =
             SemanticUnit::new("u0", [AtomIndex(0), AtomIndex(1)], ReadingTier::Supporting);
-        unit.core_atoms.push(AtomIndex(0));
+        unit.set_core([AtomIndex(0)]);
+        let doc = SemanticDocument::new(atoms, vec![unit]);
+        assert_eq!(
+            states(&doc, 100),
+            [DisplayState::Normal, DisplayState::Normal]
+        );
+    }
+
+    /// **空の核は「核を持たない」** — その Unit は MARKED にならず NORMAL に
+    /// なる。リスト 1 本につき核を 1 つに絞るとき、選に漏れた ESSENTIAL な
+    /// Unit がこれを受け取る。DIM ではない（沈めるかどうかは Tier と Budget が
+    /// 決めることで、核の選に漏れたことは「読まなくてよい」を意味しない）。
+    #[test]
+    fn an_essential_unit_with_an_empty_core_is_normal_not_marked() {
+        let atoms = vec![
+            Atom::new(0..10, AtomKind::Sentence),
+            Atom::new(10..20, AtomKind::Sentence),
+        ];
+        let mut unit =
+            SemanticUnit::new("u0", [AtomIndex(0), AtomIndex(1)], ReadingTier::Essential);
+        unit.set_core([]);
         let doc = SemanticDocument::new(atoms, vec![unit]);
         assert_eq!(
             states(&doc, 100),

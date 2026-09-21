@@ -510,6 +510,141 @@ class CoreQuestionTest(unittest.TestCase):
         self.assertNotIn("core_atoms", units[0])
 
 
+class RunCapTest(unittest.TestCase):
+    """1 本のリストにつき核は 1 つ。Tier（沈む側）は項目ごとのまま。"""
+
+    #: `- 決定A。` / `- 決定B。` / `- 決定C。` の 3 項目。
+    SOURCE = "- 決定A。\n- 決定B。\n- 決定C。\n"
+
+    def setUp(self):
+        self.atoms = atoms_from(
+            self.SOURCE,
+            ("list_item", "- 決定A。"),
+            ("list_item", "- 決定B。"),
+            ("list_item", "- 決定C。"),
+        )
+        self.plan = jev.plan_boundaries(self.atoms, self.SOURCE)
+
+    def units(self, *tiers):
+        return [
+            {
+                "id": f"u{n}",
+                "atoms": [n - 1],
+                "reading_tier": tier,
+                "relations": [],
+                "jev": {},
+            }
+            for n, tier in enumerate(tiers, start=1)
+        ]
+
+    def test_a_run_is_the_stretch_joined_by_rule_four(self):
+        # 3 項目とも別 Unit で、規則4 の境界 2 本でつながっている。
+        self.assertEqual(
+            [e["by"] for e in self.plan],
+            ["rule:new_list_item", "rule:new_list_item"],
+        )
+        self.assertEqual(jev.unit_runs([[0], [1], [2]], self.plan), [[0, 1, 2]])
+
+    def test_a_boundary_that_is_not_rule_four_breaks_the_run(self):
+        # 見出しや散文で切れたら別のリスト。
+        plan = [
+            {"after_atom": 0, "decision": jev.NEW, "by": "rule:new_list_item"},
+            {"after_atom": 1, "decision": jev.NEW, "by": "rule:next_is_heading"},
+            {"after_atom": 2, "decision": jev.NEW, "by": "rule:new_list_item"},
+        ]
+        self.assertEqual(
+            jev.unit_runs([[0], [1], [2], [3]], plan), [[0, 1], [2, 3]]
+        )
+
+    def test_one_question_covers_the_whole_run(self):
+        units = self.units("essential", "essential", "essential")
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        self.assertEqual(list(questions), ["core:run:1"])
+        self.assertEqual(
+            questions["core:run:1"]["criteria"],
+            {"atom:0": "- 決定A。", "atom:1": "- 決定B。", "atom:2": "- 決定C。"},
+        )
+        self.assertEqual(scope, {"core:run:1": [0, 1, 2]})
+        self.assertEqual(handled, frozenset({0, 1, 2}))
+        self.assertEqual(fixed, {})
+
+    def test_the_losers_of_a_run_get_an_empty_core_not_a_missing_one(self):
+        # ここが肝。`[]` は「核を持たない」で MARKED にならない。省くと
+        # 「絞り込み無し」になって Unit 全体が光る。
+        units = self.units("essential", "essential", "essential")
+        questions, fixed, scope, _ = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        jev.apply_run_cores(
+            units, questions, fixed, scope, {"core:run:1": {"choice": "atom:1"}}
+        )
+        self.assertEqual(units[0]["core_atoms"], [])
+        self.assertEqual(units[1]["core_atoms"], [1])
+        self.assertEqual(units[2]["core_atoms"], [])
+        self.assertEqual(units[0]["jev"]["core_by"], "rule:run_cap")
+        self.assertEqual(units[1]["jev"]["core_choice"], "atom:1")
+
+    def test_only_units_that_can_become_marked_join_the_run(self):
+        # CONTEXT の項目は核の話に加わらない（Tier は項目ごとのまま効く）。
+        units = self.units("essential", "context", "essential")
+        questions, _, scope, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        self.assertEqual(
+            questions["core:run:1"]["criteria"],
+            {"atom:0": "- 決定A。", "atom:2": "- 決定C。"},
+        )
+        self.assertEqual(scope["core:run:1"], [0, 2])
+        self.assertEqual(handled, frozenset({0, 2}))
+
+    def test_a_run_with_a_single_marked_unit_is_left_alone(self):
+        # 畳む相手がいないので従来どおり。
+        units = self.units("essential", "context", "context")
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        self.assertEqual((questions, fixed, scope, handled), ({}, {}, {}, frozenset()))
+
+    def test_a_single_candidate_in_a_run_is_settled_without_asking(self):
+        source = "- 決定A。\n-\n"
+        atoms = atoms_from(source, ("list_item", "- 決定A。"))
+        units = self.units("essential", "essential")
+        units[1]["atoms"] = []          # 本文の無い項目は候補を出せない
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            atoms, units, [[0, 1]], source
+        )
+        self.assertEqual(questions, {})
+        self.assertEqual(fixed, {0: [0], 1: []})
+        self.assertEqual(handled, frozenset({0, 1}))
+        self.assertEqual(units[0]["jev"]["core_by"], "rule:only_prose_atom_in_run")
+        self.assertEqual(units[1]["jev"]["core_by"], "rule:run_cap")
+
+    def test_a_run_over_budget_falls_back_to_per_unit_cores(self):
+        # 「核が無ければ Unit 全体が MARKED」を run に当てると全項目が光って
+        # 最悪になる。そこへは落とさず、現行の Unit ごとの核に戻す。
+        units = self.units("essential", "essential", "essential")
+        huge = "あ" * 70_000        # state だけで予算を食い潰す
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], huge
+        )
+        self.assertLess(jev.core_budget(huge), 0)
+        self.assertEqual((questions, fixed, scope, handled), ({}, {}, {}, frozenset()))
+
+    def test_the_per_unit_path_skips_what_the_run_already_handled(self):
+        units = self.units("essential", "essential", "essential")
+        _, _, _, handled = jev.plan_run_cores(
+            self.atoms, units, [[0, 1, 2]], self.SOURCE
+        )
+        self.assertEqual(
+            jev.core_questions(self.atoms, units, self.SOURCE, handled), {}
+        )
+        jev.assign_lone_cores(self.atoms, units, handled)
+        for unit in units:
+            self.assertNotIn("core_atoms", unit, "run キャップの決定を上書きしない")
+
+
 class CoreBudgetTest(unittest.TestCase):
     """核 question の上限は state の大きさから決まる。
 
