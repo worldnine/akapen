@@ -46,8 +46,10 @@
 //!    この順序は Budget に依存しない。
 //! 2. **その先頭から順に、attention が尽きるまで残す**。attention の量は
 //!    Unit が占める source のバイト数で測り、`budget` はその何 % までを
-//!    残すかを表す。入らない Unit が現れた時点で打ち切る（後ろの小さい
-//!    Unit を拾い直さない）。
+//!    残すかを表す。**Unit を 1 つ残すときは、その Unit が前提にしている
+//!    Unit（`PRESUPPOSES` の閉包）のうち未払いのぶんも一緒に払う** —
+//!    払えなければその Unit のほうが残らない（下の「context preservation」）。
+//!    入らない Unit が現れた時点で打ち切る（後ろの小さい Unit を拾い直さない）。
 //! 3. **残った Unit の意味情報を Atom へ投影する**。判断単位は Unit、
 //!    表示単位は Atom。
 //!
@@ -78,35 +80,114 @@
 //! - **先頭バイト位置 / Unit の並び順**: 文書順。最後の同点崩しであり、
 //!   これで順序は必ず全順序になる（安定でない並び替えでも結果が揺れない）。
 //!
-//! # context preservation — 欠けているのは「1 項目」ではなく逐次性
+//! # context preservation — 前提を一緒に生き残らせる
 //!
 //! 設計書は同一 Tier 内の rule として
 //! `redundancy / length / document position / context preservation` の 4 つを
-//! 挙げており、上の鍵は最初の 3 つしか使っていない。ただしこれは
-//! **4 つのうち 1 つを省いた**という話ではない。
+//! 挙げている。上の並び替え鍵が使っているのは最初の 3 つで、
+//! **4 つ目はここ（打ち切り）にある。**
 //!
 //! 最初の 3 つはどれも **Unit 単体の属性**から決まる静的な値である
 //! （重複しているか・何バイトか・文書のどこにあるか）。だから鍵は Unit を
 //! 1 つ見れば計算できる。4 つ目だけが違い、
 //! **残った Unit を順に読んだとき文脈が繋がるか**という、選択の結果に
-//! 依存する性質を指している。
+//! 依存する性質を指している。satisficing は「読み進めて information gain が
+//! 落ちたら次へ移る」という**逐次的**なモデルなので、4 つ目はこの層で
+//! 逐次性を担う唯一の項目である。
 //!
-//! そして satisficing は「読み進めて information gain が落ちたら次へ移る」
-//! という**逐次的**なモデルである。4 つ目は、この層で逐次性を担う唯一の
-//! 項目だった。いま `decorate` がしているのは「集合を選ぶ」ことまでで、
-//! **選んだ集合が読む経路として成立しているかは誰も見ていない**。
+//! ## 何をもって「文脈が繋がる」とするか
 //!
-//! 鍵のどこにそれが現れるかは具体的に言える。`redundant` は
-//! [`crate::SemanticUnit::is_redundant`] であって、`REDUNDANT_WITH` の参照先が
-//! その Budget で残っているかは見ていない。u0 を参照して弱められた Unit は、
-//! u0 自身が DIM になる Budget でも弱められたままである。ここでの「既読」は
-//! 「文書の中で前にある」であって、「読者が実際に辿る経路の上で前にある」では
-//! ない。
+//! 設計書はこの語の中身を定義していない（出てくるのは上の rule の列挙
+//! 1 箇所だけである）。**中身は実測で決めた**（2026-09-21、
+//! `examples/semantic/measurements/context-preservation.md`）。この module は
+//! 設計書に無い定義を自分で発明したのではなく、**測って選ばれた形を実装して
+//! いる**。設計書側は列挙のままで、定義はここと計測にある。
 //!
-//! **ここで実装しないこと。** 設計書は context preservation の中身を定義して
-//! いない（語が出てくるのは上の rule の列挙 1 箇所だけである）。何をもって
-//! 「文脈が繋がる」とするかをこの module で決めると、設計書に無い設計を足す
-//! ことになる。同じ話は `docs/gotchas/open-questions.md` にも置いてある。
+//! 決まった形は 2 つに分かれる。
+//!
+//! - **依存の判定は判定器（Jev）がする。** 「この部分は、前のどこかを
+//!   読んでいないと意味が取れないか」（Noul）→「どれか」（Choice）→
+//!   「ほかにもあるか」（Noul）。直接の前提は最大 2 で、**閾値はどこにも
+//!   置かない**。答えは [`crate::Relation::Presupposes`] として運ばれてくる
+//! - **閉包と予算への反映はこの層がする。** それが下である
+//!
+//! 第 1 版は依存を「自分より前の全 Unit と対の Noul」で聞き、閾値で切った。
+//! 0.4 では閉包が文書の 17〜58 %（中央値）に膨らみ、0.5 では実文書で手に
+//! 見つけた穴の片方を取り逃がした。**原因は閾値ではなく primitive の
+//! 取り違えで**、役を入れ替えても「はい」になる対が 0.4 で 7.6〜32 %
+//! あった — それは依存ではなく関連である。Choice は候補を突き合わせて 1 つ
+//! 返すので扇が構造的に 1 になり、**閉包は 0.5 の大きさのまま 0.4 の再現率**
+//! になった（b1 10.3 % / design 2.5 %、穴は 2 件とも捕捉）。
+//!
+//! ## 予算に数える。表示はしない
+//!
+//! **前提は「読み手に知らせる」ものではなく「一緒に生き残らせる」もの**
+//! である。ステータス行に「どこかに穴がある」と出す案は却下してある
+//! （読み手にできることが無い）。
+//!
+//! 反映の仕方は上の「決め方」2 のとおり、`keep_order` の順に進みながら
+//! **その Unit と、まだ払っていない閉包を一緒に払う**。払えなければそこで
+//! 打ち切る。閉包は根まで辿る（前提の前提も払う）。
+//!
+//! 数えないという選択肢は無い。**数えないと「30 % と言って 45 % 出る」**
+//! ことになり、`budget` が指す量が文書によって変わる。
+//!
+//! ## 逆転は起きる。受け入れた帰結である
+//!
+//! 前提を予算に数えると、**長い系譜を持つ ESSENTIAL が丸ごと払えずに落ち、
+//! 系譜の無い格下が代わりに繰り上がる**。実測では 26 Unit の小さい文書で
+//! READ 30 % のとき MARKED 5 つのうち 2 つが落ちた（Choice 版・第 1 版とも
+//! 同じ 2 / 5）。`design` は第 1 版の 14〜16 / 38 から 4〜5 / 38 へ桁が
+//! 変わったが、**小さい文書では残る**。
+//!
+//! これは不具合ではなく、「前提を予算に数える」と決めた時点で決まる帰結で
+//! ある。**ここを直そうとしないこと** — 落ちた MARKED を特別扱いして拾い
+//! 直せば、それは best-fit であり、下の単調性が壊れる。
+//!
+//! ## 単調性は何に支えられているか
+//!
+//! 閉包を足しても単調性は保たれる。支えているのは次の 2 点だけで、
+//! **どちらも辺の構造をまったく使っていない**。
+//!
+//! 1. `keep_order` が Budget に依存しない
+//! 2. 打ち切りが `break` である（入らないものを飛ばして先を試さない）
+//!
+//! 各 rank で払う額は「それまでに何が kept になったか」だけで決まり、
+//! それは rank だけの関数である（Budget を見ていない）。つまり
+//! **累積額の列 `S_0 <= S_1 <= …` は Budget に依存しない固定列**で、
+//! Budget が決めるのは「その列のどこで初めて越えるか」だけである。
+//! 越える位置は Budget について単調なので、残る集合は入れ子になる。
+//!
+//! だから**前向きの辺や循環があっても単調性は壊れない**（閉包は訪問済み
+//! 集合で辿るので必ず止まる）。壊れるのは `break` を `continue` にした
+//! ときだけで、そのとき「Budget b で i が入らず j が入り、b+1 で i が入って
+//! j が落ちる」が起きる。
+//!
+//! ## rank 0 は閉包ごと残る
+//!
+//! 「読む場所がゼロの表示には意味がない」ので先頭 1 つは Budget 1 % でも
+//! 必ず残すが、**前提もその Unit の一部として一緒に残る**。だから Budget
+//! 1 % の表示は「MARKED 1 つ」ではなく「MARKED 1 つ + その前提」になる。
+//! 前提だけ落として先頭を残すのは、context preservation が禁じている当の
+//! 状態（意味の取れない一文だけが光っている）そのものである。
+//!
+//! ## 並び替え鍵には入れない
+//!
+//! 前提を鍵に混ぜる案は採らない。鍵は「どちらを先に残すか」しか言えず、
+//! **「一緒に引き上げる」を表現できない**。さらに、前提の強さを鍵に足すと
+//! DETAIL の前提が ESSENTIAL より先に来て、**Tier が第 1 キーである意味が
+//! 消える**。context preservation は順序の rule ではなく、
+//! **払い方の rule** である。
+//!
+//! ## `REDUNDANT_WITH` のほうは、今回も相対にしていない
+//!
+//! `redundant` は [`crate::SemanticUnit::is_redundant`] であって、
+//! `REDUNDANT_WITH` の参照先がその Budget で残っているかは見ていない。
+//! u0 を参照して弱められた Unit は、u0 自身が DIM になる Budget でも
+//! 弱められたままである。ここでの「既読」は「文書の中で前にある」であって
+//! 「読者が実際に辿る経路の上で前にある」ではない。**これは未解決のまま
+//! 残っている**（`docs/gotchas/open-questions.md`）。今回入れたのは
+//! `PRESUPPOSES` の側だけである。
 //!
 //! # 表示状態の割り当て
 //!
@@ -168,6 +249,7 @@
 //! を読むだけである。**核の選択は Budget に依存しない**ので、上の単調性は
 //! そのまま成り立つ。
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::display::DisplayState;
@@ -209,17 +291,36 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
 
     let order = keep_order(doc);
     let total: usize = doc.units.iter().map(cost).sum();
+    let by_id = index_by_id(doc);
 
     // 残したい順に attention を積み、Budget を超えた時点で打ち切る。
+    // **1 つ残すときは、その Unit が前提にしている Unit のうちまだ払って
+    // いないぶんも一緒に払う**（context preservation）。払えなければ
+    // その Unit のほうが残らない。
+    //
     // 先頭の 1 つだけは Budget が 1 % でも必ず残す — 読む場所がゼロの
-    // 表示には意味がないため。
+    // 表示には意味がないため。**そのとき前提も一緒に残る**（意味の取れない
+    // 一文だけが光っている状態は、この rule が禁じている当のものである）。
     let mut kept = vec![false; doc.units.len()];
     let mut spent: usize = 0;
+    let mut bill = Vec::new();
     for (rank, &unit_index) in order.iter().enumerate() {
-        spent += cost(&doc.units[unit_index]);
-        let fits = (spent as u128) * 100 <= (budget as u128) * (total as u128);
+        // この Unit と、その前提の閉包。重複は無い（`prerequisites` は
+        // 訪問済み集合で辿り、seed 自身を含めない）。
+        bill.clear();
+        bill.push(unit_index);
+        prerequisites(doc, &by_id, unit_index, &mut bill);
+        let due: usize = bill
+            .iter()
+            .filter(|&&index| !kept[index])
+            .map(|&index| cost(&doc.units[index]))
+            .sum();
+        let fits = ((spent + due) as u128) * 100 <= (budget as u128) * (total as u128);
         if fits || rank == 0 {
-            kept[unit_index] = true;
+            for &index in &bill {
+                kept[index] = true;
+            }
+            spent += due;
         } else {
             break;
         }
@@ -287,6 +388,57 @@ fn keep_order(doc: &SemanticDocument) -> Vec<usize> {
         (effective_tier, redundant, length, start, index)
     });
     order
+}
+
+/// `id` から Unit の添字を引く表。
+///
+/// [`crate::SemanticDocument::unit`] は線形探索なので、閉包を Unit の数だけ
+/// 辿ると 3 乗になる。`decorate` 1 回につき 1 度だけ作る。
+fn index_by_id(doc: &SemanticDocument) -> HashMap<&str, usize> {
+    // id の重複は validate が弾くが、ここでは黙って先勝ちにする
+    // （`decorate` は壊れた入力でも panic しない、という約束のほう）。
+    let mut by_id = HashMap::with_capacity(doc.units.len());
+    for (index, unit) in doc.units.iter().enumerate() {
+        by_id.entry(unit.id.as_str()).or_insert(index);
+    }
+    by_id
+}
+
+/// `seed` が推移的に前提にしている Unit の添字を `out` へ追記する。
+///
+/// **`seed` 自身は含めない。** 呼び手が先に `out` へ入れている前提で、
+/// 重複も入れない（`out` に既にある添字は辿り直さない）。
+///
+/// # 循環でも止まる
+///
+/// 判定器は「自分より前の Unit」しか選択肢にしないので辺は後ろ向きにしか
+/// 立たないが、**ここはそれに依存していない**。すでに見た添字を二度辿ら
+/// ないので、前向きの辺が混ざっても循環があっても必ず止まる。参照先が
+/// 実在することは [`crate::SemanticDocument::validate`] が保証するが、
+/// 知らない id はここでも黙って飛ばす（panic しない）。
+fn prerequisites(
+    doc: &SemanticDocument,
+    by_id: &HashMap<&str, usize>,
+    seed: usize,
+    out: &mut Vec<usize>,
+) {
+    let mut frontier = vec![seed];
+    while let Some(current) = frontier.pop() {
+        let Some(unit) = doc.units.get(current) else {
+            continue;
+        };
+        for target in unit.presupposes() {
+            let Some(&index) = by_id.get(target.as_str()) else {
+                continue;
+            };
+            // seed 自身へ戻る辺（循環）も、すでに積んだ添字も辿らない。
+            if index == seed || out.contains(&index) {
+                continue;
+            }
+            out.push(index);
+            frontier.push(index);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -595,6 +747,343 @@ mod tests {
         ];
         let doc = SemanticDocument::new(atoms, units);
         assert_eq!(states(&doc, 100), [DisplayState::Marked]);
+    }
+
+    // ---------------------------------------------------------------
+    // context preservation
+    // ---------------------------------------------------------------
+
+    /// バイト長を指定して Unit を並べた文書を作る（Atom 1 つ = Unit 1 つ）。
+    fn sized(units: &[(ReadingTier, usize)]) -> SemanticDocument {
+        let mut atoms = Vec::new();
+        let mut at = 0;
+        for &(_, len) in units {
+            atoms.push(Atom::new(at..at + len, AtomKind::Sentence));
+            at += len;
+        }
+        let units = units
+            .iter()
+            .enumerate()
+            .map(|(i, &(tier, _))| SemanticUnit::new(format!("u{i}"), [AtomIndex(i)], tier))
+            .collect();
+        SemanticDocument::new(atoms, units)
+    }
+
+    /// `owner` が `target` を前提にする、と書き足す。
+    fn presuppose(doc: &mut SemanticDocument, owner: usize, target: usize) {
+        doc.units[owner]
+            .relations
+            .push(Relation::Presupposes(format!("u{target}").into()));
+    }
+
+    /// その Budget で DIM でない Unit の添字（= 残った Unit）。
+    fn kept_units(doc: &SemanticDocument, budget: u8) -> Vec<usize> {
+        let states = states(doc, budget);
+        doc.units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| {
+                unit.atoms
+                    .iter()
+                    .any(|&AtomIndex(a)| states[a] != DisplayState::Dim)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// **合格条件の本体。** Budget 1..=100 を全部回して、残る集合が必ず
+    /// 入れ子になっていることを確かめる。
+    ///
+    /// 前提を足すと 1 つの Unit を残す値段が変わるので、単調性がいちばん
+    /// 危ないのがここである。支えているのは「`keep_order` が Budget に
+    /// 依存しない」と「打ち切りが `break` である」の 2 点だけで、
+    /// **辺の構造は一切使っていない** — だから循環を含む fixture も同じ
+    /// ループで回している。
+    fn assert_monotone(doc: &SemanticDocument, label: &str) {
+        let mut previous: Vec<usize> = Vec::new();
+        for budget in MIN_BUDGET..=MAX_BUDGET {
+            let now = kept_units(doc, budget);
+            for index in &previous {
+                assert!(
+                    now.contains(index),
+                    "{label}: budget {budget} で u{index} が消えた \
+                     （{previous:?} -> {now:?}）"
+                );
+            }
+            previous = now;
+        }
+    }
+
+    #[test]
+    fn keeping_a_unit_stays_monotone_when_prerequisites_are_charged() {
+        // 鎖（深さ 2）。ESSENTIAL が CONTEXT を、それがさらに DETAIL を。
+        let mut chain = sized(&[
+            (ReadingTier::Detail, 40),
+            (ReadingTier::Context, 30),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 20),
+        ]);
+        presuppose(&mut chain, 2, 1);
+        presuppose(&mut chain, 1, 0);
+        assert_monotone(&chain, "chain");
+
+        // 共有前提 — 2 つの Unit が同じ Unit を前提にする。
+        let mut shared = sized(&[
+            (ReadingTier::Context, 25),
+            (ReadingTier::Essential, 15),
+            (ReadingTier::Essential, 15),
+            (ReadingTier::Detail, 45),
+        ]);
+        presuppose(&mut shared, 1, 0);
+        presuppose(&mut shared, 2, 0);
+        assert_monotone(&shared, "shared");
+
+        // 直接の前提が 2 本（判定器の当て木の上限）。
+        let mut two = sized(&[
+            (ReadingTier::Context, 20),
+            (ReadingTier::Detail, 30),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 40),
+        ]);
+        presuppose(&mut two, 2, 0);
+        presuppose(&mut two, 2, 1);
+        assert_monotone(&two, "two");
+
+        // 払えないほど高い閉包。ESSENTIAL が文書の大半を引き連れている。
+        let mut heavy = sized(&[
+            (ReadingTier::Detail, 400),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 30),
+            (ReadingTier::Context, 60),
+        ]);
+        presuppose(&mut heavy, 1, 0);
+        assert_monotone(&heavy, "heavy");
+
+        // 循環。構造上は起きないが、起きても順序も打ち切りも変わらない。
+        let mut cyclic = sized(&[
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 20),
+            (ReadingTier::Context, 30),
+            (ReadingTier::Detail, 40),
+        ]);
+        presuppose(&mut cyclic, 0, 2);
+        presuppose(&mut cyclic, 2, 0);
+        presuppose(&mut cyclic, 1, 1 /* 自己参照は validate が弾くが、ここは 3 へ */);
+        cyclic.units[1].relations.clear();
+        presuppose(&mut cyclic, 1, 3);
+        presuppose(&mut cyclic, 3, 1);
+        assert_monotone(&cyclic, "cyclic");
+    }
+
+    /// 単調性の支えは辺ではなく `break` である、を裏から固定する。
+    /// 前提が 1 本も無い文書では、閉包の実装が入っても結果が 1 ビットも
+    /// 変わらない。
+    #[test]
+    fn a_document_without_prerequisites_decorates_exactly_as_before() {
+        let doc = doc(&[
+            (ReadingTier::Essential, false),
+            (ReadingTier::Supporting, false),
+            (ReadingTier::Context, false),
+            (ReadingTier::Detail, false),
+        ]);
+        assert_eq!(
+            states(&doc, 50),
+            [
+                DisplayState::Marked,
+                DisplayState::Normal,
+                DisplayState::Dim,
+                DisplayState::Dim
+            ]
+        );
+        assert_monotone(&doc, "no edges");
+    }
+
+    /// 前提は**一緒に残る**。これが rule の本体である。
+    ///
+    /// u0 は DETAIL なので、普通なら順序のいちばん後ろで沈む。u2
+    /// （ESSENTIAL）がそれを前提にしていると、u2 を残す値段に u0 が乗り、
+    /// **2 つ一緒に残る**。実測の穴 A がこの形だった（MARKED の一文が
+    /// 人物名で人物を指し、その人物の説明が沈んでいた）。
+    #[test]
+    fn a_prerequisite_survives_with_the_unit_that_needs_it() {
+        let plain = sized(&[
+            (ReadingTier::Detail, 25),
+            (ReadingTier::Essential, 5),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 60),
+        ]);
+        // 前提が無ければ、40 % でも DETAIL の u0 は沈んだまま。
+        assert_eq!(kept_units(&plain, 40), [1, 2]);
+
+        let mut linked = plain.clone();
+        presuppose(&mut linked, 2, 0);
+        assert_eq!(kept_units(&linked, 40), [0, 1, 2]);
+        // 引き上げられた前提は **NORMAL**。DIM でもないし、MARKED でもない
+        // （沈めないだけで、格上げしたわけではない）。
+        assert_eq!(
+            states(&linked, 40),
+            [
+                DisplayState::Normal,
+                DisplayState::Marked,
+                DisplayState::Marked,
+                DisplayState::Dim
+            ]
+        );
+    }
+
+    /// 前提は**根まで**辿る。前提の前提も一緒に払う。
+    #[test]
+    fn prerequisites_are_followed_to_the_root() {
+        let mut doc = sized(&[
+            (ReadingTier::Detail, 10),
+            (ReadingTier::Context, 10),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 70),
+        ]);
+        presuppose(&mut doc, 2, 1);
+        presuppose(&mut doc, 1, 0);
+        // 30 % = 30 バイト。鎖 3 つでちょうど払える。u0 は ESSENTIAL の
+        // **前提の前提**で、直接は誰も指していない。
+        assert_eq!(kept_units(&doc, 30), [0, 1, 2]);
+        // 20 % では鎖が払えないが、ESSENTIAL は rank 0 なので閉包ごと
+        // 強制で残る（「rank 0 は閉包ごと残る」）。
+        assert_eq!(kept_units(&doc, 20), [0, 1, 2]);
+    }
+
+    /// **逆転**。長い系譜を持つ ESSENTIAL が払えずに落ち、系譜の無い格下が
+    /// 繰り上がる。実測（b3 で 2 / 5 の MARKED が落ちる）と同じ形で、
+    /// **「前提を予算に数える」と決めた時点で決まる帰結である**。
+    /// 拾い直すと best-fit になり単調性が壊れるので、ここは固定して残す。
+    #[test]
+    fn a_unit_with_an_unpayable_lineage_falls_and_a_lesser_one_rises() {
+        let mut doc = sized(&[
+            (ReadingTier::Detail, 55),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Essential, 15),
+            (ReadingTier::Context, 20),
+        ]);
+        // 前提が無ければ 30 % で ESSENTIAL が 2 つとも残り、どちらも光る。
+        assert_eq!(kept_units(&doc, 30), [1, 2]);
+        assert_eq!(states(&doc, 30)[1..3], [DisplayState::Marked; 2]);
+
+        presuppose(&mut doc, 1, 0);
+        // u1 の請求書は 65 バイトになる。rank 0 なので閉包ごと強制で残り、
+        // **そこで予算を使い切って打ち切られる**。
+        //
+        // 落ちたのは u2 — **MARKED である**。繰り上がったのは u0、
+        // 文書でいちばん下の DETAIL である。「予算の外にある弱い Unit が
+        // 落ちる」のではなく「MARKED が落ちて格下が上がる」。
+        assert_eq!(kept_units(&doc, 30), [0, 1]);
+        assert_eq!(
+            states(&doc, 30),
+            [
+                DisplayState::Normal,
+                DisplayState::Marked,
+                DisplayState::Dim,
+                DisplayState::Dim
+            ]
+        );
+    }
+
+    /// すでに払った前提は二度請求されない（共有前提）。
+    #[test]
+    fn a_shared_prerequisite_is_paid_for_once() {
+        let mut doc = sized(&[
+            (ReadingTier::Context, 40),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 40),
+        ]);
+        presuppose(&mut doc, 1, 0);
+        presuppose(&mut doc, 2, 0);
+        // 二重計上なら 40 + 10 + 40 + 10 = 100 バイトで 60 % を超える。
+        // 1 回だけなら 60 バイトちょうどで収まる。
+        assert_eq!(kept_units(&doc, 60), [0, 1, 2]);
+    }
+
+    /// **rank 0 は閉包ごと残る。** Budget 1 % の表示は「MARKED 1 つ」では
+    /// なく「MARKED 1 つ + その前提」になる。意味の取れない一文だけが
+    /// 光っている状態は、この rule が禁じている当のものである。
+    #[test]
+    fn the_forced_first_unit_brings_its_prerequisites_along() {
+        let mut doc = sized(&[
+            (ReadingTier::Context, 500),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 90),
+        ]);
+        presuppose(&mut doc, 1, 0);
+        assert_eq!(kept_units(&doc, 1), [0, 1]);
+        assert_eq!(
+            states(&doc, 1),
+            [
+                DisplayState::Normal,
+                DisplayState::Marked,
+                DisplayState::Dim
+            ]
+        );
+    }
+
+    /// 循環があっても止まる（無限ループにならない）。
+    #[test]
+    fn a_cycle_in_the_prerequisites_terminates() {
+        let mut doc = sized(&[
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Context, 10),
+            (ReadingTier::Detail, 80),
+        ]);
+        presuppose(&mut doc, 0, 1);
+        presuppose(&mut doc, 1, 0);
+        assert_eq!(kept_units(&doc, 20), [0, 1]);
+    }
+
+    /// 知らない id を指す前提は黙って飛ばす — `decorate` は壊れた入力でも
+    /// panic しない（弾くのは [`SemanticDocument::validate`] の仕事）。
+    #[test]
+    fn a_prerequisite_pointing_nowhere_does_not_panic() {
+        let mut doc = sized(&[
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 90),
+        ]);
+        doc.units[0]
+            .relations
+            .push(Relation::Presupposes("nope".into()));
+        assert_eq!(kept_units(&doc, 20), [0]);
+    }
+
+    /// 前提を持つだけの ESSENTIAL は **MARKED のまま**。`relations` が
+    /// 空でないことを redundancy と読むと、ここが NORMAL へ落ちる。
+    #[test]
+    fn a_unit_that_presupposes_is_still_marked() {
+        let mut doc = sized(&[
+            (ReadingTier::Context, 10),
+            (ReadingTier::Essential, 10),
+        ]);
+        presuppose(&mut doc, 1, 0);
+        assert_eq!(
+            states(&doc, 100),
+            [DisplayState::Normal, DisplayState::Marked]
+        );
+    }
+
+    /// 前提でも重複でもある Unit は、重複として弱められる。2 つの relation は
+    /// 独立に効く。
+    #[test]
+    fn a_unit_can_be_redundant_and_have_a_prerequisite_at_once() {
+        let mut doc = sized(&[
+            (ReadingTier::Context, 10),
+            (ReadingTier::Essential, 10),
+        ]);
+        presuppose(&mut doc, 1, 0);
+        doc.units[1]
+            .relations
+            .push(Relation::RedundantWith("u0".into()));
+        assert!(doc.units[1].is_redundant());
+        // REDUNDANT なので MARKED にはならない。前提は引き続き引き上げる。
+        assert_eq!(
+            states(&doc, 100),
+            [DisplayState::Normal, DisplayState::Normal]
+        );
+        assert_eq!(kept_units(&doc, 55), [0, 1]);
     }
 
     #[test]

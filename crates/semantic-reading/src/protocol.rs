@@ -66,6 +66,40 @@
 //! 読んで「絞り込み無し」に倒す — 表示は従来どおり Unit 全体が MARKED に
 //! なるだけで、位置を取り違えることはない。
 //!
+//! # `PRESUPPOSES` を足しても版は上げない — ただし理由の形が違う
+//!
+//! [`crate::Relation::Presupposes`]（context preservation の前提。2026-09-21）
+//! も [`VERSION`] を 1 のままにした。**ただし `core_atoms` と同じ話ではない。**
+//! あちらは追加された**フィールド**で、知らない側は読み飛ばせた。こちらは
+//! 追加された**列挙の枝**なので、知らない側は読み飛ばせない。
+//!
+//! | 組み合わせ | 起きること |
+//! | ---------- | ---------- |
+//! | 新しい akapen + 古い判定器 | `presupposes` が 1 つも来ない。閉包が空なので `decorate` の請求額は従来どおり Unit 1 つ分になり、**表示は 1 ビットも変わらない** |
+//! | 古い akapen + 新しい判定器 | serde が `unknown variant `presupposes`` で失敗し、**応答が丸ごと捨てられる**。注釈は付かず、`App::flash_err` がステータス行にその一行を出す |
+//!
+//! **2 行目は退化ではなく失敗である。** `core_atoms` の表が「どちらも従来の
+//! 表示」だったのと違って、こちらは片側が注釈を失う。それでも版を上げない
+//! 理由は 2 つある。
+//!
+//! 1. **上げても直らない。** 版を 2 にしたところで古い akapen は
+//!    「cannot read protocol version 2」で同じく応答を捨てる。変わるのは
+//!    エラーの文面だけで、注釈は戻らない
+//! 2. **上げると、いま動いている組み合わせが死ぬ。** 新しい akapen + 古い
+//!    判定器（1 行目）は完全に正しく動いているのに、版を 2 にすると
+//!    判定器が名乗る 1 を拒んで壊れる。**直らない側のために、壊れていない
+//!    側を壊すことになる**
+//!
+//! そして版が守っているものは、ここでも守られている。**どちらの向きにも
+//! 「それらしく見えるが間違っている注釈」は出ない** — 1 行目は前提を知らない
+//! だけで正しく、2 行目は何も出さずに理由を言う。版は「同じフィールドを双方が
+//! 違う意味で読み書きする」事故のためにあり、ここにその事故は無い。
+//!
+//! **失敗は静かではない。** `AnalyzeResponse::from_json` の `Err` は
+//! `CommandProvider::analyze` から `App::accept_analysis` へ上がり、
+//! `flash_err` でステータス行に出る（`src/app.rs`）。古い akapen に新しい
+//! 判定器を繋いだ人は、黙って注釈が消えるのではなく理由を読む。
+//!
 //! # 検証は受け取る側の責務
 //!
 //! [`AnalyzeResponse::into_document`] は全項目を検査し、**1 つでも失敗
@@ -338,6 +372,42 @@ mod tests {
             json,
             r##"{"version":1,"source":"# A\n","atoms":[{"index":0,"kind":"heading","range":{"start":0,"end":3},"text":"# A"}]}"##
         );
+    }
+
+    /// 前提が wire を通って relation になる。**`redundant_with` と取り違え
+    /// ない** — 持ち主は REDUNDANT にならず、ESSENTIAL なら光り続ける。
+    #[test]
+    fn a_prerequisite_crosses_the_wire_as_its_own_relation() {
+        let document = response(
+            r#"{"version":1,"units":[
+                {"id":"u1","atoms":[0],"reading_tier":"context"},
+                {"id":"u2","atoms":[1,2],"reading_tier":"essential","relations":[{"presupposes":"u1"}]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            document.units[1].relations,
+            [Relation::Presupposes("u1".into())]
+        );
+        assert!(!document.units[1].is_redundant());
+        assert_eq!(document.units[1].redundant_with(), None);
+        assert_eq!(
+            document.units[1].presupposes().collect::<Vec<_>>(),
+            [&UnitId::from("u1")]
+        );
+    }
+
+    /// 参照先が居ない前提は、redundancy と同じで**応答ごと捨てる**。
+    #[test]
+    fn a_prerequisite_pointing_at_nobody_throws_the_whole_response_away() {
+        let err = response(
+            r#"{"version":1,"units":[
+                {"id":"u1","atoms":[0,1,2],"reading_tier":"essential","relations":[{"presupposes":"u9"}]}
+            ]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown unit"), "{err}");
     }
 
     #[test]

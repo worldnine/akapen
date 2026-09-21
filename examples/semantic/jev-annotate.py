@@ -15,7 +15,7 @@ Atom の index だけなので、このスクリプトが壊れた位置を返�
 
 ---
 
-## 3 ラウンド構成
+## ラウンド構成 — 3 + 波
 
 Tier の question は Unit について聞くものだが、Unit は境界判定の答えから
 生まれる。**1 ラウンドでは原理的に組めない。**
@@ -26,9 +26,16 @@ Tier の question は Unit について聞くものだが、Unit は境界判定
                  → 誰に redundancy を聞くか / 誰の核を聞くかが確定
     ラウンド3  state=文書全文, questions={ SUPPORTING 以上の redundancy(Noul)
                                             と、ESSENTIAL な Unit の核(Choice) }
+                 → **MARKED になりうる Unit**が確定
+    ラウンド4+ state=文書全文, context preservation の前提を波で辿る
+                 （1 波 = 段階 1〜4 の 4 往復。実測で波は 2〜4）
 
 Jev は question を**並列・独立に**評価するので、ラウンド 2 の時点では
 「どの Unit が ESSENTIAL か」をまだ誰も知らない。だから畳めない。
+
+**ラウンド 4 以降だけ本数が固定でない。** 前提の前提を聞くには、前の波の
+答えを見てからでないと相手が決まらないためである（[`trace_prerequisites`]）。
+波は新しい前提が出なくなると自然に止まる。
 
 **redundancy はラウンド 2 から 3 へ移してある。** 全 Unit に聞くのをやめ、
 Tier が SUPPORTING 以上の Unit だけに聞く — `policy::decorate` は REDUNDANT な
@@ -705,7 +712,10 @@ def build_units(
     値の真上に乗り、実行ごとに答えが揺れたため。
 
     redundancy を聞いていない Unit（CONTEXT / DETAIL と先頭）は、そもそも
-    REDUNDANT になりえないので `relations` は空のままになる。
+    REDUNDANT になりえないので、ここを出る時点では `relations` が空になる。
+    **空のまま終わるとは限らない** — context preservation の前提
+    （`PRESUPPOSES`）は核まで決まったあとに [`trace_prerequisites`] が
+    同じ配列へ足す。
     """
     bodies = [unit_body(atoms, indices) for indices in units]
     out = []
@@ -736,19 +746,32 @@ def build_units(
     return out
 
 
+def is_redundant(unit: dict) -> bool:
+    """この Unit に `REDUNDANT_WITH` が付いているか。
+
+    **`relations` が空でないこと、ではない。** `PRESUPPOSES`（context
+    preservation の前提）が同じ配列に並ぶようになったので、空かどうかで
+    判定すると**前提を持つ Unit が重複扱いになる** — MARKED から外れ、
+    核も捨てられる。context preservation は光らせ続けるための rule なので、
+    そこを混ぜると真逆へ倒れる。`crates/semantic-reading/src/unit.rs` の
+    `SemanticUnit::redundant_with` が同じ直しを受けている。
+    """
+    return any("redundant_with" in relation for relation in unit["relations"])
+
+
 def wants_core(unit: dict) -> bool:
     """この Unit に核を聞く意味があるか。
 
     聞くのは **MARKED になりうる Unit だけ**である。`policy::decorate` が
     MARKED にするのは「Budget に残った ESSENTIAL かつ非 REDUNDANT」なので、
-    ここで Tier と relations を見れば足りる（Budget はこのスクリプトから
+    ここで Tier と redundancy を見れば足りる（Budget はこのスクリプトから
     見えないし、見る必要もない — 核の選択は Budget に依存しない）。
 
     絞り込むことで question 数が減る。実測（45.6 KB の文書）では 34 Unit の
     うち 11 が ESSENTIAL かつ非 REDUNDANT で、さらに Atom が 2 つ以上ある
     7 つだけがラウンド 3 の question になった。
     """
-    return unit["reading_tier"] == "essential" and not unit["relations"]
+    return unit["reading_tier"] == "essential" and not is_redundant(unit)
 
 
 def core_candidates(atoms: list[dict], unit: dict) -> dict:
@@ -991,6 +1014,319 @@ def apply_core_answers(units: list[dict], questions: dict, answers: dict) -> Non
         unit["core_atoms"] = [int(choice.split(":")[1])]
         unit["jev"]["core_choice"] = choice
         unit["jev"]["core_confidence"] = confidence_of(answers, key)
+
+
+# ---------------------------------------------------------------------------
+# context preservation — 前提を聞く（段階 1〜3 を波で回す）
+#
+# 設計上の位置は `docs/design/semantic-reading-layer.md`「同じ Tier 内部では
+# … `context preservation` などの決定論的な rule をまず利用する」。**表示では
+# ない** — 前提は読み手に知らせるのではなく、`policy::decorate` が閉包ごと
+# 予算に数えて**一緒に生き残らせる**。
+#
+# 中身は設計書が定義していないので、実測で決めた
+# （`examples/semantic/measurements/context-preservation.md`。採取スクリプトは
+# 証拠ディレクトリの `tools/ctxchoice.py`）。**この節の 3 つの文面と 0.5 は
+# そこから一字一句移したものである。言い換えると計測が根拠でなくなる。**
+#
+#     段階 1  seed ごとに Noul 1 つ。「前を読まないと意味が取れないか」
+#     段階 2  「はい」の Unit ごとに **Choice 1 つ**。選択肢は自分より前の Unit
+#     段階 3  当て木。Noul 1 つ →「はい」なら選んだものを外した Choice を
+#             もう 1 回で**止める**。1 Unit の直接前提は最大 2
+#
+# ## なぜ Choice なのか（閾値の話ではなかった）
+#
+# 第 1 版は段階 2 を「自分より前の全 Unit と対の Noul」でやり、閾値で切った。
+# 0.4 では閉包が文書の 17〜58 %（中央値）に膨らみ、0.5 では手で見つけた穴の
+# 片方を取り逃がす。**原因は閾値ではなく primitive の取り違えだった** — 役を
+# 入れ替えても「はい」になる対が 0.4 で 7.6〜32 % あり、依存は定義から非対称
+# なので、それは依存ではなく**関連**を測っている。
+#
+# Noul は孤立した真偽で比較をしない。Choice は候補を突き合わせて 1 つ返すので
+# **扇が構造的に 1 になる**。差し替えたら閉包は 0.5 の大きさのまま（b1 10.3 % /
+# design 2.5 %）、穴は 2 件とも捕まり、**閉包が単独で 30 % の予算を超える
+# MARKED は全 32 ランで 0** になった。コストも 2 乗が消えた（design で
+# 155 秒 / 4.7M tokens → 15 秒 / 0.27M tokens）。
+#
+# akapen は既に同じ形を核の選択で使っている（[`core_questions`]）。
+# ---------------------------------------------------------------------------
+
+
+#: 段階 1・3 の Noul の「はい」の境目。**振らない。**
+#:
+#: 「Noul の『はい』の自然な境目で、恣意的でない点はここしかない」を計測から
+#: 引き継いだ。段階 2 には閾値が無い（Choice が返した 1 つを採る。
+#: [`apply_core_answers`]「`probabilities` を閾値で切って複数採る案は採らない」
+#: と同じ線）。
+#:
+#: **穴 A の 2 本目はこの境目のすぐ上に乗っている。** 実測で当て木が 0.52
+#: だった（4 ランとも）。`docs/design/jev.md` は `confidence` の揺れ ±0.07 を
+#: 理由に閾値ガードを不採用にしていて、**同じ幅がここに乗れば裏返る**。
+#: 「捕まえた」であって「安定して捕まえる」ではない。
+CONTEXT_YES = 0.5
+
+#: 前提の選択肢にする Tier — **DETAIL だけ落とす。**
+#:
+#: 指示は「SUPPORTING 以上」だったが、字義どおりだと CONTEXT も落ちる。
+#: **実測で穴 A の相手は 2 つとも CONTEXT だった**ので、字義を採ると
+#: Choice の出来と無関係に捕まらない（b1 の 4 ランとも候補 0 件）。
+#: 絞り込みの理由は「DETAIL は Jev 自身が重要でないと言ったものだから」なので、
+#: 理由に合わせて DETAIL だけを落とす。
+#:
+#: **CONTEXT を落とせない理由は構造的である。** CONTEXT は設計上「背景」で、
+#: 人物や書名が何者かの説明はまさにそこに落ちる。ESSENTIAL な一文が CONTEXT に
+#: 寄りかかるという想定は捨てられない。
+CONTEXT_TIERS = frozenset({"essential", "supporting", "context"})
+
+#: 閉包の波の上限。
+#:
+#: **打ち切りのためではなく、止まらなくなったときの保険である。** 実測では
+#: 4 文書 × 4 ラン × 2 条件のすべてで、新しい前提が出なくなって自然に止まった
+#: （波は 2〜4）。辺は必ず自分より前の Unit を指すので波の数は Unit 数を
+#: 超えられないが、それを当てにせず数で止める。
+CONTEXT_MAX_WAVES = 12
+
+#: 段階 1（Noul）。**計測と一字一句同じ。**
+CONTEXT_STAGE1 = (
+    "次の部分は、これより**前**のどこかを読んでいないと意味が取れない。\n"
+    "前の箇所を読まずにここだけを読むと、何を指しているのか・誰の何の話なのかが"
+    "決まらず、書かれている内容を取り違える。\n\n"
+    "――― 対象 ―――\n{body}\n―――――――――"
+)
+
+#: 段階 2（Choice）。選択肢は前の Unit の本文そのもの（キーは `u:<添字>`）。
+#: 核の Choice と同じで、`criteria` の説明文が判定基準ではなく本文の引用になる。
+#:
+#: 対の Noul との違いは「1 つ選べ」と強制するところにある。答えを 1 つへ倒す
+#: 問い方にしないと「どれも当てはまる」に戻る（[`CORE_INSTRUCTIONS`]
+#: 「『重要な部分はどれか』とは聞かない」と同じ理由）。
+CONTEXT_CHOICE = (
+    "「対象」はこの文書の後ろの方にある次の一続きである。\n\n"
+    "――― 対象 ―――\n{target}\n―――――――――\n\n"
+    "選択肢は、対象より**前**にある各部分の本文である。**それを読まずに対象だけを"
+    "読むと、対象が何を言っているのかが決まらない**のはどれか。\n"
+    "同じ話題に触れているだけ・関連しているだけの箇所は当てはまらない。"
+    "**対象の意味がそこに依存している**箇所を選ぶこと。"
+)
+
+#: 段階 3（当て木。Noul）。
+#:
+#: Jev は question を独立・並列に評価するので、「いま選んだもの」という指示語は
+#: 届かない（`docs/design/jev.md`）。**選んだ Unit の本文を埋め込む。**
+CONTEXT_SPLINT = (
+    "「対象」を正しく読むには、下の「既に分かっている前の箇所」だけでは足りない。"
+    "**これとは別に、さらに前のどこかをもう 1 つ**読まないと、対象が何を言って"
+    "いるのかが決まらない。\n\n"
+    "――― 対象 ―――\n{target}\n"
+    "――― 既に分かっている前の箇所 ―――\n{known}\n―――――――――"
+)
+
+
+def context_seeds(units: list[dict]) -> list[int]:
+    """前提を聞き始める Unit の添字（0 始まり）。
+
+    **`policy::decorate` が MARKED にしうる Unit と同じ条件**である —
+    ESSENTIAL かつ非 REDUNDANT かつ核が空でないもの。穴の形が「光っている
+    一文が、沈んだ Unit に寄りかかっている」なので、光る側から辿る。
+
+    ここは Budget を見ない。見えないし、見る必要もない — どの Budget で
+    沈むかを決めるのは `policy` の仕事で、この層は辺を渡すだけである。
+    """
+    return [
+        position
+        for position, unit in enumerate(units)
+        if unit["reading_tier"] == "essential"
+        and not is_redundant(unit)
+        and unit.get("core_atoms") != []
+    ]
+
+
+def context_candidates(
+    units: list[dict], bodies: list[str], target: int, exclude: set[int]
+) -> list[int]:
+    """`target` より前で、選択肢になれる Unit の添字。
+
+    **語彙で絞らない。** 初出の語・人名の有無などで代用すると、擬似見出しを
+    句点で捕まえようとした手（`docs/gotchas/semantic-reading.md` で 2 回却下）と
+    同じ形になる。絞るのは Jev 自身が付けた Tier だけ（[`CONTEXT_TIERS`]）。
+    """
+    return [
+        position
+        for position in range(target)
+        if position not in exclude
+        and bodies[position].strip()
+        and units[position]["reading_tier"] in CONTEXT_TIERS
+    ]
+
+
+def context_choice(
+    bodies: list[str], target: int, pool: list[int], budget: RequestBudget
+) -> tuple[dict, list[int]]:
+    """Choice 1 つ。**予算を超えたら位置が近い順に詰める。**
+
+    返すのは `(question, 実際に載せた候補)`。[`core_fits`] と同じく個数では
+    なくトークンで切る — 同じ 10 個でも文書によって桁が違う。
+
+    **実測ではここは 1 度も発火しなかった**（4 文書 × 4 ラン × 2 条件）。
+    全 Unit の本文を並べても 4.3〜9.6k tokens で、32k 枠の残り（21〜26k）に
+    収まる。もっと大きい文書では当たるはずで、そこは測っていない。
+    """
+    instructions = CONTEXT_CHOICE.format(target=bodies[target])
+    kept = list(pool)
+    while kept:
+        question = {
+            "type": "choice",
+            "instructions": instructions,
+            "criteria": {f"u:{position}": bodies[position] for position in kept},
+        }
+        if question_tokens(question) <= budget.pair:
+            return question, kept
+        # いちばん遠い（＝位置が離れた）候補から落とす。
+        kept.pop(0)
+    return {}, []
+
+
+def trace_prerequisites(
+    units: list[dict],
+    bodies: list[str],
+    budget: RequestBudget,
+    ask,
+) -> tuple[dict[int, list[int]], dict]:
+    """段階 1〜3 を波で回し、`{対象の添字: 直接の前提（最大 2）}` を返す。
+
+    `ask(questions, label) -> answers` は [`annotate`] のラウンド送信。
+    2 つ目の戻り値は報告用の記録。
+
+    ## 波は回す。扇だけが 1 に変わる
+
+    新しく見つかった前提についても段階 1〜3 を聞き直す。**「2 段で止める」は
+    1 Unit あたりの当て木の話であって、閉包の波の話ではない** — 深さを出すには
+    推移的に辿るしかない。実測では深さの中央値 0〜2・最大 7 で、閉包は
+    文書の 0〜10.3 %（中央値）に収まった。
+
+    ## 辺は必ず後ろ向きに立つ
+
+    選択肢を `range(target)` に限っているので、前提は必ず自分より前の Unit に
+    なる。**循環は構造上ありえない**（測って 0 だったのではない）。
+    `policy` 側はそれに依存せず訪問済み集合で辿るが、ここで前向きの辺を
+    作らないこと自体は保証している。
+    """
+    picks: dict[int, list[int]] = {}
+    trim = {"asked": 0, "by_budget": 0, "forced_single": 0, "no_candidate": 0}
+    waves: list[dict] = []
+
+    def ask_some(questions: dict, label: str) -> dict:
+        """空の束では 1 往復も使わない。
+
+        段階 1 が全部「いいえ」なら段階 2 は組まれず、当て木が全部
+        「いいえ」なら段階 4 も組まれない。**波の後半は空になるのが普通**
+        なので、ここで落とさないとラウンドの記録に空の往復が並ぶ。
+        """
+        return ask(questions, label) if questions else {}
+
+    frontier = context_seeds(units)
+    seeds = list(frontier)
+    visited: set[int] = set()
+
+    for wave in range(CONTEXT_MAX_WAVES):
+        todo = [position for position in frontier if position not in visited]
+        if not todo:
+            break
+        visited.update(todo)
+        found: set[int] = set()
+
+        # --- 段階 1: そもそも前を読む必要があるか（Noul）--------------
+        stage1 = {
+            f"needs:u{position}": {
+                "type": "noul",
+                "instructions": CONTEXT_STAGE1.format(body=bodies[position]),
+            }
+            for position in todo
+            if bodies[position].strip()
+        }
+        answers = ask_some(stage1, f"context1.w{wave}")
+        # 送れなかった question は「聞かなかった」と同じに倒す — 前提が
+        # 付かないだけで、注釈としては従来どおりになる安全側である。
+        askers = [
+            position
+            for position in todo
+            if f"needs:u{position}" in answers
+            and noul_of(answers, f"needs:u{position}") >= CONTEXT_YES
+            and position > 0
+        ]
+
+        def choose(targets: list[int], label: str, exclude: dict[int, set[int]]) -> None:
+            """段階 2 / 段階 4 に共通の Choice 1 往復。"""
+            questions: dict = {}
+            pools: dict[int, list[int]] = {}
+            for target in targets:
+                pool = context_candidates(units, bodies, target, exclude[target])
+                if not pool:
+                    trim["no_candidate"] += 1
+                    continue
+                if len(pool) == 1:
+                    # 候補が 1 つなら答えは決まっている（[`assign_lone_cores`]
+                    # と同じ扱い）。question を使わずに採る。
+                    trim["forced_single"] += 1
+                    picks.setdefault(target, []).append(pool[0])
+                    found.add(pool[0])
+                    continue
+                question, kept = context_choice(bodies, target, pool, budget)
+                if not kept:
+                    trim["no_candidate"] += 1
+                    continue
+                if len(kept) < len(pool):
+                    trim["by_budget"] += 1
+                trim["asked"] += 1
+                questions[f"{label}:u{target}"] = question
+                pools[target] = kept
+            got = ask_some(questions, f"{label}.w{wave}")
+            for target in pools:
+                key = f"{label}:u{target}"
+                if key not in got:
+                    continue
+                choice = choice_of(got, key, questions[key]["criteria"])
+                won = int(choice.split(":")[1])
+                picks.setdefault(target, []).append(won)
+                found.add(won)
+
+        # --- 段階 2: どれか（Choice）----------------------------------
+        choose(askers, "pick", {target: set() for target in askers})
+
+        # --- 段階 3: ほかにもあるか（当て木の Noul）-------------------
+        splint_targets = [target for target in askers if picks.get(target)]
+        splint = {
+            f"more:u{target}": {
+                "type": "noul",
+                "instructions": CONTEXT_SPLINT.format(
+                    target=bodies[target], known=bodies[picks[target][0]]
+                ),
+            }
+            for target in splint_targets
+        }
+        answers = ask_some(splint, f"context3.w{wave}")
+        second = [
+            target
+            for target in splint_targets
+            if f"more:u{target}" in answers
+            and noul_of(answers, f"more:u{target}") >= CONTEXT_YES
+        ]
+
+        # --- 段階 4: 2 本目（選んだものを外した Choice）。ここで止める ---
+        choose(second, "pick2", {target: set(picks[target]) for target in second})
+
+        waves.append(
+            {
+                "wave": wave,
+                "asked_stage1": len(stage1),
+                "askers": len(askers),
+                "splint_yes": len(second),
+                "new_prereqs": sorted(found - visited),
+            }
+        )
+        frontier = sorted(found - visited)
+
+    return picks, {"seeds": seeds, "waves": waves, "trim": trim}
 
 
 # ---------------------------------------------------------------------------
@@ -1431,6 +1767,7 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
         answers.update(third)
 
     built = build_units(atoms, units, tiers, answers)
+    bodies = [unit_body(atoms, indices) for indices in units]
     for unit, source_unit in zip(built, provisional):
         unit["jev"].update(source_unit["jev"])
     for number in range(1, len(units) + 1):
@@ -1441,20 +1778,41 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     assign_lone_cores(atoms, built, handled)
     apply_core_answers(built, questions, answers)
     # REDUNDANT だった Unit は MARKED にならないので、核は使われない。
+    # **`relations` が空でないこと、ではない**（[`is_redundant`]）。
     for unit in built:
-        if unit["relations"]:
+        if is_redundant(unit):
             unit.pop("core_atoms", None)
             unit["jev"].pop("core_choice", None)
             unit["jev"].pop("core_by", None)
 
-    report = {"rounds": rounds, "boundaries": plan, "budget": budget.record()}
+    # --- ラウンド 4 以降: context preservation の前提 -------------------
+    #
+    # **ここまでの答えが全部要る。** 聞き始める Unit は「MARKED になりうる
+    # Unit」で、それが決まるのは Tier・redundancy・核が出そろったあと、
+    # つまり上のエピローグの**後**である（[`context_seeds`]）。前へ動かすと
+    # 光らない Unit にも聞くことになり、question が無駄に増える。
+    #
+    # ラウンド数が固定でないのはここだけである。波ごとに段階 1〜4 の
+    # 4 往復で、実測では波は 2〜4 だった。
+    prerequisites, context_report = trace_prerequisites(built, bodies, budget, ask)
+    for target, sources in prerequisites.items():
+        for source in sources:
+            built[target]["relations"].append({"presupposes": built[source]["id"]})
+        built[target]["jev"]["presupposes"] = [built[s]["id"] for s in sources]
+
+    report = {
+        "rounds": rounds,
+        "boundaries": plan,
+        "budget": budget.record(),
+        "context": context_report,
+    }
     if unsent:
         report["unsent"] = unsent
     return {"version": VERSION, "units": built, "jev": report}
 
 
 def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
-    """API を叩かずに、送る 3 ラウンドのリクエストの形を出す。
+    """API を叩かずに、送るリクエストの形を出す。
 
     後のラウンドは前のラウンドの答えに依存するので、仮定を置いて組む。
 
@@ -1463,6 +1821,15 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
     - ラウンド 3: **すべての Unit が ESSENTIAL だった**と仮定する。本番では
       redundancy は SUPPORTING 以上にだけ、核は ESSENTIAL かつ散文の候補が
       2 つ以上ある Unit にだけ聞くので、実際に送る question はこれより少ない
+    - ラウンド 4: **context preservation の最初の波だけ**を、段階 1 が
+      全部「はい」だったと仮定して組む。本番の波の本数は答え次第なので
+      ここには出ない（[`trace_prerequisites`]）
+
+    ラウンド 4 を出すのは、**32k 枠に当たるとしたらここだから**である。
+    段階 2 の Choice は自分より前の Unit の本文を全部並べるので、文書の
+    どの question よりも大きくなりうる（実測の 4 文書では当たらなかったが、
+    もっと大きい文書は測っていない）。**逆に言えば、ここに出る 1 波ぶんが
+    本番の下限**である — 波が 2〜4 回るぶんリクエストは増える。
 
     仮定は戻り値の `assumptions` にも載せる — 形だけ見て「これが本番で送る
     question 数だ」と読まれると困るため。
@@ -1497,9 +1864,28 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
     third = redundancy_questions(atoms, units, tiers)
     third.update(run_questions)
     third.update(core_questions(atoms, as_essential, budget, handled))
+    # ラウンド 4（最初の波だけ）。段階 1 は全 seed に、段階 2 は段階 1 が
+    # 全部「はい」だったと仮定して組む。
+    bodies = [unit_body(atoms, indices) for indices in units]
+    fourth = {
+        f"needs:u{position}": {
+            "type": "noul",
+            "instructions": CONTEXT_STAGE1.format(body=bodies[position]),
+        }
+        for position in context_seeds(as_essential)
+        if bodies[position].strip()
+    }
+    for position in context_seeds(as_essential):
+        pool = context_candidates(as_essential, bodies, position, set())
+        if len(pool) < 2:
+            continue
+        question, kept = context_choice(bodies, position, pool, budget)
+        if kept:
+            fourth[f"pick:u{position}"] = question
+
     rounds = []
     for number, questions in enumerate(
-        (first, unit_questions(atoms, units), third), start=1
+        (first, unit_questions(atoms, units), third, fourth), start=1
     ):
         chunks, dropped = plan_chunks(questions, budget)
         rounds.append(
@@ -1523,6 +1909,9 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
             "round 2 assumes every boundary Jev is asked about is new_unit",
             "round 3 assumes every Unit is essential (production narrows this, "
             "so it sends fewer questions)",
+            "round 4 shows only the first context-preservation wave, assuming "
+            "stage 1 said yes everywhere; production runs 2-4 waves, so this "
+            "is a lower bound on requests and an upper bound on one wave's size",
             "when the state token count is an estimate (0.5 tokens/byte) this "
             "splits into more chunks than production, which measures the count "
             "on large documents (--state-tokens passes a measured value in)",

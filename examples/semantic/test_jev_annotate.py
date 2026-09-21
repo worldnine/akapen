@@ -888,7 +888,8 @@ class DryRunTest(unittest.TestCase):
 
     def test_round_three_asks_for_the_core_of_multi_prose_units_only(self):
         rounds = self.payload()["rounds"]
-        self.assertEqual(len(rounds), 3)
+        # ラウンド 4（context preservation の最初の波）が足されている。
+        self.assertEqual(len(rounds), 4)
         units = {
             f"u{n}": indices
             for n, indices in enumerate(
@@ -1115,8 +1116,17 @@ class SendInChunksTest(unittest.TestCase):
         """合格条件 3 — 分割が不要なら 1 リクエストのまま。
 
         実文書で確かめる。`demo.md` と `design/semantic-reading-layer.md` は
-        3 ラウンドとも 1 チャンクでなければならない（見積もりは実測の
+        **ラウンド 1〜3 が** 1 チャンクでなければならない（見積もりは実測の
         1.4 倍まで過大評価するので、ここが本番より厳しい側の判定になる）。
+
+        **ラウンド 4 は数えない。** context preservation の段階 2 は自分より
+        前の Unit の本文を全部並べるので、question の大きさが Unit 数の 2 乗で
+        効く。dry-run はさらに「全 Unit が ESSENTIAL で段階 1 が全部はい」と
+        仮定するので、**本番より桁で多い question を組む**（design.md で
+        173 seed）。ここが 1 チャンクにならないのは分割の不具合ではなく、
+        この仮定と question の形の帰結である。**代わりに `unsent` を見る** —
+        分割で外せない 32k 枠に当たっていないことが、この経路で確かめたい
+        ことだからである。
         """
         for name in ("demo.md", "../../docs/design/semantic-reading-layer.md"):
             with self.subTest(document=name):
@@ -1124,13 +1134,34 @@ class SendInChunksTest(unittest.TestCase):
                 request = dump_request(HERE / name)
                 plan = jev.dry_run(request, "jev-latest")
                 for entry in plan["rounds"]:
+                    if entry["round"] == 4:
+                        continue
                     self.assertEqual(
                         entry["plan"]["chunks"], 1, f"round {entry['round']}"
                     )
-                    self.assertEqual(entry["plan"]["unsent"], [])
                 self.assertEqual(
                     plan["budget"]["state_tokens"], jev.estimate_tokens(source)
                 )
+
+    def test_no_round_hits_the_ceiling_that_splitting_cannot_move(self):
+        """**分割で外せない 32k 枠**に、どのラウンドも当たらない。
+
+        `whole`（64k）はチャンクを増やせば外せるが、`state` + question 1 つの
+        32k はどう分けても小さくならない。そこに当たった question は
+        `unsent` に出て、誰にも送れない。
+
+        ラウンド 4 を**含めて**見るのはここである。段階 2 の Choice が
+        この枠に当たるかどうかが、context preservation を実文書に当てられるか
+        そのものだからである。
+        """
+        for name in ("demo.md", "../../docs/design/semantic-reading-layer.md"):
+            with self.subTest(document=name):
+                request = dump_request(HERE / name)
+                plan = jev.dry_run(request, "jev-latest")
+                for entry in plan["rounds"]:
+                    self.assertEqual(
+                        entry["plan"]["unsent"], [], f"round {entry['round']}"
+                    )
 
     # --- 見積もりの精度 ---------------------------------------------------
 
@@ -1392,6 +1423,295 @@ class UnansweredTierTest(unittest.TestCase):
         out = with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
         covered = sorted(i for unit in out["units"] for i in unit["atoms"])
         self.assertEqual(covered, [0, 1, 2], "Atom を 1 つも取りこぼさない")
+
+
+class ContextPreservationTest(unittest.TestCase):
+    """context preservation — 前提を聞いて `PRESUPPOSES` にする。
+
+    文面と 0.5 は実測（`measurements/context-preservation.md`）から一字一句
+    移したものなので、**ここで固定するのは「動くこと」ではなく「変わって
+    いないこと」**である。言い換えると計測が根拠でなくなる。
+    """
+
+    def units(self, *specs):
+        """`(tier, core_atoms, redundant)` から、組み上がった Unit を作る。"""
+        out = []
+        for number, (tier, core, redundant) in enumerate(specs, start=1):
+            unit = {
+                "id": f"u{number}",
+                "atoms": [number - 1],
+                "reading_tier": tier,
+                "relations": [{"redundant_with": "u1"}] if redundant else [],
+                "jev": {},
+            }
+            if core is not None:
+                unit["core_atoms"] = core
+            out.append(unit)
+        return out
+
+    # --- 文面 ---------------------------------------------------------
+
+    def test_the_three_questions_are_verbatim_from_the_measurement(self):
+        """採取スクリプトの文面から動いていないこと。
+
+        ここを変えると計測が根拠でなくなる（第 1 版と第 2 版を並べた表が
+        すべて無効になる）。
+
+        **このテストが見ているのは部分一致である。** 全文の一字一句一致は
+        証拠ディレクトリの `tools/ctxchoice.py` と突き合わせて確認した
+        （2026-09-21）。採取スクリプトは repo の外にあるので、ここからは
+        import できない — だから「変わったら気づく」ところまでを機械で、
+        「同じである」ことは記録で担保している。
+        """
+        self.assertIn("これより**前**のどこかを読んでいないと意味が取れない",
+                      jev.CONTEXT_STAGE1)
+        self.assertIn("同じ話題に触れているだけ・関連しているだけの箇所は当てはまらない",
+                      jev.CONTEXT_CHOICE)
+        self.assertIn("これとは別に、さらに前のどこかをもう 1 つ",
+                      jev.CONTEXT_SPLINT)
+        self.assertEqual(jev.CONTEXT_YES, 0.5)
+
+    def test_the_choice_does_not_repeat_the_bodies_it_sends_as_options(self):
+        """選択肢そのものが本文になるので、instructions に本文を入れると
+        同じテキストを 2 回送ることになる（[`CORE_INSTRUCTIONS`] と同じ話）。
+        """
+        bodies = ["まえ A", "まえ B", "対象"]
+        question, kept = jev.context_choice(
+            bodies, 2, [0, 1], jev.RequestBudget.estimated("")
+        )
+        self.assertEqual(kept, [0, 1])
+        self.assertEqual(question["criteria"], {"u:0": "まえ A", "u:1": "まえ B"})
+        self.assertNotIn("まえ A", question["instructions"])
+        # 対象の本文だけは instructions に入る（選択肢ではないので）。
+        self.assertIn("対象", question["instructions"])
+
+    # --- 誰に聞くか ---------------------------------------------------
+
+    def test_only_units_that_can_become_marked_are_seeds(self):
+        """`policy::decorate` が MARKED にしうる Unit と同じ条件。"""
+        units = self.units(
+            ("essential", None, False),   # u1: 聞く
+            ("supporting", None, False),  # u2: ESSENTIAL でない
+            ("essential", [], False),     # u3: 核を持たない = 光らない
+            ("essential", None, True),    # u4: REDUNDANT
+            ("essential", [4], False),    # u5: 聞く
+        )
+        self.assertEqual(jev.context_seeds(units), [0, 4])
+
+    def test_a_unit_that_only_presupposes_is_still_a_seed(self):
+        """**`relations` が空でないこと、を redundancy と読まない。**
+        前提を持つ Unit は光り続けるので、次の波でも seed になれる。
+        """
+        units = self.units(("essential", None, False))
+        units[0]["relations"].append({"presupposes": "u0"})
+        self.assertFalse(jev.is_redundant(units[0]))
+        self.assertTrue(jev.wants_core(units[0]))
+        self.assertEqual(jev.context_seeds(units), [0])
+
+    def test_detail_units_are_not_offered_as_prerequisites(self):
+        """絞り込みは **DETAIL だけ落とす**。CONTEXT は残す — 実測で穴 A の
+        相手は 2 つとも CONTEXT だった。字義どおり「SUPPORTING 以上」にすると
+        その穴は Choice の出来と無関係に捕まらない。
+        """
+        units = self.units(
+            ("context", None, False),
+            ("detail", None, False),
+            ("supporting", None, False),
+            ("essential", None, False),
+        )
+        bodies = ["a", "b", "c", "d"]
+        self.assertEqual(jev.context_candidates(units, bodies, 3, set()), [0, 2])
+
+    def test_candidates_are_never_ahead_of_the_target(self):
+        """辺は必ず後ろ向きに立つ。**循環は構造上ありえない。**"""
+        units = self.units(*[("context", None, False)] * 5)
+        bodies = list("abcde")
+        for target in range(5):
+            self.assertTrue(
+                all(c < target for c in jev.context_candidates(units, bodies, target, set()))
+            )
+
+    # --- 波 -----------------------------------------------------------
+
+    def trace(self, units, bodies, answers_for):
+        """`trace_prerequisites` を、答えを関数で決めながら回す。"""
+        asked = []
+
+        def ask(questions, label):
+            asked.append((label, sorted(questions)))
+            return {key: answers_for(key, questions[key]) for key in questions}
+
+        picks, report = jev.trace_prerequisites(
+            units, bodies, jev.RequestBudget.estimated(""), ask
+        )
+        return picks, report, asked
+
+    def test_a_seed_gets_one_prerequisite_when_the_splint_says_no(self):
+        units = self.units(
+            ("context", None, False),
+            ("context", None, False),
+            ("essential", [2], False),
+        )
+        bodies = ["まえ A", "まえ B", "対象"]
+
+        def answer(key, question):
+            if key.startswith("needs:"):
+                # 対象だけが「前を読まないと分からない」。前提の u1 は自足。
+                return {"noul": 0.9 if key == "needs:u2" else 0.1}
+            if key.startswith("more:"):
+                return {"noul": 0.1}       # ほかには無い
+            return {"choice": "u:1"}
+
+        picks, report, asked = self.trace(units, bodies, answer)
+        self.assertEqual(picks, {2: [1]})
+        self.assertEqual(report["seeds"], [2])
+        # 段階 1 → Choice → 当て木。当て木が「いいえ」なので 2 本目は
+        # 組まれず、新しい前提 u1 について次の波が回る。
+        self.assertEqual([label for label, _ in asked],
+                         ["context1.w0", "pick.w0", "context3.w0", "context1.w1"])
+
+    def test_the_splint_adds_a_second_prerequisite_and_stops_there(self):
+        """**直接の前提は最大 2。** 当て木が「はい」でも Choice はもう 1 回
+        だけで、そこで扇は打ち止めになる。
+        """
+        units = self.units(
+            ("context", None, False),
+            ("context", None, False),
+            ("context", None, False),
+            ("essential", [3], False),
+        )
+        bodies = ["A", "B", "C", "対象"]
+        seen = {"more": 0}
+
+        def answer(key, question):
+            if key.startswith("needs:"):
+                return {"noul": 0.9 if key == "needs:u3" else 0.1}
+            if key.startswith("more:"):
+                seen["more"] += 1
+                return {"noul": 0.9}
+            if key.startswith("pick2:"):
+                # 1 本目は選択肢から外れている。
+                self.assertNotIn("u:2", question["criteria"])
+                return {"choice": "u:0"}
+            return {"choice": "u:2"}
+
+        picks, _report, asked = self.trace(units, bodies, answer)
+        self.assertEqual(picks, {3: [2, 0]})
+        self.assertEqual(seen["more"], 1, "当て木は 1 Unit につき 1 回だけ")
+        self.assertNotIn("pick3", " ".join(label for label, _ in asked))
+
+    def test_the_wave_follows_a_prerequisite_of_a_prerequisite(self):
+        """**閉包の波は回す。** 「2 段で止める」は 1 Unit あたりの当て木の
+        話であって、波の話ではない — 深さを出すには推移的に辿るしかない。
+        """
+        units = self.units(
+            ("context", None, False),
+            ("context", None, False),
+            ("essential", [2], False),
+        )
+        bodies = ["根", "まんなか", "対象"]
+
+        def answer(key, question):
+            if key.startswith("needs:"):
+                return {"noul": 0.9 if key in ("needs:u2", "needs:u1") else 0.1}
+            if key.startswith("more:"):
+                return {"noul": 0.1}
+            # u2 は u1 を、u1 は u0 を選ぶ。
+            return {"choice": "u:1" if key == "pick:u2" else "u:0"}
+
+        picks, report, _asked = self.trace(units, bodies, answer)
+        self.assertEqual(picks, {2: [1], 1: [0]})
+        self.assertEqual(report["waves"][0]["new_prereqs"], [1])
+        self.assertEqual(report["waves"][1]["new_prereqs"], [0])
+
+    def test_a_seed_that_needs_nothing_gets_no_edge(self):
+        units = self.units(("context", None, False), ("essential", [1], False))
+
+        def answer(key, question):
+            return {"noul": 0.1}
+
+        picks, _report, asked = self.trace(units, ["A", "対象"], answer)
+        self.assertEqual(picks, {})
+        # 段階 1 で止まるので Choice も当て木も 1 往復も使わない。
+        self.assertEqual([label for label, _ in asked], ["context1.w0"])
+
+    def test_a_lone_candidate_is_taken_without_asking(self):
+        """候補が 1 つなら答えは決まっている（[`assign_lone_cores`] と同じ
+        扱い）。question を使わない。
+        """
+        units = self.units(("context", None, False), ("essential", [1], False))
+
+        def answer(key, question):
+            if key.startswith("needs:"):
+                return {"noul": 0.9}
+            return {"noul": 0.1}
+
+        picks, report, asked = self.trace(units, ["A", "対象"], answer)
+        self.assertEqual(picks, {1: [0]})
+        self.assertEqual(report["trim"]["forced_single"], 1)
+        self.assertEqual(report["trim"]["asked"], 0)
+
+    def test_the_first_unit_is_never_asked(self):
+        """先頭の Unit には「これより前」が無い。"""
+        units = self.units(("essential", [0], False))
+
+        def answer(key, question):
+            return {"noul": 0.9}
+
+        picks, report, _asked = self.trace(units, ["対象"], answer)
+        self.assertEqual(picks, {})
+        self.assertEqual(report["trim"]["no_candidate"], 0)
+
+    def test_the_noul_boundary_is_not_nudged(self):
+        """ちょうど 0.5 は「はい」、その下は「いいえ」。"""
+        units = self.units(("context", None, False), ("essential", [1], False))
+        for noul, expected in ((0.5, {1: [0]}), (0.49, {})):
+            with self.subTest(noul=noul):
+                picks, _r, _a = self.trace(
+                    units, ["A", "対象"],
+                    lambda key, q, n=noul: {"noul": n if key.startswith("needs:") else 0.0},
+                )
+                self.assertEqual(picks, expected)
+
+    # --- 組み上がりまで -------------------------------------------------
+
+    def test_a_prerequisite_becomes_a_presupposes_relation(self):
+        """`annotate` を通して、答えが `PRESUPPOSES` として出てくる。
+
+        **`redundant_with` にしない。** 向きは同じでも効き方が逆で、
+        取り違えると前提を沈める実装になる。
+        """
+        request = {
+            "version": 1,
+            "source": "背景の一文。\n\n人物についての一文。\n",
+            "atoms": [
+                {"index": 0, "kind": "sentence", "range": [0, 18], "text": "背景の一文。"},
+                {"index": 1, "kind": "sentence", "range": [20, 47], "text": "人物についての一文。"},
+            ],
+        }
+
+        def fake(state, chunk, model, timeout):
+            answers = {}
+            for key in chunk:
+                if key.startswith("boundary:"):
+                    answers[key] = {"choice": jev.NEW}
+                elif key.startswith("tier:"):
+                    answers[key] = {"choice": "context" if key.endswith("u1") else "essential"}
+                elif key.startswith("redundant:") or key.startswith("more:"):
+                    answers[key] = {"noul": 0.0}
+                elif key.startswith("needs:"):
+                    answers[key] = {"noul": 0.8}
+                else:
+                    answers[key] = {"choice": "u:0"}
+            return {"answers": answers, "usage": {"input_tokens": 10}}
+
+        out = with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
+        u2 = out["units"][1]
+        self.assertEqual(u2["reading_tier"], "essential")
+        self.assertEqual(u2["relations"], [{"presupposes": "u1"}])
+        # 前提を持っても REDUNDANT ではないので、核は捨てられない。
+        self.assertNotEqual(u2.get("core_atoms"), None)
+        self.assertEqual(out["jev"]["context"]["seeds"], [1])
 
 
 def with_fake_ask(fake, body):

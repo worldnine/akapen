@@ -71,11 +71,28 @@ impl SemanticDocument {
     /// - Unit の Atom 添字が範囲内であること
     /// - Unit の `core_atoms` がその Unit の `atoms` の部分集合であること
     /// - Unit の識別子が重複していないこと
-    /// - `RedundantWith` の参照先が実在し、自分自身でないこと
+    /// - relation（`RedundantWith` / `Presupposes`）の参照先が実在し、
+    ///   自分自身でないこと
     /// - `source_sha256` があるなら hex 64 桁であること
     ///
     /// の 6 点。Atom がどの Unit にも属さないことは**エラーにしない**
     /// （未判断の Atom は NORMAL のまま表示されればよい）。
+    ///
+    /// # `Presupposes` の向きと循環は検査しない
+    ///
+    /// 判定器は「自分より前の Unit」しか選択肢にしないので、辺は後ろ向きに
+    /// しか立たず循環は構造上できない
+    /// （`examples/semantic/measurements/context-preservation.md` 結論 1）。
+    /// それでも**前向きの辺や循環をここで拒否しない**。理由は 2 つある。
+    ///
+    /// - [`crate::policy`] の閉包は訪問済み集合で辿るので、循環があっても
+    ///   必ず止まる
+    /// - 単調性の証明は辺の構造をまったく使っていない（[`crate::policy`] の
+    ///   「単調性は何に支えられているか」）。壊れた辺で壊れるのは
+    ///   **その注釈の妥当性**であって、この層の不変量ではない
+    ///
+    /// 「構造上ありえないものを弾く検査」は、通らない道のぶんだけ嘘を
+    /// 言いやすい。実在と自己参照だけを見る。
     ///
     /// `source_sha256` は**形だけ**を見る。実際の source と一致するかは
     /// クライアントの仕事で、ここには source そのものが無い。
@@ -124,10 +141,13 @@ impl SemanticDocument {
                 }
             }
             for relation in &unit.relations {
-                let Relation::RedundantWith(target) = relation;
+                let (target, what) = match relation {
+                    Relation::RedundantWith(target) => (target, "redundant with"),
+                    Relation::Presupposes(target) => (target, "presupposing"),
+                };
                 if target == &unit.id {
                     return Err(Error::Invalid(format!(
-                        "unit `{}` is marked redundant with itself",
+                        "unit `{}` is marked {what} itself",
                         unit.id
                     )));
                 }
@@ -286,6 +306,55 @@ mod tests {
                 .to_string()
                 .contains("redundant with itself")
         );
+    }
+
+    #[test]
+    fn validate_rejects_a_dangling_prerequisite() {
+        let mut broken = doc();
+        broken.units[1]
+            .relations
+            .push(Relation::Presupposes("u9".into()));
+        assert!(
+            broken
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown unit")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_unit_that_presupposes_itself() {
+        let mut broken = doc();
+        broken.units[1]
+            .relations
+            .push(Relation::Presupposes("u2".into()));
+        assert!(
+            broken
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("presupposing itself"),
+            "{:?}",
+            broken.validate()
+        );
+    }
+
+    /// 前向きの辺（後ろの Unit を前提にする）は**通す**。構造上は起こらない
+    /// が、起きても policy 側が止まるので、ここで拒否する理由が無い。
+    #[test]
+    fn validate_allows_a_forward_prerequisite_and_a_cycle() {
+        let mut forward = doc();
+        // u1 が、自分より後ろの u2 を前提にする。
+        forward.units[0]
+            .relations
+            .push(Relation::Presupposes("u2".into()));
+        assert!(forward.validate().is_ok());
+        // そのまま循環にしても通る。
+        forward.units[1]
+            .relations
+            .push(Relation::Presupposes("u1".into()));
+        assert!(forward.validate().is_ok());
     }
 
     #[test]
