@@ -115,7 +115,7 @@ impl<P: Provider> Provider for DigestChecked<P> {
             Ok(document)
         } else {
             Err(SemanticError::Invalid(format!(
-                "この fixture は別の文書のものです (source_sha256 {} ≠ 開いている文書 {})",
+                "this fixture belongs to a different document (source_sha256 {} ≠ {} for the open file)",
                 &expected[..12.min(expected.len())],
                 &actual[..12]
             )))
@@ -417,7 +417,7 @@ mod tests {
             .analyze("# 別の文書\n\nこれは demo.md ではない。\n")
             .expect_err("別の文書は拒否されること");
         let message = err.to_string();
-        assert!(message.contains("別の文書のものです"), "{message}");
+        assert!(message.contains("a different document"), "{message}");
         // 期待値と実際の両方を名乗る（どちらを直せばよいか分かるように）。
         assert!(message.contains("07090d9efc97"), "{message}");
     }
@@ -755,13 +755,13 @@ mod tests {
         let source = "# 見出し\n\n本文です。\n";
         let cases = [
             // 範囲外の atom index
-            (r#"{"version":1,"units":[{"id":"u1","atoms":[99],"reading_tier":"essential"}]}"#, "範囲外"),
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[99],"reading_tier":"essential"}]}"#, "out of range"),
             // id の重複
-            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"},{"id":"u1","atoms":[1],"reading_tier":"detail"}]}"#, "重複"),
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"},{"id":"u1","atoms":[1],"reading_tier":"detail"}]}"#, "duplicate"),
             // 未知の tier
             (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"urgent"}]}"#, "JSON"),
             // 存在しない relation 先
-            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"detail","relations":[{"redundant_with":"u9"}]}]}"#, "未知"),
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"detail","relations":[{"redundant_with":"u9"}]}]}"#, "unknown"),
             // version 不一致
             (r#"{"version":7,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"}]}"#, "version 7"),
             // JSON ですらない
@@ -791,7 +791,7 @@ mod tests {
         assert!(message.contains("--semantic-cmd"), "{message}");
         assert!(message.contains("ANTHROPIC_API_KEY is not set"), "{message}");
         // 「文書が不正」ではない — 答えを得られなかっただけ。
-        assert!(!message.contains("document が不正"), "{message}");
+        assert!(!message.contains("invalid semantic document"), "{message}");
     }
 
     /// 起動できないコマンドでも落ちない。

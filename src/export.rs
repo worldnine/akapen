@@ -353,7 +353,11 @@ fn run_child(
                 if !status.success() {
                     let tail = err.tail().or_else(|| out.tail());
                     return Err(match tail {
-                        Some(tail) => anyhow!("{label} exited non-zero: {tail}"),
+                        // **stderr の末尾を先に置く。** ここは 3 段の接頭辞の
+                        // 2 段目で、`{label} exited non-zero:` を先に置くと
+                        // 子プロセスが言いたかった一文がステータス行の幅から
+                        // 押し出される。切られるなら後ろの括弧側でよい。
+                        Some(tail) => anyhow!("{tail} ({label} exited non-zero)"),
                         None => anyhow!("{label} exited non-zero"),
                     });
                 }
@@ -963,7 +967,11 @@ mod tests {
         )
         .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.ends_with('…'), "{msg}");
+        // 切り詰めは stderr の末尾のほうに起きる — `…` の後ろには
+        // `(send command exited non-zero)` が続く（この括弧は後ろに置いて
+        // あるので、ステータス行で切られてもいちばん損が小さい）。
+        assert!(msg.contains('…'), "{msg}");
+        assert!(msg.ends_with("(send command exited non-zero)"), "{msg}");
         assert!(msg.chars().count() < 250, "{}", msg.chars().count());
     }
 

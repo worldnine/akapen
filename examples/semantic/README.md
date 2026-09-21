@@ -163,7 +163,7 @@ python3 examples/semantic/build-demo-json.py
 
 を走らせ直すこと。`demo.json` は `source_sha256` で `demo.md` の中身を
 名指ししているので、再生成を忘れると akapen は fixture を拒否して
-「この fixture は別の文書のものです」と言う（`src/semantic.rs` の
+`this fixture belongs to a different document` と言う（`src/semantic.rs` の
 `DigestChecked`）。テスト
 `semantic::tests::the_demo_fixture_names_the_current_demo_md` でも落ちる。
 
@@ -422,8 +422,8 @@ question のぶんだけ — **いちばん気づきにくい壊れ方**であ�
 [`annotate`] が失敗させる:
 
 ```text
-jev-annotate: 文書が大きすぎます。state が 30808 tokens あり、32k の枠に
-question の余地が 0 tokens しか残らないので、Tier を 1 つも聞けません。
+Document too large for Jev — shrink it. Splitting cannot help: state alone
+is 30808 tokens, leaving 0 of the 32k budget, so not one Tier question fits.
 ```
 
 `UNANSWERED_TIER` は**個別の巨大な Unit のための落とし先**であって、文書

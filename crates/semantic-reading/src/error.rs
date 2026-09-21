@@ -19,16 +19,22 @@ pub enum Error {
     /// 答えを**得る過程**が失敗した — provider を起動できない、異常終了、
     /// タイムアウト。応答の中身の問題ではないので [`Error::Invalid`] とは
     /// 分ける（「文書が不正です」と言われると、文書を直せば通ると読める）。
+    /// `Display` はこの variant だけ接頭辞を付けない（下の実装を見ること）。
     Provider(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Io(e) => write!(f, "fixture を読めません: {e}"),
-            Error::Json(e) => write!(f, "JSON を解析できません: {e}"),
-            Error::Invalid(msg) => write!(f, "semantic document が不正です: {msg}"),
-            Error::Provider(msg) => write!(f, "provider が失敗しました: {msg}"),
+            Error::Io(e) => write!(f, "cannot read fixture: {e}"),
+            Error::Json(e) => write!(f, "cannot parse JSON: {e}"),
+            Error::Invalid(msg) => write!(f, "invalid semantic document: {msg}"),
+            // **接頭辞を付けない。** ここに入る文字列は必ず
+            // `--semantic-cmd ...` で始まっていて、それ自体が何が失敗したかを
+            // 言っている。`provider failed: --semantic-cmd exited non-zero: ...`
+            // は同じことを 2 回言っているだけで、ステータス行の幅を食って
+            // **肝心の一文を枠の外へ押し出す**。
+            Error::Provider(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -61,8 +67,8 @@ mod tests {
 
     #[test]
     fn invalid_carries_its_reason_in_the_message() {
-        let e = Error::Invalid("atom 3 は範囲外".to_owned());
-        assert!(e.to_string().contains("atom 3 は範囲外"));
+        let e = Error::Invalid("atom 3 is out of range".to_owned());
+        assert!(e.to_string().contains("atom 3 is out of range"));
         assert!(std::error::Error::source(&e).is_none());
     }
 
@@ -71,9 +77,10 @@ mod tests {
     fn a_provider_failure_does_not_claim_the_document_is_broken() {
         let e = Error::Provider("--semantic-cmd timed out after 60s".to_owned());
         let message = e.to_string();
-        assert!(message.contains("timed out"), "{message}");
+        // 接頭辞を足さない — 中身がすでに何が失敗したかを言っている。
+        assert_eq!(message, "--semantic-cmd timed out after 60s");
         assert!(
-            !message.contains("document が不正"),
+            !message.contains("invalid semantic document"),
             "起動できなかっただけの話を「文書が不正」と言わない: {message}"
         );
         assert!(std::error::Error::source(&e).is_none());

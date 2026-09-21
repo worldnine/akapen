@@ -6405,7 +6405,7 @@ fn a_fixture_for_another_document_is_refused_and_leaves_no_decorations() {
     assert!(app.semantic_decorations.is_empty());
     let (message, _, is_error) = app.status.clone().expect("警告が出ていること");
     assert!(is_error, "黙って何もしないのではなく loud に断る");
-    assert!(message.contains("別の文書のものです"), "{message}");
+    assert!(message.contains("a different document"), "{message}");
     // READ の表示は出ない（Budget は値としては存在するが意味を持たない）。
     assert!(!crate::chrome::footer_hints(&app).contains("READ"));
     // キーも断る。
@@ -6575,7 +6575,7 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
     assert_eq!(app.semantic_inflight, Some(1));
     // ステータス行は黙らずに「解析中」と言う。
     let hints = crate::chrome::footer_hints(&app);
-    assert!(hints.contains("解析中"), "{hints}");
+    assert!(hints.contains("analyzing"), "{hints}");
     assert!(hints.contains("READ 100%"), "{hints}");
 
     pump_until_idle(&mut app, "最初の解析");
@@ -6588,7 +6588,7 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
     assert!(!app.semantic_decorations.is_empty());
     // 答えが来たら「解析中」は消え、READ の読み出しだけが残る。
     let hints = crate::chrome::footer_hints(&app);
-    assert!(!hints.contains("解析中"), "{hints}");
+    assert!(!hints.contains("analyzing"), "{hints}");
     assert!(hints.contains("READ 100%"), "{hints}");
 }
 
@@ -6784,7 +6784,7 @@ fn the_budget_keys_say_analyzing_while_an_answer_is_on_its_way() {
 
     on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
     let (message, _, is_error) = app.status.clone().expect("何か言うこと");
-    assert!(message.contains("解析中"), "{message}");
+    assert!(message.contains("analyzing"), "{message}");
     assert!(!is_error, "エラーではない — 待てば使える");
     assert_eq!(app.reading_budget, 100, "まだ動かない");
 }

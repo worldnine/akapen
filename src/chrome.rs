@@ -449,14 +449,14 @@ pub(crate) fn footer_hints(app: &App) -> String {
     // actually loaded — without one the budget exists as a number but
     // means nothing, and advertising it would promise keys that refuse.
     //
-    // `解析中…` is the exception: an external `--semantic-cmd` shells out
+    // `analyzing…` is the exception: an external `--semantic-cmd` shells out
     // and goes over the network, and a status line that says nothing for
     // that long is indistinguishable from a feature that does not work. It rides
     // beside the budget because the budget is what the answer will act
     // on — and it appears even before the first annotation exists, which
     // is exactly when the silence would be most confusing.
     let read = |p: String| match (&app.semantic_doc, app.semantic_inflight) {
-        (_, Some(_)) => format!("{p} · READ {}% · 解析中…", app.reading_budget),
+        (_, Some(_)) => format!("{p} · READ {}% · analyzing…", app.reading_budget),
         (Some(_), None) => format!("{p} · READ {}%", app.reading_budget),
         (None, None) => p,
     };
