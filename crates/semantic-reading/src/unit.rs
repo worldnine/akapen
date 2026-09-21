@@ -60,7 +60,7 @@ impl std::fmt::Display for UnitId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadingTier {
-    /// 落とすと文書の要点・結論・制約を取り違えうる。最後まで残る。
+    /// 落とすと文書の要点・結論・制約・未決の論点を取り違えうる。最後まで残る。
     Essential,
     /// ESSENTIAL の理解や納得を支える。次に残る。
     Supporting,
