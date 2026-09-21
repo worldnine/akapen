@@ -6242,6 +6242,101 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
     assert_ne!(essential, detail);
 }
 
+/// **A MARKED line under the cursor shows the band, not the amber.** Seen
+/// on a real document as "policy says MARKED for 17 Atoms and 16 of them
+/// are amber": the seventeenth was the line the cursor had been moved to
+/// in order to look at it. The cursor band paints the whole row's
+/// background and wins over the mark by design (`view.rs`, `span_hl`),
+/// so under the band a MARKED phrase and a NORMAL one are the same
+/// color. The amber is not lost — it is back the moment the cursor
+/// leaves — and nothing in `decorate_row` or the projection is involved.
+///
+/// Same demo line as the test above: 「採用する方式は差分配信である。」
+/// (MARKED) and 「詳細は付録にまとめた。」 (NORMAL) on ONE source line.
+#[test]
+fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
+    use crate::decoration::DecorationStyles;
+
+    let path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.md"
+    ));
+    let fixture = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/semantic/demo.json"
+    ));
+    let config = Config {
+        files: vec![path.clone()],
+        send_cmd: None,
+        send_agent: false,
+        reply: false,
+        theme: None,
+        ime: ImeMode::Off,
+        light: None,
+        callback: None,
+        esc_quit: EscQuit::Auto,
+        cursor_anchor: true,
+        fx: false,
+        semantic: Some(fixture),
+        semantic_cmd: None,
+        decoration_blend: Default::default(),
+        decorations: Vec::new(),
+    };
+    let source = Source::load(path).unwrap();
+    // `ViewState::cursor` is a SOURCE line, not a display row.
+    let marked_line = source
+        .content
+        .lines()
+        .position(|l| l.starts_with("採用する方式は差分配信である。"))
+        .expect("the 結論 line is in demo.md");
+    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let view = ViewState::render(&source, crate::view_render_width(80), &highlight, Default::default());
+    let styles = DecorationStyles::from_theme(&highlight, Default::default());
+    let mark_bg = styles.mark_style().bg;
+    let mut app = App::new(config, source, highlight, view, false);
+    app.set_semantic_source(crate::semantic::source_from_config(&app.config).unwrap());
+    app.reanalyze_semantics();
+    app.mode = Mode::View;
+    app.gutter_cols = 3;
+    assert!(app.semantic_doc.is_some(), "the fixture matches demo.md");
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    let halves = |app: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        let cell = |y: usize, x: usize| &buf.content[y * w + x];
+        let (row, right) = (0..buf.area.height as usize)
+            .find_map(|y| (0..w).find(|&x| cell(y, x).symbol() == "詳").map(|x| (y, x)))
+            .expect("the 結論 paragraph is on screen");
+        let left = (0..right)
+            .find(|&x| cell(row, x).symbol() == "採")
+            .expect("both halves are on the SAME terminal row");
+        (cell(row, left).style(), cell(row, right).style())
+    };
+
+    // Cursor on the title: the MARKED half is amber, the NORMAL half is not.
+    assert_eq!(app.view.cursor, 0);
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, mark_bg, "カーソルが他の行にあれば MARKED は琥珀");
+    assert_ne!(detail.bg, mark_bg);
+
+    // Cursor on the marked line: the band paints BOTH halves the same
+    // background, and that background is not the amber. This is the
+    // "one MARKED line is not amber" sighting, reproduced.
+    app.view.cursor = marked_line;
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_ne!(essential.bg, mark_bg, "カーソル行では帯が琥珀を覆う");
+    assert!(essential.bg.is_some(), "覆っているのは帯の背景であって、無色ではない");
+    assert_eq!(essential.bg, detail.bg, "帯の下では MARKED と NORMAL が同じ背景になる");
+
+    // And it is the band, not a lost mark: leaving the line brings it back.
+    app.view.cursor = 0;
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, mark_bg, "カーソルが離れれば琥珀は戻る");
+    assert_ne!(detail.bg, mark_bg);
+}
+
 /// 設計書「Budget 変更では Jev を呼ばない」を、呼び出し回数と
 /// レンダー済み行の同一性で固定する。
 ///
