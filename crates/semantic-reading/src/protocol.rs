@@ -593,8 +593,23 @@ mod tests {
         assert_eq!(document.units[1].atoms, [AtomIndex(2)]);
         assert_eq!(document.units[1].core_atoms, Some(vec![AtomIndex(2)]), "1 は取られた");
 
-        // 核が全部取られたら「核を持たない」になる。**「絞り込み無し」には
-        // 戻さない** — 戻すと、核を隣に取られた Unit が丸ごと光ることになる。
+    }
+
+    /// **核を全部取られた Unit は `Some([])` に倒す。`None` へは戻さない。**
+    ///
+    /// ここは 3 値のうちどちらへ倒すかの選択で、どちらも筋は通る:
+    ///
+    /// - `None`（絞り込み無し）へ戻す … 変更前の挙動。Unit 全体が MARKED
+    /// - `Some([])`（核を持たない）のまま … **こちらを選んだ**
+    ///
+    /// 選んだ理由は、核に選ばれた Atom はもう**隣の Unit のもの**だからである。
+    /// この Unit に光らせるべき中身は残っていないのに `None` へ戻すと、残った
+    /// Atom が**丸ごと光る** — 絞ったつもりが元より広く光る、という向きに倒れる。
+    ///
+    /// 再解析やキャッシュで Unit の割り方が変わると通る経路なので、
+    /// **黙って挙動が変わらないようにここで固定する。**
+    #[test]
+    fn a_unit_that_loses_every_core_atom_keeps_an_empty_core_not_an_absent_one() {
         let document = response(
             r#"{"version":1,"units":[
                 {"id":"first","atoms":[1],"reading_tier":"detail"},
@@ -602,8 +617,29 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(document.units[1].core_atoms, Some(Vec::new()));
+        // 先勝ちで atom 1 は first のものになり、second の核は空になる。
+        assert_eq!(document.units[1].atoms, [AtomIndex(0), AtomIndex(2)]);
+        assert_eq!(
+            document.units[1].core_atoms,
+            Some(Vec::new()),
+            "None へ戻すと、残った atom 0 と 2 が丸ごと MARKED になる"
+        );
         assert!(!document.units[1].is_core(AtomIndex(0)));
+        assert!(!document.units[1].is_core(AtomIndex(2)));
+    }
+
+    /// 核が**一部だけ**取られたら、残った核はそのまま効く。
+    #[test]
+    fn a_unit_that_loses_some_core_atoms_keeps_the_rest() {
+        let document = response(
+            r#"{"version":1,"units":[
+                {"id":"first","atoms":[1],"reading_tier":"detail"},
+                {"id":"second","atoms":[1,2],"reading_tier":"essential","core_atoms":[1,2]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(document.units[1].core_atoms, Some(vec![AtomIndex(2)]));
+        assert!(document.units[1].is_core(AtomIndex(2)));
     }
 
     /// 未知のフィールドは無視する（将来の `stage` などのため）。

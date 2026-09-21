@@ -622,15 +622,53 @@ class RunCapTest(unittest.TestCase):
         self.assertEqual(units[1]["jev"]["core_by"], "rule:run_cap")
 
     def test_a_run_over_budget_falls_back_to_per_unit_cores(self):
-        # 「核が無ければ Unit 全体が MARKED」を run に当てると全項目が光って
-        # 最悪になる。そこへは落とさず、現行の Unit ごとの核に戻す。
-        units = self.units("essential", "essential", "essential")
-        huge = "あ" * 70_000        # state だけで予算を食い潰す
-        questions, fixed, scope, handled = jev.plan_run_cores(
-            self.atoms, units, [[0, 1, 2]], huge
+        """run では予算を超えるが Unit ごとなら収まる、という境目を必ず通す。
+
+        **実文書では 1 度も通っていない枝である**（5 文書で 0 回。`CLAUDE.md` の
+        いちばん大きい run も収まった）。ここが間違っていると
+        **そのリストの全項目が光る**という最悪の壊れ方をするので、
+        予算を人工的に挟んでここで踏んでおく。
+        """
+        prose = "- " + "あ" * 400                  # 1 Atom あたり約 1,202 バイト
+        atoms = [atom(i, "list_item", prose) for i in range(6)]
+        units = [
+            {
+                "id": f"u{n + 1}",
+                "atoms": [2 * n, 2 * n + 1],
+                "reading_tier": "essential",
+                "relations": [],
+                "jev": {},
+            }
+            for n in range(3)
+        ]
+        body = len(prose.encode()) * jev.TOKENS_PER_BYTE
+        # 1 Unit は 2 Atom、run 全体は 6 Atom。その真ん中に予算が来る state を選ぶ。
+        target = (2 * body + 6 * body) / 2
+        source = "x" * int(
+            (jev.STATE_PLUS_QUESTION_LIMIT - jev.CORE_QUESTION_MARGIN - target)
+            / jev.TOKENS_PER_BYTE
         )
-        self.assertLess(jev.core_budget(huge), 0)
+        budget = jev.core_budget(source)
+        self.assertLessEqual(2 * body, budget, "1 Unit ぶんは収まる予算であること")
+        self.assertGreater(6 * body, budget, "run 全体は収まらない予算であること")
+
+        questions, fixed, scope, handled = jev.plan_run_cores(
+            atoms, units, [[0, 1, 2]], source
+        )
+        # run としては面倒を見ない。
         self.assertEqual((questions, fixed, scope, handled), ({}, {}, {}, frozenset()))
+        # そして Unit ごとの経路がちゃんと拾う — ここが「全項目が光る」との分かれ目。
+        per_unit = jev.core_questions(atoms, units, source, handled)
+        self.assertEqual(sorted(per_unit), ["core:u1", "core:u2", "core:u3"])
+        for question in per_unit.values():
+            self.assertEqual(len(question["criteria"]), 2)
+        jev.apply_core_answers(
+            units, per_unit, {key: {"choice": f"atom:{2 * n}"}
+                              for n, key in enumerate(sorted(per_unit))}
+        )
+        for n, unit in enumerate(units):
+            self.assertEqual(unit["core_atoms"], [2 * n])
+            self.assertNotEqual(unit["core_atoms"], [], "核を持たない扱いにしない")
 
     def test_the_per_unit_path_skips_what_the_run_already_handled(self):
         units = self.units("essential", "essential", "essential")
@@ -643,6 +681,62 @@ class RunCapTest(unittest.TestCase):
         jev.assign_lone_cores(self.atoms, units, handled)
         for unit in units:
             self.assertNotIn("core_atoms", unit, "run キャップの決定を上書きしない")
+
+
+class ReferenceImplementationTest(unittest.TestCase):
+    """隣の決定論的な参照実装 `annotate-doc.py` が 3 値の意味を壊さないこと。
+
+    `core_atoms` の空の配列は「**核を持たない** = MARKED にならない」という
+    意味を持つようになった（`crates/semantic-reading/src/protocol.rs`）。
+    `annotate-doc.py` は run のロジックを持たないので、ここが `[]` を出すと
+    **意味が変わって黙って何も光らなくなる。**
+
+    いまは `core_atoms` を一切出さない（= `None` = 絞り込み無し = Unit 全体が
+    MARKED）。それが正しい振る舞いなので、**出さないことを固定する**。
+    """
+
+    REFERENCE = HERE / "annotate-doc.py"
+
+    def units(self):
+        source = "# 見出し\n\n本文である。二文目。\n\n- 一つ目。\n- 二つ目。\n"
+        raw = source.encode()
+        atoms, cursor = [], 0
+        for kind, text in [
+            ("heading", "# 見出し"),
+            ("sentence", "本文である。"),
+            ("sentence", "二文目。"),
+            ("list_item", "- 一つ目。"),
+            ("list_item", "- 二つ目。"),
+        ]:
+            start = raw.index(text.encode(), cursor)
+            atoms.append(
+                {
+                    "index": len(atoms),
+                    "kind": kind,
+                    "range": {"start": start, "end": start + len(text.encode())},
+                    "text": text,
+                }
+            )
+            cursor = start + len(text.encode())
+        proc = subprocess.run(
+            [sys.executable, str(self.REFERENCE)],
+            input=json.dumps({"version": 1, "source": source, "atoms": atoms}),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)["units"]
+
+    def test_the_reference_never_emits_core_atoms(self):
+        units = self.units()
+        self.assertTrue(units, "Unit が 1 つも返っていない")
+        for unit in units:
+            self.assertNotIn(
+                "core_atoms",
+                unit,
+                "`[]` を出すと「核を持たない」の意味になり、何も光らなくなる",
+            )
 
 
 class CoreBudgetTest(unittest.TestCase):
