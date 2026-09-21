@@ -414,15 +414,25 @@ REDUNDANT_CRITERION = (
 #: **計測用**。question の定型文をどこまで削るか。
 #:
 #:     none   削らない（本番の挙動）
-#:     frame  `――― 対象 ―――` の枠と問い文を短くする（criteria は触らない）
+#:     noframe `――― 対象 ―――` の枠だけを外す（問い文も criteria もそのまま）
+#:     shortask 問い文だけを短くする（枠は残す）
+#:     frame  枠を外し、かつ問い文も短くする（= noframe + shortask）
 #:     crit   criteria の説明文を短くする（設計書の逐語を崩す）
-#:     both   両方
+#:     both   frame + crit
+#:
+#: `noframe` と `shortask` は `frame` を**分離して測る**ためにある。
+#: 枠と問い文を同時に削って壊れたとき、どちらが効いたのか分からないため。
 #:
 #: 実測の固定費（本文を除く 1 question あたり、2026-09-21）:
 #: Tier は 181 tok = 器 68 + criteria 説明文 65 + 枠組み文 65、
 #: redundancy は 81 tok = 器 8 + 枠組み文 73。合わせて Unit 1 つ 262 tok。
 #: **器（criteria のキー名と型）は削れない。**
-TRIM_MODES = ("none", "frame", "crit", "both")
+TRIM_MODES = ("none", "noframe", "shortask", "frame", "crit", "both")
+
+#: 枠を外すモード。
+NO_FRAME = ("noframe", "frame", "both")
+#: 問い文を短くするモード。
+SHORT_ASK = ("shortask", "frame", "both")
 
 #: `crit` で使う短い criteria。**設計書の逐語ではない** — 削ると判定が
 #: どれだけ動くかを測るための対照であって、採用案ではない。
@@ -437,7 +447,7 @@ SHORT_REDUNDANT_CRITERION = "前に述べた内容の言い直し。"
 
 def framed(instruction: str, body: str, trim: str) -> str:
     """question の instructions を組む。`trim` が `frame` / `both` なら枠を省く。"""
-    if trim in ("frame", "both"):
+    if trim in NO_FRAME:
         return f"{instruction}\n{body}"
     return f"{instruction}\n\n――― 対象 ―――\n{body}\n―――――――――"
 
@@ -473,10 +483,10 @@ def unit_questions(
     先頭の Unit には redundancy を聞かない —「これより前」が存在せず、
     REDUNDANT_WITH の参照先も作れない。
     """
-    ask = "どの読む優先度か。" if trim in ("frame", "both") else (
+    ask = "どの読む優先度か。" if trim in SHORT_ASK else (
         "この文書の中で、次の部分はどの読む優先度に当たりますか。"
     )
-    repeat = "前に述べた内容の言い直しか。" if trim in ("frame", "both") else (
+    repeat = "前に述べた内容の言い直しか。" if trim in SHORT_ASK else (
         "次の部分は、これより**前**の箇所ですでに述べられた内容を"
         "言い直しているだけで、新しい情報を加えていない。"
     )
@@ -695,7 +705,7 @@ def core_questions(atoms: list[dict], units: list[dict], trim: str = "none") -> 
         questions[f"core:{unit['id']}"] = {
             "type": "choice",
             "instructions": SHORT_CORE_INSTRUCTIONS
-            if trim in ("frame", "both")
+            if trim in SHORT_ASK
             else CORE_INSTRUCTIONS,
             "criteria": options,
         }
