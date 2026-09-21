@@ -205,42 +205,92 @@ exact / 上位集合の一覧は
 `MARK_TINT`。実機（別ペインで `herdr pane read --format ansi`）で
 ダーク / `--light` / `--theme DarkNeon` / source モードの diff 帯を確認。
 
-### `MARK_SCOPES` に背景を持つ埋め込みテーマは **DarkNeon 1 本だけ**
+### テーマの highlight scope 尊重は、一度やって落とした
 
-「テーマが自前の highlight 背景を持つならそれが勝つ」という分岐
-（`src/decoration.rs::mark_background` の先頭ループ）は、**書かれてから
-一度も実機で走っていませんでした。** 次に触る人が試すテーマが
-分からない、というのがその原因です。総なめした結果を置いておきます。
+**これは自然に再発する案です。** 「テーマが自前の highlight 背景を
+持っているなら、それを尊重して使うべきだ」は筋が通って聞こえます。
+実際に実装されていました。**測って落としました。** 同じ提案を
+また書く前に、ここを読んでください。
 
-two-face の埋め込みテーマ **32 本中 1 本**だけが到達します:
+あった分岐（`src/decoration.rs::mark_background` の先頭ループ）:
 
-```sh
-./target/debug/akapen <file> --theme DarkNeon --decorations '[{"range":[0,20],"kind":"mark"}]'
+```rust
+const MARK_SCOPES: &[&str] = &[
+    "markup.highlight", "markup.mark", "markup.quote.highlight", "region.yellowish",
+];
+// この 4 つのどれかに背景を持つテーマなら、その色を使って早期 return
 ```
 
-| テーマ | scope | 背景 |
+two-face の埋め込みテーマを**総なめした結果、32 本中 1 本**だけが
+到達しました。
+
+| テーマ | 当たった scope | 背景 |
 |---|---|---|
 | DarkNeon | `markup.quote.highlight` | `rgb(254,224,156)` |
 
-**ただし、この到達の仕方は事故に近いものです。** 3 点:
+**その 1 本も、間違った理由で発火して、壊れた結果を出していました。**
 
 1. DarkNeon は `markup.quote.highlight` を定義していません。定義して
    いるのは **`markup.quote`（ただの引用ブロック）** で、syntect の
-   前方一致で `markup.quote.highlight` にも当たります。つまりこの分岐は
+   前方一致で `markup.quote.highlight` にも当たります。つまり分岐は
    「テーマが highlight 色を持っている」ではなく
-   **「テーマが引用ブロックに背景を付けている」**を拾っています
-2. その背景は **アルファ 18/255 の重ね色**です。`Highlighter::scope_style`
-   はアルファを捨てるので、本来ほぼ透明な指定が**べた塗りのクリーム色**
-   になります
-3. 結果、**紙が黒い DarkNeon の上にほぼ白い帯**が出ます。本文 span は
-   前景色を持たず端末既定（ダーク端末では白に近い）で描かれるため、
-   実測で白 `38;2;255;255;255` on `48;2;254;224;156` = **約 1.3:1** —
-   字が読めません
+   **「テーマが引用ブロックに背景を付けている」**を拾っていました
+2. その背景は **アルファ 18/255 の重ね色**です。`scope_style` は
+   アルファを捨てるので、ほぼ透明な指定が**べた塗りのクリーム色**に
+   なります（下の節）
+3. 結果、**紙が黒い DarkNeon の上にほぼ白い帯**が出て、実測
+   白 `38;2;255;255;255` on `48;2;254;224;156` = **約 1.3:1**。
+   字が読めませんでした
 
-この分岐を残すか落とすか、`MARK_SCOPES` から `markup.quote.highlight` を
-外すか、`scope_style` でアルファを合成するかは**設計の判断**なので、
-ここでは何も変えていません。テーマ優先そのものは
-`a_theme_that_styles_a_highlight_scope_wins_over_the_amber`
-（`.tmTheme` を書いて固定）で保証されています。顔ぶれが変わったら
-`the_only_embedded_theme_that_reaches_the_scope_branch` が落ちるので、
-**そのときはこの表も直してください。**
+つまり残る価値が無い。**1 本のテーマに、間違った理由で発火して、
+壊れた結果を出すものは尊重ではない**、というのが落とした判断です。
+
+落としたことで得たもの:
+
+- **経路が 1 本になり、必ず走る。** 「書かれてから一度も実行されて
+  いない分岐」がそもそも問題でした。式が 1 本なら、壊れていれば
+  誰でもすぐ気づきます
+- `--mark-blend` が**どのテーマでも**効くようになりました。以前は
+  テーマ次第でつまみが黙って死んでいました
+
+**戻すなら**、少なくとも (a) scope を前方一致で誤射しない形にする、
+(b) アルファを紙へ合成する、(c) 出た色の上で本文が読めるか検査する —
+の 3 つが要ります。再発防止のテストは `src/decoration.rs` の
+`a_theme_that_styles_a_highlight_scope_gets_the_amber_anyway`
+（`.tmTheme` を書いて「見えているのに使っていない」ことを固定）と
+`every_embedded_theme_gets_the_amber_formula`（32 本すべてが式どおり）。
+
+### `scope_style` はアルファを捨てる — DarkNeon の引用とインラインコードが読めない
+
+**上の分岐を落としても、この問題は消えません。** アルファを捨てて
+いるのは `src/highlight.rs::scope_style` で、そこは
+`src/render.rs::MdcommentStyleSheet::from_theme` が**本体の描画**に
+使っている一般の経路だからです。
+
+再現:
+
+```sh
+./target/debug/akapen <引用とインラインコードを含む .md> --theme DarkNeon
+```
+
+実測（別ペインで `herdr pane read --format ansi`）:
+
+| 構造 | 解決する scope | テーマの指定 | 実際に出る | コントラスト |
+|---|---|---|---|---|
+| 引用ブロック | `markup.quote.markdown` | `rgba(254,224,156,18)` | bg `48;2;254;224;156` / fg `38;2;225;212;185` | **約 1.1:1** |
+| インラインコード | `markup.raw.inline.markdown` | `rgba(177,179,186,8)` | bg `48;2;177;179;186` / fg `38;2;87;139;179` | **約 1.7:1** |
+
+紙は黒（`#000000`）なので、アルファ 18/255 を正しく合成すれば
+`rgb(18,16,11)` 程度の「ほぼ黒」になるはずのものが、**べた塗りの
+クリーム色**として出ています。
+
+**これは MARKED の色とは無関係の、前からあるバグです。**（今回は
+触っていません。）影響範囲も測ってあります — 埋め込み 32 本のうち
+アルファ付き背景を持つのは `ansi` / `base16` / `base16-256` /
+`DarkNeon` / `Monokai Extended` 系ですが、`render.rs` が解決する
+markdown の scope に当たるのは **DarkNeon だけ**です
+（Monokai の `markup.table` はどこからも引かれていません）。
+
+直すなら `scope_style` で `theme.settings.background` へ合成する
+のが素直です。ただし**合成先が「紙」とは限らない**（インライン
+コードは本文の上に乗る）点は考えること。

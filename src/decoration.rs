@@ -136,8 +136,8 @@ pub enum DecorationKind {
 const MARK_TINT: Color = Color::Rgb(0xff, 0xb0, 0x00);
 
 /// The background of [`DecorationKind::SemanticMark`] for a theme that
-/// carries no highlight scope AND no background of its own. Split
-/// light/dark by the theme foreground's brightness.
+/// carries no background of its own. Split light/dark by the theme
+/// foreground's brightness.
 ///
 /// These are exactly what [`MARK_BG_BLEND`] toward [`MARK_TINT`] produces
 /// on the two default papers ([`DIM_TARGET_DARK`]/[`DIM_TARGET_LIGHT`]),
@@ -154,7 +154,7 @@ const DIM_TARGET_DARK: Color = Color::Rgb(0x1e, 0x1e, 0x2e);
 const DIM_TARGET_LIGHT: Color = Color::Rgb(0xfd, 0xf6, 0xe3);
 
 /// How far the mark background is lifted from the theme background
-/// toward [`MARK_TINT`] when no scope supplies one.
+/// toward [`MARK_TINT`].
 ///
 /// 0.14 toward the foreground was tried first and read as "nothing
 /// happened"; 0.22 shipped, and at READ 100 % still read as "not enough
@@ -218,20 +218,6 @@ impl Default for DecorationBlend {
         Self { mark: MARK_BG_BLEND, dim: DIM_BLEND }
     }
 }
-
-/// The scopes a theme may use for a "marked passage" background, best
-/// first. Resolved through the very same [`Highlighter::scope_style`] path
-/// the markdown style sheet uses (`render::MdcommentStyleSheet::from_theme`),
-/// so a theme that styles any of them keeps its own look. Neither akapen
-/// default theme (Catppuccin Mocha / Solarized (light)) defines one, so
-/// both fall through to the blend below — an `invalid`-style red is
-/// deliberately NOT in this list, its meaning is "error", not "marked".
-const MARK_SCOPES: &[&str] = &[
-    "markup.highlight",
-    "markup.mark",
-    "markup.quote.highlight",
-    "region.yellowish",
-];
 
 /// The resolved per-kind styles for one theme. Built once per render (the
 /// theme cannot change without a re-render) and applied by patching, so a
@@ -323,24 +309,29 @@ impl DecorationStyles {
     }
 }
 
-/// The mark background: the first [`MARK_SCOPES`] entry the theme gives a
-/// background, else the theme's own background lifted [`MARK_BG_BLEND`]
-/// toward [`MARK_TINT`] (so it reads as "a highlighter was drawn over
-/// this paper" in a dark AND a light theme), else a fixed pair picked by
-/// the foreground's brightness.
+/// The mark background: the theme's own background lifted
+/// [`MARK_BG_BLEND`] toward [`MARK_TINT`] (so it reads as "a highlighter
+/// was drawn over this paper" in a dark AND a light theme), else a fixed
+/// pair picked by the foreground's brightness.
 ///
-/// **The theme still wins.** The scope lookup is first and unchanged: a
-/// theme that styles a highlight scope keeps its own color and never
-/// sees the amber. Only the fallback below changed destination — from
-/// the theme's foreground (hueless) to [`MARK_TINT`]. The theme's own
-/// paper is still the origin, so the mark stays theme-derived: it is the
-/// same gesture, drawn in a color.
+/// # ONE path, and it always runs
+///
+/// There used to be a lookup in front of this: a `MARK_SCOPES` list
+/// (`markup.highlight`, `markup.mark`, `markup.quote.highlight`,
+/// `region.yellowish`) that let a theme with its own highlight
+/// background keep it. **It was removed after being measured.** Out of
+/// two-face's 32 embedded themes exactly one reached it, by accident,
+/// and produced text at 1.14:1 — see
+/// `docs/gotchas/rendering.md`「テーマの highlight scope 尊重は一度
+/// やって落とした」for the numbers. Deferring to a theme that is not
+/// actually saying anything about marks is not respect.
+///
+/// So the mark is always theme-DERIVED and never theme-SUPPLIED: the
+/// theme's paper is the origin, [`MARK_TINT`] is the destination. A dark
+/// theme lands on a dark amber, a light theme on a pale yellow, from the
+/// same formula — and because there is no branch, the formula is the
+/// only thing that can ever be wrong.
 fn mark_background(highlighter: &Highlighter, blend: f32) -> Color {
-    for scope in MARK_SCOPES {
-        if let Some(bg) = highlighter.scope_style(scope).and_then(|s| s.bg) {
-            return bg;
-        }
-    }
     let settings = &highlighter.theme().settings;
     let fg = highlighter.default_fg();
     match settings.background {
@@ -894,9 +885,9 @@ mod tests {
         }
     }
 
-    /// The mark background is a real color that differs from the page —
-    /// both default themes fall through the scope lookup to the blend, so
-    /// this is the path that actually ships.
+    /// The mark background is a real color that differs from the page.
+    /// There is only one path now, so this IS the path that ships, for
+    /// every theme.
     #[test]
     fn the_mark_background_is_theme_derived_in_both_themes() {
         for light in [false, true] {
@@ -1113,15 +1104,19 @@ mod tests {
         assert!(beyond < 4.5, "0.55 でも {beyond:.1}:1 — 天井の理由が消えた");
     }
 
-    /// **テーマが勝つ。** `MARK_SCOPES` のどれかに背景を持つテーマでは、
-    /// amber の計算経路には一切入らず、テーマの色がそのまま出ること。
+    /// **テーマの highlight scope 背景は、もう見ていません。**
+    /// 前に `MARK_SCOPES`（`markup.highlight` / `markup.mark` /
+    /// `markup.quote.highlight` / `region.yellowish`）のループが
+    /// `mark_background` の先頭にあり、背景を持つテーマにはそれを
+    /// 使わせていました。**実測して落としました** — 理由は
+    /// `docs/gotchas/rendering.md`「テーマの highlight scope 尊重は
+    /// 一度やって落とした」。
     ///
-    /// この分岐は書かれてから一度も実機で走っていませんでした
-    /// （埋め込みテーマ 32 本のうち到達するのは 1 本だけ —
-    /// `the_only_embedded_theme_that_reaches_the_scope_branch`）。
-    /// ここで `.tmTheme` を書いて固定します。
+    /// これは**再発防止のテスト**です。「テーマを尊重しよう」は自然に
+    /// 出てくる案なので、分岐を戻すとここが落ちます。落としてよいのは
+    /// 上の gotcha を読んで、それでもなお戻すと決めたときだけです。
     #[test]
-    fn a_theme_that_styles_a_highlight_scope_wins_over_the_amber() {
+    fn a_theme_that_styles_a_highlight_scope_gets_the_amber_anyway() {
         const HIGHLIGHT_TM_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1157,59 +1152,79 @@ mod tests {
         let path = dir.join("highlighted.tmTheme");
         std::fs::write(&path, HIGHLIGHT_TM_THEME).unwrap();
         let highlighter = Highlighter::new(Some(path.to_str().unwrap()), false);
+        // scope_style からは今でも見える —— 見えるのに使っていない、
+        // というのがこのテストの主張です（「実装し忘れ」ではない）。
+        assert_eq!(
+            highlighter.scope_style("markup.highlight").and_then(|s| s.bg),
+            Some(Color::Rgb(0x26, 0x4f, 0x78)),
+            "テーマ側の前提が変わった — この .tmTheme が効いていない"
+        );
 
-        // テーマの背景と前景は amber の材料でもあるので、amber 経路に
-        // 落ちたら別の色になる。ここで出るのはテーマの色そのもの。
         let styles = DecorationStyles::from_theme(&highlighter, Default::default());
-        assert_eq!(styles.mark_style().bg, Some(Color::Rgb(0x26, 0x4f, 0x78)));
-        assert_ne!(styles.mark_style().bg, Some(MARK_BG_DARK));
+        assert_ne!(styles.mark_style().bg, Some(Color::Rgb(0x26, 0x4f, 0x78)));
+        // 紙が Catppuccin Mocha と同じなので、出る色も同じ amber。
+        assert_eq!(styles.mark_style().bg, Some(MARK_BG_DARK));
 
-        // `--mark-blend` を振り切っても動かない —— 勝ち方が「先に
-        // return する」であって「強く混ぜる」ではないこと。
+        // 経路が 1 本になったので、`--mark-blend` は**どのテーマでも**効く。
+        // 以前はテーマ次第でつまみが死んでいました。
         for blend in [0.0, 1.0] {
             let forced = DecorationStyles::from_theme(
                 &highlighter,
                 DecorationBlend { mark: blend, ..Default::default() },
             );
-            assert_eq!(
+            assert_ne!(
                 forced.mark_style().bg,
                 Some(Color::Rgb(0x26, 0x4f, 0x78)),
-                "blend={blend}: テーマの背景はブレンド率に左右されない"
+                "blend={blend}"
             );
         }
+        assert_eq!(
+            DecorationStyles::from_theme(
+                &highlighter,
+                DecorationBlend { mark: 1.0, ..Default::default() },
+            )
+            .mark_style()
+            .bg,
+            Some(MARK_TINT)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 埋め込みテーマのうち `MARK_SCOPES` に背景を持つのは
-    /// **DarkNeon 1 本だけ**（32 本中）。`--theme DarkNeon` が
-    /// 「テーマが勝つ」経路を実機で試せる唯一の埋め込みテーマなので、
-    /// 名前を消えないところに置いておく。
-    ///
-    /// 到達の仕方は事故に近いことも一緒に固定します: DarkNeon は
-    /// `markup.quote.highlight` を定義していません。定義しているのは
-    /// **`markup.quote`（ただの引用ブロック）** で、syntect の前方一致
-    /// で `markup.quote.highlight` にも当たります。しかもその背景は
-    /// **アルファ 18/255 の重ね色**で、`scope_style` はアルファを捨てる
-    /// ため、黒い紙の上にほぼ白いクリーム色が出ます。
+    /// 経路が 1 本になったことを、埋め込みテーマ 32 本で確かめる。
+    /// **どのテーマでも**マークはそのテーマの紙から amber へ向かう
+    /// 計算で出ること —— 以前は DarkNeon 1 本だけがここを外れて
+    /// `rgb(254,224,156)` を出し、その上の字が読めませんでした。
     #[test]
-    fn the_only_embedded_theme_that_reaches_the_scope_branch() {
+    fn every_embedded_theme_gets_the_amber_formula() {
         use two_face::theme::EmbeddedLazyThemeSet;
-        let mut found: Vec<(&str, &str, Color)> = Vec::new();
         for theme in EmbeddedLazyThemeSet::theme_names() {
             let name = theme.as_name();
             let highlighter = Highlighter::new(Some(name), false);
-            for scope in MARK_SCOPES {
-                if let Some(bg) = highlighter.scope_style(scope).and_then(|s| s.bg) {
-                    found.push((name, scope, bg));
-                    break;
-                }
-            }
+            let bg = DecorationStyles::from_theme(&highlighter, Default::default())
+                .mark_style()
+                .bg
+                .expect("a background");
+            let expected = match highlighter.theme().settings.background {
+                Some(p) => crate::view::lerp_color(
+                    Color::Rgb(p.r, p.g, p.b),
+                    MARK_TINT,
+                    MARK_BG_BLEND,
+                ),
+                None => match highlighter.default_fg() {
+                    Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => {
+                        MARK_BG_DARK
+                    }
+                    _ => MARK_BG_LIGHT,
+                },
+            };
+            assert_eq!(bg, expected, "theme={name:?} が式から外れた");
+            // 暖色であること —— 紙がどんな色でも amber へ向かうので、
+            // 赤み > 青み に落ちる。DarkNeon の `rgb(254,224,156)` が
+            // これを満たしてしまう（r>b）ので、色相だけでは不十分。
+            // 式そのものの一致を上で見ているのはそのためです。
+            let Color::Rgb(r, _, b) = bg else { panic!("RGB") };
+            assert!(r >= b, "theme={name:?}: rgb({r},_,{b}) が寒色側に落ちた");
         }
-        assert_eq!(
-            found,
-            vec![("DarkNeon", "markup.quote.highlight", Color::Rgb(254, 224, 156))],
-            "MARK_SCOPES に背景を持つ埋め込みテーマの顔ぶれが変わった              — docs/gotchas/rendering.md の名前も直すこと"
-        );
     }
 
     /// ブレンド率はつまみとして効く。
