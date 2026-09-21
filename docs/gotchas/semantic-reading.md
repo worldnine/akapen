@@ -278,7 +278,40 @@ Budget が決めることで、核の選に漏れたことは「読まなくて�
 Atom を隣の Unit に取られて核が全部落ちた場合に `Some([])` へ倒す（`None` へ
 戻さない）ことは `protocol.rs::overlapping_atoms_go_to_the_first_unit_that_claims_them`。
 
-### `core_atoms` は DIM に効かない — 「沈み方が変わった」は核のせいではない
+### `core_atoms` は DIM に効く — **2026-09-22 に変わりました**
+
+> **この項目は逆になりました。** 台帳が一段だった頃は「核は DIM に効かない」で、
+> 下にその根拠（Budget 4 点で DIM 集合が完全一致）を残してあります。
+> **台帳を二段にしたので、いまは効きます。**
+
+`policy::decorate` の**一段目**は、核を持つ Unit（ESSENTIAL かつ非 REDUNDANT
+かつ `core_atoms != Some([])`）を **Budget を見ずに**残します。だから
+`core_atoms` を `Some([])` にするか否かで、**その Unit が沈むかどうかが
+変わります**。
+
+- `None` / `Some([i])` … 一段目。**どの Budget でも沈まない**
+- `Some([])` … 二段目。Tier と Budget の取り合いに出る
+
+実測では `design`（173 Unit / 核 38）で、二段にしたとき低い予算で落ちた Unit が
+延べ 122 個あり、**その全部が「ESSENTIAL だが `Some([])`」**でした
+（`examples/semantic/measurements/context-preservation.md` 第 4 版）。
+run キャップが核の選に漏れさせた Unit です。
+
+**切り分け方**: 沈み方が変わったとき、まず**核の 3 値が動いていないか**を見ます。
+`Some([])` が増減していれば一段目の顔ぶれが変わっているので、それは Tier の
+揺れではありません。3 値が同じなら、従来どおりラウンド 2 の Tier の揺れを疑い
+ます（比べたい 2 条件のラウンド 2 の question が同一かを先に見ること）。
+
+**`keep_order` と `cost` は相変わらず核を読みません。** 核が効くのは
+「一段目に入るか」だけで、**並び順と値段には効きません**。
+
+**確認したこと**: `decorate` の一段目が `bears_a_core`（`reading_tier` /
+`is_redundant` / `has_core`）を読むこと。表示状態の割り当ても同じ関数を読むので、
+「一段目で確保したのに MARKED にならない」はずれません。落ちた 122 個の内訳は
+`~/.local/share/akapen/evidence/runs/2026-09-22-two-tier-ledger/xcheck.json`。
+
+<details>
+<summary>台帳が一段だった頃の記述（2026-09-21 まで）</summary>
 
 `policy::keep_order` と `cost` は核を読みません。**どの Unit が沈むかは Tier と
 Budget だけで決まります。** 核が決めるのは「残った Unit の中で MARKED か NORMAL か」
@@ -289,12 +322,7 @@ Budget だけで決まります。** 核が決めるのは「残った Unit の�
 同じ応答から `core_atoms` だけを抜いて通すと DIM の集合は Budget
 100 / 60 / 40 / 20 % のどれでも完全に一致しました（業務議事録と業務 `CLAUDE.md`）。
 
-**切り分け方**: 比べたい 2 条件のラウンド 2 の question が同一かを先に見ること。
-Unit の割り方が同じなら Tier の question は同一なので、沈み方の差は全部揺れです。
-
-**確認したこと**: `crates/semantic-reading/src/policy.rs::decorate` の `kept` の
-計算が `unit.is_core` を呼ばないこと（呼ぶのは表示状態の割り当てだけ）。
-上の DIM 集合の一致は `atom-states` を 2 条件 × 4 Budget で突き合わせて確認。
+</details>
 
 ### `examples/semantic/README.md` は測定対象の文書でもある — 測りながら書くと分母が動く
 

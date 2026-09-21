@@ -191,6 +191,17 @@ impl SemanticUnit {
         }
     }
 
+    /// 核を 1 つでも持つか — **この Unit は MARKED になりうるか**。
+    ///
+    /// [`Self::core_atoms`] の 3 値のうち `Some([])` だけが `false` になる。
+    /// `None`（絞り込みを受けていない）は Unit 全体が核なので `true`。
+    ///
+    /// [`crate::policy::decorate`] の**一段目**（核を先に確保する段）が、
+    /// Tier と redundancy と併せてこれを見る。
+    pub fn has_core(&self) -> bool {
+        !matches!(&self.core_atoms, Some(core) if core.is_empty())
+    }
+
     /// 核を明示的に決める。空を渡すと「**核を持たない**」になり、この Unit は
     /// MARKED にならない（[`Self::core_atoms`] の 3 値のうち `Some([])`）。
     pub fn set_core(&mut self, atoms: impl IntoIterator<Item = AtomIndex>) {
@@ -285,6 +296,19 @@ mod tests {
         assert_eq!(unit.core_atoms, Some(Vec::new()));
         assert!(!unit.is_core(AtomIndex(0)));
         assert!(!unit.is_core(AtomIndex(1)));
+    }
+
+    /// `has_core` は 3 値のうち `Some([])` だけを弾く。
+    /// [`crate::policy::decorate`] の一段目がこれで核を選ぶ。
+    #[test]
+    fn has_core_is_false_only_for_the_empty_core() {
+        let mut unit = SemanticUnit::new("u1", [AtomIndex(0), AtomIndex(1)], ReadingTier::Essential);
+        // None — 絞り込みを受けていない。Unit 全体が核。
+        assert!(unit.has_core());
+        unit.set_core([AtomIndex(1)]);
+        assert!(unit.has_core());
+        unit.set_core([]);
+        assert!(!unit.has_core());
     }
 
     #[test]

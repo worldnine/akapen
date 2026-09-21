@@ -605,14 +605,15 @@ mod tests {
                 .map(|(i, _)| i)
                 .collect()
         };
-        // ESSENTIAL の 3 Unit（タイトル / 結論 / 制約）が残っているあいだ、
-        // MARKED は Budget に依存しない。
-        for budget in [100, 75, 73, 30, 14] {
+        // ESSENTIAL の 3 Unit（タイトル / 結論 / 制約）の核は、
+        // **どの Budget でも MARKED である**。1 % も含む。
+        //
+        // 台帳が一段だった頃はここが `[0]` で、READ を下げると
+        // 「最低限これを読め」が 3 つから 1 つへ減っていた
+        // （`semantic_reading::policy` の「台帳の単位」）。
+        for budget in [100, 75, 73, 30, 14, 5, 1] {
             assert_eq!(marked(budget), [0, 3, 4, 11, 12, 13], "budget {budget}");
         }
-        // 残らなければ MARKED でもなくなる。budget 1 % では、Budget が
-        // どれだけ小さくても必ず残る先頭の 1 Unit（タイトル）だけになる。
-        assert_eq!(marked(1), [0]);
     }
 
     /// 同じ source 行の中で状態が切り替わること — マイルストーンの

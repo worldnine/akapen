@@ -44,14 +44,22 @@
 //!
 //! 1. **Unit を「残したい順」に一列に並べる**（`keep_order` の並び替え鍵）。
 //!    この順序は Budget に依存しない。
-//! 2. **その先頭から順に、attention が尽きるまで残す**。attention の量は
-//!    Unit が占める source のバイト数で測り、`budget` はその何 % までを
-//!    残すかを表す。**Unit を 1 つ残すときは、その Unit が前提にしている
-//!    Unit（`PRESUPPOSES` の閉包）のうち未払いのぶんも一緒に払う** —
-//!    払えなければその Unit のほうが残らない（下の「context preservation」）。
-//!    入らない Unit が現れた時点で打ち切る（後ろの小さい Unit を拾い直さない）。
-//! 3. **残った Unit の意味情報を Atom へ投影する**。判断単位は Unit、
+//! 2. **一段目 — 核を先に、単独で確保する。** 核を持つ Unit
+//!    （= MARKED になりうるもの。ESSENTIAL かつ非 REDUNDANT かつ
+//!    `core_atoms != Some([])`）を、**Budget を見ずに**残す。そのとき
+//!    **その Unit が前提にしている Unit（`PRESUPPOSES` の閉包）も一緒に
+//!    残す**（下の「context preservation」）。
+//! 3. **二段目 — 残りの予算を、残りの Unit が奪い合う。** `keep_order` の
+//!    先頭から順に、attention が尽きるまで残す。attention の量は Unit が
+//!    占める source のバイト数で測り、`budget` はその何 % までを残すかを
+//!    表す。入らない Unit が現れた時点で打ち切る（後ろの小さい Unit を
+//!    拾い直さない）。**二段目の Unit は自分の前提を連れてこない。**
+//! 4. **残った Unit の意味情報を Atom へ投影する**。判断単位は Unit、
 //!    表示単位は Atom。
+//!
+//! 二段にしている理由は下の「台帳の単位」にある。**予算の意味は変えて
+//! いない** — 読み手が「これだけ時間がある」と言う入力のままで、変えたのは
+//! その下で何を数えるかである。
 //!
 //! 打ち切りを「入らないものを飛ばして詰める」best-fit にしないのは、
 //! Budget を 1 下げた瞬間に別の Unit が復活しうるからである。先頭からの
@@ -125,37 +133,78 @@
 //! である。ステータス行に「どこかに穴がある」と出す案は却下してある
 //! （読み手にできることが無い）。
 //!
-//! 反映の仕方は上の「決め方」2 のとおり、`keep_order` の順に進みながら
-//! **その Unit と、まだ払っていない閉包を一緒に払う**。払えなければそこで
-//! 打ち切る。閉包は根まで辿る（前提の前提も払う）。
+//! 反映の仕方は上の「決め方」2 のとおり、**一段目で核と一緒に払う**。
+//! 閉包は根まで辿る（前提の前提も払う）。
 //!
 //! 数えないという選択肢は無い。**数えないと「30 % と言って 45 % 出る」**
-//! ことになり、`budget` が指す量が文書によって変わる。
+//! ことになり、`budget` が指す量が文書によって変わる。数えたうえで、
+//! 核のぶんだけは**取り合いの前に**確保する、というのが二段の形である。
 //!
-//! ## 逆転は起きる。受け入れた帰結である
+//! # 台帳の単位 — 予算は Unit で数え、マーカーは Atom に置いている
 //!
-//! 前提を予算に数えると、**長い系譜を持つ ESSENTIAL が丸ごと払えずに落ち、
-//! 系譜の無い格下が代わりに繰り上がる**。実測では 26 Unit の小さい文書で
-//! READ 30 % のとき MARKED 5 つのうち 2 つが落ちた（Choice 版・第 1 版とも
-//! 同じ 2 / 5）。`design` は第 1 版の 14〜16 / 38 から 4〜5 / 38 へ桁が
-//! 変わったが、**小さい文書では残る**。
+//! 台帳が一段だった頃、**読む量を減らすと「最低限これを読め」が消えた**。
 //!
-//! これは不具合ではなく、「前提を予算に数える」と決めた時点で決まる帰結で
-//! ある。**ここを直そうとしないこと** — 落ちた MARKED を特別扱いして拾い
-//! 直せば、それは best-fit であり、下の単調性が壊れる。
+//! ```text
+//! READ 20%  ->  MARKED の Atom 3 個
+//! READ  1%  ->  MARKED の Atom 1 個
+//! ```
+//!
+//! ラベルの意味と逆である。原因は**単位のずれ**だった。**予算は Unit で
+//! 数え、マーカーは Atom に置いている。** Unit が予算に入らなければ丸ごと
+//! DIM になり、その中の核の一文も一緒に沈む。1 % では段落は買えないが、
+//! **一文なら 1 % の中で誤差**である。
+//!
+//! そして下の「表示状態の割り当て」は「**MARKED は Budget に依存しない**」
+//! と書いていた。一段の台帳では、その主張は「生き残った Unit については
+//! 真、落ちた Unit については偽」で、**どこにもそう書いていなかった**。
+//!
+//! ## 直し方 — 核を取り合いに出さない
+//!
+//! 一段目で核とその閉包を確保し、二段目で残りを取り合う。**「これさえ
+//! 見れば」なら、READ 1 % は核（とその前提）だけが出るべきである。**
+//!
+//! これは「閉包を払うのは MARKED の分だけ」を**含む**。一段だった頃は
+//! 残るすべての Unit が自分の閉包を払っていて、実データでは SUPPORTING の
+//! Unit が自分の前提を引き上げていた。二段にすると、二段目の Unit は自分の
+//! 前提を連れてこない。
+//!
+//! ## 逆転はもう起きない
+//!
+//! 一段だった頃は、**長い系譜を持つ ESSENTIAL が丸ごと払えずに落ち、
+//! 系譜の無い格下が代わりに繰り上がっていた**。実測では 26 Unit の小さい
+//! 文書で READ 30 % のとき MARKED 5 つのうち 2 つが落ちた。
+//!
+//! 二段にして、この形は消えた（実測 5 / 5）。**落ちた MARKED を拾い直して
+//! 直したのではない** — 拾い直しは best-fit であり、下の単調性を壊す。
+//! 核を**そもそも取り合いに出さない**ので、落ちなくなった。
+//!
+//! ## 二段目が予算を使い切ることはある
+//!
+//! 一段目は Budget を見ないので、**核とその閉包が `budget` を超えることが
+//! ある**。実測の記事では一段目だけで文書の 28.3 % を占めた。READ 1 % でも
+//! その 28.3 % が出る。
+//!
+//! これは「30 % と言って 45 % 出る」を避けるという上の話と衝突して見えるが、
+//! 衝突していない。あちらは**二段目の取り合いの中で前提を隠れて払う**こと
+//! （予算の意味が文書ごとに変わる）を避けている。こちらは
+//! **「最低限これを読め」は予算より先にある**という宣言で、量は
+//! 一段目の大きさとして数えられる。
 //!
 //! ## 単調性は何に支えられているか
 //!
-//! 閉包を足しても単調性は保たれる。支えているのは次の 2 点だけで、
-//! **どちらも辺の構造をまったく使っていない**。
+//! 二段にしても単調性は保たれる。支えているのは次の 3 点だけで、
+//! **どれも辺の構造をまったく使っていない**。
 //!
-//! 1. `keep_order` が Budget に依存しない
-//! 2. 打ち切りが `break` である（入らないものを飛ばして先を試さない）
+//! 1. **一段目が Budget に依存しない**（だから定数である）
+//! 2. `keep_order` が Budget に依存しない
+//! 3. 打ち切りが `break` である（入らないものを飛ばして先を試さない）
 //!
-//! 各 rank で払う額は「それまでに何が kept になったか」だけで決まり、
-//! それは rank だけの関数である（Budget を見ていない）。つまり
-//! **累積額の列 `S_0 <= S_1 <= …` は Budget に依存しない固定列**で、
-//! Budget が決めるのは「その列のどこで初めて越えるか」だけである。
+//! 一段目で残る集合も、そこで使う額も Budget の関数ではない。つまり
+//! 二段目は**固定の下駄 `S_core` を履いて**始まる。二段目の各 rank で払う
+//! 額は「それまでに何が kept になったか」だけで決まり、それは rank だけの
+//! 関数である（Budget を見ていない）。つまり
+//! **累積額の列 `S_core <= S_core + c_0 <= …` は Budget に依存しない固定列**
+//! で、Budget が決めるのは「その列のどこで初めて越えるか」だけである。
 //! 越える位置は Budget について単調なので、残る集合は入れ子になる。
 //!
 //! だから**前向きの辺や循環があっても単調性は壊れない**（閉包は訪問済み
@@ -163,13 +212,19 @@
 //! ときだけで、そのとき「Budget b で i が入らず j が入り、b+1 で i が入って
 //! j が落ちる」が起きる。
 //!
-//! ## rank 0 は閉包ごと残る
+//! **副産物として、MARKED が Budget の関数でなくなった。** 核は必ず
+//! 一段目にいるので、READ 1 % と READ 100 % で MARKED の集合は完全に
+//! 一致する（`the_marked_set_never_moves_with_the_budget`）。
+//!
+//! ## 核が 1 つも無い文書だけ、先頭を強制で残す
 //!
 //! 「読む場所がゼロの表示には意味がない」ので先頭 1 つは Budget 1 % でも
-//! 必ず残すが、**前提もその Unit の一部として一緒に残る**。だから Budget
-//! 1 % の表示は「MARKED 1 つ」ではなく「MARKED 1 つ + その前提」になる。
-//! 前提だけ落として先頭を残すのは、context preservation が禁じている当の
-//! 状態（意味の取れない一文だけが光っている）そのものである。
+//! 必ず残す。ただしこれが要るのは**一段目が空のときだけ**で、核があるなら
+//! 一段目がすでに空でない。
+//!
+//! **この強制は前提を連れてこない**（二段目の規則のまま）。`context
+//! preservation` は「光っている一文が読める」ための rule なので、光る Unit
+//! が無い文書では引き上げる先も無い。
 //!
 //! ## 並び替え鍵には入れない
 //!
@@ -220,6 +275,11 @@
 //!
 //! MARKED は Budget に依存しない。Budget 100% で全文を見せつつ ESSENTIAL に
 //! 薄い marker を重ねる、という設計書の最初のデモがそのままこの規則である。
+//!
+//! **これは上の「一段目」が支えている。** 核を持つ Unit は Budget を見ずに
+//! 残るので、`kept` は必ず真になり、`marks` は Budget の関数ではない。
+//! 台帳が一段だった頃、この一文は生き残った Unit にしか当てはまっていな
+//! かった（上の「台帳の単位」）。
 //!
 //! ## MARKED だけ、投影を選択的にする
 //!
@@ -293,37 +353,60 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
     let total: usize = doc.units.iter().map(cost).sum();
     let by_id = index_by_id(doc);
 
-    // 残したい順に attention を積み、Budget を超えた時点で打ち切る。
-    // **1 つ残すときは、その Unit が前提にしている Unit のうちまだ払って
-    // いないぶんも一緒に払う**（context preservation）。払えなければ
-    // その Unit のほうが残らない。
-    //
-    // 先頭の 1 つだけは Budget が 1 % でも必ず残す — 読む場所がゼロの
-    // 表示には意味がないため。**そのとき前提も一緒に残る**（意味の取れない
-    // 一文だけが光っている状態は、この rule が禁じている当のものである）。
     let mut kept = vec![false; doc.units.len()];
     let mut spent: usize = 0;
+
+    // ---- 一段目 — 核を先に、単独で確保する ----------------------------
+    //
+    // **ここは Budget を見ない。** 核（= MARKED になりうる Unit）と、その
+    // 前提の閉包を、予算の取り合いの前に確保する。取り合いに混ぜると
+    // 「READ を下げたら『最低限これを読め』が消える」が起きる（下の
+    // 「台帳の単位」）。この集合は Budget の関数ではないので、`spent` の
+    // 初期値も Budget に依存しない定数である。
     let mut bill = Vec::new();
-    for (rank, &unit_index) in order.iter().enumerate() {
+    let mut any_core = false;
+    for &unit_index in &order {
+        if !bears_a_core(&doc.units[unit_index]) {
+            continue;
+        }
+        any_core = true;
         // この Unit と、その前提の閉包。重複は無い（`prerequisites` は
         // 訪問済み集合で辿り、seed 自身を含めない）。
         bill.clear();
         bill.push(unit_index);
         prerequisites(doc, &by_id, unit_index, &mut bill);
-        let due: usize = bill
-            .iter()
-            .filter(|&&index| !kept[index])
-            .map(|&index| cost(&doc.units[index]))
-            .sum();
-        let fits = ((spent + due) as u128) * 100 <= (budget as u128) * (total as u128);
-        if fits || rank == 0 {
-            for &index in &bill {
+        for &index in &bill {
+            if !kept[index] {
                 kept[index] = true;
+                spent += cost(&doc.units[index]);
             }
+        }
+    }
+
+    // ---- 二段目 — 残りの予算を Unit が奪い合う ------------------------
+    //
+    // `keep_order` の prefix 打ち切りのまま。**ここの Unit は自分の前提を
+    // 連れてこない** — 前提を一緒に生き残らせるのは核のためのものなので、
+    // 一段目で済んでいる。
+    //
+    // 核が 1 つも無い文書でだけ、先頭の 1 つを Budget 1 % でも必ず残す
+    // （読む場所がゼロの表示には意味がないため）。核があるなら一段目が
+    // すでに空でないので、この保険は要らない。
+    let mut rank = 0usize;
+    for &unit_index in &order {
+        // 一段目で確保済みのものは、もう払ってある。
+        if kept[unit_index] {
+            continue;
+        }
+        let due = cost(&doc.units[unit_index]);
+        let fits = ((spent + due) as u128) * 100 <= (budget as u128) * (total as u128);
+        if fits || (!any_core && rank == 0) {
+            kept[unit_index] = true;
             spent += due;
         } else {
             break;
         }
+        rank += 1;
     }
 
     // Unit の判断を Atom へ投影する。1 つの Atom を複数の Unit が指している
@@ -332,9 +415,11 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
     for (unit_index, unit) in doc.units.iter().enumerate() {
         // MARKED になりうる Unit か。なる場合だけ、Unit の中で核と残りを
         // 分ける（NORMAL と DIM は Unit 全体に一律で掛かる）。
-        let marks = kept[unit_index]
-            && unit.reading_tier == ReadingTier::Essential
-            && !unit.is_redundant();
+        //
+        // **一段目がこの Unit を必ず残しているので、Budget は効かない。**
+        // 「MARKED は Budget に依存しない」はここで文字どおり成り立つ。
+        let marks = bears_a_core(unit);
+        debug_assert!(!marks || kept[unit_index], "核を持つ Unit は一段目で残る");
         for &atom in &unit.atoms {
             let state = if !kept[unit_index] {
                 DisplayState::Dim
@@ -355,6 +440,15 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
         // どの Unit にも属さない Atom は未判断であって低優先度ではない。
         .map(|(atom, state)| (atom.range.clone(), state.unwrap_or(DisplayState::Normal)))
         .collect()
+}
+
+/// この Unit は**一段目**に入るか — すなわち MARKED になりうるか。
+///
+/// 表示状態の割り当てと同じ条件である（ESSENTIAL / 非 REDUNDANT / 核を持つ）。
+/// **2 箇所で別々に書かない**こと — ずれると「一段目で確保したのに MARKED に
+/// ならない Unit」や、その逆が出る。
+fn bears_a_core(unit: &crate::unit::SemanticUnit) -> bool {
+    unit.reading_tier == ReadingTier::Essential && !unit.is_redundant() && unit.has_core()
 }
 
 /// Unit を「残したい順」に並べた添字列を返す。Budget には依存しない。
@@ -526,10 +620,16 @@ mod tests {
             ReadingTier::Essential,
         );
         essential.set_core([AtomIndex(0)]);
+        // **REDUNDANT にしてある。** 二段目に落ちるのは核を持たない Unit
+        // だけなので（核は一段目が必ず確保する）、「核を持つのに沈む」を
+        // 作るには MARKED になれない Unit を使う。`core_atoms` は付いたまま
+        // で、**それが DIM に一切効かない**ことがここの主張である。
         let mut dropped = SemanticUnit::new("drop", [AtomIndex(2)], ReadingTier::Essential);
         dropped.set_core([AtomIndex(2)]);
+        dropped.relations.push(Relation::RedundantWith("keep".into()));
         let doc = SemanticDocument::new(atoms, vec![essential, dropped]);
-        // 60 バイト中、短い "keep"（20 バイト）だけが 70 % に入る。
+        // 60 バイト中、一段目の "keep"（20 バイト）を引いた残りに
+        // "drop"（40 バイト）は入らない。
         assert_eq!(
             states(&doc, 70),
             [
@@ -873,6 +973,175 @@ mod tests {
         presuppose(&mut cyclic, 1, 3);
         presuppose(&mut cyclic, 3, 1);
         assert_monotone(&cyclic, "cyclic");
+
+        // **一段目が予算を食い切る。** 核 2 つが同じ重い CONTEXT を前提に
+        // していて、一段目だけで文書の 9 割になる。二段目の予算が負
+        // （実際には 0 扱い）になる領域を通る。
+        let mut crowded = sized(&[
+            (ReadingTier::Context, 200),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 20),
+        ]);
+        presuppose(&mut crowded, 1, 0);
+        presuppose(&mut crowded, 2, 0);
+        assert_monotone(&crowded, "crowded");
+
+        // **二段目の Unit も辺を持つ文書。** 二段目は連れてこないが、
+        // 一段目の閉包と行き先が重なることはある。
+        let mut mixed = sized(&[
+            (ReadingTier::Context, 30),
+            (ReadingTier::Supporting, 20),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 40),
+        ]);
+        presuppose(&mut mixed, 2, 0);
+        presuppose(&mut mixed, 1, 0);
+        presuppose(&mut mixed, 3, 1);
+        assert_monotone(&mixed, "mixed");
+    }
+
+    /// その Budget で MARKED を持つ Unit の添字。
+    fn marked_units(doc: &SemanticDocument, budget: u8) -> Vec<usize> {
+        let states = states(doc, budget);
+        doc.units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| {
+                unit.atoms
+                    .iter()
+                    .any(|&AtomIndex(a)| states[a] == DisplayState::Marked)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// **「MARKED は Budget に依存しない」を文字どおり固定する。**
+    ///
+    /// 台帳が一段だった頃、この主張は「生き残った Unit については真、
+    /// 落ちた Unit については偽」だった — READ を下げると MARKED が消えた。
+    /// 二段にしたので、いまは Budget 1 % と 100 % で MARKED の集合が
+    /// **完全に一致する**。
+    #[test]
+    fn the_marked_set_never_moves_with_the_budget() {
+        let mut lineage = sized(&[
+            (ReadingTier::Context, 300),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 600),
+            (ReadingTier::Essential, 20),
+            (ReadingTier::Supporting, 70),
+        ]);
+        presuppose(&mut lineage, 1, 0);
+        presuppose(&mut lineage, 3, 1);
+
+        let mut redundant = sized(&[
+            (ReadingTier::Essential, 40),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 50),
+        ]);
+        redundant.units[0]
+            .relations
+            .push(Relation::RedundantWith("u1".into()));
+
+        let mut hollow = sized(&[
+            (ReadingTier::Essential, 30),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 60),
+        ]);
+        hollow.units[0].set_core([]);
+
+        for (doc, label) in [
+            (&lineage, "lineage"),
+            (&redundant, "redundant"),
+            (&hollow, "hollow"),
+        ] {
+            let full = marked_units(doc, MAX_BUDGET);
+            assert!(!full.is_empty(), "{label}: 100 % で MARKED が無い fixture");
+            for budget in MIN_BUDGET..=MAX_BUDGET {
+                assert_eq!(
+                    marked_units(doc, budget),
+                    full,
+                    "{label}: budget {budget} で MARKED が動いた"
+                );
+            }
+        }
+    }
+
+    /// **合格条件。** READ 1 % で、核とその前提だけが出る。
+    #[test]
+    fn every_core_and_its_lineage_survives_the_smallest_budget() {
+        let mut doc = sized(&[
+            (ReadingTier::Context, 300),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 600),
+            (ReadingTier::Essential, 20),
+            (ReadingTier::Supporting, 70),
+        ]);
+        presuppose(&mut doc, 1, 0);
+        // 一段目は u1 + 前提の u0 + u3 で 330 バイト。文書は 1000 バイトで、
+        // READ 1 % は 10 バイトしかないが、**核は 2 つとも出る**。
+        assert_eq!(kept_units(&doc, 1), [0, 1, 3]);
+        assert_eq!(
+            states(&doc, 1),
+            [
+                DisplayState::Normal,
+                DisplayState::Marked,
+                DisplayState::Dim,
+                DisplayState::Marked,
+                DisplayState::Dim
+            ]
+        );
+    }
+
+    /// **二段目は自分の前提を連れてこない。** 二段にして変わったのはここで、
+    /// 実データでは SUPPORTING の Unit が自分の前提を引き上げていた。
+    #[test]
+    fn a_second_tier_unit_does_not_bring_its_prerequisite() {
+        let mut doc = sized(&[
+            (ReadingTier::Detail, 30),
+            (ReadingTier::Supporting, 10),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 50),
+        ]);
+        presuppose(&mut doc, 1, 0);
+        // 一段目は核の u2 だけ（10 バイト）。25 % = 25 バイトの残りで
+        // u1 は買えるが、**前提の u0（30 バイト）は連れてこない**。
+        // 台帳が一段だった頃は u1 が 40 バイトになって買えず、`[2]` だった。
+        assert_eq!(kept_units(&doc, 25), [1, 2]);
+    }
+
+    /// 核が 1 つも無い文書。読む場所がゼロにならないよう先頭は残すが、
+    /// **そこは二段目なので前提は連れてこない**。
+    ///
+    /// 一段目だけを閉包つきにしたのは、`context preservation` が
+    /// 「光っている一文が読める」ための rule だからである。光る Unit が
+    /// 無いなら、引き上げる先も無い。
+    #[test]
+    fn without_a_core_the_forced_first_unit_pays_no_lineage() {
+        let mut doc = sized(&[
+            (ReadingTier::Context, 500),
+            (ReadingTier::Supporting, 10),
+            (ReadingTier::Detail, 90),
+        ]);
+        presuppose(&mut doc, 1, 0);
+        assert_eq!(kept_units(&doc, 1), [1]);
+        assert!(marked_units(&doc, 1).is_empty());
+    }
+
+    /// 核を持たない ESSENTIAL（`Some([])`）は一段目に入らない。
+    /// 一段目の条件は**表示状態の割り当てと同じ 3 つ**である。
+    #[test]
+    fn an_essential_unit_without_a_core_is_not_reserved_first() {
+        let mut doc = sized(&[
+            (ReadingTier::Essential, 60),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Detail, 30),
+        ]);
+        doc.units[0].set_core([]);
+        // u0 は核を持たないので取り合いに出る。30 % = 30 バイトに 60 は
+        // 入らない。核を持つ u1 だけが一段目で残る。
+        assert_eq!(kept_units(&doc, 30), [1]);
+        assert_eq!(marked_units(&doc, 30), [1]);
     }
 
     /// 単調性の支えは辺ではなく `break` である、を裏から固定する。
@@ -945,17 +1214,20 @@ mod tests {
         // 30 % = 30 バイト。鎖 3 つでちょうど払える。u0 は ESSENTIAL の
         // **前提の前提**で、直接は誰も指していない。
         assert_eq!(kept_units(&doc, 30), [0, 1, 2]);
-        // 20 % では鎖が払えないが、ESSENTIAL は rank 0 なので閉包ごと
-        // 強制で残る（「rank 0 は閉包ごと残る」）。
+        // 20 % では鎖が払えないが、ESSENTIAL は核なので一段目で閉包ごと
+        // 確保される（「一段目は Budget を見ない」）。
         assert_eq!(kept_units(&doc, 20), [0, 1, 2]);
     }
 
-    /// **逆転**。長い系譜を持つ ESSENTIAL が払えずに落ち、系譜の無い格下が
-    /// 繰り上がる。実測（b3 で 2 / 5 の MARKED が落ちる）と同じ形で、
-    /// **「前提を予算に数える」と決めた時点で決まる帰結である**。
-    /// 拾い直すと best-fit になり単調性が壊れるので、ここは固定して残す。
+    /// **逆転はもう起きない。** 一段目が Budget を見ないので、払えないほど
+    /// 長い系譜を持つ核も、系譜ごと確保される。
+    ///
+    /// 台帳が一段だった頃はここが逆で、この fixture では MARKED の u2 が
+    /// 落ちて DETAIL の u0 が繰り上がっていた（実測 b3 の 2 / 5 と同じ形）。
+    /// **拾い直して直したのではない** — 拾い直しは best-fit で単調性を壊す。
+    /// 核を取り合いに出さないことで、そもそも落ちなくなった。
     #[test]
-    fn a_unit_with_an_unpayable_lineage_falls_and_a_lesser_one_rises() {
+    fn an_unpayable_lineage_no_longer_takes_its_core_down() {
         let mut doc = sized(&[
             (ReadingTier::Detail, 55),
             (ReadingTier::Essential, 10),
@@ -967,22 +1239,21 @@ mod tests {
         assert_eq!(states(&doc, 30)[1..3], [DisplayState::Marked; 2]);
 
         presuppose(&mut doc, 1, 0);
-        // u1 の請求書は 65 バイトになる。rank 0 なので閉包ごと強制で残り、
-        // **そこで予算を使い切って打ち切られる**。
-        //
-        // 落ちたのは u2 — **MARKED である**。繰り上がったのは u0、
-        // 文書でいちばん下の DETAIL である。「予算の外にある弱い Unit が
-        // 落ちる」のではなく「MARKED が落ちて格下が上がる」。
-        assert_eq!(kept_units(&doc, 30), [0, 1]);
+        // 一段目は u1 + その前提の u0（55 バイト）+ u2 で 80 バイト。
+        // 予算 30 % = 30 バイトを大きく超えるが、**一段目は Budget を
+        // 見ない**。核は 2 つとも光ったままで、落ちるのは二段目の u3。
+        assert_eq!(kept_units(&doc, 30), [0, 1, 2]);
         assert_eq!(
             states(&doc, 30),
             [
                 DisplayState::Normal,
                 DisplayState::Marked,
-                DisplayState::Dim,
+                DisplayState::Marked,
                 DisplayState::Dim
             ]
         );
+        // READ 1 % でも同じ集合。**「これさえ見れば」が消えない。**
+        assert_eq!(kept_units(&doc, 1), [0, 1, 2]);
     }
 
     /// すでに払った前提は二度請求されない（共有前提）。
@@ -1001,11 +1272,11 @@ mod tests {
         assert_eq!(kept_units(&doc, 60), [0, 1, 2]);
     }
 
-    /// **rank 0 は閉包ごと残る。** Budget 1 % の表示は「MARKED 1 つ」では
+    /// **一段目は閉包ごと残る。** Budget 1 % の表示は「MARKED 1 つ」では
     /// なく「MARKED 1 つ + その前提」になる。意味の取れない一文だけが
     /// 光っている状態は、この rule が禁じている当のものである。
     #[test]
-    fn the_forced_first_unit_brings_its_prerequisites_along() {
+    fn a_core_brings_its_prerequisites_at_the_smallest_budget() {
         let mut doc = sized(&[
             (ReadingTier::Context, 500),
             (ReadingTier::Essential, 10),
@@ -1068,7 +1339,7 @@ mod tests {
     /// 前提でも重複でもある Unit は、重複として弱められる。2 つの relation は
     /// 独立に効く。
     #[test]
-    fn a_unit_can_be_redundant_and_have_a_prerequisite_at_once() {
+    fn a_redundant_essential_unit_does_not_bring_its_prerequisite() {
         let mut doc = sized(&[
             (ReadingTier::Context, 10),
             (ReadingTier::Essential, 10),
@@ -1078,12 +1349,16 @@ mod tests {
             .relations
             .push(Relation::RedundantWith("u0".into()));
         assert!(doc.units[1].is_redundant());
-        // REDUNDANT なので MARKED にはならない。前提は引き続き引き上げる。
+        // REDUNDANT なので MARKED にならない → **一段目に入らない**。
         assert_eq!(
             states(&doc, 100),
             [DisplayState::Normal, DisplayState::Normal]
         );
-        assert_eq!(kept_units(&doc, 55), [0, 1]);
+        // 55 % = 11 バイト。u1 は入るが、**前提の u0 は連れてこない**。
+        // 台帳が一段だった頃はここが `[0, 1]` で、20 バイトを 11 バイトの
+        // 予算で買っていた。
+        assert_eq!(kept_units(&doc, 55), [1]);
+        assert_eq!(kept_units(&doc, 100), [0, 1]);
     }
 
     #[test]
