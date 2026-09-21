@@ -157,6 +157,33 @@ pub struct SemanticUnit {
     /// ここを 2 値にすると、選に漏れた Unit が丸ごと光ってしまい絞れない。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_atoms: Option<Vec<AtomIndex>>,
+    /// この Unit が属する**節**の見出し Unit。節の外（見出しより前の前書き）
+    /// なら `None`。
+    ///
+    /// 見出し Unit 自身もこのフィールドを持ち、その値は**親の節**の見出し
+    /// Unit である（`### 費用` なら `## 決定事項` の Unit）。だから節は
+    /// このフィールドだけで入れ子になり、この crate は `#` の数を知らずに
+    /// 済む。
+    ///
+    /// # なぜ [`Relation`] ではないのか
+    ///
+    /// **出自が違う。** `relations` に並ぶのは Jev が判定したもので、
+    /// こちらは**構文から決まる**（設計書「Jev に判断させないもの:
+    /// syntax parsing」）。同じ配列に混ぜると、JSON を読む人が
+    /// 「どれが判定されたのか」を区別できなくなる。
+    ///
+    /// 型の上でも混ぜない方が安い。`Relation` の枝を増やすと、それを知らない
+    /// 古い akapen は `unknown variant` で**応答を丸ごと捨てる**
+    /// （[`Relation::Presupposes`] を足したときの表。`crate::protocol`）。
+    /// 追加のフィールドなら知らない側は読み飛ばすだけで済む。
+    ///
+    /// # 何に使うか
+    ///
+    /// [`crate::policy::decorate`] が、**節の中に残った Unit が 1 つでも
+    /// あれば、その節の見出しを戻す**ために使う。判定は構造だけで、Jev は
+    /// 出てこない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_of: Option<UnitId>,
     /// 他 Unit との関係。空でよい。
     #[serde(default)]
     pub relations: Vec<Relation>,
@@ -174,6 +201,7 @@ impl SemanticUnit {
             atoms: atoms.into_iter().collect(),
             reading_tier,
             core_atoms: None,
+            section_of: None,
             relations: Vec::new(),
         }
     }
@@ -335,6 +363,40 @@ mod tests {
             r#"{"id":"u1","atoms":[0],"reading_tier":"essential","relations":[]}"#
         );
         assert_eq!(serde_json::from_str::<SemanticUnit>(&json).unwrap(), unit);
+    }
+
+    #[test]
+    fn section_of_is_absent_from_the_wire_until_the_annotator_fills_it() {
+        // 節を知らない判定器・既存の fixture の形を変えない。
+        let unit = SemanticUnit::new("u1", [AtomIndex(0)], ReadingTier::Essential);
+        assert_eq!(unit.section_of, None);
+        let json = serde_json::to_string(&unit).unwrap();
+        assert!(!json.contains("section_of"), "{json}");
+        assert_eq!(serde_json::from_str::<SemanticUnit>(&json).unwrap(), unit);
+    }
+
+    #[test]
+    fn section_of_round_trips_as_a_bare_id() {
+        let mut unit = SemanticUnit::new("u9", [AtomIndex(0)], ReadingTier::Detail);
+        unit.section_of = Some("u4".into());
+        let json = serde_json::to_string(&unit).unwrap();
+        assert_eq!(
+            json,
+            r#"{"id":"u9","atoms":[0],"reading_tier":"detail","section_of":"u4","relations":[]}"#
+        );
+        assert_eq!(serde_json::from_str::<SemanticUnit>(&json).unwrap(), unit);
+    }
+
+    /// **出自を混ぜない。** 節に属することは Jev の判定ではないので、
+    /// `relations` には 1 つも現れない。ここを混ぜると、JSON を読む人が
+    /// 「どれが判定されたのか」を区別できなくなる。
+    #[test]
+    fn belonging_to_a_section_is_not_a_relation() {
+        let mut unit = SemanticUnit::new("u9", [AtomIndex(0)], ReadingTier::Essential);
+        unit.section_of = Some("u4".into());
+        assert!(unit.relations.is_empty());
+        assert!(!unit.is_redundant());
+        assert_eq!(unit.presupposes().count(), 0);
     }
 
     #[test]
