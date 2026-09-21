@@ -366,6 +366,42 @@ MARKED のままでした。理由は経路が違うからです。ラベルは*
 テストは `examples/semantic/test_jev_annotate.py` の `ListMarkerIndentTest`
 （`atoms_from` が実際の Markdown からバイト位置で Atom を作る）。
 
+### `cargo clippy --workspace --all-targets -- -D warnings` は緑になったことがない
+
+CI は clippy を走らせていません（`.github/workflows/ci.yml` は `cargo build` /
+`cargo test --workspace` / `check-vendor-diff.sh` の 3 つだけ）。手で clippy を
+当てるときは**呼び方で結果が変わる**ので、「clippy が赤い」を回帰と読み違え
+ないでください。
+
+| 呼び方 | 結果 |
+| --- | --- |
+| `--workspace --all-targets -- -D warnings` | **赤**（14 件） |
+| `--workspace -- -D warnings`（`--all-targets` なし） | 緑 |
+| `--workspace --all-targets`（`-D warnings` なし） | 緑（warning 14 件） |
+| `-p akapen -p semantic-reading --all-targets -- -D warnings` | 緑 |
+
+**14 件はすべて `third_party/tui-markdown` のテストコード**（`#[cfg(test)]`）で、
+akapen 本体と `semantic-reading` は 0 件です。内訳は
+`unused import: super::*` が 10 件と `single_range_in_vec_init` が 4 件。
+
+**ツールチェーンで件数が変わります。** 同じツリーに当てた実測:
+
+| toolchain | 該当 warning |
+| --- | ---: |
+| clippy 0.1.90 (2025-09-14) | 4 |
+| clippy 0.1.92 (2025-12-08) | 4 |
+| clippy 0.1.98 (2026-09-01) | **14** |
+
+`unused import: super::*` の 10 件は新しい rustc で増えたぶんで、
+`single_range_in_vec_init` の 4 件は**1.90 の時点から赤**です。つまり
+`--workspace --all-targets -- -D warnings` はこのツリーで緑だったことがなく、
+「main は clippy 0」という記録は**上の表の下 3 行のいずれかの呼び方**を指します。
+
+**確認したこと**: `git diff main...HEAD -- '*.rs' '*.toml' 'Cargo.lock'` が空
+（ブランチ `rule4-list-boundary` の Rust は main と同一）。上の 4 通りの呼び方と
+3 つの toolchain を同じシェルで実行。`cargo clippy --message-format short` の
+出力がすべて `third_party/tui-markdown/src/renderer/*.rs` を指すこと。
+
 ### 箇条書きを項目ごとに割ると MARKED が増える — 規則 4 の変更は条件を満たさなかった
 
 **現象**: 境界の構造ルール 4 を「`list_item` どうしは SAME」から「別項目どうしは
