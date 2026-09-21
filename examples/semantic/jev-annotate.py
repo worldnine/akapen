@@ -244,8 +244,76 @@ class JevError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str | None, str]:
+#: 行頭マーカー（`-` / `*` / `+` / `1.` / `3)`）を捕まえる正規表現。
+#:
+#: `crates/semantic-reading/src/atomize.rs` の `marker_len` と同じ規則である。
+#: `atomize` は list item の Atom を**マーカーから**始めるので、この正規表現に
+#: 当たるかどうかが「項目の 1 文目か、それとも継続文か」をそのまま分ける。
+LIST_MARKER = re.compile(r"[-*+]|\d+[.)]")
+
+
+def list_marker_indent(source: bytes, atom: dict) -> int | None:
+    """list_item の Atom が**項目の先頭**なら、その行頭インデント幅を返す。
+
+    返り値が `None` なら、その Atom は項目の先頭ではない — 同じ項目の 2 文目
+    以降（継続文）か、そもそもマーカーが読めなかった場合である。
+
+    **`range` はバイト位置なので `source` もバイト列で受ける。** Python の
+    文字列添字は符号位置なので、日本語の文書では全 Atom がずれる（実測: 45.6 KB
+    の文書で 372/372 件が不一致）。`docs/gotchas.md` にも書いた。
+
+    判別は構造だけで行う。設計書「Jev に判断させないもの: **syntax parsing**」の
+    とおり、ここに Jev は出てこない。手がかりは 2 つ:
+
+    - `atomize` は項目の Atom を**マーカーから**始める（`- 一つ目。` /
+      `1. 一文目。`）。継続文にはマーカーが無い（`二文目。`）
+    - 行頭から Atom の先頭までが引用符と空白だけなら、その Atom は行頭に立って
+      いる。途中から始まっていれば、それは同じ行の 2 文目である
+
+    引用マーカーは**インデントとして数えない**。CommonMark の `>` は「`>` と、
+    その直後の空白 1 つ」までが引用の印なので、そこまでを読み飛ばして数え直す。
+    こうしないと `> - 一つ目` の指標が 1 になり、引用の中のリストが丸ごと
+    「子項目」に見える。
+
+    インデント幅は 0 か否かだけを見る（[`boundary_rule`] の規則 4）ので、タブ幅の
+    厳密さは要らない。
+    """
+    start = atom["range"]["start"]
+    line_start = source.rfind(b"\n", 0, start) + 1
+    prefix = source[line_start:start].decode("utf-8", "replace")
+    if prefix.strip(" \t>"):
+        # 行の途中から始まっている = 同じ行の 2 文目。
+        return None
+    lead = prefix + (atom.get("text") or "")
+    i = indent = 0
+    while i < len(lead):
+        char = lead[i]
+        if char == ">":
+            # 引用の印は `>` と直後の空白 1 つ。そこまではインデントではない。
+            i += 1
+            if i < len(lead) and lead[i] == " ":
+                i += 1
+            indent = 0
+        elif char == " ":
+            indent += 1
+            i += 1
+        elif char == "\t":
+            indent += 4
+            i += 1
+        else:
+            break
+    return indent if LIST_MARKER.match(lead, i) else None
+
+
+def boundary_rule(
+    current_kind: str | None,
+    next_kind: str | None,
+    next_indent: int | None = None,
+) -> tuple[str | None, str]:
     """隣り合う 2 つの Atom の境界を、構造だけで決められるなら決める。
+
+    `next_indent` は後ろの Atom が項目の先頭なら [`list_marker_indent`] が返す
+    インデント幅、そうでなければ `None`。規則 4 だけがこれを見る。
 
     返り値は `(SAME / NEW / None, 理由)`。`None` は「構造では決まらないので
     Jev に聞く」を意味する。
@@ -259,7 +327,7 @@ def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str 
     1. 次が heading         -> NEW  見出しは必ず新しいまとまりを始める
     2. 現在が heading       -> SAME 見出しは直後の内容に付く
     3. どちらかが code_block / table -> NEW  単独の Unit にする
-    4. どちらも list_item   -> SAME 同じリストの項目は 1 つのまとまり
+    4. どちらも list_item   -> 別項目なら NEW / 同じ項目の中なら SAME
     5. どちらも sentence    -> None Jev に聞く
     6. それ以外             -> NEW  既定（引用と散文の間など）
 
@@ -270,15 +338,32 @@ def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str 
     1 つの Unit になる（見出しだけの Unit は単独では Tier を判定しづらい）。
     ただし **この組み合わせは測っていない** — demo.md に出てこない。
 
-    規則 4 と規則 6 の引用の扱い（block_quote どうしは NEW になる）も
-    **測っていない**。判断の根拠は:
+    ## 規則 4 — 箇条書きは項目ごとに割る。ただし**トップレベルだけ**
 
-    - list_item どうし: 箇条書きは著者が既に 1 つのまとまりとして束ねた構造で、
-      半分だけ DIM になったリストは読み物として壊れる。なお Atom には
-      ネスト段階が載らないので、別々のリストが隣接していても区別できない。
-    - block_quote: 引用は自己完結した挿入で、「引用した」こと自体が周囲の散文と
-      読む優先度が違うという著者の表明である。連続する引用は別々の引用なので
-      規則 6 で NEW になる。
+    以前はリスト項目どうしを一律 SAME にしていた。それだと箇条書きが丸ごと
+    1 Unit になり、**10 個の決定事項が全部同じ Tier**になる。しょうもない
+    決定事項が個別に沈めない。
+
+    いま割るのは**トップレベルの項目の切れ目だけ**である。
+
+        - 決定A          ← ここで NEW
+          - 詳細A1       ← 親に SAME（インデント > 0）
+          - 詳細A2       ← 親に SAME
+        - 決定B          ← ここで NEW（インデント 0）
+          二文目。       ← 同じ項目の中なので SAME（マーカーが無い）
+
+    子項目を割らないのは、ユーザーの言う「決定事項」が**親項目＋その詳細の
+    束**だからである。そこで割ると、下の「半分だけ DIM のリスト」が親と子の
+    あいだで起きる。
+
+    規則 6 の引用の扱い（block_quote どうしは NEW になる）は**測っていない**。
+    判断の根拠は、引用は自己完結した挿入で、「引用した」こと自体が周囲の散文と
+    読む優先度が違うという著者の表明である、というもの。連続する引用は別々の
+    引用なので規則 6 で NEW になる。
+
+    **半分だけ DIM のリストは、依然として起こしてはいけない。** いま起こらない
+    のは、割る単位を「親 + その子 + 継続文」に揃えているからで、規則 4 を
+    さらに細かくするなら、まずそこを測ること。
     """
     if next_kind == "heading":
         return NEW, "rule:next_is_heading"
@@ -287,7 +372,11 @@ def boundary_rule(current_kind: str | None, next_kind: str | None) -> tuple[str 
     if current_kind in STANDALONE_KINDS or next_kind in STANDALONE_KINDS:
         return NEW, "rule:standalone_block"
     if current_kind == "list_item" and next_kind == "list_item":
-        return SAME, "rule:same_list"
+        if next_indent == 0:
+            return NEW, "rule:new_list_item"
+        if next_indent is None:
+            return SAME, "rule:same_list_item"
+        return SAME, "rule:nested_list_item"
     if current_kind == "sentence" and next_kind == "sentence":
         return None, "jev"
     return NEW, "rule:default"
@@ -298,15 +387,27 @@ def atom_text(atom: dict) -> str:
     return (atom.get("text") or "").strip()
 
 
-def plan_boundaries(atoms: list[dict]) -> list[dict]:
+def plan_boundaries(atoms: list[dict], source: str) -> list[dict]:
     """すべての境界について、構造で決まったか Jev に聞くかを並べる。
 
     要素は `{"after_atom": i, "decision": SAME/NEW/None, "by": 理由}`。
     `decision` が `None` のものだけがラウンド 1 の question になる。
+
+    `source` が要るのは規則 4 のためだけである — 項目のインデントは Atom の
+    `range` の**手前**（行頭からマーカーまで）にあるので、Atom だけでは読めない。
+    `range` はバイト位置なので、ここで 1 度だけバイト列にして渡す。
     """
+    raw = source.encode()
     plan = []
     for i in range(len(atoms) - 1):
-        decision, why = boundary_rule(atoms[i].get("kind"), atoms[i + 1].get("kind"))
+        following = atoms[i + 1]
+        decision, why = boundary_rule(
+            atoms[i].get("kind"),
+            following.get("kind"),
+            list_marker_indent(raw, following)
+            if following.get("kind") == "list_item"
+            else None,
+        )
         # 本文が空の Atom は Jev に見せても判断材料が無い。既定側へ倒す。
         if decision is None and not (atom_text(atoms[i]) and atom_text(atoms[i + 1])):
             decision, why = NEW, "rule:empty_text"
@@ -806,7 +907,7 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     rounds = []
 
     # --- ラウンド 1: 散文どうしの境界 -> Unit --------------------------
-    plan = plan_boundaries(atoms)
+    plan = plan_boundaries(atoms, state)
     questions = boundary_questions(atoms, plan)
     if questions:
         payload = ask_jev(state, questions, model, timeout)
@@ -874,7 +975,7 @@ def dry_run(request: dict, model: str) -> dict:
     """
     atoms = request.get("atoms") or []
     state = request.get("source") or ""
-    plan = plan_boundaries(atoms)
+    plan = plan_boundaries(atoms, state)
     first = boundary_questions(atoms, plan)
     for entry in plan:
         if entry["decision"] is None:

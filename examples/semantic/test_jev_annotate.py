@@ -55,8 +55,8 @@ def atom(index, kind, text):
 class BoundaryRuleTest(unittest.TestCase):
     """構造ルール — パーサが既に知っている境界は Jev に聞かない。"""
 
-    def decide(self, current, following):
-        return jev.boundary_rule(current, following)[0]
+    def decide(self, current, following, next_indent=None):
+        return jev.boundary_rule(current, following, next_indent)[0]
 
     def test_a_heading_always_starts_a_new_unit(self):
         for kind in ("sentence", "list_item", "code_block", "block_quote", "heading"):
@@ -77,8 +77,19 @@ class BoundaryRuleTest(unittest.TestCase):
             self.assertEqual(self.decide(kind, "sentence"), NEW, kind)
             self.assertEqual(self.decide(kind, kind), NEW, kind)
 
-    def test_consecutive_list_items_stay_in_one_unit(self):
-        self.assertEqual(self.decide("list_item", "list_item"), SAME)
+    def test_a_new_top_level_list_item_starts_a_new_unit(self):
+        # 別項目どうしは NEW。箇条書きが丸ごと 1 Unit だと、10 個の決定事項が
+        # 全部同じ Tier になってしまう。
+        self.assertEqual(self.decide("list_item", "list_item", 0), NEW)
+
+    def test_a_nested_list_item_stays_with_its_parent(self):
+        # 「決定事項」は親項目 + その詳細の束なので、そこでは割らない。
+        for indent in (1, 2, 3, 4, 8):
+            self.assertEqual(self.decide("list_item", "list_item", indent), SAME, indent)
+
+    def test_a_continuation_sentence_stays_in_the_same_item(self):
+        # マーカーが無い = 同じ項目の 2 文目以降。
+        self.assertEqual(self.decide("list_item", "list_item", None), SAME)
 
     def test_a_block_quote_never_merges_with_its_neighbour(self):
         self.assertEqual(self.decide("sentence", "block_quote"), NEW)
@@ -98,12 +109,150 @@ class BoundaryRuleTest(unittest.TestCase):
     def test_the_reason_says_which_rule_fired(self):
         self.assertEqual(jev.boundary_rule("sentence", "heading")[1], "rule:next_is_heading")
         self.assertEqual(jev.boundary_rule("sentence", "sentence")[1], "jev")
+        self.assertEqual(
+            jev.boundary_rule("list_item", "list_item", 0)[1], "rule:new_list_item"
+        )
+        self.assertEqual(
+            jev.boundary_rule("list_item", "list_item", 2)[1], "rule:nested_list_item"
+        )
+        self.assertEqual(
+            jev.boundary_rule("list_item", "list_item", None)[1], "rule:same_list_item"
+        )
+
+
+def atoms_from(source, *items):
+    """実際の Markdown から、**バイト位置の正しい** Atom 列を作る。
+
+    `items` は `(種別, 本文)` の並びで、本文は `source` の中を先頭から順に探す。
+    上の `atom()` は `range` を `index * 100` で捏造するので、行頭を source から
+    探す `list_marker_indent` のテストには使えない。
+
+    `range` はバイト位置である。Python の文字列添字は符号位置なので、日本語を
+    含む文書ではここを取り違えると全 Atom がずれる。
+    """
+    raw = source.encode()
+    atoms, cursor = [], 0
+    for index, (kind, text) in enumerate(items):
+        start = raw.index(text.encode(), cursor)
+        end = start + len(text.encode())
+        atoms.append(
+            {
+                "index": index,
+                "kind": kind,
+                "range": {"start": start, "end": end},
+                "text": text,
+            }
+        )
+        cursor = end
+    return atoms
+
+
+class ListMarkerIndentTest(unittest.TestCase):
+    """項目の先頭か継続文か、先頭ならどの深さか — 構造だけで判別する。"""
+
+    def indents(self, source, *items):
+        raw = source.encode()
+        return [jev.list_marker_indent(raw, a) for a in atoms_from(source, *items)]
+
+    def test_top_level_items_are_indent_zero(self):
+        self.assertEqual(
+            self.indents(
+                "- 一つ目。\n- 二つ目。\n",
+                ("list_item", "- 一つ目。"),
+                ("list_item", "- 二つ目。"),
+            ),
+            [0, 0],
+        )
+
+    def test_an_ordered_marker_counts_too(self):
+        self.assertEqual(
+            self.indents(
+                "1. 一つ目\n2) 二つ目\n",
+                ("list_item", "1. 一つ目"),
+                ("list_item", "2) 二つ目"),
+            ),
+            [0, 0],
+        )
+
+    def test_a_continuation_sentence_has_no_marker(self):
+        # 同じ行の 2 文目。行の途中から始まるので項目の先頭ではない。
+        self.assertEqual(
+            self.indents(
+                "1. 一文目。二文目。\n",
+                ("list_item", "1. 一文目。"),
+                ("list_item", "二文目。"),
+            ),
+            [0, None],
+        )
+
+    def test_a_continuation_on_its_own_line_has_no_marker_either(self):
+        self.assertEqual(
+            self.indents(
+                "- 一文目。\n  二文目。\n",
+                ("list_item", "- 一文目。"),
+                ("list_item", "二文目。"),
+            ),
+            [0, None],
+        )
+
+    def test_nested_items_carry_their_indent(self):
+        self.assertEqual(
+            self.indents(
+                "- 親\n  - 子 1\n  - 子 2\n- 別の親\n",
+                ("list_item", "- 親"),
+                ("list_item", "- 子 1"),
+                ("list_item", "- 子 2"),
+                ("list_item", "- 別の親"),
+            ),
+            [0, 2, 2, 0],
+        )
+
+    def test_a_quote_marker_is_not_indentation(self):
+        # `>` と直後の空白 1 つまでが引用の印。ここを数えると、引用の中の
+        # トップレベルの項目がすべて「子項目」に見えてしまう。
+        self.assertEqual(
+            self.indents(
+                "> - 一つ目。\n> - 二つ目。\n",
+                ("list_item", "> - 一つ目。"),
+                ("list_item", "> - 二つ目。"),
+            ),
+            [0, 0],
+        )
+
+    def test_nesting_inside_a_quote_still_counts(self):
+        self.assertEqual(
+            self.indents(
+                "> - 親\n>   - 子\n",
+                ("list_item", "> - 親"),
+                ("list_item", ">   - 子"),
+            ),
+            [0, 2],
+        )
+
+    def test_the_whole_rule_runs_end_to_end(self):
+        source = "- 決定A\n  - 詳細A1。二文目。\n- 決定B\n"
+        atoms = atoms_from(
+            source,
+            ("list_item", "- 決定A"),
+            ("list_item", "- 詳細A1。"),
+            ("list_item", "二文目。"),
+            ("list_item", "- 決定B"),
+        )
+        plan = jev.plan_boundaries(atoms, source)
+        self.assertEqual(
+            [(e["decision"], e["by"]) for e in plan],
+            [
+                (SAME, "rule:nested_list_item"),
+                (SAME, "rule:same_list_item"),
+                (NEW, "rule:new_list_item"),
+            ],
+        )
 
 
 class PlanAndGroupTest(unittest.TestCase):
     def test_an_empty_atom_is_not_asked_about(self):
         atoms = [atom(0, "sentence", "本文がある。"), atom(1, "sentence", "   ")]
-        plan = jev.plan_boundaries(atoms)
+        plan = jev.plan_boundaries(atoms, "")
         self.assertEqual(plan[0]["decision"], NEW)
         self.assertEqual(plan[0]["by"], "rule:empty_text")
         self.assertEqual(jev.boundary_questions(atoms, plan), {})
@@ -507,7 +656,7 @@ class DryRunTest(unittest.TestCase):
                     self.request["atoms"],
                     [
                         dict(entry, decision=entry["decision"] or jev.NEW)
-                        for entry in jev.plan_boundaries(self.request["atoms"])
+                        for entry in jev.plan_boundaries(self.request["atoms"], self.request["source"])
                     ],
                 ),
                 start=1,

@@ -335,6 +335,92 @@ MARKED のままでした。理由は経路が違うからです。ラベルは*
 
 ---
 
+### 要求 JSON の `range` はバイト位置 — Python の文字列添字で読むと全件ずれる
+
+`AnalyzeRequest` の `range` は **source のバイト位置**です。Python の `str` の
+添字は符号位置なので、日本語を含む文書では `source[start:end]` が `text` と
+**1 件も一致しません**（実測: 45.6 KB の業務 `CLAUDE.md` で **372/372 件**が
+不一致）。
+
+刺さり方が意地悪なのは、**例外が出ないこと**です。返ってくるのは「もっともらしい
+別の場所の文字列」で、しかも ASCII だけの文書では正しく動きます。規則 4 の
+ネスト判定を最初に書いたときは、行頭を取りに行ったつもりで**別の項目の本文**を
+読んでいて、それでも 5 文書すべてで数字が出ました（子項目が 0 件、継続文が
+311/314 件という、いま思えばあり得ない内訳でしたが）。
+
+`source.encode()` でバイト列にしてから `rfind(b"\n", 0, start)` してください。
+[`list_marker_indent`](../examples/semantic/jev-annotate.py) がそうしています。
+`plan_boundaries` が `source` を受け取ってその場で 1 度だけ `encode()` するのも
+同じ理由で、境界ごとに `encode()` すると文書の長さ × 境界数になります。
+
+**`text` は使ってよい。** アダプタが source を自分で切り出さずに済むように
+`RequestAtom` が `text` を載せているので（`crates/semantic-reading/src/protocol.rs`）、
+本文が欲しいだけなら `range` に触る必要はありません。`range` が要るのは
+**Atom の外側**（行頭からマーカーまでのインデントなど）を見るときだけです。
+
+**確認したこと**: `crates/semantic-reading/src/protocol.rs` の `RequestAtom` が
+`atom.range` をそのまま載せ、`text` を `source.get(atom.range)` で切っていること
+（Rust の `str` の添字はバイト）。5 文書の要求 JSON について
+`source.encode()[start:end].decode() == text` が全件成立し、
+`source[start:end] == text` は日本語を含む 4 文書で全件不成立であること。
+テストは `examples/semantic/test_jev_annotate.py` の `ListMarkerIndentTest`
+（`atoms_from` が実際の Markdown からバイト位置で Atom を作る）。
+
+### 箇条書きを項目ごとに割ると MARKED が増える — 規則 4 の変更は条件を満たさなかった
+
+**現象**: 境界の構造ルール 4 を「`list_item` どうしは SAME」から「別項目どうしは
+NEW / 同じ項目の中は SAME」に変えると、**MARKED 比率が揺れの床を超えて増えます**。
+5 文書のうち 3 文書で増え、業務 `CLAUDE.md` は 3.3〜3.7 % → 10.8〜11.2 % と
+**約 3 倍**になりました。
+
+**原因は経路がはっきりしています。** MARKED は「ESSENTIAL かつ非 REDUNDANT な
+Unit」ごとに 1 つの核 Atom として付きます（`jev-annotate.py` の `wants_core`）。
+Unit が割れれば ESSENTIAL な Unit が増え、**MARKED はそれに比例して増えます**。
+箇条書きを細かく割る変更は、必ずこの経路を踏みます。
+
+**それでも要望そのものは叶っています。** 業務議事録の `## 決定事項`（8 項目）は、
+変更前は丸ごと 1 Unit で 8 項目が一斉に DIM になりました。変更後は 1・4・7・8 が
+沈み、2・3・5・6 が残ります — 「しょうもない決定事項が個別に沈む」は実際に
+起きています。数字と定性の評価が**正面から衝突している**のがこの変更の性質で、
+どちらかが間違っているのではありません。比較の表は
+`examples/semantic/README.md`「箇条書きを項目ごとに割る」にあります。
+
+**次に触る人へ、測る前に知っておくこと。**
+
+- **Unit 数で判定しないこと。** 決定事項が 8 Unit に割れれば最大 8 個 MARKED に
+  なりえます。効くのは MARKED 比率です
+- **Tier 一致率は使えません。** その床（`docs/gotchas.md` 5.1）は「同じ分割
+  どうし」で測った値で、**分割そのものを変える変更には当たりません**
+- **天井は超えませんでした。** 事前の見積もりは 1 Unit あたり 262 tokens
+  （Tier 181 + redundancy 81）で計算していましたが、redundancy は既にラウンド 3 へ
+  移っていて SUPPORTING 以上にしか聞かないので、**ラウンド 2 の固定費は 181 だけ**
+  です。`CLAUDE.md` は 62 % → 89 % で収まりました。ただし `README.md` の 90 % と
+  並んで余裕はありません（規則 4 と無関係の既存の崖。未解決 5）
+- **子項目を割らないこと。** 親項目＋その詳細の束で 1 つの「決定事項」なので、
+  そこで割ると「半分だけ DIM のリスト」が親子のあいだで起きます
+  （`policy::decorate` の docstring）。実測でも子を割らない判断が `CLAUDE.md` で
+  63 Unit を節約しています
+- **`is_marker_only` の親は取りこぼします。** 子だけを持つ親項目（`-` と改行だけの
+  行）は `atomize` が Atom にしないので、その子は直前の何かに付きます。
+  実文書では踏んでいませんが、直すなら `atomize` 側の話になります
+
+**増えたぶんは「1 Atom の Unit」だけに寄ってはいません。** MARKED になる Unit
+（ESSENTIAL かつ非 REDUNDANT）の内訳を数えると、業務 `CLAUDE.md` では
+11〜12 → 25〜26 に増えるうち、**Jev が核を選んだ Unit が 7〜8 → 16〜17**、
+`assign_lone_cores` が聞かずに決めた Unit が 4 → 9 で、**どちらも同じ比率で
+増えています**。つまり「1 Atom の Unit の扱いを直せば MARKED の増加だけ消せる」
+という逃げ道は**ありません** — 増加は分割そのものから来ています。上の
+「箇条書きのラベルが MARKED になる」とは別の経路です。
+
+**確認したこと**: 5 文書 × 変更前後を 2〜4 回ずつ、合計 34 ラン。要求 JSON は
+`dump-request`、比率は `decorate-report`、Atom ごとの状態は `atom-states`。
+変更前のスクリプトを退避して同じ要求を食わせており、`atomize` は変えていないので
+Atom の range は前後で同一です。内訳は各応答の `units[].jev.core_by`
+（`rule:only_prose_atom` か否か）で数えました。表は
+`examples/semantic/README.md`「箇条書きを項目ごとに割る」。
+
+---
+
 ## 外部プロセス
 
 ### TUI が生きているあいだの子プロセスは `export::run_child` を通す
