@@ -1338,9 +1338,24 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     units = group_units(atoms, plan)
 
     # --- ラウンド 2: Unit ごとの Tier ----------------------------------
+    #
+    # **1 つも送れなかったら失敗させる。** [`UNANSWERED_TIER`] は個別の巨大な
+    # Unit のための落とし先であって、文書全体の落とし先ではない。全部が既定値に
+    # なった注釈は「それらしく見えるが、何も判定していない」ものになる
+    # （[`apply_boundary_answers`] が黙って埋めないのと同じ理由）。実測では
+    # 83 KB の文書がここに来て、**530 Unit すべてが detail** の応答を exit 0 で
+    # 返していた。`state` は 32k に収まっているので probe は通り、**question の
+    # ぶんだけが足りない**という、いちばん気づきにくい壊れ方をする。
     questions = unit_questions(atoms, units)
     answers = dict(ask(questions, "tier"))
     unanswered = set(unsent.get("tier", ()))
+    if questions and len(unanswered) == len(questions):
+        raise JevError(
+            f"文書が大きすぎます。state が {budget.state_tokens} tokens あり、"
+            f"32k の枠に question の余地が {max(budget.pair, 0)} tokens しか"
+            "残らないので、Tier を 1 つも聞けません。state はどのリクエストにも"
+            "乗るので分割では外せません。文書を小さくしてください"
+        )
     tiers = [
         UNANSWERED_TIER
         if f"tier:u{n}" in unanswered

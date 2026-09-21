@@ -1269,22 +1269,76 @@ class UnansweredTierTest(unittest.TestCase):
         for other in others:
             self.assertEqual(other["reading_tier"], "essential")
 
-    def test_the_unit_is_kept_so_the_budget_denominator_does_not_move(self):
-        """Unit を落とさない。落とすと `decorate` の `total` が黙って縮む。"""
-        source = "あ" * 10_000
-        atoms = [{"index": 0, "kind": "sentence", "text": "あ" * 12_000,
-                  "range": [0, 36_000]}]
+    def test_a_document_where_nothing_can_be_asked_fails_loudly(self):
+        """全部が既定値の注釈を exit 0 で返さない。
+
+        **実測で踏んだ枝である。** 83 KB の文書は `state` が 30,808 tokens で
+        32k の probe は通るのに、question に残る余地が **負**になる。ここを
+        塞ぐ前は **530 Unit すべてが `detail`** の応答を exit 0 で返していた
+        — `state` が収まっているぶん、いちばん気づきにくい壊れ方をする。
+
+        [`UNANSWERED_TIER`] は個別の巨大な Unit のための落とし先であって、
+        文書全体の落とし先ではない。
+        """
+        source = "あ" * 30_000
+        atoms = [atom(i, "sentence", "文" * 300) for i in range(3)]
         request = {"version": jev.VERSION, "source": source, "atoms": atoms}
 
         def fake(state, chunk, model, timeout):
             if "state-probe" in chunk:
                 return {"answers": {"state-probe": {"noul": 0.1}},
-                        "usage": {"input_tokens": 25_000}}
-            return {"answers": {key: {"choice": "essential"} for key in chunk}}
+                        "usage": {"input_tokens": 30_800}}
+            raise AssertionError("1 つも送れないはずのリクエストが飛んだ")
+
+        with self.assertRaises(jev.JevError) as caught:
+            with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
+        self.assertIn("大きすぎ", str(caught.exception))
+        self.assertIn("30800", str(caught.exception).replace(",", ""))
+
+    def test_one_answerable_question_is_enough_to_keep_going(self):
+        """一部だけ送れないなら、既定値へ倒して続ける（文書は失敗させない）。"""
+        source = "あ" * 10_000
+        atoms = [
+            atom(0, "sentence", "短い文。"),
+            atom(1, "heading", "見出し"),
+            atom(2, "sentence", "あ" * 12_000),
+        ]
+        request = {"version": jev.VERSION, "source": source, "atoms": atoms}
+
+        def fake(state, chunk, model, timeout):
+            if "state-probe" in chunk:
+                return {"answers": {"state-probe": {"noul": 0.1}},
+                        "usage": {"input_tokens": 20_000}}
+            return {"answers": {k: {"choice": "essential", "noul": 0.1} for k in chunk}}
 
         out = with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
-        self.assertEqual(len(out["units"]), 1)
-        self.assertEqual(out["units"][0]["atoms"], [0])
+        tiers = [u["reading_tier"] for u in out["units"]]
+        self.assertIn(jev.UNANSWERED_TIER, tiers)
+        self.assertIn("essential", tiers)
+
+    def test_the_unit_is_kept_so_the_budget_denominator_does_not_move(self):
+        """送れなかった Unit も落とさない。
+
+        落とすと `decorate` の `total`（全 Unit のバイト長の合計）が黙って縮み、
+        「Budget 50 %」が指す量が文書によって変わる。
+        """
+        source = "あ" * 10_000
+        atoms = [
+            atom(0, "sentence", "短い文。"),
+            atom(1, "heading", "見出し"),
+            atom(2, "sentence", "あ" * 12_000),
+        ]
+        request = {"version": jev.VERSION, "source": source, "atoms": atoms}
+
+        def fake(state, chunk, model, timeout):
+            if "state-probe" in chunk:
+                return {"answers": {"state-probe": {"noul": 0.1}},
+                        "usage": {"input_tokens": 20_000}}
+            return {"answers": {k: {"choice": "essential", "noul": 0.1} for k in chunk}}
+
+        out = with_fake_ask(fake, lambda: jev.annotate(request, "m", 1.0))
+        covered = sorted(i for unit in out["units"] for i in unit["atoms"])
+        self.assertEqual(covered, [0, 1, 2], "Atom を 1 つも取りこぼさない")
 
 
 def with_fake_ask(fake, body):
