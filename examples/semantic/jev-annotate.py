@@ -1134,6 +1134,11 @@ class RequestBudget:
     def __init__(self, state_tokens: int, measured: bool = False) -> None:
         self.state_tokens = state_tokens
         self.measured = measured
+        #: 実測に使ったリクエストの記録（測らなかったときは None）。
+        #: **報告で数えられるように残す** — これを `rounds` に載せないと、
+        #: リクエスト数と input tokens の合計が食い違う（probe のぶんだけ
+        #: 少なく出る。実測で 7 % ずれた）。
+        self.probe: dict | None = None
         self.whole = REQUEST_LIMIT - REQUEST_MARGIN - state_tokens
         self.pair = STATE_PLUS_QUESTION_LIMIT - CORE_QUESTION_MARGIN - state_tokens
 
@@ -1174,10 +1179,15 @@ def measure_state_tokens(state: str, model: str, timeout: float) -> RequestBudge
         return RequestBudget(estimate, measured=False)
     payload = ask_jev(state, dict(PROBE_QUESTION), model, timeout)
     used = (payload.get("usage") or {}).get("input_tokens")
+    record = round_record(payload, len(PROBE_QUESTION))
+    record["round"] = "probe"
     if not isinstance(used, (int, float)):
         # usage を返さない相手でも止まらない。見積もりへ戻すだけ。
-        return RequestBudget(estimate, measured=False)
-    return RequestBudget(int(used), measured=True)
+        budget = RequestBudget(estimate, measured=False)
+    else:
+        budget = RequestBudget(int(used), measured=True)
+    budget.probe = record
+    return budget
 
 
 def plan_chunks(questions: dict, budget: RequestBudget) -> tuple[list[dict], list[str]]:
@@ -1309,7 +1319,7 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     # 3 ラウンドで共有する予算。`state` のトークン数はここで 1 度だけ決める
     # （大きい文書では 1 リクエスト使って実測する。[`measure_state_tokens`]）。
     budget = measure_state_tokens(state, model, timeout)
-    rounds = []
+    rounds = [budget.probe] if budget.probe else []
     unsent: dict[str, list[str]] = {}
 
     def ask(questions: dict, label: str) -> dict:

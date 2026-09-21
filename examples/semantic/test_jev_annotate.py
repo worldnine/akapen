@@ -1126,6 +1126,7 @@ class SendInChunksTest(unittest.TestCase):
         budget = self.measure("短い文書。" * 10, calls)
         self.assertEqual(calls, [], "小さい文書で余分なリクエストを使わない")
         self.assertFalse(budget.measured)
+        self.assertIsNone(budget.probe)
 
     def test_a_large_state_is_measured_from_usage(self):
         calls = []
@@ -1134,6 +1135,9 @@ class SendInChunksTest(unittest.TestCase):
         self.assertEqual(sorted(calls[0]), ["state-probe"])
         self.assertTrue(budget.measured)
         self.assertEqual(budget.state_tokens, 12_345)
+        # probe も記録に残す。残さないとリクエスト数と tokens の合計が食い違う。
+        self.assertEqual(budget.probe["round"], "probe")
+        self.assertEqual(budget.probe["usage"], {"input_tokens": 12_345})
         # 見積もり（0.5/byte で 60,000）を信じていたら pair は負になっていた。
         self.assertGreater(budget.pair, 0)
 
