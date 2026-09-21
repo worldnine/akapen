@@ -898,9 +898,9 @@ ESSENTIAL は 1 つも落ちていない。**
 | u39 | SUPPORTING | 209 |
 | u40 | SUPPORTING | 135 |
 | u41 | SUPPORTING | 174 |
-| u42 | SUPPORTING | 147 |
 | u49 | SUPPORTING | 179 |
 | u51 | SUPPORTING | 225 |
+| u52 | SUPPORTING | 147 |
 
 **この文書では逆転が起きていない** — 落ちた MARKED は 0 で、繰り上がったのは
 DETAIL ではなく前提そのものである。b3（26 Unit）で 2 / 5 の MARKED が落ちる
