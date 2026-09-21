@@ -417,6 +417,22 @@ def boundary_rule(
     1 つの Unit になる（見出しだけの Unit は単独では Tier を判定しづらい）。
     ただし **この組み合わせは測っていない** — demo.md に出てこない。
 
+    ## 規則 2 は境界だけでは守りきれない — 続きは `section_of` にある
+
+    規則 2 が防いでいるのは「見出しが中身から切り離されて、単独では読めない
+    Unit になる」ことである。**規則 4 が入ってから、境界だけではこれを防げ
+    なくなった。** 箇条書きを項目ごとに割ると、見出しの Unit は「見出し ＋
+    せいぜい最初の項目」になり、2 つ目以降の項目は別 Unit として浮く。中身は
+    残っているのに、それが何なのかを言う見出しのほうが沈む。実測（業務議事録・
+    READ 30 %）では、中身が 17 atom 中 8 / 13 atom 中 2 残っている節が
+    2 件、見出しだけ DIM だった。
+
+    **新しい規則を足して直してはいない。** 同じ意図を「中身が複数 Unit に
+    なった場合」について言い直したのが [`assign_sections`] の `section_of` で、
+    実行するのは `policy::decorate` である（「節の中の Unit が 1 つでも残るなら
+    見出しも残す」）。**規則 2 とそれは 1 つのことである** — 似た規則が 2 つ
+    あると読んで、片方だけ直したり統合したりしないこと。
+
     ## 規則 4 — 箇条書きは項目ごとに割る。ただし**トップレベルだけ**
 
     以前はリスト項目どうしを一律 SAME にしていた。それだと箇条書きが丸ごと
@@ -757,6 +773,79 @@ def build_units(
             }
         )
     return out
+
+
+#: setext 見出しの下線（`=====` / `-----`）。深さはこれで決まる。
+SETEXT_UNDERLINE = re.compile(r"^(=+|-+)$")
+
+
+def heading_level(atom: dict) -> int | None:
+    """見出し Atom の深さ（`#` の数）。見出しでなければ `None`。
+
+    **構造だけで決まる。** 設計書「Jev に判断させないもの: syntax parsing」の
+    とおり、ここに Jev は出てこない。
+
+    `atomize` は見出しの Atom を**マーカーから**始めるので（`## 節`）、
+    `#` を数えれば深さになる。setext（`見出し` + `=====`）は `#` を持たない
+    ので、下線の種類で 1 / 2 に落とす。
+
+    引用の中の見出し（`> ## 節`）も `atomize` は `heading` にする。ここでも
+    見出しとして扱い、`>` は深さに数えない。**引用された文書が `#` で
+    始まっていると、そこで外側の節が閉じる** — 実測した 5 文書には 1 件も
+    無かったので、直していない。
+
+    深さが読めない見出しは**いちばん深い 6** に倒す。浅い側へ倒すと外側の節を
+    誤って閉じるが、深い側なら「現在の節の下に小さい節ができる」だけで済み、
+    次の本物の見出しがそれを閉じる。
+    """
+    if atom.get("kind") != "heading":
+        return None
+    text = atom.get("text") or ""
+    lead = text.lstrip(" \t>")
+    if lead.startswith("#"):
+        return min(len(lead) - len(lead.lstrip("#")), 6)
+    lines = [line.strip(" \t>") for line in text.splitlines()]
+    if len(lines) >= 2 and SETEXT_UNDERLINE.match(lines[-1]):
+        return 1 if lines[-1].startswith("=") else 2
+    return 6
+
+
+def assign_sections(atoms: list[dict], units: list[list[int]], built: list[dict]) -> None:
+    """各 Unit に、自分が属する節の見出し Unit（`section_of`）を書き込む。
+
+    **境界規則 2 の意図を、規則 4 の先まで運ぶための属性である。** 規則 2
+    「見出しは直後の内容に付く」は、見出しだけの Unit を作らないことで
+    「中身は残っているのに見出しが沈む」を防いでいた。規則 4 で箇条書きを
+    項目ごとに割ってから、見出しの Unit は「見出し ＋ せいぜい最初の項目」に
+    なり、**2 つ目以降の項目は別 Unit として浮いた** — 境界だけでは意図を
+    守れない。そこで節の境界を属性として渡し、`policy::decorate` が
+    「節の中の Unit が 1 つでも残るなら見出しも残す」を実行する。
+
+    **見出し Unit 自身も `section_of` を持つ**。値は**親の節**の見出し Unit
+    で、こうしておくと入れ子が属性だけで伝わる（`### 費用` が戻れば
+    `## 決定事項` が戻り、それが `#` を戻す）。crate 側は `#` の数を知らずに
+    済む。
+
+    節の外（最初の見出しより前の前書き）は `section_of` を持たない。
+    """
+    stack: list[tuple[int, str]] = []
+    for indices, unit in zip(units, built):
+        level = next(
+            (
+                depth
+                for index in indices
+                if (depth := heading_level(atoms[index])) is not None
+            ),
+            None,
+        )
+        if level is not None:
+            # 同じ深さ以浅の節はここで閉じる。
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+        if stack:
+            unit["section_of"] = stack[-1][1]
+        if level is not None:
+            stack.append((level, unit["id"]))
 
 
 def is_redundant(unit: dict) -> bool:
@@ -1780,6 +1869,8 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
         answers.update(third)
 
     built = build_units(atoms, units, tiers, answers)
+    # 節の見出しは構造だけで決まる。Jev は出てこない（[`assign_sections`]）。
+    assign_sections(atoms, units, built)
     bodies = [unit_body(atoms, indices) for indices in units]
     for unit, source_unit in zip(built, provisional):
         unit["jev"].update(source_unit["jev"])
