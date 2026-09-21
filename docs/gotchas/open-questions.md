@@ -113,6 +113,15 @@ Phase 1 Range Attribution / 2 Range Decoration / 3 Render Mapping 強化 /
 rule の列挙 1 箇所だけです。直すには設計判断が要り、ここで定義を足すのは
 「設計書に無い設計」を足すことになります。
 
+**材料は測ってあります（2026-09-21）。**
+[`examples/semantic/measurements/context-preservation.md`](../../examples/semantic/measurements/context-preservation.md)
+に、依存を Jev に聞いて根まで辿った閉包の実測（4 文書 × 4 ラン）があります。
+**まだ決まっていないのは閾値です** — 実文書で見つけた穴を捕まえる 0.4 では
+閉包が文書の 17〜58 %（中央値）に膨らみ、閉包の収まる 0.5 では穴の片方を
+取り逃がします。`redundancy` の 0.7 はこの question では使えません
+（閉包の中央値が 4 文書とも 0 になる）。`policy::keep_order` には**まだ何も
+足していません**。
+
 **確認したこと**: `policy::keep_order` の並び替え鍵
 `(実効 Tier, redundant か, バイト長, 先頭バイト位置, 添字)` が、すべて
 `doc.units[index]` 1 つから計算されていること。とくに `redundant` は
