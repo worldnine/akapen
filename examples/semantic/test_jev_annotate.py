@@ -1139,8 +1139,9 @@ class SendInChunksTest(unittest.TestCase):
 
         **下回ってはいけない** — 見積もりが小さいと上限を超えた question を
         送って 400 で落ちる。**大きすぎてもいけない** — 収まる文書を無駄に
-        分割し、`state` を余分に課金する。実測の内訳（`docs/gotchas.md`
-        未解決 5）は器 68 / criteria 65 / 枠組み文 65 = 181。
+        分割し、`state` を余分に課金する。実測の内訳
+        （`docs/gotchas/open-questions.md` 未解決 5）は
+        器 68 / criteria 65 / 枠組み文 65 = 181。
         """
         tier = jev.unit_questions(
             [{"kind": "sentence", "text": "", "range": [0, 0]}], [[0]]

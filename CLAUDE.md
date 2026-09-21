@@ -14,7 +14,7 @@ Semantic Reading Layer の判定品質は実文書でしか測れないので、
 外）に置き、リポジトリ側には件数と「証拠はそこにある」だけを書きます。応答 JSON
 は `state` に文書の全文が入るので、リポジトリには絶対に置けません。
 
-詳しくは `docs/gotchas.md`「業務文書の本文はこのリポジトリに書かない」。
+詳しくは `docs/gotchas/public-repo.md`「業務文書の本文はこのリポジトリに書かない」。
 **2026-09-21 に実際に踏んで、未 push の 50 コミットを書き換えて消しています。**
 
 ## 先に読むもの
@@ -35,4 +35,4 @@ python3 -m pytest examples/semantic -q
 
 `cargo clippy --workspace --all-targets -- -D warnings` は**緑になったことが
 ありません**（vendored fork のテストコード）。判定には使わないこと —
-`docs/gotchas.md` に呼び方の表があります。
+`docs/gotchas/semantic-reading.md` に呼び方の表があります。

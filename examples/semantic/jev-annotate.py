@@ -201,7 +201,8 @@ CORE_INSTRUCTIONS = (
 #:
 #: 公式値は「64k tokens per request」（`docs.typesafe.ai/models.md`）＝ 65,536。
 #: 実測の切れ目は `usage.input_tokens` で 65,771 成功 / 65,874 失敗と公式値より
-#: 約 235 上にあるが（`docs/gotchas.md` 未解決 5）、**分母には公式値を使う** —
+#: 約 235 上にあるが（`docs/gotchas/open-questions.md` 未解決 5）、
+#: **分母には公式値を使う** —
 #: budget の数え方が `usage` と違うようなので、実測の切れ目に寄せる理由が無い。
 #:
 #: **この制約は分割で外せる。** state を毎回送り直せば、question をいくつの
@@ -229,7 +230,8 @@ TOKENS_PER_BYTE = 0.5
 
 #: question 1 つあたりの器（型と criteria のキー名）の実測値。
 #:
-#: `docs/gotchas.md` 未解決 5 の内訳表の「器（型と criteria のキー名）68」。
+#: `docs/gotchas/open-questions.md` 未解決 5 の内訳表の
+#: 「器（型と criteria のキー名）68」。
 #: 残りの内訳（criteria の説明文 65 / instructions の枠組み文 65）は
 #: [`question_tokens`] が本文と一緒に [`TOKENS_PER_BYTE`] で数えるので、
 #: ここで二重に足さないこと。Tier question 全体の実測 181 に対して
@@ -669,8 +671,9 @@ def confidence_of(answers: dict, key: str) -> float | None:
     """`confidence` は**無くてよい**ので、答えが丸ごと無いときも None を返す。
 
     `choice` / `noul` と違ってここで黙って埋めているわけではない — 記録用の
-    付加情報で、判定には使っていない（`docs/gotchas.md` 未解決 3）。送れなかった
-    question の Unit もこの経路を通るので、落とさないこと。
+    付加情報で、判定には使っていない（`docs/gotchas/open-questions.md`
+    未解決 3）。送れなかった question の Unit もこの経路を通るので、
+    落とさないこと。
     """
     answer = answers.get(key)
     if not isinstance(answer, dict):
@@ -1039,8 +1042,9 @@ def http_error_message(code: int, detail: str) -> str:
     **「文書を分けてください」とはもう言わない。** リクエストの分割は
     [`send_in_chunks`] が自動でやるので、ここまで来たということは
     **`state` だけで 32k 枠を使い切っている**ということである。`state` は
-    どのチャンクにも丸ごと乗るので、**分割では外せない**（`docs/gotchas.md`
-    未解決 5 の 2 つ目の制約）。文書そのものを小さくするしかない。
+    どのチャンクにも丸ごと乗るので、**分割では外せない**
+    （`docs/gotchas/open-questions.md` 未解決 5 の 2 つ目の制約）。
+    文書そのものを小さくするしかない。
 
     `docs/design/jev.md` は「context window は需要に応じて変わりうる」と書いて
     いるので、**数値を断定せず実測値として**出す。ここで切れるのは時間ではなく
@@ -1127,8 +1131,8 @@ def question_tokens(question: dict) -> int:
 
     **個数で切らずにこれで切る。** 同じ 10 個の question でも、`demo.md` の
     Unit なら 2,000 tokens、45 KB の文書の大きな Unit なら 20,000 tokens に
-    なる。`docs/gotchas.md`「核の question は個数ではなくトークンで切る」と
-    同じ理由で、固定の個数はどの文書でも正しくない。
+    なる。`docs/gotchas/open-questions.md`「核の question は個数ではなく
+    トークンで切る」と同じ理由で、固定の個数はどの文書でも正しくない。
     """
     text = question.get("instructions") or ""
     for key, value in (question.get("criteria") or {}).items():
@@ -1258,8 +1262,8 @@ def send_in_chunks(
     （`docs/design/jev.md`）。LLM のような文脈の持ち越しが無いので、同じ
     state に対して question を複数のリクエストへ分けても、各 question の答えは
     変わらない**はず**である。**「はず」なので測ってある** —
-    `examples/semantic/README.md`「リクエスト分割」に、分割版と非分割版の
-    Tier 一致率を揺れの床と並べて置いた。
+    `examples/semantic/measurements/request-splitting.md` に、分割版と
+    非分割版の Tier 一致率を揺れの床と並べて置いた。
 
     ## state は毎回丸ごと送る
 
@@ -1318,9 +1322,10 @@ def send_in_chunks(
 #:    だけで注釈としては壊れない）と作法を揃えた。1 つの巨大な Unit のために
 #:    文書全体の注釈を失うほうが損失が大きい
 #:
-#: **実測ではどの文書でも 0 件だった**（5 文書。`examples/semantic/README.md`
-#: 「リクエスト分割」）。この経路に来るのは 1 つの Unit の本文が 18 KB 前後に
-#: なる文書だけなので、**動いたところを見ていない落とし先**である。
+#: **実測ではどの文書でも 0 件だった**（5 文書。
+#: `examples/semantic/measurements/request-splitting.md`）。この経路に来るのは
+#: 1 つの Unit の本文が 18 KB 前後になる文書だけなので、**動いたところを
+#: 見ていない落とし先**である。
 UNANSWERED_TIER = "detail"
 
 

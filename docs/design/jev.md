@@ -225,8 +225,10 @@ Unit 全体が MARKED、後方互換）/ 空（核を持たない ＝ MARKED に
 `[i]`（i が MARKED）。run で選に漏れた Unit に空を入れるためで、ここを丸めると
 選に漏れた Unit が丸ごと光って元より悪くなる。
 
-比率・時間・tokens・安定性の実測は `examples/semantic/README.md`
-「MARKED を Unit の核だけに絞る」と「run キャップ」にある。
+比率・時間・tokens・安定性の実測は
+`examples/semantic/measurements/core-selection.md`「MARKED を Unit の核だけに
+絞る」と `examples/semantic/measurements/lists-and-run-cap.md`「run キャップ」に
+ある。
 
 ### Score を今は使っていない（禁止ではない）
 
@@ -284,7 +286,7 @@ debounce / cache / rate limit / Reading Budget / Reading Policy
 
 すべて `examples/semantic/demo.md`（624 文字）に対する実測で、推測ではない。
 アダプタは `examples/semantic/jev-annotate.py`、詳しい表は
-`examples/semantic/README.md` にある。
+`examples/semantic/measurements/speed-and-limits.md` にある。
 
 ### 速さと値段
 
@@ -317,7 +319,8 @@ demo.md の境界 26 件のうち 17 件は見出し・コードブロック・�
 syntax parsing」の実証である。
 
 > 注意: この 2 つの数字はプローブでの実測で、出荷したスクリプトでの測り直しは
-> 21/26 / 質問 9（`examples/semantic/README.md` の表）である。分母が揃って
+> 21/26 / 質問 9（`examples/semantic/measurements/speed-and-limits.md` の表）
+> である。分母が揃って
 > いない理由は**まだ突き合わせていない**。
 
 ### 手書き fixture は正解ではない
@@ -332,7 +335,7 @@ syntax parsing」の実証である。
 ## 大きな文書での実測（2026-09-21）
 
 上は 624 文字の 1 ファイルだけの実測だった。日常的に開く大きさで測り直した。
-表の全体は `examples/semantic/README.md` にある。
+表の全体は `examples/semantic/measurements/speed-and-limits.md` にある。
 
 ### 時間は問題ではない
 
@@ -413,7 +416,7 @@ criteria の説明文 65 + 枠組み文 65、redundancy（Noul）が 81 = 器 8 
 `README.md`（113 Unit）の旧ラウンド 2 は `state` 11,180 + 本文の 2 度引き
 21,818 + 固定費 29,525 = 62,523 tokens で、**固定費が全体の 47 %** だった。
 だから効くのは「1 Unit あたりの question を減らす」ことで、文面を削ることでは
-ない（文面を削ると判定が壊れる — `docs/gotchas.md` の表）。
+ない（文面を削ると判定が壊れる — `docs/gotchas/open-questions.md` 未解決 5 の表）。
 
 redundancy を SUPPORTING 以上の Unit にだけ聞くようにして、`README.md` は
 62,523 → **50,895 tokens（78 %）**になり通るようになった。設計書が
