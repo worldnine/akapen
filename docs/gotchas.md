@@ -37,6 +37,9 @@
 - `decorate_row` のコストは O(可視 span 数 × 装飾数) / フレーム
 - 上位集合 attribution の range の「広さ」は当たり判定そのもの
 - exact を増やすときは `line_of` が変わらないことを確認する
+- MARKED の天井の理由が変わった — 帯との混同ではなく、字が読めるか
+- テーマの highlight scope 尊重は、一度やって落とした
+- `scope_style` はアルファを捨てる — DarkNeon の引用とインラインコードが読めない
 
 ### [Semantic Reading Layer](gotchas/semantic-reading.md)
 

@@ -116,11 +116,35 @@ pub enum DecorationKind {
     Dim,
 }
 
-/// The theme-derived background of [`DecorationKind::SemanticMark`], for a
-/// theme that carries no highlight scope AND no background of its own.
-/// Split light/dark by the theme foreground's brightness.
-const MARK_BG_DARK: Color = Color::Rgb(0x36, 0x37, 0x49);
-const MARK_BG_LIGHT: Color = Color::Rgb(0xe7, 0xe5, 0xd5);
+/// Where the mark background travels TO: a saturated amber, the color a
+/// yellow highlighter leaves on paper.
+///
+/// The mark used to be lifted toward the theme's own FOREGROUND, which
+/// produced a hueless gray (`rgb(68,70,89)` on Catppuccin Mocha). Read at
+/// READ 100 % that gray was reported as "nothing to catch on": a marked
+/// passage and an unmarked one differed only in lightness, and lightness
+/// alone is what the selection band and the history glow already use.
+/// Hue is the channel nothing else in the UI spends, so the mark spends
+/// it — see `docs/design/reading-research.md` on Scim, where the colors
+/// are the device the reader builds a correspondence with.
+///
+/// ONE destination for every theme, not a light/dark pair: the theme's
+/// own paper is the origin, so a dark theme lands on a dark amber and a
+/// light theme on a pale yellow, from the same formula. That is the
+/// property the previous version had and the reason to keep blending
+/// rather than writing a color in — see [`mark_background`].
+const MARK_TINT: Color = Color::Rgb(0xff, 0xb0, 0x00);
+
+/// The background of [`DecorationKind::SemanticMark`] for a theme that
+/// carries no background of its own. Split light/dark by the theme
+/// foreground's brightness.
+///
+/// These are exactly what [`MARK_BG_BLEND`] toward [`MARK_TINT`] produces
+/// on the two default papers ([`DIM_TARGET_DARK`]/[`DIM_TARGET_LIGHT`]),
+/// so a theme without a background gets the same amber as everything
+/// else instead of falling back to the old gray.
+const MARK_BG_DARK: Color = Color::Rgb(0x5a, 0x45, 0x21);
+const MARK_BG_LIGHT: Color = Color::Rgb(0xfd, 0xe3, 0xa5);
 
 /// The theme background a [`DecorationKind::Dim`] foreground is blended
 /// toward when the theme declares none of its own. Same split as
@@ -129,23 +153,43 @@ const MARK_BG_LIGHT: Color = Color::Rgb(0xe7, 0xe5, 0xd5);
 const DIM_TARGET_DARK: Color = Color::Rgb(0x1e, 0x1e, 0x2e);
 const DIM_TARGET_LIGHT: Color = Color::Rgb(0xfd, 0xf6, 0xe3);
 
-/// How far the mark background is lifted from the theme background toward
-/// the theme foreground when no scope supplies one.
+/// How far the mark background is lifted from the theme background
+/// toward [`MARK_TINT`].
 ///
-/// The mark sits BELOW the selection band in the priority order, so it
-/// must stay clearly quieter than it — see [`MARK_BG_BLEND_CEILING`].
-/// 0.14 was tried first and read as "nothing happened" on a real
-/// terminal; 0.22 was picked by eye against four alternatives.
-pub const MARK_BG_BLEND: f32 = 0.22;
+/// 0.14 toward the foreground was tried first and read as "nothing
+/// happened"; 0.22 shipped, and at READ 100 % still read as "not enough
+/// to catch on".
+///
+/// What the user picked on a real terminal, out of four hues, is the
+/// COLOR `#5a4520`. 0.27 is the blend that reproduces it from
+/// Catppuccin Mocha's paper: it lands on `rgb(90,69,33)` (`#5a4521`,
+/// one off — `lerp_color` truncates). On Solarized (light) the same
+/// 0.27 gives `rgb(253,227,165)`; that side was delegated and picked by
+/// eye against 0.20 / 0.34 / 0.40 on the real terminal.
+pub const MARK_BG_BLEND: f32 = 0.27;
 
-/// The highest default [`MARK_BG_BLEND`] may take before the mark starts
-/// to be mistakable for the selection band (dark: the band is
-/// `rgb(88,91,112)`, and 0.30 already lands on `rgb(82,85,105)`).
+/// The highest default [`MARK_BG_BLEND`] may take before the text ON the
+/// mark stops being comfortable to read.
+///
+/// **The old reason no longer holds and was replaced.** Until the mark
+/// had a hue, the ceiling existed because a darker gray became
+/// mistakable for the gray selection band (`rgb(88,91,112)`). That
+/// collision is gone: `rgb(90,69,33)` and `rgb(88,91,112)` sit at almost
+/// the same lightness and still do not mix, because one is warm and the
+/// other is cool. Lightness was doing the separating; now hue does, and
+/// hue does not run out as the blend climbs.
+///
+/// What DOES run out is contrast. The amber gets brighter as the blend
+/// climbs while the text on top does not move, so on a dark theme
+/// `#cdd6f4` over the mark falls from ~6:1 at the default to ~3:1 around
+/// 0.55 — the point where code spans and syntax colors start to be
+/// swallowed. 0.40 keeps a comfortable margin below that and still
+/// leaves the flag somewhere to go.
 ///
 /// A ceiling on the SHIPPED default, not on `--mark-blend`: the flag is a
 /// knob for looking at alternatives, and silently clamping what the user
 /// typed would make it a useless one. A test holds the default under it.
-pub const MARK_BG_BLEND_CEILING: f32 = 0.25;
+pub const MARK_BG_BLEND_CEILING: f32 = 0.40;
 
 /// The ceiling is not advice: raising [`MARK_BG_BLEND`] past it stops the
 /// build, not a test run.
@@ -174,20 +218,6 @@ impl Default for DecorationBlend {
         Self { mark: MARK_BG_BLEND, dim: DIM_BLEND }
     }
 }
-
-/// The scopes a theme may use for a "marked passage" background, best
-/// first. Resolved through the very same [`Highlighter::scope_style`] path
-/// the markdown style sheet uses (`render::MdcommentStyleSheet::from_theme`),
-/// so a theme that styles any of them keeps its own look. Neither akapen
-/// default theme (Catppuccin Mocha / Solarized (light)) defines one, so
-/// both fall through to the blend below — an `invalid`-style red is
-/// deliberately NOT in this list, its meaning is "error", not "marked".
-const MARK_SCOPES: &[&str] = &[
-    "markup.highlight",
-    "markup.mark",
-    "markup.quote.highlight",
-    "region.yellowish",
-];
 
 /// The resolved per-kind styles for one theme. Built once per render (the
 /// theme cannot change without a re-render) and applied by patching, so a
@@ -279,21 +309,33 @@ impl DecorationStyles {
     }
 }
 
-/// The mark background: the first [`MARK_SCOPES`] entry the theme gives a
-/// background, else the theme's own background lifted [`MARK_BG_BLEND`]
-/// toward its foreground (so it reads as "slightly raised paper" in a dark
-/// AND a light theme), else a fixed pair picked by the foreground's
-/// brightness.
+/// The mark background: the theme's own background lifted
+/// [`MARK_BG_BLEND`] toward [`MARK_TINT`] (so it reads as "a highlighter
+/// was drawn over this paper" in a dark AND a light theme), else a fixed
+/// pair picked by the foreground's brightness.
+///
+/// # ONE path, and it always runs
+///
+/// There used to be a lookup in front of this: a `MARK_SCOPES` list
+/// (`markup.highlight`, `markup.mark`, `markup.quote.highlight`,
+/// `region.yellowish`) that let a theme with its own highlight
+/// background keep it. **It was removed after being measured.** Out of
+/// two-face's 32 embedded themes exactly one reached it, by accident,
+/// and produced text at 1.14:1 — see
+/// `docs/gotchas/rendering.md`「テーマの highlight scope 尊重は一度
+/// やって落とした」for the numbers. Deferring to a theme that is not
+/// actually saying anything about marks is not respect.
+///
+/// So the mark is always theme-DERIVED and never theme-SUPPLIED: the
+/// theme's paper is the origin, [`MARK_TINT`] is the destination. A dark
+/// theme lands on a dark amber, a light theme on a pale yellow, from the
+/// same formula — and because there is no branch, the formula is the
+/// only thing that can ever be wrong.
 fn mark_background(highlighter: &Highlighter, blend: f32) -> Color {
-    for scope in MARK_SCOPES {
-        if let Some(bg) = highlighter.scope_style(scope).and_then(|s| s.bg) {
-            return bg;
-        }
-    }
     let settings = &highlighter.theme().settings;
     let fg = highlighter.default_fg();
     match settings.background {
-        Some(bg) => crate::view::lerp_color(Color::Rgb(bg.r, bg.g, bg.b), fg, blend),
+        Some(bg) => crate::view::lerp_color(Color::Rgb(bg.r, bg.g, bg.b), MARK_TINT, blend),
         // No theme background at all: pick the side from the text color.
         None => match fg {
             Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => MARK_BG_DARK,
@@ -843,9 +885,9 @@ mod tests {
         }
     }
 
-    /// The mark background is a real color that differs from the page —
-    /// both default themes fall through the scope lookup to the blend, so
-    /// this is the path that actually ships.
+    /// The mark background is a real color that differs from the page.
+    /// There is only one path now, so this IS the path that ships, for
+    /// every theme.
     #[test]
     fn the_mark_background_is_theme_derived_in_both_themes() {
         for light in [false, true] {
@@ -951,51 +993,238 @@ mod tests {
         }
     }
 
-    /// 既定のブレンド率で実際に出る色。ユーザーが実機で選んだ値なので、
-    /// 黙って動かないように値そのものを固定する。
+    /// 既定のブレンド率で実際に出る色。ダークの値はユーザーが実機で
+    /// 4 候補（violet / plum / teal / amber）を並べて選んだものなので、
+    /// 黙って動かないように値そのものを固定する。ライトは同じ式が同じ
+    /// amber へ向かって出す色で、こちらは実装側が実機で確かめて選んだ。
     #[test]
     fn the_default_blends_produce_the_colors_that_were_chosen() {
         // Catppuccin Mocha: 背景 rgb(30,30,46) / 前景 rgb(205,214,244)。
+        // 見せて選ばれたのは #5a4520、式が出すのは #5a4521（lerp の
+        // 切り捨てぶん 1 だけ違う）。
         let dark = DecorationStyles::from_theme(&Highlighter::new(None, false), Default::default());
-        assert_eq!(dark.mark_style().bg, Some(Color::Rgb(68, 70, 89)));
+        assert_eq!(dark.mark_style().bg, Some(Color::Rgb(0x5a, 0x45, 0x21)));
         assert_eq!(dark.dim_fg(None), Color::Rgb(99, 103, 125));
         // Solarized (light): 背景 rgb(253,246,227) / 前景 rgb(101,123,131)。
         let light = DecorationStyles::from_theme(&Highlighter::new(None, true), Default::default());
-        assert_eq!(light.mark_style().bg, Some(Color::Rgb(219, 218, 205)));
+        assert_eq!(light.mark_style().bg, Some(Color::Rgb(0xfd, 0xe3, 0xa5)));
         assert_eq!(light.dim_fg(None), Color::Rgb(192, 196, 188));
+
+        // 背景を持たないテーマ用の固定値は、この 2 つと同じ色であること
+        // — amber の経路から取り残された灰色が残らないように。
+        assert_eq!(dark.mark_style().bg, Some(MARK_BG_DARK));
+        assert_eq!(light.mark_style().bg, Some(MARK_BG_LIGHT));
     }
 
     /// MARK の背景は selection 帯とはっきり別物であること。
     ///
-    /// 帯（dark `rgb(88,91,112)`）に寄りすぎると「選択されている」と
-    /// 読み違える。0.22 は `rgb(68,70,90)` で十分離れているが、0.30 は
-    /// `rgb(82,85,105)` で危険域なので、既定値には天井を置いてある。
+    /// **分けているものが変わりました。** 灰色だった頃は「明るさ」が
+    /// 唯一の違いで、濃くすると帯 `rgb(88,91,112)` に近づいて
+    /// 「選択されている」と読み違えた。いまは色相で分かれます —
+    /// mark `rgb(90,69,33)` は暖色、帯は寒色で、**明るさがほぼ同じでも
+    /// 混ざりません**。だからここで見るのは距離ではなく色相です。
+    /// 距離のほうも一応見ますが、天井（0.40）まで上げると距離は
+    /// むしろ縮む方向にも動くので、距離だけを条件にはできません。
     #[test]
     fn the_mark_background_stays_clear_of_the_selection_band() {
-        // 天井そのものは `const _: () = assert!(..)` がコンパイル時に
-        // 押さえている。ここで見るのは、その天井が実際の色として意味を
-        // 持っているか。
         let band = crate::view::selected_bg(false);
         let Color::Rgb(sr, sg, sb) = band else { panic!("RGB") };
         assert_eq!((sr, sg, sb), (88, 91, 112), "selection 帯の色が変わった");
+        assert!(sb > sr, "帯は寒色（青みの灰）という前提が崩れた");
 
-        let styles = DecorationStyles::from_theme(&Highlighter::new(None, false), Default::default());
-        let Some(Color::Rgb(r, g, b)) = styles.mark_style().bg else { panic!("RGB") };
-        assert_ne!((r, g, b), (sr, sg, sb));
-        let distance = (r as i32 - sr as i32).abs()
-            + (g as i32 - sg as i32).abs()
-            + (b as i32 - sb as i32).abs();
-        assert!(distance >= 60, "mark rgb({r},{g},{b}) は帯に近すぎる（{distance}）");
-        // 天井ちょうどでもまだ離れている。
-        let ceiling = DecorationStyles::from_theme(
-            &Highlighter::new(None, false),
-            DecorationBlend { mark: MARK_BG_BLEND_CEILING, ..Default::default() },
+        // 既定でも天井でも、mark は暖色側にいる。
+        for blend in [MARK_BG_BLEND, MARK_BG_BLEND_CEILING] {
+            let styles = DecorationStyles::from_theme(
+                &Highlighter::new(None, false),
+                DecorationBlend { mark: blend, ..Default::default() },
+            );
+            let Some(Color::Rgb(r, g, b)) = styles.mark_style().bg else { panic!("RGB") };
+            assert_ne!((r, g, b), (sr, sg, sb));
+            assert!(r > g && g > b, "blend {blend}: mark rgb({r},{g},{b}) が暖色でない");
+            // 帯とは r と b の大小が逆 — これが「混ざらない」の中身。
+            assert!(
+                (r > b) != (sr > sb),
+                "blend {blend}: mark rgb({r},{g},{b}) が帯と同じ寒暖に回った"
+            );
+        }
+
+        // ライトの帯とも同じこと。
+        let light_band = crate::view::selected_bg(true);
+        let Color::Rgb(lr, _, lb) = light_band else { panic!("RGB") };
+        let light = DecorationStyles::from_theme(&Highlighter::new(None, true), Default::default());
+        let Some(Color::Rgb(r, _, b)) = light.mark_style().bg else { panic!("RGB") };
+        assert!(r > b && lb > lr, "ライトでも mark は暖色、帯は寒色");
+    }
+
+    /// 天井の新しい理由 —— 帯との混同ではなく、**マークの上の字が
+    /// 読めるか**。ブレンドを上げるほど amber は明るくなり、上に乗る
+    /// 文字は動かないので、コントラストだけが減っていく。
+    ///
+    /// 数字は WCAG の相対輝度比。既定は余裕があり、天井でもまだ
+    /// 本文が読める側に残っていること（4.5:1 は AA の本文基準）を
+    /// 固定する。0.55 まで上げると 3:1 台に落ちる、というのが
+    /// 天井を 0.40 に置いた理由です。
+    #[test]
+    fn the_ceiling_is_where_the_text_on_the_mark_stays_readable() {
+        fn luminance(c: Color) -> f32 {
+            let Color::Rgb(r, g, b) = c else { panic!("RGB") };
+            let ch = |x: u8| {
+                let x = x as f32 / 255.0;
+                if x <= 0.03928 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+        }
+        fn contrast(a: Color, b: Color) -> f32 {
+            let (x, y) = (luminance(a), luminance(b));
+            let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+            (hi + 0.05) / (lo + 0.05)
+        }
+
+        let highlighter = Highlighter::new(None, false);
+        let fg = highlighter.default_fg();
+        let at = |blend: f32| {
+            DecorationStyles::from_theme(
+                &highlighter,
+                DecorationBlend { mark: blend, ..Default::default() },
+            )
+            .mark_style()
+            .bg
+            .expect("a background")
+        };
+
+        let default = contrast(fg, at(MARK_BG_BLEND));
+        assert!(default >= 6.0, "既定のコントラストが {default:.1}:1 まで落ちた");
+        // 天井ちょうどが境界です（実測 4.52:1）。`lerp_color` の丸めを
+        // いじるとここが最初に反転するので、落ちたら天井の位置を
+        // 疑うこと — テストの閾値を下げて済ませないように。
+        let ceiling = contrast(fg, at(MARK_BG_BLEND_CEILING));
+        assert!(ceiling >= 4.5, "天井のコントラストが {ceiling:.2}:1 — AA を割った");
+        // 天井の向こうは実際に危ない、というのが天井を置く根拠。
+        let beyond = contrast(fg, at(0.55));
+        assert!(beyond < 4.5, "0.55 でも {beyond:.1}:1 — 天井の理由が消えた");
+    }
+
+    /// **テーマの highlight scope 背景は、もう見ていません。**
+    /// 前に `MARK_SCOPES`（`markup.highlight` / `markup.mark` /
+    /// `markup.quote.highlight` / `region.yellowish`）のループが
+    /// `mark_background` の先頭にあり、背景を持つテーマにはそれを
+    /// 使わせていました。**実測して落としました** — 理由は
+    /// `docs/gotchas/rendering.md`「テーマの highlight scope 尊重は
+    /// 一度やって落とした」。
+    ///
+    /// これは**再発防止のテスト**です。「テーマを尊重しよう」は自然に
+    /// 出てくる案なので、分岐を戻すとここが落ちます。落としてよいのは
+    /// 上の gotcha を読んで、それでもなお戻すと決めたときだけです。
+    #[test]
+    fn a_theme_that_styles_a_highlight_scope_gets_the_amber_anyway() {
+        const HIGHLIGHT_TM_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>name</key>
+  <string>Highlighted</string>
+  <key>settings</key>
+  <array>
+    <dict>
+      <key>settings</key>
+      <dict>
+        <key>background</key>
+        <string>#1e1e2e</string>
+        <key>foreground</key>
+        <string>#cdd6f4</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>scope</key>
+      <string>markup.highlight</string>
+      <key>settings</key>
+      <dict>
+        <key>background</key>
+        <string>#264f78</string>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>
+"#;
+        let dir = std::env::temp_dir().join(format!("akapen-mark-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("highlighted.tmTheme");
+        std::fs::write(&path, HIGHLIGHT_TM_THEME).unwrap();
+        let highlighter = Highlighter::new(Some(path.to_str().unwrap()), false);
+        // scope_style からは今でも見える —— 見えるのに使っていない、
+        // というのがこのテストの主張です（「実装し忘れ」ではない）。
+        assert_eq!(
+            highlighter.scope_style("markup.highlight").and_then(|s| s.bg),
+            Some(Color::Rgb(0x26, 0x4f, 0x78)),
+            "テーマ側の前提が変わった — この .tmTheme が効いていない"
         );
-        let Some(Color::Rgb(cr, cg, cb)) = ceiling.mark_style().bg else { panic!("RGB") };
-        let ceiling_distance = (cr as i32 - sr as i32).abs()
-            + (cg as i32 - sg as i32).abs()
-            + (cb as i32 - sb as i32).abs();
-        assert!(ceiling_distance >= 40, "天井 rgb({cr},{cg},{cb}) が帯に近すぎる");
+
+        let styles = DecorationStyles::from_theme(&highlighter, Default::default());
+        assert_ne!(styles.mark_style().bg, Some(Color::Rgb(0x26, 0x4f, 0x78)));
+        // 紙が Catppuccin Mocha と同じなので、出る色も同じ amber。
+        assert_eq!(styles.mark_style().bg, Some(MARK_BG_DARK));
+
+        // 経路が 1 本になったので、`--mark-blend` は**どのテーマでも**効く。
+        // 以前はテーマ次第でつまみが死んでいました。
+        for blend in [0.0, 1.0] {
+            let forced = DecorationStyles::from_theme(
+                &highlighter,
+                DecorationBlend { mark: blend, ..Default::default() },
+            );
+            assert_ne!(
+                forced.mark_style().bg,
+                Some(Color::Rgb(0x26, 0x4f, 0x78)),
+                "blend={blend}"
+            );
+        }
+        assert_eq!(
+            DecorationStyles::from_theme(
+                &highlighter,
+                DecorationBlend { mark: 1.0, ..Default::default() },
+            )
+            .mark_style()
+            .bg,
+            Some(MARK_TINT)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 経路が 1 本になったことを、埋め込みテーマ 32 本で確かめる。
+    /// **どのテーマでも**マークはそのテーマの紙から amber へ向かう
+    /// 計算で出ること —— 以前は DarkNeon 1 本だけがここを外れて
+    /// `rgb(254,224,156)` を出し、その上の字が読めませんでした。
+    #[test]
+    fn every_embedded_theme_gets_the_amber_formula() {
+        use two_face::theme::EmbeddedLazyThemeSet;
+        for theme in EmbeddedLazyThemeSet::theme_names() {
+            let name = theme.as_name();
+            let highlighter = Highlighter::new(Some(name), false);
+            let bg = DecorationStyles::from_theme(&highlighter, Default::default())
+                .mark_style()
+                .bg
+                .expect("a background");
+            let expected = match highlighter.theme().settings.background {
+                Some(p) => crate::view::lerp_color(
+                    Color::Rgb(p.r, p.g, p.b),
+                    MARK_TINT,
+                    MARK_BG_BLEND,
+                ),
+                None => match highlighter.default_fg() {
+                    Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => {
+                        MARK_BG_DARK
+                    }
+                    _ => MARK_BG_LIGHT,
+                },
+            };
+            assert_eq!(bg, expected, "theme={name:?} が式から外れた");
+            // 暖色であること —— 紙がどんな色でも amber へ向かうので、
+            // 赤み > 青み に落ちる。DarkNeon の `rgb(254,224,156)` が
+            // これを満たしてしまう（r>b）ので、色相だけでは不十分。
+            // 式そのものの一致を上で見ているのはそのためです。
+            let Color::Rgb(r, _, b) = bg else { panic!("RGB") };
+            assert!(r >= b, "theme={name:?}: rgb({r},_,{b}) が寒色側に落ちた");
+        }
     }
 
     /// ブレンド率はつまみとして効く。
@@ -1014,8 +1243,8 @@ mod tests {
         // 0 は「何もしない」— ページ背景そのもの / 前景そのもの。
         assert_eq!(weak.mark_style().bg, Some(Color::Rgb(page.r, page.g, page.b)));
         assert_eq!(weak.dim_fg(Some(Color::Rgb(1, 2, 3))), Color::Rgb(1, 2, 3));
-        // 1 は振り切り — 前景そのもの / ページ背景そのもの。
-        assert_eq!(strong.mark_style().bg, Some(highlighter.default_fg()));
+        // 1 は振り切り — amber そのもの / ページ背景そのもの。
+        assert_eq!(strong.mark_style().bg, Some(MARK_TINT));
         assert_eq!(
             strong.dim_fg(Some(Color::Rgb(1, 2, 3))),
             Color::Rgb(page.r, page.g, page.b)
