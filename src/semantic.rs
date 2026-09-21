@@ -356,6 +356,12 @@ pub(crate) fn decorations_for(document: &SemanticDocument, budget: u8) -> Vec<De
         .collect()
 }
 
+/// Reading Budget の下限（[`policy::floor`]）。`decorations_for` と同じ
+/// 一段目で数えるので、下限で止めた Budget の数字は表示量と一致する。
+pub(crate) fn floor_for(document: &SemanticDocument) -> u8 {
+    policy::floor(document)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

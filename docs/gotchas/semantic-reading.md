@@ -630,3 +630,46 @@ parsing」）。**似た規則が 2 つあると読まないこと** — `bounda
 版の 18 ラン、表示状態は `atom-states`。生ログは証拠ディレクトリの
 `runs/2026-09-22-heading-follows-content/`。業務 `CLAUDE.md` 45.6 KB は
 凍結した本文が残っておらず Atom を作り直せないので測っていません。
+
+---
+
+### `docs/design/semantic-reading-layer.md` も test の fixture — 書き足すと 1 リクエストから溢れる
+
+`examples/semantic/test_jev_annotate.py` の
+`test_small_documents_still_go_in_one_request` は、設計書を「ラウンド 1〜3 が
+1 チャンクに収まる小さい文書」の実例として読んでいます。**設計書に節を
+1 つ足しただけで（+1.1 KB、9.9 KB → 11.0 KB）ラウンド 2 が 2 チャンクに割れ、
+このテストが落ちました**（2026-09-22）。Rust 側を 1 行も触っていなくても
+`python3 -m pytest examples/semantic` が赤になります。
+
+上の「`examples/semantic/README.md` は測定対象の文書でもある」と同じ形です。
+設計書へ書き足すときは短く書くか、テストの前提（見積もりは実測の 1.4 倍まで
+過大評価）と合わせて判断してください。10.7 KB では通っています。
+
+**確認したこと**: 同じ変更を main（`ab3ef7b`）に当てる前は通り、設計書だけを
+伸ばして落ち、追記を 700 バイト縮めて通ったこと。
+
+---
+
+### Budget の下限は「数字の約束」であって「集合の約束」ではない
+
+`policy::floor` は一段目（核とその閉包）のバイト数 ÷ 全体を**切り上げた**
+整数です。下限より下では残る集合は動きませんが、**`decorate(doc, floor)` が
+`decorate(doc, floor - 1)` と同じとは限りません** — 切り上げの端数（全体の
+1 % 未満）に収まる小さな Unit を、二段目が下限ちょうどで拾うことがあります。
+実測では 40 fixture のうち 17 でそうなりました（記事・設計書・業務議事録を含む）。
+
+下限が約束しているのは **`budget >= floor` なら残る Unit の表示量が
+`budget` % 以下、`budget < floor` なら超えている**（数字が嘘をつくかどうか）
+だけです。予算の外で戻る見出しの行（`restore_section_heads`）はこの数字に
+入っていません — 実測では下限で設計書 +1.4 ポイント、業務議事録
++0.1 ポイントが見出しのぶんとして上乗せされ、差はすべて `heading` Atom の
+バイト数で説明できます（`section_of` を外した対照との差で数えました）。
+「下限で残る集合 = 一段目」を前提にしたテストや計測を書くと、文書によって
+落ちます。一段目そのものが要るなら `decorate(doc, MIN_BUDGET)` を読んでください。
+
+**確認したこと**: `policy.rs` の `floor` の doc コメントと
+`the_floor_is_where_the_number_stops_lying`（`budget < floor` で集合が
+`MIN_BUDGET` と一致し表示量が超えていること、`budget >= floor` で表示量が
+収まること）。fixture ごとの `floor_equals_floor_minus_1` は repo 外
+`runs/2026-09-22-read-floor/floors*.jsonl`。
