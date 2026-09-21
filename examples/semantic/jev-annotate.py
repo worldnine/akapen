@@ -170,6 +170,47 @@ class JevError(Exception):
     """akapen のステータス行に 1 行で出したい失敗。"""
 
 
+class Trace:
+    """**計測用**。ラウンドごとの実測を、失敗しても残るように書き出す。
+
+    本番経路では使わない（`--trace` を渡したときだけ作られる）。`annotate` は
+    ラウンドの途中で失敗すると例外を投げてそこまでの計測を捨ててしまうが、
+    どのラウンドで天井に当たったかは測りたい情報そのものである。だから
+    1 ラウンド終わるたびに**上書きで**ファイルへ流す。
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.data: dict = {"rounds": [], "units": None}
+
+    def round(
+        self,
+        number: int,
+        count: int,
+        usage: dict | None,
+        elapsed_s: float,
+        error: str | None,
+    ) -> None:
+        self.data["rounds"].append(
+            {
+                "round": number,
+                "questions": count,
+                "usage": usage,
+                "elapsed_s": elapsed_s,
+                "error": error,
+            }
+        )
+        self.flush()
+
+    def note(self, **fields: object) -> None:
+        self.data.update(fields)
+        self.flush()
+
+    def flush(self) -> None:
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # 境界 — 構造ルールと、散文どうしだけの question
 # ---------------------------------------------------------------------------
@@ -229,15 +270,58 @@ def atom_text(atom: dict) -> str:
     return (atom.get("text") or "").strip()
 
 
-def plan_boundaries(atoms: list[dict]) -> list[dict]:
+#: **計測用**の境界モード。既定の `current` が本番の挙動で、`a` / `b` は
+#: 「散文どうしの境界をどこまでローカルに決めるか」を測るための切り替えである
+#: （どれを採るかはまだ決まっていない）。規則 1〜4 はどのモードでも変わらず、
+#: **規則 5（sentence どうし）の扱いだけ**が違う。
+#:
+#:     current  すべて Jev に聞く（本番）
+#:     a        空行で区切られていれば NEW_UNIT、同じ段落の中だけ Jev に聞く
+#:     b        空行で区切られていれば NEW_UNIT、でなければ SAME_UNIT
+#:              （境界 question を一切出さない）
+BOUNDARY_MODES = ("current", "a", "b")
+
+
+def paragraph_break(source: bytes, atoms: list[dict], i: int) -> bool:
+    """Atom `i` と `i+1` の間に**空行**があるか。
+
+    `range` は Rust の `&str` 由来で**バイト**単位なので、`source` も bytes の
+    まま切る（Python の str で切ると多バイト文字の後がずれる）。
+
+    Atom の range は末尾の改行を含むことがあるので、Atom 自身の末尾空白と
+    Atom 間の隙間を**繋げてから**改行を数える。改行が 2 つ以上あれば空行
+    （＝段落境界）である。
+
+    隙間に `---` のような水平線が入ることがあるが、水平線は前後に空行を伴う
+    ので、この判定では空行として拾われる。
+    """
+    own = source[atoms[i]["range"]["start"] : atoms[i]["range"]["end"]]
+    gap = source[atoms[i]["range"]["end"] : atoms[i + 1]["range"]["start"]]
+    tail = own[len(own.rstrip()) :]
+    return (tail + gap).count(b"\n") >= 2
+
+
+def plan_boundaries(
+    atoms: list[dict],
+    source: str = "",
+    mode: str = "current",
+) -> list[dict]:
     """すべての境界について、構造で決まったか Jev に聞くかを並べる。
 
     要素は `{"after_atom": i, "decision": SAME/NEW/None, "by": 理由}`。
     `decision` が `None` のものだけがラウンド 1 の question になる。
+
+    `mode` は**計測用**の切り替えで、既定の `current` は本番の挙動。
+    `a` / `b` は [`BOUNDARY_MODES`] を参照（`source` が要る）。
     """
+    raw = source.encode() if mode != "current" else b""
     plan = []
     for i in range(len(atoms) - 1):
         decision, why = boundary_rule(atoms[i].get("kind"), atoms[i + 1].get("kind"))
+        if decision is None and mode != "current" and paragraph_break(raw, atoms, i):
+            decision, why = NEW, "rule:paragraph_break"
+        elif decision is None and mode == "b":
+            decision, why = SAME, "rule:same_paragraph"
         # 本文が空の Atom は Jev に見せても判断材料が無い。既定側へ倒す。
         if decision is None and not (atom_text(atoms[i]) and atom_text(atoms[i + 1])):
             decision, why = NEW, "rule:empty_text"
@@ -583,7 +667,15 @@ def http_error_message(code: int, detail: str) -> str:
     return f"Jev が HTTP {code} を返しました: {detail}"
 
 
-def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
+def ask_jev(
+    state: str,
+    questions: dict,
+    model: str,
+    timeout: float,
+    trace: Trace | None = None,
+    number: int = 0,
+    count: int = 0,
+) -> dict:
     """1 リクエストで questions をまとめて評価させる。
 
     Jev は「すべての question を同じ state に対して並列かつ独立に評価する」
@@ -608,6 +700,8 @@ def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
     except urllib.error.HTTPError as e:
         # 本文には鍵は載らない（載せていない）。要点だけ 1 行にする。
         detail = one_line(e.read().decode("utf-8", "replace"))[:200]
+        if trace is not None:
+            trace.round(number, count, None, round(time.monotonic() - started, 3), detail)
         raise JevError(http_error_message(e.code, detail)) from e
     except urllib.error.URLError as e:
         raise JevError(f"Jev に接続できません: {one_line(str(e.reason))}") from e
@@ -618,6 +712,8 @@ def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
     if not isinstance(payload.get("answers"), dict):
         raise JevError("Jev の応答に answers がありません")
     payload["elapsed_s"] = round(time.monotonic() - started, 3)
+    if trace is not None:
+        trace.round(number, count, payload.get("usage"), payload["elapsed_s"], None)
     return payload
 
 
@@ -636,7 +732,13 @@ def round_record(payload: dict, count: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def annotate(request: dict, model: str, timeout: float) -> dict:
+def annotate(
+    request: dict,
+    model: str,
+    timeout: float,
+    mode: str = "current",
+    trace: Trace | None = None,
+) -> dict:
     version = request.get("version")
     if version != VERSION:
         raise JevError(f"対応していないプロトコル版です: {version!r}")
@@ -648,35 +750,37 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     rounds = []
 
     # --- ラウンド 1: 散文どうしの境界 -> Unit --------------------------
-    plan = plan_boundaries(atoms)
+    plan = plan_boundaries(atoms, state, mode)
     questions = boundary_questions(atoms, plan)
     if questions:
-        payload = ask_jev(state, questions, model, timeout)
+        payload = ask_jev(state, questions, model, timeout, trace, 1, len(questions))
         apply_boundary_answers(plan, payload["answers"])
         rounds.append(round_record(payload, len(questions)))
     units = group_units(atoms, plan)
+    if trace is not None:
+        trace.note(boundaries=plan, units=len(units))
 
     # --- ラウンド 2: Unit ごとの Tier と redundancy ---------------------
     questions = unit_questions(atoms, units)
-    payload = ask_jev(state, questions, model, timeout)
+    payload = ask_jev(state, questions, model, timeout, trace, 2, len(questions))
     rounds.append(round_record(payload, len(questions)))
     built = build_units(atoms, units, payload["answers"])
 
     # --- ラウンド 3: MARKED になる Unit の核 ---------------------------
     questions = core_questions(atoms, built)
     if questions:
-        payload = ask_jev(state, questions, model, timeout)
+        payload = ask_jev(state, questions, model, timeout, trace, 3, len(questions))
         apply_core_answers(built, questions, payload["answers"])
         rounds.append(round_record(payload, len(questions)))
 
     return {
         "version": VERSION,
         "units": built,
-        "jev": {"rounds": rounds, "boundaries": plan},
+        "jev": {"rounds": rounds, "boundaries": plan, "boundary_mode": mode},
     }
 
 
-def dry_run(request: dict, model: str) -> dict:
+def dry_run(request: dict, model: str, mode: str = "current") -> dict:
     """API を叩かずに、送る 3 ラウンドのリクエストの形を出す。
 
     後のラウンドは前のラウンドの答えに依存するので、仮定を置いて組む。
@@ -692,7 +796,7 @@ def dry_run(request: dict, model: str) -> dict:
     """
     atoms = request.get("atoms") or []
     state = request.get("source") or ""
-    plan = plan_boundaries(atoms)
+    plan = plan_boundaries(atoms, state, mode)
     first = boundary_questions(atoms, plan)
     for entry in plan:
         if entry["decision"] is None:
@@ -743,6 +847,18 @@ def main() -> int:
         help=f"1 リクエストのタイムアウト秒（既定 {DEFAULT_TIMEOUT}）",
     )
     parser.add_argument(
+        "--boundary-mode",
+        choices=BOUNDARY_MODES,
+        default="current",
+        help="【計測用】散文どうしの境界の決め方（既定 current が本番の挙動）",
+    )
+    parser.add_argument(
+        "--trace",
+        metavar="PATH",
+        help="【計測用】ラウンドごとの usage と所要をこのファイルへ逐次書き出す"
+        "（途中で失敗しても残る）",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="API を叩かず、送る 3 ラウンドのリクエストの形だけを出す"
@@ -757,9 +873,12 @@ def main() -> int:
         return 1
     try:
         if args.dry_run:
-            response = dry_run(request, args.model)
+            response = dry_run(request, args.model, args.boundary_mode)
         else:
-            response = annotate(request, args.model, args.timeout)
+            trace = Trace(args.trace) if args.trace else None
+            response = annotate(
+                request, args.model, args.timeout, args.boundary_mode, trace
+            )
     except JevError as e:
         # akapen はステータス行に stderr の**最後の非空行**を 160 字まで出す
         # （`src/export.rs` の `Capture::tail`）。だから 1 行に収める。
