@@ -133,10 +133,22 @@ DEFAULT_TIMEOUT = 20.0
 #: 言い直しの u9 が 0.92、結論の u3 が 0.36 だった。その間を取っている。
 REDUNDANCY_THRESHOLD = 0.7
 
-#: Reading Tier の criteria。設計書 `docs/semantic-reading-layer.md` の
+#: Reading Tier の criteria。設計書 `docs/design/semantic-reading-layer.md` の
 #: 「Reading Tier」の定義の逐語。**言い換えないこと** — ここが判定品質を支配する。
+#:
+#: **ESSENTIAL の例示は 2026-09-22 に広げた。設計書と同時に、逐語のまま。**
+#: ここが drift したのではない。実機で未決を述べた節が 10/10 DETAIL になり、
+#: 「制約」は既に入っているのに例が全部「決まったもの」の名詞だったのが原因
+#: だったので、例示に未決の側を足した。**軸は 1 つのままである** —
+#: 経緯と却下した別案は `examples/semantic/measurements/essential-unsettled.md`
+#: とコミットメッセージに。
+#:
+#: `supporting` だけは設計書と一字一句では一致していない（設計書
+#: 「ESSENTIALの理解・納得に役立つ。」/ ここ「ESSENTIAL な内容の…」）。
+#: **2026-09-22 以前からある差で、今回は触っていない** — 測定の最中に
+#: 2 つ目の criteria を動かすと、どちらが効いたのか帰属できなくなる。
 TIER_CRITERIA = {
-    "essential": "落とすと文書の要点、結論、制約などを取り違える可能性が高い。",
+    "essential": "落とすと文書の要点、結論、制約、未決の論点や宿題などを取り違える可能性が高い。",
     "supporting": "ESSENTIAL な内容の理解・納得に役立つ。",
     "context": "背景や前提、理解補助。",
     "detail": "例、細部、追加説明。",
@@ -183,7 +195,8 @@ SAME, NEW = "same_unit", "new_unit"
 #: 「Jev にさせる小さな意味判断」として挙げる例は**すべてこの形**である
 #: （「ここを飛ばすと要点を失う？」「これは主要な主張を支えている？」）。
 #: Reading Tier の ESSENTIAL の定義（`TIER_CRITERIA`）も「落とすと文書の要点、
-#: 結論、制約などを取り違える可能性が高い」という損失の言い方をしている。
+#: 結論、制約、未決の論点や宿題などを取り違える可能性が高い」という損失の
+#: 言い方をしている。
 #: 核は ESSENTIAL な Unit の中をさらに同じ軸で絞る操作なので、**軸を揃えるのが
 #: 筋**であって、ここだけ「1 か所だけ読むなら」という別の軸を混ぜる理由が無い。
 #:

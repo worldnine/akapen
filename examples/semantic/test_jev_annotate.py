@@ -930,7 +930,7 @@ class DryRunTest(unittest.TestCase):
         # 言い換えると判定品質が落ちるので、逐語であることを固定する。
         self.assertEqual(
             jev.TIER_CRITERIA["essential"],
-            "落とすと文書の要点、結論、制約などを取り違える可能性が高い。",
+            "落とすと文書の要点、結論、制約、未決の論点や宿題などを取り違える可能性が高い。",
         )
         self.assertEqual(jev.TIER_CRITERIA["detail"], "例、細部、追加説明。")
 
