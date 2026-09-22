@@ -4024,12 +4024,13 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         // way when the comment bar opened freezes until Enter/Esc
         // returns to the view. The border rotation keeps flying (it
         // lives in the frame's own cells, never over the text).
-        // 問いの入力（`/`）は composer を使わない — メッセージ行の 1 行
-    // プロンプトが受ける（`chrome::draw_ask_prompt`）。文書に 3 行割り
-    // 込ませないので、ここで弾く。
-    let composing = app.mode == Mode::Input
-        && app.composer_return == Mode::View
-        && !app.marks_prompt;
+        //
+        // **問いの 1 行プロンプト（`/`）はここに入らない。** あれは本文の
+        // 列を 1 行も占めないので、下の演出を止める理由が無い — 止めると
+        // 問いを打っているあいだ時間旅行の演出が凍る。
+        let composing = app.mode == Mode::Input
+            && app.composer_return == Mode::View
+            && !app.marks_prompt;
         if !composing {
             // Changed blocks that have scrolled off-screen drop their
             // effects rather than hold them: left un-rendered their
@@ -4542,7 +4543,11 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // otherwise clamp the scroll at the document's last row and hide the
     // bar — and it grows as you type. Input mode has no scroll keys, so a
     // per-frame nudge cannot fight the user.
-    let composing = app.mode == Mode::Input && app.composer_return == Mode::View;
+    // 問いの入力（`/`）は composer を使わない — メッセージ行の 1 行
+    // プロンプトが受ける（[`crate::chrome::draw_ask_prompt`]）。文書に
+    // 3 行（上罫・本文・下罫）を割り込ませないので、ここで弾く。
+    let composing =
+        app.mode == Mode::Input && app.composer_return == Mode::View && !app.marks_prompt;
     if composing {
         app.keep_composer_visible_view(inner.height as usize);
     }
