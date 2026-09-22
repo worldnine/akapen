@@ -26,8 +26,9 @@ Tier の question は Unit について聞くものだが、Unit は境界判定
                  → 誰に redundancy を聞くか / 誰の核を聞くかが確定
     ラウンド3  state=文書全文, questions={ SUPPORTING 以上の redundancy(Choice)
                                             と、ESSENTIAL な Unit の核(Choice) }
+    ラウンド4  state=文書全文, questions={ 相手が決まった対の Noul }
                  → **MARKED になりうる Unit**が確定
-    ラウンド4+ state=文書全文, context preservation の前提を波で辿る
+    ラウンド5+ state=文書全文, context preservation の前提を波で辿る
                  （1 波 = 段階 1〜4 の 4 往復。実測で波は 2〜4）
 
 Jev は question を**並列・独立に**評価するので、ラウンド 2 の時点では
@@ -646,6 +647,43 @@ REDUNDANCY_CHOICE = (
 )
 
 
+#: 対の Noul の「はい」の境目（ラウンド 4）。
+#:
+#: **閾値を無くすには届かなかった。** Choice 単独で出す案は実測で駄目で、
+#: 他の 4 文書の冗長が 0〜1 件から 2〜41 件へ増えた（増えたぶんはほぼ
+#: 「同じ話題」。`examples/semantic/measurements/redundancy.md`）。**Choice は
+#: 「無い」と言えない**ので、「該当なし」を選択肢に文字で置いても足りない。
+#:
+#: だからここで起きたことは「閾値が消えた」ではなく、**0.7 が 0.5 に
+#: 置き換わった**である。違いは値の出どころで、
+#:
+#: - 旧 `REDUNDANCY_THRESHOLD` の 0.7 … `demo.md` の 1 回の実行の 2 点
+#:   （0.92 と 0.36）の間を取った暫定値。掃引していない
+#: - この 0.5 … Noul の「はい」の自然な境目。ここも掃引していないが、
+#:   **恣意的でない点はここしかない**（[`CONTEXT_YES`] と同じ理由・同じ値）
+#:
+#: **構造も context preservation の段階 1 と同じ**である。あちらも
+#: 「そもそも前を読む必要があるか」を Noul で聞いてから Choice で相手を選ぶ。
+#: こちらは順番が逆（Choice で相手を選んでから、その対を Noul で確かめる）
+#: だが、「Choice は『無い』と言えないので、無いと言う役は Noul に持たせる」
+#: という形は同じである。
+#:
+#: 実測では 0.5 の真上に乗る対が 5 文書で十数件ある。`docs/design/jev.md` の
+#: 「`confidence` の閾値ガードは不採用」と同じ危うさがここにも残っている。
+REDUNDANCY_YES = 0.5
+
+#: ラウンド 4 の Noul。**計測と一字一句同じ**（証拠の `tools/noulgate.py`）。
+#: ここを変えると `measurements/redundancy.md` の数字が根拠でなくなる。
+#:
+#: Jev は question を独立・並列に評価するので「いま選んだ相手」という指示語は
+#: 届かない（`docs/design/jev.md`）。**両方の本文を埋め込む。**
+REDUNDANCY_PAIR = (
+    "下の「後の部分」は、「前の部分」をすでに読んだ人にとって新しい情報を加えていない。"
+    "「前の部分」で述べられた内容の言い直しである。\n\n"
+    "――― 前の部分 ―――\n{earlier}\n――― 後の部分 ―――\n{later}\n―――――――――"
+)
+
+
 def redundancy_candidates(tiers: list[str], bodies: list[str], target: int) -> list[int]:
     """`target`（0 始まり）より前で、言い直しの元になれる Unit の添字。
 
@@ -724,6 +762,43 @@ def redundancy_questions(
     return questions, trim
 
 
+def redundancy_gate_questions(
+    atoms: list[dict], units: list[list[int]], questions: dict, answers: dict
+) -> dict:
+    """ラウンド 4 の questions — Choice が選んだ対にだけ聞く Noul。
+
+    Choice が「該当なし」を選んだ Unit には聞かない（対が無い）。聞く数は
+    ラウンド 3 で相手が付いた Unit の数だけで、実測では 1 文書あたり 2〜41 件
+    だった。
+
+    **この question はラウンド 3 の Choice より必ず小さい。** 中身は対象と
+    相手の本文 2 つだけで、Choice の方は同じ対象に加えて**先行 Unit の本文
+    全部**を並べる。だからラウンド 3 が 32k 枠に収まっている限り、ここが
+    新しく天井に当たることはない。
+
+    送れなかった question は [`build_units`] が「冗長ではない」に倒す
+    （聞かなかった場合と同じ安全側）。
+    """
+    bodies = [unit_body(atoms, indices) for indices in units]
+    gate: dict = {}
+    for number in range(1, len(units) + 1):
+        key = f"redundant:u{number}"
+        question = questions.get(key)
+        if question is None:
+            continue
+        choice = choice_of(answers, key, question["criteria"])
+        if choice == REDUNDANCY_NONE:
+            continue
+        earlier = int(choice.split(":")[1])
+        gate[f"redundant2:u{number}"] = {
+            "type": "noul",
+            "instructions": REDUNDANCY_PAIR.format(
+                earlier=bodies[earlier], later=bodies[number - 1]
+            ),
+        }
+    return gate
+
+
 # ---------------------------------------------------------------------------
 # 答えの取り出し（緩めない）
 # ---------------------------------------------------------------------------
@@ -779,11 +854,19 @@ def build_units(
 ) -> list[dict]:
     """ラウンド 2・3 の答えから、プロトコルの `units` を組む。
 
-    `questions` はラウンド 3 の question（redundancy の Choice の `criteria` を
-    答えの検査に使う）。`confidence` は**捨てず**、各 Unit の `jev` フィールドに
-    記録する（プロトコルは未知のフィールドを拒否しないので akapen 側は無視
-    する）。**閾値で判定を倒す場所はもう無い** — redundancy も Choice になり、
-    「該当なし」（[`REDUNDANCY_NONE`]）が閾値の代わりをする。
+    `questions` はラウンド 3・4 の question（redundancy の Choice の `criteria`
+    を答えの検査に使い、対の Noul が送れたかをここで見る）。`confidence` は
+    **捨てず**、各 Unit の `jev` フィールドに記録する（プロトコルは未知の
+    フィールドを拒否しないので akapen 側は無視する）。
+
+    **`REDUNDANT_WITH` が付くのは 2 段を通ったときだけ**である。
+
+    1. ラウンド 3 の Choice が「該当なし」以外を選ぶ（＝ 相手が決まる）
+    2. ラウンド 4 の対の Noul が [`REDUNDANCY_YES`] 以上（＝ その相手を読んだ
+       人にとって、ここは新しい情報を加えていない）
+
+    1 だけ通って 2 で落ちた Unit は、相手を `jev.redundancy_target` に、Noul を
+    `jev.redundancy_pair_noul` に残すが `relations` には入らない。
 
     redundancy を聞いていない Unit（CONTEXT / DETAIL と先頭、候補が無かった
     もの、予算で送れなかったもの）は、そもそも REDUNDANT になりえないので、
@@ -812,12 +895,19 @@ def build_units(
                 got = probabilities.get(REDUNDANCY_NONE)
                 if isinstance(got, (int, float)):
                     record["redundancy_none_probability"] = float(got)
-            if choice == REDUNDANCY_NONE:
-                record["redundant_with"] = None
-            else:
+            record["redundant_with"] = None
+            if choice != REDUNDANCY_NONE:
                 target = f"u{int(choice.split(':')[1]) + 1}"
-                record["redundant_with"] = target
-                relations.append({"redundant_with": target})
+                # Choice が選んだ相手は、ゲートで落ちても記録に残す
+                # （どちらの段で落ちたかを後から数えられるように）。
+                record["redundancy_target"] = target
+                gate_key = f"redundant2:{uid}"
+                if gate_key in questions:
+                    noul = noul_of(answers, gate_key)
+                    record["redundancy_pair_noul"] = noul
+                    if noul >= REDUNDANCY_YES:
+                        record["redundant_with"] = target
+                        relations.append({"redundant_with": target})
         out.append(
             {
                 "id": uid,
@@ -1934,6 +2024,23 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
             scope.pop(key, None)
         answers.update(third)
 
+    # --- ラウンド 4: 選ばれた対への Noul（REDUNDANT_WITH の 2 段目）--------
+    #
+    # Choice は「無い」と言えないので、「無い」と言う役を Noul に持たせる
+    # （[`REDUNDANCY_YES`]）。相手が決まった Unit にだけ聞くので、question は
+    # ラウンド 3 で相手が付いた数だけ。
+    #
+    # **ラウンドを分ける理由は Jev の評価が独立だからである。** どの Unit に
+    # 何を聞くかがラウンド 3 の答えで決まるので、畳めない（境界 → Tier →
+    # redundancy と同じ形）。
+    gate = redundancy_gate_questions(atoms, units, questions, answers)
+    if gate:
+        answers.update(ask(gate, "redundancy_gate"))
+        for key in unsent.get("redundancy_gate", ()):
+            # 聞けなかった対は冗長にしない（[`build_units`]。安全側）。
+            gate.pop(key, None)
+        questions.update(gate)
+
     built = build_units(atoms, units, tiers, answers, questions)
     # 節の見出しは構造だけで決まる。Jev は出てこない（[`assign_sections`]）。
     assign_sections(atoms, units, built)
@@ -1951,12 +2058,16 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     # `core_atoms` を pop していたが、policy が冗長 ESSENTIAL に核を要求する
     # ようになると、無い核は「Unit 全体が MARKED」に読まれる。
 
-    # --- ラウンド 4 以降: context preservation の前提 -------------------
+    # --- ラウンド 5 以降: context preservation の前提 -------------------
     #
     # **ここまでの答えが全部要る。** 聞き始める Unit は「MARKED になりうる
     # Unit」で、それが決まるのは Tier・redundancy・核が出そろったあと、
     # つまり上のエピローグの**後**である（[`context_seeds`]）。前へ動かすと
     # 光らない Unit にも聞くことになり、question が無駄に増える。
+    #
+    # **ここは対の Noul（ラウンド 4）の後でなければならない。** `context_seeds`
+    # は非 REDUNDANT を条件にするので、ゲートで落ちた Unit を冗長のまま数えると
+    # 前提を辿る相手が変わる。
     #
     # ラウンド数が固定でないのはここだけである。波ごとに段階 1〜4 の
     # 4 往復で、実測では波は 2〜4 だった。
@@ -1988,11 +2099,15 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
     - ラウンド 3: **すべての Unit が ESSENTIAL だった**と仮定する。本番では
       redundancy は SUPPORTING 以上にだけ、核は ESSENTIAL かつ散文の候補が
       2 つ以上ある Unit にだけ聞くので、実際に送る question はこれより少ない
-    - ラウンド 4: **context preservation の最初の波だけ**を、段階 1 が
+    - ラウンド 4: **redundancy の Choice が全部、直前の候補を選んだ**と仮定
+      する。本番では「該当なし」に倒れるぶんだけ少ない。この question は
+      同じ Unit のラウンド 3 の Choice より必ず小さいので（本文 2 つだけ）、
+      上限の判定でここが新しく効くことはない
+    - ラウンド 5: **context preservation の最初の波だけ**を、段階 1 が
       全部「はい」だったと仮定して組む。本番の波の本数は答え次第なので
       ここには出ない（[`trace_prerequisites`]）
 
-    ラウンド 4 を出すのは、**32k 枠に当たるとしたらここだから**である。
+    ラウンド 5 を出すのは、**32k 枠に当たるとしたらここだから**である。
     段階 2 の Choice は自分より前の Unit の本文を全部並べるので、文書の
     どの question よりも大きくなりうる（実測の 4 文書では当たらなかったが、
     もっと大きい文書は測っていない）。**逆に言えば、ここに出る 1 波ぶんが
@@ -2031,10 +2146,28 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
     third, _trim = redundancy_questions(atoms, units, tiers, budget)
     third.update(run_questions)
     third.update(core_questions(atoms, as_essential, budget, handled))
-    # ラウンド 4（最初の波だけ）。段階 1 は全 seed に、段階 2 は段階 1 が
-    # 全部「はい」だったと仮定して組む。
     bodies = [unit_body(atoms, indices) for indices in units]
-    fourth = {
+    # ラウンド 4（対の Noul）。Choice は直前の候補を選んだと仮定する。
+    fourth = {}
+    for key, question in third.items():
+        if not key.startswith("redundant:"):
+            continue
+        number = int(key.split(":u")[1])
+        nearest = max(
+            (int(k.split(":")[1]) for k in question["criteria"] if k != REDUNDANCY_NONE),
+            default=None,
+        )
+        if nearest is None:
+            continue
+        fourth[f"redundant2:u{number}"] = {
+            "type": "noul",
+            "instructions": REDUNDANCY_PAIR.format(
+                earlier=bodies[nearest], later=bodies[number - 1]
+            ),
+        }
+    # ラウンド 5（context preservation の最初の波だけ）。段階 1 は全 seed に、
+    # 段階 2 は段階 1 が全部「はい」だったと仮定して組む。
+    fifth = {
         f"needs:u{position}": {
             "type": "noul",
             "instructions": CONTEXT_STAGE1.format(body=bodies[position]),
@@ -2048,11 +2181,11 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
             continue
         question, kept = context_choice(bodies, position, pool, budget)
         if kept:
-            fourth[f"pick:u{position}"] = question
+            fifth[f"pick:u{position}"] = question
 
     rounds = []
     for number, questions in enumerate(
-        (first, unit_questions(atoms, units), third, fourth), start=1
+        (first, unit_questions(atoms, units), third, fourth, fifth), start=1
     ):
         chunks, dropped = plan_chunks(questions, budget)
         rounds.append(
@@ -2076,7 +2209,11 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
             "round 2 assumes every boundary Jev is asked about is new_unit",
             "round 3 assumes every Unit is essential (production narrows this, "
             "so it sends fewer questions)",
-            "round 4 shows only the first context-preservation wave, assuming "
+            "round 4 assumes every redundancy choice picked the nearest "
+            "earlier candidate rather than none, so it sends more pair "
+            "questions than production; each is smaller than round 3's choice "
+            "for the same unit",
+            "round 5 shows only the first context-preservation wave, assuming "
             "stage 1 said yes everywhere; production runs 2-4 waves, so this "
             "is a lower bound on requests and an upper bound on one wave's size",
             "when the state token count is an estimate (0.5 tokens/byte) this "
@@ -2106,7 +2243,7 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the shape of the 3 rounds without calling the API "
+        help="print the shape of the rounds without calling the API "
         "(round 2 assumes every boundary is new_unit, round 3 that every "
         "Unit is essential)",
     )

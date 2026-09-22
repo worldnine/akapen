@@ -670,17 +670,24 @@ parsing」）。**似た規則が 2 つあると読まないこと** — `bounda
 
 **閾値を消したいなら primitive を替えるだけでは足りず、「無い」を Noul に
 聞かせる段が要ります。** context preservation が段階 1 の Noul を残している
-のはそのためです。選ばれた対に「前を読んだ人にとって後は新しい情報を加えない
-か」の Noul を 1 つ足すと、偽陽性 119 件（148 対のうち言い直しでない分）で
-0.5 に届くのは 2 件（最大 0.51）になり、真の言い直しは 0.5〜0.9 に残ります
-（ただし 0.5 の真上に乗るものが十数件あります）。数字は
-`examples/semantic/measurements/redundancy.md`。**実装は判断待ちで、いまの
-アダプタは Choice 単独です** — マージ前にここを読むこと。
+のはそのためです。**そうしました**（第 2 版。ラウンド 4 の
+`redundancy_gate_questions` / `REDUNDANCY_YES`）。選ばれた対に「前を読んだ人に
+とって後は新しい情報を加えないか」を 1 つ聞き、0.5 以上のときだけ
+`REDUNDANT_WITH` を付けます。
+
+**だから「閾値を無くした」とは書けません。** 0.7（`demo.md` の 2 点から取った
+暫定値）が 0.5（Noul の「はい」の自然な境目）に**置き換わった**だけです。
+定数は 1 つになり、値の出どころは恣意的でなくなりましたが、**0.5 の真上に
+乗る対は残っています** — `docs/design/jev.md`「`confidence` の閾値ガードは
+不採用」と同じ危うさです。次に触る人へ: **ここを「閾値が無い」と読まないで
+ください。**
 
 **確認したこと**: `~/.local/share/akapen/evidence/runs/2026-09-22-redundancy-choice/`
-の `ans/*.after.*.json` で `jev.redundancy_choice` と
-`redundancy_none_probability` を数えたこと。同 `noulgate/*.json` に対の Noul の
-4 ラン。`docs/design/jev.md`「redundancy の question は方向を持つ」。
+の `ans/*.after.*.json`（Choice 単独）と `ans/*.gate.*.json`（第 2 版）で
+`jev.redundancy_choice` / `redundancy_none_probability` /
+`redundancy_pair_noul` を数えたこと。`docs/design/jev.md`「redundancy の
+question は方向を持つ」。数字は
+`examples/semantic/measurements/redundancy.md`。
 
 ### Budget の下限は「数字の約束」であって「集合の約束」ではない
 

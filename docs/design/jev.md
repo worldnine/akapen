@@ -139,6 +139,7 @@ Atom 間の意味境界（SAME_UNIT / NEW_UNIT）  → Choice（2 択）
 Reading Tier（ESSENTIAL / SUPPORTING /
               CONTEXT / DETAIL）            → Choice（4 択）
 semantic redundancy                          → Choice（先行 Unit + 該当なし）
+                                               ＋ 選んだ対の Noul
 Unit の核（MARKED を絞る先）                → Choice（Unit 内の Atom の数だけ）
 ```
 
@@ -183,10 +184,19 @@ Noul の文面を対称に書いてはならない。「他の箇所で既に述
 **Choice 単独では冗長が増える。** 「該当なし」を選択肢に置いても、Choice は
 「同じ話題」の先行 Unit を選ぶ（context preservation の第 2 版が「Choice は
 『無い』と言えない」と書いたのと同じ性質）。議事録では相手の正否は直ったが、
-設計書や記事では冗長 0〜1 件 → 24〜30 件になった。数字と、選ばれた対に Noul を
-1 つ足す案の測定は `examples/semantic/measurements/redundancy.md`。
+設計書や記事では冗長 0〜1 件 → 24〜30 件になった。
 
-現在の文面は `examples/semantic/jev-annotate.py` の `REDUNDANCY_CHOICE`。
+**だから段を 1 つ足した（第 2 版）。** Choice が相手を返した対にだけ、
+「前の部分を読んだ人にとって後の部分は新しい情報を加えていない」の Noul を
+1 つ聞き、0.5 以上のときだけ `REDUNDANT_WITH` を付ける。**閾値は消えていない**
+— 旧 `REDUNDANCY_THRESHOLD` の 0.7（`demo.md` の 2 点から取った暫定値）が、
+0.5（Noul の「はい」の自然な境目。`CONTEXT_YES` と同じ値・同じ理由）に
+置き換わった。「Choice は『無い』と言えないので、無いと言う役を Noul に
+持たせる」という形は context preservation の段階 1 と同じである。
+
+前後の数字は `examples/semantic/measurements/redundancy.md`。文面は
+`examples/semantic/jev-annotate.py` の `REDUNDANCY_CHOICE` と
+`REDUNDANCY_PAIR`。
 
 ### Unit の核 — 選択肢が本文そのものになる Choice
 
@@ -433,7 +443,8 @@ criteria の説明文 65 + 枠組み文 65、redundancy（Noul）が 81 = 器 8 
 **redundancy の 81 は 2026-09-22 までの値である。** いまの redundancy は
 Choice で、選択肢が自分より前の Unit の本文全部なので、固定費ではなく
 **Unit 数の 2 乗**で効く。ラウンド 3 は実測で 2.7〜17 倍になった
-（`examples/semantic/measurements/redundancy.md` の 5 節）。ラウンド 2 に
+（`examples/semantic/measurements/redundancy.md`）。ラウンド 4 の対の Noul は
+本文 2 つぶんで、同じ Unit のラウンド 3 の Choice より必ず小さい。ラウンド 2 に
 乗る固定費が Tier の 181 だけ、という下の話は変わらない。
 
 `README.md`（113 Unit）の旧ラウンド 2 は `state` 11,180 + 本文の 2 度引き
