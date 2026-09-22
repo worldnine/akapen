@@ -247,6 +247,59 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
 /// leave every key dead, with no way to interrupt from inside the app.
 const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// When [`run_child`] gives up on a child.
+///
+/// Two policies, because the callers want different things from the same
+/// four hazards. A clipboard tool or a `--send-cmd` delivery either works
+/// in a moment or is wedged, so **wall time is the right question** for
+/// them. `--semantic-cmd` is not like that: its wall time is set by how
+/// big the document is, which akapen cannot know before it spawns the
+/// child, and the answer is an expensive one to throw away.
+///
+/// # なぜ `--semantic-cmd` だけ別扱いなのか（2026-09-22 の実測）
+///
+/// 60 秒の固定値は**もう足りていない**。アダプタのプロセス壁時計は
+/// `examples/semantic/measurements/speed-and-limits.md` の第 2 版で
+///
+/// ```text
+/// 1,664 B     6.7〜7.0 秒（12 リクエスト）
+/// 22,685 B   28.9〜29.4 秒（27〜28 リクエスト）
+/// 35,021 B   46.9〜47.4 秒（40〜41 リクエスト）
+/// ```
+///
+/// で、**同じ文書がその日のうちに 54,435 B へ育って推定 74 秒**（63
+/// リクエスト）になっている。リクエスト数は文書の構造で決まり、実測でも
+/// Atom あたり 0.095〜0.44 と 4.6 倍ぶれる — **spawn 前に見積もれる量では
+/// ない。**
+///
+/// だから量を見積もるのをやめて、**進捗そのものを見る**。タイムアウトに
+/// 当たると読み手は約 8 円払って何も得ない（子が殺されるので stdout は空、
+/// キャッシュにも入らない）ので、誤って殺す側の害が大きい。
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Deadline {
+    /// Kill the child once it has run this long, whatever it is doing.
+    /// The clipboard and `--send-cmd` paths; the historical behaviour.
+    Absolute(Duration),
+    /// **Kill the child only when it goes quiet.** `idle` is how long a
+    /// silence may last before it counts as wedged; `backstop` stops it
+    /// regardless, so a child that chatters forever still terminates.
+    ///
+    /// Progress means bytes on stdout OR stderr ([`Capture::drain`]).
+    /// The child has to say something for this to help — an adapter that
+    /// prints nothing until it exits is indistinguishable from a hung
+    /// one, and gets `idle` as its whole budget.
+    WhileProgressing {
+        /// The longest silence tolerated. **Must exceed the child's own
+        /// per-request timeout**, or akapen kills it during a request
+        /// the child would itself have given up on and reported
+        /// (`jev-annotate.py`'s `DEFAULT_TIMEOUT` is 20 s; that error
+        /// message is worth far more than a kill).
+        idle: Duration,
+        /// The absolute ceiling, as [`Deadline::Absolute`].
+        backstop: Duration,
+    },
+}
+
 /// Pipe `text` into a child's stdin and wait for its exit — but never
 /// longer than `timeout`. The write stays on the caller's thread and is
 /// non-blocking: stdin is `O_NONBLOCK` and every attempt is gated by a
@@ -276,7 +329,15 @@ fn pipe_and_wait(
     text: &str,
     timeout: Duration,
 ) -> Result<()> {
-    run_child(label, cmd, args, text, timeout, CAPTURE_LIMIT).map(|_| ())
+    run_child(
+        label,
+        cmd,
+        args,
+        text,
+        Deadline::Absolute(timeout),
+        CAPTURE_LIMIT,
+    )
+    .map(|_| ())
 }
 
 /// What a finished child left behind on stdout.
@@ -296,12 +357,16 @@ pub(crate) struct ChildOutput {
 /// `stdout_limit` bounds what is kept: the toast paths want only a tail
 /// ([`CAPTURE_LIMIT`]), while `--semantic-cmd` wants the whole JSON
 /// answer and says so with a much larger limit.
+///
+/// `deadline` picks *when* to give up ([`Deadline`]). Both policies kill
+/// and reap the child the same way; they differ only in the clock they
+/// read, and both say `timed out` so the toast reads the same.
 fn run_child(
     label: &str,
     cmd: &str,
     args: &[&str],
     text: &str,
-    timeout: Duration,
+    deadline: Deadline,
     stdout_limit: usize,
 ) -> Result<ChildOutput> {
     let mut child = Command::new(cmd)
@@ -333,7 +398,17 @@ fn run_child(
     let mut out = Capture::new(stdout, stdout_limit);
     let mut err = Capture::new(stderr, CAPTURE_LIMIT);
     let mut bytes = text.as_bytes();
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    // The absolute wall — a plain deadline, or the backstop under
+    // `WhileProgressing`. Reached, it kills either way.
+    let (wall, idle_limit) = match deadline {
+        Deadline::Absolute(timeout) => (started + timeout, None),
+        Deadline::WhileProgressing { idle, backstop } => (started + backstop, Some(idle)),
+    };
+    // The last moment the child said anything. Spawning counts as the
+    // first sign of life, so a child that prints nothing at all still
+    // gets a full `idle` window to produce its answer.
+    let mut last_output = started;
     loop {
         match child
             .try_wait()
@@ -366,21 +441,52 @@ fn run_child(
                     stdout: out.buf,
                 });
             }
-            None if Instant::now() >= deadline => {
-                // The child outlived its budget (e.g. a send command
-                // that never reads stdin) — kill it instead of blocking
-                // the UI forever, then reap it so it cannot linger.
+            // The child outlived its budget (e.g. a send command that
+            // never reads stdin) — kill it instead of blocking the UI
+            // forever, then reap it so it cannot linger. Under
+            // `WhileProgressing` this arm is the backstop: a child that
+            // keeps talking still stops here.
+            None if Instant::now() >= wall => {
                 drop(stdin.take());
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!("{label} timed out after {}s", timeout.as_secs_f64());
+                bail!(match idle_limit {
+                    Some(_) => anyhow!(
+                        "{label} timed out after {}s (backstop)",
+                        started.elapsed().as_secs_f64().round()
+                    ),
+                    // **The historical message, unchanged.** The
+                    // `--send-cmd` and clipboard toasts read this.
+                    None => anyhow!(
+                        "{label} timed out after {}s",
+                        (wall - started).as_secs_f64()
+                    ),
+                });
+            }
+            // Gone quiet for too long. Distinct from the backstop in
+            // the message: "with no output" is the part that tells the
+            // reader their command is wedged rather than slow.
+            None
+                if idle_limit
+                    .is_some_and(|idle| last_output.elapsed() >= idle) =>
+            {
+                drop(stdin.take());
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "{label} timed out after {}s with no output",
+                    last_output.elapsed().as_secs_f64().round()
+                );
             }
             None => {}
         }
         // Keep the output pipes from filling up: a child blocked on a
         // full stdout would never exit, and we would never see it.
-        out.drain();
-        err.drain();
+        // **The byte counts are also the progress signal** — see
+        // `Deadline::WhileProgressing`.
+        if out.drain() + err.drain() > 0 {
+            last_output = Instant::now();
+        }
         if bytes.is_empty() {
             // Everything is written: close our write end so the child
             // sees EOF and can exit, then just keep reaping it.
@@ -446,18 +552,27 @@ impl<R: Read> Capture<R> {
     /// first would-block — never wait for EOF, which a grandchild
     /// holding the write end could postpone forever. EOF or a hard
     /// error retires the pipe.
-    fn drain(&mut self) {
+    ///
+    /// **Returns how many bytes arrived this call.** That count is what
+    /// [`Deadline::WhileProgressing`] means by progress: bytes on either
+    /// pipe are the only evidence, from outside, that the child is still
+    /// working. The count is the bytes READ, not the bytes kept — a
+    /// capture sitting at its limit still reports progress, or a chatty
+    /// child would be killed for being too chatty.
+    fn drain(&mut self) -> usize {
         let Some(pipe) = self.pipe.as_mut() else {
-            return;
+            return 0;
         };
         let mut chunk = [0u8; 4096];
+        let mut read = 0;
         loop {
             match pipe.read(&mut chunk) {
                 Ok(0) => {
                     self.pipe = None;
-                    return;
+                    return read;
                 }
                 Ok(n) => {
+                    read += n;
                     self.buf.extend_from_slice(&chunk[..n]);
                     if self.buf.len() > self.limit {
                         let excess = self.buf.len() - self.limit;
@@ -465,11 +580,11 @@ impl<R: Read> Capture<R> {
                         self.truncated = true;
                     }
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return read,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(_) => {
                     self.pipe = None;
-                    return;
+                    return read;
                 }
             }
         }
@@ -554,14 +669,18 @@ pub fn send_command(cmd: &str, text: &str) -> Result<()> {
 ///
 /// A non-zero exit carries the last non-empty line of stderr (else
 /// stdout) in the error, so the caller's toast can say *why*.
+///
+/// **The caller chooses the deadline policy** ([`Deadline`]), and
+/// `--semantic-cmd` is the one caller that does not want a wall-clock
+/// limit — see [`crate::semantic::COMMAND_IDLE_TIMEOUT`].
 pub(crate) fn run_capturing(
     label: &str,
     cmd: &str,
     text: &str,
-    timeout: Duration,
+    deadline: Deadline,
     stdout_limit: usize,
 ) -> Result<String> {
-    let out = run_child(label, "sh", &["-c", cmd], text, timeout, stdout_limit)?;
+    let out = run_child(label, "sh", &["-c", cmd], text, deadline, stdout_limit)?;
     if out.truncated {
         bail!("{label} wrote more than {stdout_limit} bytes to stdout");
     }
@@ -877,6 +996,114 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "the child must be killed, not waited for"
+        );
+    }
+
+    /// **`--send-cmd` の見切り方は変わっていない。** `--semantic-cmd` が
+    /// 無音で測るようになった（`Deadline::WhileProgressing`）あとも、
+    /// 配送側は壁時計のままである — 送信は文書の大きさに比例しないし、
+    /// 進捗を出しながら詰まっている子を待ち続ける理由が無い。
+    ///
+    /// 喋り続ける子を `pipe_and_wait` に渡し、**進捗では延命しない**ことと
+    /// 文言が従来どおり（`(backstop)` も `with no output` も付かない）こと
+    /// を確かめる。
+    #[test]
+    fn pipe_and_wait_still_uses_the_wall_clock_even_for_a_chatty_child() {
+        let start = Instant::now();
+        let err = super::pipe_and_wait(
+            "send command",
+            "sh",
+            // 10ms ごとに stderr へ 1 行出しながら、決して終わらない。
+            &["-c", "while :; do printf 'working\\n' >&2; sleep 0.01; done"],
+            "x",
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert_eq!(message, "send command timed out after 0.2s", "{message}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "進捗があっても壁時計で殺すこと（{:?} かかった）",
+            start.elapsed()
+        );
+    }
+
+    /// 無音の上限と backstop が、それぞれ自分の文言で止める。
+    ///
+    /// `run_capturing` の層で見ているのは、`--semantic-cmd` が通るのが
+    /// こちらだからである（[`super::Deadline::WhileProgressing`]）。
+    #[test]
+    fn run_capturing_distinguishes_a_silent_child_from_a_chatty_one() {
+        // 黙って寝ている子 — 無音の上限で止まる。
+        let start = Instant::now();
+        let err = super::run_capturing(
+            "--semantic-cmd",
+            "sleep 30",
+            "x",
+            super::Deadline::WhileProgressing {
+                idle: Duration::from_millis(200),
+                backstop: Duration::from_secs(30),
+            },
+            1 << 20,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("with no output"),
+            "無音であることを言うこと: {err}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+
+        // 喋り続ける子 — 無音では当たらないので backstop が止める。
+        let start = Instant::now();
+        let err = super::run_capturing(
+            "--semantic-cmd",
+            "while :; do printf 'working\\n' >&2; sleep 0.01; done",
+            "x",
+            super::Deadline::WhileProgressing {
+                idle: Duration::from_secs(30),
+                backstop: Duration::from_millis(300),
+            },
+            1 << 20,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("backstop"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    /// 進捗が続くかぎり、無音の上限を何倍越えても殺さない。
+    ///
+    /// **これが 60 秒の固定値をやめた中身である**（実測で 35 KB の文書が
+    /// 47 秒、同日の版が推定 74 秒。`super::Deadline` のコメント）。
+    ///
+    /// **無音の上限は出力の間隔より桁で大きく取る。** 本番は 30 秒に対して
+    /// 1 リクエスト 1.2 秒（25 倍）で、テストもその比を真似る —— 詰めると
+    /// **並列に走る他のテストの負荷で `sleep` が伸びて偽陽性になる**
+    /// （最初 100ms/30ms（3 倍）で書いて、`--workspace` の全 580 本と
+    /// 一緒に走らせたときだけ落ちた）。
+    #[test]
+    fn run_capturing_does_not_kill_a_child_that_keeps_talking() {
+        let start = Instant::now();
+        let out = super::run_capturing(
+            "--semantic-cmd",
+            // 50ms 間隔で 50 行 ≒ 2.5 秒。無音の上限 1.5 秒に対して
+            // 間隔は 30 倍の余裕があり、壁時計では上限を越えている。
+            "cat >/dev/null; \
+             i=0; while [ $i -lt 50 ]; do i=$((i+1)); \
+               printf 'round %s\\n' \"$i\" >&2; sleep 0.05; done; \
+             printf done",
+            "x",
+            super::Deadline::WhileProgressing {
+                idle: Duration::from_millis(1500),
+                backstop: Duration::from_secs(60),
+            },
+            1 << 20,
+        )
+        .expect("進捗があるかぎり殺さない");
+        assert_eq!(out, "done");
+        assert!(
+            start.elapsed() > Duration::from_millis(1500),
+            "無音の上限より長く生きたことを確かめる（{:?}）",
+            start.elapsed()
         );
     }
 

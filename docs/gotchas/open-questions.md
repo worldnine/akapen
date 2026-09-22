@@ -221,8 +221,7 @@ rule の列挙 1 箇所だけ）。**設計書は列挙のままにして、定�
 > 天井です（下の「5.3 分割後の天井」）。以下の「失敗」は**分割前**の記録です。
 
 **`--semantic-cmd` で Jev を繋いだとき、大きな文書の制約はタイムアウトでは
-ありません。** `COMMAND_TIMEOUT`（60 秒）には 15 倍以上の余裕があり、先に
-当たるのは Jev の **context window** です。超えると**約 1〜2 秒で** HTTP 400
+ありません。** 先に当たるのは Jev の **context window** です。超えると**約 1〜2 秒で** HTTP 400
 `max_tokens_exceeded` が返ります — 待っても変わりません。
 
 公式値は `https://docs.typesafe.ai/models.md` の Jev 1.13 の表にあります。逐語:
@@ -360,7 +359,11 @@ SUPPORTING 以上にだけ聞くようにして（[`redundancy_questions`]）、
 | `README.md`（28.2 KB） | **失敗**（推定 76k、116 %） | **50,895〜51,438 (78 %)** |
 | 実業務の `CLAUDE.md`（45.6 KB） | 60,772〜61,034 (93 %) | 40,911〜41,092 (62 %) |
 
-所要はどれも 2.2〜3.7 秒で、`COMMAND_TIMEOUT` には遠く届きません。
+所要はどれも 2.2〜3.7 秒でした（**2 ラウンドの頃の数字**です。9 種になった
+あとの実測は `examples/semantic/measurements/speed-and-limits.md`「第 2 版」に
+あり、35 KB の文書で 47 秒です。akapen 側の見切り方も壁時計の
+`COMMAND_TIMEOUT` から `COMMAND_IDLE_TIMEOUT`（無音 30 秒）＋
+`COMMAND_BACKSTOP`（600 秒）に変わっています）。
 
 **確認したこと**: `examples/semantic/jev-annotate.py` を akapen 抜きで単体実行し、
 5 文書（1,664 / 9,857 / 15,656 / 24,280 / 45,650 バイト）を 2 回ずつ、45,650
@@ -467,3 +470,47 @@ Tier 一致率は 4 文書 × 床と変種 × 4〜8 ラン、ラウンド 1 を 
 Unit の組を固定。表示は `decorate-report` を 65 KB / 248 Unit の
 `docs/gotchas.md` に当てた。**していないこと**: akapen 本体の TUI では開いて
 いません。並列化は測っていません。
+
+### 6. 取れたラウンドまでを使うには「劣化の印」が要る（2026-09-22 に評価だけした）
+
+`--semantic-cmd` が見切られると、読み手は**約 8 円払って何も得ません**。
+子が殺されるので stdout は空（アダプタは JSON を終了時に 1 回だけ書く）、
+`SemanticCache` にも入らないので開き直せばもう一度払います。
+
+**「取れたラウンドまでの結果を使う」案は、プロトコルの上では成立します。**
+`relations` / `core_atoms` / `section_of` はどれも省略可なので
+（`crates/semantic-reading/src/protocol.rs` のテスト
+`relations_may_be_omitted`）、**boundary ＋ tier だけの応答も妥当な
+`SemanticDocument`** です。得られるものと失うものは:
+
+| | boundary + tier だけのとき |
+| --- | --- |
+| DIM | **正しく出る**（Tier と Budget だけで決まる） |
+| MARKED | **粗くなる** — `core_atoms` が無いので Unit 丸ごと（核を入れる前の挙動） |
+| 冗長の沈み | 出ない（`relations` が空） |
+| 前提の波 | 出ない（同上） |
+| 見出しの追随 | **効く**（`section_of` は構文由来で Jev の判定ではない） |
+
+費用も安いです。35 KB の文書で **probe + boundary + tier = 5 リクエスト /
+5.4 秒 / 約 0.8 円** — 全体 47 秒・8.3 円の 11 % と 10 % です。
+
+**それでも実装していません。2 つ足りないからです。**
+
+1. **キャッシュの汚染。** `SemanticCache` のキーは
+   `sha256(source)` ＋ `sha256(--semantic-cmd の文字列)` だけなので、劣化した
+   文書も同じキーで `put` され、**一度掴むと二度と良くなりません**。
+   「劣化した結果はキャッシュしない」か「劣化の印を持つ」かのどちらかが
+   必須で、後者は**プロトコル変更**です（応答に新しいフィールドが要る）
+2. **読み手への表示が無い。** いまの akapen は劣化した文書と完全な文書を
+   区別できません。何の表示もないまま marks が粗くなるのは、
+   「動いているのに壊れて見える」の別の形です。ステータス行は
+   `READ 73%` と `analyzing…` しか持っていません
+
+**確認したこと**: `protocol.rs` の `relations_may_be_omitted` と
+「`core_atoms` は 3 値」の表。`src/semantic.rs::CommandProvider::analyze` が
+`cache.put` を成功時にだけ呼ぶこと（失敗時は書かない）。
+`src/app.rs::accept_analysis` が `Err` を `flash_err` へ渡すこと、
+`src/chrome.rs` の `read` クロージャが持つ状態が
+`analyzing…` / `READ n%` / 無表示の 3 つだけであること。
+ラウンドごとの内訳は
+`~/.local/share/akapen/evidence/runs/2026-09-22-command-timeout/README.md`。
