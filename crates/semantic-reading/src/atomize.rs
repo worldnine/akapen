@@ -36,6 +36,20 @@
 //! [`AtomKind`] も `ListItem` のままにする — 種別は「どの構文要素に
 //! 由来するか」であって、文の通し番号ではない。
 //!
+//! # 表は行へ割る
+//!
+//! 表だけは「1 ブロック 1 Atom」の例外で、**行**へ割る（ヘッダ行 ＋
+//! データ行）。割らないと、表を含む Unit で光らせられるのが「表全体」に
+//! なり、marks の売りである一文の精度が出ない。
+//!
+//! ヘッダ行の Atom は [`AtomKind::Table`]、データ行は
+//! [`AtomKind::TableRow`] である。**区切り行（`| - | - |`）は独立した
+//! Atom にしない** — ヘッダ行の Atom の末尾に含める。含めないと区切り行が
+//! どの Atom にも属さず、表が沈んだときにそこだけ NORMAL で光り残る。
+//!
+//! セルまでは割らない。1 行が「1 か所だけ読むならどこか」の答えになる
+//! 最小の単位で、セルは単独では読めない。
+//!
 //! # 敷き詰めない
 //!
 //! Atom 列は文書を隙間なく覆わない。空行、`---`、リストの入れ子の
@@ -84,7 +98,7 @@ pub fn atomize(source: &str) -> Vec<Atom> {
     while i < events.len() {
         let (event, range) = &events[i];
         match event {
-            // 見出し・コードブロック・表は中身を割らず、ブロックごと 1 Atom。
+            // 見出しとコードブロックは中身を割らず、ブロックごと 1 Atom。
             Event::Start(Tag::Heading { .. }) => {
                 atoms.push(range.clone(), AtomKind::Heading);
                 i = block_end(&events, i);
@@ -93,9 +107,11 @@ pub fn atomize(source: &str) -> Vec<Atom> {
                 atoms.push(range.clone(), AtomKind::CodeBlock);
                 i = block_end(&events, i);
             }
+            // 表だけは中身を割る。ヘッダ行（＋区切り行）とデータ行。
             Event::Start(Tag::Table(_)) => {
-                atoms.push(range.clone(), AtomKind::Table);
-                i = block_end(&events, i);
+                let end = block_end(&events, i);
+                push_table_rows(&mut atoms, source, &events[i..end]);
+                i = end;
             }
             // YAML front matter は本文ではないので Atom にしない。
             Event::Start(Tag::MetadataBlock(_)) => {
@@ -180,6 +196,36 @@ fn parse_options() -> Options {
     options.insert(Options::ENABLE_GFM);
     options.insert(Options::ENABLE_TABLES);
     options
+}
+
+/// 表の event 列から行の Atom を積む。
+///
+/// ヘッダ行は [`AtomKind::Table`]（表の枕）、データ行は
+/// [`AtomKind::TableRow`]。セルの event は見ない。
+fn push_table_rows(atoms: &mut Atoms<'_>, source: &str, table: &[(Event<'_>, Range<usize>)]) {
+    for (event, range) in table {
+        match event {
+            Event::Start(Tag::TableHead) => {
+                atoms.push(with_delimiter_row(source, range.clone()), AtomKind::Table);
+            }
+            Event::Start(Tag::TableRow) => atoms.push(range.clone(), AtomKind::TableRow),
+            _ => {}
+        }
+    }
+}
+
+/// ヘッダ行の範囲を、その下の区切り行の行末まで伸ばす。
+///
+/// `TableHead` の range はヘッダ行だけで、区切り行（`| - | - |`）には
+/// event が 1 つも無い。伸ばさないと区切り行がどの Atom にも属さず、
+/// 表が沈んだときにそこだけ NORMAL で残る。
+///
+/// **次の行の先頭ではなく改行の位置まで**にするのは、引用の中の表
+/// （`> | a |` / `> | - |`）で次の行の `> ` を飲み込まないためである。
+fn with_delimiter_row(source: &str, head: Range<usize>) -> Range<usize> {
+    let rest = source.get(head.end..).unwrap_or("");
+    let end = rest.find('\n').map_or(source.len(), |i| head.end + i);
+    head.start..end.max(head.end)
 }
 
 /// `events[start]` の `Start` に対応する `End` の 1 つ後ろの添字。
@@ -701,10 +747,53 @@ mod tests {
     }
 
     #[test]
-    fn a_table_is_one_atom() {
+    fn a_table_splits_into_a_head_and_rows() {
+        // ヘッダ行は区切り行まで含めて 1 Atom（表の枕）。データ行は 1 行ずつ。
         assert_eq!(
-            split("| a | b |\n| - | - |\n| 1 | 2 |\n"),
-            [("| a | b |\n| - | - |\n| 1 | 2 |", AtomKind::Table)]
+            split("| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n"),
+            [
+                ("| a | b |\n| - | - |", AtomKind::Table),
+                ("| 1 | 2 |", AtomKind::TableRow),
+                ("| 3 | 4 |", AtomKind::TableRow),
+            ]
+        );
+        // データ行が無くても枕は出る。
+        assert_eq!(
+            split("| a | b |\n| - | - |\n"),
+            [("| a | b |\n| - | - |", AtomKind::Table)]
+        );
+    }
+
+    #[test]
+    fn a_quoted_table_keeps_its_quote_marker_and_does_not_swallow_the_next_line() {
+        // 区切り行まで伸ばすとき、次の行の `> ` を飲み込まないこと。
+        assert_eq!(
+            split("> | a | b |\n> | - | - |\n> | 1 | 2 |\n"),
+            [
+                ("> | a | b |\n> | - | - |", AtomKind::Table),
+                ("> | 1 | 2 |", AtomKind::TableRow),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_at_the_end_of_the_document_without_a_newline_is_still_split() {
+        assert_eq!(
+            split("| a |\n| - |\n| 1 |"),
+            [("| a |\n| - |", AtomKind::Table), ("| 1 |", AtomKind::TableRow)]
+        );
+    }
+
+    #[test]
+    fn a_table_inside_a_list_item_stays_inside_the_item() {
+        // 項目の中の表は項目の Atom のまま（`inline_guards` が `.` での分割も
+        // 止める）。割るのはトップレベルの表だけである。
+        assert_eq!(
+            split("- 表です。\n\n  | a |\n  | - |\n  | 1 |\n"),
+            [
+                ("- 表です。", AtomKind::ListItem),
+                ("| a |\n  | - |\n  | 1 |", AtomKind::ListItem),
+            ]
         );
     }
 

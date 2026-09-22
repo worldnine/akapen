@@ -287,7 +287,7 @@ akapen 側のプロトコルは 1 往復（atoms in / units out）のままで�
 | - | ---- | ---- |
 | 1 | 次が `heading` | NEW_UNIT |
 | 2 | 現在が `heading` | SAME_UNIT（見出しは直後の内容に付く） |
-| 3 | どちらかが `code_block` / `table` | NEW_UNIT（単独の Unit） |
+| 3 | どちらかが `code_block` / `table` | NEW_UNIT（単独の Unit）。ただし**次が `table_row` なら SAME_UNIT** — 表は行へ割れても 1 Unit |
 | 4 | どちらも `list_item` | SAME_UNIT |
 | 5 | どちらも `sentence` | **Jev に聞く** |
 | 6 | それ以外 | NEW_UNIT（既定。引用と散文の間など） |
@@ -447,7 +447,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | 本当の上限は時間ではなく context window（≒ 65,536 input tokens）であること | [`measurements/speed-and-limits.md`](measurements/speed-and-limits.md) |
 | 時間の内訳 — question 数と state を独立に振ったときの効き方 | [`measurements/speed-and-limits.md`](measurements/speed-and-limits.md) |
 | リクエスト分割で 64k の側を外す — 5 文書の before / after、コスト、意味的な中立性、送れなかった question の落とし先 | [`measurements/request-splitting.md`](measurements/request-splitting.md) |
-| Atom を細かくするとどうなるか（文単位まで割ったときの見え方） | [`measurements/atom-granularity.md`](measurements/atom-granularity.md) |
+| Atom を細かくするとどうなるか（文単位まで割ったときの見え方。第 2 版は**表を行ごとに割った**とき — Atom の増分、DIM 版の Unit / Tier / 下限、marks で表が光るか） | [`measurements/atom-granularity.md`](measurements/atom-granularity.md) |
 | MARKED を Unit の核だけに絞ったときの比率 | [`measurements/core-selection.md`](measurements/core-selection.md) |
 | 核の問いを損失ベースの文面にしたときの比率 | [`measurements/core-selection.md`](measurements/core-selection.md) |
 | 箇条書きを項目ごとに割る（規則 4 の変更）と MARKED がどれだけ増えるか | [`measurements/lists-and-run-cap.md`](measurements/lists-and-run-cap.md) |

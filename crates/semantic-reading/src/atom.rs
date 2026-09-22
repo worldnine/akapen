@@ -44,8 +44,9 @@ impl Atom {
 /// Atom の構文上の種別。
 ///
 /// 設計書が挙げる sentence / list item / heading / code block / table /
-/// blockquote を持つ。将来 parser 側が増えても壊れないよう、
-/// 分類しきれないものは [`AtomKind::Other`] に落とす。
+/// blockquote を持つ。表だけは設計書より 1 段細かく、**行**まで割る
+/// （[`AtomKind::Table`] と [`AtomKind::TableRow`]）。将来 parser 側が
+/// 増えても壊れないよう、分類しきれないものは [`AtomKind::Other`] に落とす。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AtomKind {
@@ -57,8 +58,21 @@ pub enum AtomKind {
     Heading,
     /// フェンスまたはインデントされたコードブロック。
     CodeBlock,
-    /// 表。MVP では行 / セル単位まで割らなくてよい。
+    /// 表の**枕** — ヘッダ行と、その下の区切り行（`| - | - |`）。
+    ///
+    /// 表そのものは [`AtomKind::TableRow`] の行へ割る。ヘッダをデータ行と
+    /// 別の種別にしてあるのは、**ヘッダは「1 行だけ読むならどれか」の答えに
+    /// ならない**からで、判定器はこの種別を見て核の候補から落とす（列の名前
+    /// を挙げても中身を言ったことにならない。見出しと同じ理由である）。
+    ///
+    /// 区切り行を枕に含めるのは、含めないとそこがどの Atom にも属さず、
+    /// 行が沈んだときに `| - | - |` の 1 行だけが NORMAL で光り残るため。
     Table,
+    /// 表のデータ行 1 行。
+    ///
+    /// 表は 1 つの Unit のままで、**核だけが行に下りる**（表全体が 1 塊で
+    /// 光ると、marks の売りである一文の精度が出ない）。
+    TableRow,
     /// 引用ブロック。
     BlockQuote,
     /// 上記のいずれでもないもの。
@@ -101,13 +115,14 @@ mod tests {
             AtomKind::Heading,
             AtomKind::CodeBlock,
             AtomKind::Table,
+            AtomKind::TableRow,
             AtomKind::BlockQuote,
             AtomKind::Other,
         ];
         let json = serde_json::to_string(&kinds).unwrap();
         assert_eq!(
             json,
-            r#"["sentence","list_item","heading","code_block","table","block_quote","other"]"#
+            r#"["sentence","list_item","heading","code_block","table","table_row","block_quote","other"]"#
         );
         let back: Vec<AtomKind> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, kinds);
