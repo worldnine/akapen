@@ -44,10 +44,8 @@ pub(crate) const MARKS_FREE: char = '/';
 
 /// **フォーカス**（marks モードのみ）— マーカーの無い Unit を沈める。
 ///
-/// 短押しでトグル、押しっぱなしで押している間だけ沈む。**同じキーで
-/// 振る舞いが変わる**のは端末の都合で、`KeyEventKind::Release` の来る
-/// 端末（kitty keyboard protocol）でだけ hold になる
-/// （`crate::app::Focus`）。
+/// **トグルである**（押すたびに沈む / 戻る）。押している間だけ沈む形は
+/// 2026-09-22 に試して捨てた（`crate::focus`）。
 pub(crate) const MARKS_FOCUS: char = 'f';
 
 /// `]` / `[` に続けて打つと次・前のマーク行へ飛ぶ（marks モードのみ）。

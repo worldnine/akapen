@@ -996,17 +996,19 @@ impl App {
     /// 定型はその label をそのまま（英語）。**自由入力だけは違う** —
     /// そこに入っているのは読み手が打った文字そのもの（たいてい日本語）で、
     /// ラベルではない。英語の並びに生で混ざると「また日本語が混ざった」に
-    /// 見えるので、`Ask 「…」` の枠に入れて**`Ask` の引数**として読ませる。
+    /// 見えるので、`Ask: …` の枠に入れて**`Ask` の引数**として読ませる
+    /// （鉤括弧は日本語 UI の名残なので 2026-09-22 に外した。問いの本文は
+    /// 読み手が打ったままである）。
     ///
     /// 枠を付けるのがここなのは、[`crate::marks_questions::Questions::free`]
-    /// が作る `label` が**要求にも載る値**だからである（`Ask 「…」` を
+    /// が作る `label` が**要求にも載る値**だからである（`Ask: …` を
     /// Jev 側へ送る理由は無い）。
     pub(crate) fn marks_question_display(&self) -> Option<String> {
         let question = self.marks_question.as_ref();
         if let Some(question) = question
             && question.id == "free"
         {
-            return Some(format!("Ask 「{}」", question.label));
+            return Some(format!("Ask: {}", question.label));
         }
         self.marks_question_label().map(str::to_string)
     }
@@ -1029,15 +1031,6 @@ impl App {
     /// `f` の押下。画面が変わったら `true`。
     pub(crate) fn press_focus(&mut self, now: std::time::Instant) -> bool {
         if !self.marks_focus.press(now) {
-            return false;
-        }
-        self.refresh_semantic_decorations();
-        true
-    }
-
-    /// `f` を離した（Release の来る端末だけ）。画面が変わったら `true`。
-    pub(crate) fn release_focus(&mut self, now: std::time::Instant) -> bool {
-        if !self.marks_focus.release(now) {
             return false;
         }
         self.refresh_semantic_decorations();
