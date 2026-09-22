@@ -1562,6 +1562,10 @@ impl App {
             return false;
         }
         self.toast_fx.is_some()
+            // マーカーが引かれる演出（marks）。これが無いと、toast の
+            // 出ない経路（文書の再読み込みなど）で 700 ms が 100 ms の
+            // 刻みに落ちて 7 枚の飛び飛びになる。
+            || self.marks_fx.is_some()
             // The scrubber tooltip's exit dissolve is drawn by the bar
             // drawer itself (not a tachyonfx shader — hidden cells must
             // reveal the document, which a post-hoc shader cannot do),
