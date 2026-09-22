@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -2089,6 +2090,179 @@ class ContextPreservationTest(unittest.TestCase):
         # 前提を持っても REDUNDANT ではないので、核は捨てられない。
         self.assertNotEqual(u2.get("core_atoms"), None)
         self.assertEqual(out["jev"]["context"]["seeds"], [1])
+
+
+class MarksModeTest(unittest.TestCase):
+    """marks モード — 問いに答えている箇所だけを光らせる枝。
+
+    `docs/design/marks-only-and-review-mode.md` 0 節。**DIM 版のラウンドには
+    触っていない** — 分岐は [`annotate`] の冒頭 1 か所だけである。
+    """
+
+    SOURCE = "# 見出し\n\n決まったことを述べた文。まだ決まっていない文。\n\n次の段落である。\n"
+
+    def request(self, question=True):
+        atoms = [
+            {"index": 0, "kind": "heading", "text": "# 見出し", "range": [0, 10]},
+            {"index": 1, "kind": "sentence", "text": "決まったことを述べた文。", "range": [12, 48]},
+            {"index": 2, "kind": "sentence", "text": "まだ決まっていない文。", "range": [48, 81]},
+            {"index": 3, "kind": "sentence", "text": "次の段落である。", "range": [83, 107]},
+        ]
+        out = {"version": jev.VERSION, "source": self.SOURCE, "atoms": atoms}
+        if question:
+            out["question"] = {
+                "id": "settled",
+                "text": "下の「対象」は、決定・合意・確定した事柄を述べている箇所である。",
+                "core_floor": 0.20,
+            }
+        return out
+
+    def fake(self, scores):
+        """境界は NEW、marks は `scores` の順、核は最初の選択肢。"""
+        def ask(state, chunk, model, timeout):
+            answers = {}
+            for key in chunk:
+                if key.startswith("boundary:"):
+                    answers[key] = {"choice": jev.NEW, "confidence": 0.9}
+                elif key.startswith("marks:"):
+                    number = int(key.split("u")[1])
+                    answers[key] = {"noul": scores[number - 1]}
+                elif key.startswith("core:"):
+                    criteria = chunk[key]["criteria"]
+                    answers[key] = {"choice": sorted(criteria)[0], "confidence": 0.8}
+                else:
+                    answers[key] = {"noul": 0.5, "choice": "detail"}
+            return {"answers": answers}
+        return ask
+
+    def setUp(self):
+        # **実ユーザーの ~/.cache を書かない。** 境界のキャッシュはホームの
+        # 下に置くので、テストは自分の tmpdir を指す。
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved = os.environ.get("AKAPEN_CACHE_DIR")
+        os.environ["AKAPEN_CACHE_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("AKAPEN_CACHE_DIR", None)
+        else:
+            os.environ["AKAPEN_CACHE_DIR"] = self._saved
+        self._tmp.cleanup()
+
+    def test_a_request_without_a_question_takes_the_dim_path(self):
+        """**既定は DIM 版である。** `question` が無ければ従来どおり。"""
+        out = with_fake_ask(
+            self.fake([0.9, 0.9, 0.9, 0.9]),
+            lambda: jev.annotate(self.request(question=False), "m", 1.0),
+        )
+        self.assertNotIn("question", out)
+        self.assertEqual(out["jev"].get("mode"), None, "DIM 版に mode は無い")
+        self.assertTrue(all("score" not in u for u in out["units"]))
+
+    def test_the_answer_carries_the_question_and_a_score_per_unit(self):
+        out = with_fake_ask(
+            self.fake([0.10, 0.95, 0.30, 0.05]),
+            lambda: jev.annotate(self.request(), "m", 1.0),
+        )
+        self.assertEqual(out["question"], "settled")
+        # 見出しは後続に付くので Unit は Atom より少ない。**Unit ごとに
+        # 1 つ、順番どおり**であることを見る。
+        scores = [u.get("score") for u in out["units"]]
+        self.assertEqual(scores, [0.10, 0.95, 0.30][: len(scores)])
+        self.assertTrue(all(s is not None for s in scores))
+
+    def test_every_unit_claims_the_safe_tier(self):
+        """DIM 版の akapen がこの答えを読んでも**何も光らない**。"""
+        out = with_fake_ask(
+            self.fake([0.9, 0.9, 0.9, 0.9]),
+            lambda: jev.annotate(self.request(), "m", 1.0),
+        )
+        self.assertEqual(jev.MARKS_TIER, "detail")
+        self.assertTrue(all(u["reading_tier"] == "detail" for u in out["units"]))
+
+    def test_the_core_round_only_asks_about_units_over_the_floor(self):
+        asked = []
+
+        def watching(state, chunk, model, timeout):
+            asked.extend(chunk)
+            return self.fake([0.05, 0.95, 0.06, 0.04])(state, chunk, model, timeout)
+
+        with_fake_ask(watching, lambda: jev.annotate(self.request(), "m", 1.0))
+        cores = [k for k in asked if k.startswith("core:")]
+        # u2 だけが足切りを越えている。そこは 1 Atom なので Choice は
+        # 要らず（[`assign_lone_cores`]）、核の question は 0 本になる。
+        self.assertEqual(cores, [], f"聞いたのは {cores}")
+
+    def test_a_question_nothing_answers_asks_no_core_round_at_all(self):
+        """狭い問いでは核のラウンドごと消える（費用 0）。"""
+        rounds = []
+
+        def watching(state, chunk, model, timeout):
+            rounds.append(sorted(k.split(":")[0] for k in chunk)[0])
+            return self.fake([0.05, 0.07, 0.02, 0.01])(state, chunk, model, timeout)
+
+        out = with_fake_ask(watching, lambda: jev.annotate(self.request(), "m", 1.0))
+        self.assertNotIn("core", rounds, f"送ったラウンド: {rounds}")
+        self.assertTrue(all(u["core_atoms"] == [] for u in out["units"]))
+
+    def test_the_boundary_round_runs_once_and_then_comes_from_the_cache(self):
+        """**境界を 1 回取る（キャッシュ）** — 問いを変えても回し直さない。"""
+        rounds = []
+
+        def watching(state, chunk, model, timeout):
+            rounds.append([k for k in chunk if k.startswith("boundary:")])
+            return self.fake([0.9, 0.9, 0.9, 0.9])(state, chunk, model, timeout)
+
+        first = with_fake_ask(watching, lambda: jev.annotate(self.request(), "m", 1.0))
+        asked_first = sum(len(r) for r in rounds)
+        rounds.clear()
+        second = self.request()
+        second["question"] = dict(second["question"], id="unsettled", text="別の問い。")
+        out = with_fake_ask(watching, lambda: jev.annotate(second, "m", 1.0))
+        self.assertGreater(asked_first, 0, "1 回目は境界を聞く")
+        self.assertEqual(sum(len(r) for r in rounds), 0, "2 回目は聞かない")
+        self.assertFalse(first["jev"]["boundaries_cached"])
+        self.assertTrue(out["jev"]["boundaries_cached"])
+        # 同じ境界であること（Unit の切り方が変わっていない）。
+        self.assertEqual(
+            [u["atoms"] for u in first["units"]],
+            [u["atoms"] for u in out["units"]],
+        )
+
+    def test_the_boundary_cache_holds_no_prose(self):
+        """キャッシュに本文は 1 バイトも入らない（`public-repo.md` の扱い）。"""
+        with_fake_ask(
+            self.fake([0.9, 0.9, 0.9, 0.9]),
+            lambda: jev.annotate(self.request(), "m", 1.0),
+        )
+        path = jev.boundary_cache_path(self.SOURCE)
+        raw = path.read_text(encoding="utf-8")
+        for fragment in ("決まった", "見出し", "段落"):
+            self.assertNotIn(fragment, raw, raw)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_a_question_without_text_is_refused(self):
+        request = self.request()
+        request["question"] = {"id": "settled", "core_floor": 0.2}
+        with self.assertRaises(jev.JevError):
+            with_fake_ask(
+                self.fake([0.9, 0.9, 0.9, 0.9]),
+                lambda: jev.annotate(request, "m", 1.0),
+            )
+
+    def test_the_question_text_reaches_jev_verbatim(self):
+        claims = []
+
+        def watching(state, chunk, model, timeout):
+            claims.extend(q.get("claim", "") for k, q in chunk.items() if k.startswith("marks:"))
+            return self.fake([0.9, 0.9, 0.9, 0.9])(state, chunk, model, timeout)
+
+        with_fake_ask(watching, lambda: jev.annotate(self.request(), "m", 1.0))
+        text = self.request()["question"]["text"]
+        self.assertTrue(claims)
+        for claim in claims:
+            self.assertTrue(claim.startswith(text), claim[:60])
+            self.assertIn("――― 対象 ―――", claim)
 
 
 def with_fake_ask(fake, body):
