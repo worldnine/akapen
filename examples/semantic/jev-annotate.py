@@ -73,15 +73,25 @@ question**」（`docs.typesafe.ai/models.md`）。**後者を見落とすと、�
 
 ローカルの構造ルールは [`boundary_rule`] にある。
 
-## 鍵は環境変数だけを見る
+## 鍵は環境変数、無ければ macOS のキーチェーン
 
-`TYPESAFE_API_KEY` **のみ**。キーチェーンや `op` をここに埋めない。akapen は
-再解析のたびにこのスクリプトを起動し直すので、毎回 `security` や `op read` を
-叩くのは無駄（`op` なら生体認証が毎回出る）。そして akapen は OSS なので、
-macOS 固有の手段を埋めると他 OS で動かない。鍵の取り出し方の例は
-`examples/semantic/README.md` にある。
+`TYPESAFE_API_KEY` が先。**無ければ macOS のキーチェーン**
+（`security find-generic-password -s typesafe-jev -w`）を見る。
 
-鍵は stdout にも stderr にも出さない。
+**mac 固有の読み方をここに埋めてよい**（2026-09-22 の判断。以前の「埋めない」
+を上書きした）。理由は**環境変数が普遍の逃げ道として先にあるから**である。
+他 OS の人は `TYPESAFE_API_KEY` を export すれば済み、mac の分岐は
+`sys.platform == "darwin"` の内側にしか無いので誰も縛らない。逆に埋めないと、
+mac の人は akapen を起動するシェルの環境に鍵を持ち込む必要があり、
+`export AKAPEN_SEMANTIC_CMD=…` を `~/.zshrc` に 1 行書くだけで
+`akapen foo.md` が marks で開く、という形が作れない。
+
+`op` は埋めない。**生体認証が毎回出る**（akapen は再解析のたびにこの
+スクリプトを起動し直す）。`security` は無音で済む。それでも 1 プロセスの中で
+何度も叩かないよう、[`api_key`] は取り出した鍵を 1 回だけ覚える。
+
+鍵は stdout にも stderr にも出さない。`security` の出力も同じで、
+**失敗したときの診断にも一文字も混ぜない**（stdout は鍵そのものである）。
 """
 
 from __future__ import annotations
@@ -92,6 +102,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -1716,15 +1727,66 @@ def progress(questions: int, elapsed: float) -> None:
         pass
 
 
+#: キーチェーンに鍵を入れてあるサービス名（macOS）。
+#:
+#: 保存は `security add-generic-password -a "$USER" -s typesafe-jev -w` の 1 回
+#: だけで、**保存形式の説明は要らない**（そういうものだから）。
+KEYCHAIN_SERVICE = "typesafe-jev"
+
+#: [`api_key`] が一度取り出した鍵。**ここから先へ出さない。**
+#:
+#: [`ask_jev`] が 1 リクエストごとに [`api_key`] を呼ぶので、覚えないと
+#: 1 ラン（実測で 20 前後のリクエスト）のあいだ `security` を叩き続ける。
+_api_key: str | None = None
+
+
+def keychain_key() -> str:
+    """macOS のキーチェーンから鍵を読む。取れなければ空文字。
+
+    **取れない理由は言い分けない。** `security` が無い（他 OS・PATH に無い）、
+    項目が無い（終了コード非 0）、キーチェーンがロックされていてダイアログ待ち
+    （`timeout`）のどれでも「無い」で同じで、呼んだ側は次の手段へ進むだけである。
+
+    **`security` の出力を戻り値以外のどこにも渡さない。** stdout は鍵そのもの
+    なので、例外に添える・ログに出すといった普通の親切がそのまま漏洩になる。
+    """
+    if sys.platform != "darwin":
+        return ""
+    try:
+        proc = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
 def api_key() -> str:
-    """環境変数 `TYPESAFE_API_KEY` **だけ**を見る。値は絶対に出力しない。"""
-    key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+    """`TYPESAFE_API_KEY`、無ければ macOS のキーチェーン。値は絶対に出力しない。
+
+    優先順は **環境変数が先**である。mac 固有の読み方を埋めてよいのは、
+    この普遍の逃げ道が先にあるからで（冒頭の docstring）、環境変数が立って
+    いるときはキーチェーンを見にいかない。
+
+    どちらも無ければ止まる。エラーの一文には**保存のしかたも入れる** ——
+    [`main`] が [`one_line`] で改行を潰すので、akapen のステータス行に届くのは
+    1 行だけであり、「環境変数が無い」と「どう保存するか」が別の行になれない。
+    """
+    global _api_key
+    if _api_key is not None:
+        return _api_key
+    key = os.environ.get("TYPESAFE_API_KEY", "").strip() or keychain_key()
     if not key:
         raise JevError(
-            "TYPESAFE_API_KEY is not set. Run `export TYPESAFE_API_KEY=...` "
-            "and start akapen again (examples/semantic/README.md says where "
-            "the key lives)."
+            "TYPESAFE_API_KEY is not set. Export it, or on macOS save it once: "
+            'security add-generic-password -a "$USER" -s typesafe-jev -w'
         )
+    _api_key = key
     return key
 
 

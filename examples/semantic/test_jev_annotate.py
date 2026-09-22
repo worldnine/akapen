@@ -8,7 +8,7 @@
 - Jev のレスポンスを模したフィクスチャから Unit を組み立てる処理
 - ラウンド 3（Unit の核）を聞く対象の絞り方と、答えの書き戻し
 - `--dry-run` が送ろうとするリクエストの形（state / model / questions）
-- `TYPESAFE_API_KEY` 未設定時のエラー経路
+- 鍵の取り出し（環境変数 → macOS のキーチェーン → 案内つきで停止）
 
 の 5 つだけである。判定の質そのものは実測（`docs/` と README の表）で見る。
 
@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -1234,6 +1235,107 @@ class DryRunTest(unittest.TestCase):
         self.assertIn("読む優先度", question["criteria"]["same_unit"])
 
 
+class ApiKeyTest(unittest.TestCase):
+    """鍵の取り出し（[`jev.api_key`]）。**鍵の値はこのファイルに書かない。**
+
+    ここで使う `"k-" + "stub"` のような文字列は**テストの中で組み立てた偽物**で
+    あり、本物は環境変数か macOS のキーチェーンにしかない。`security` を本当に
+    走らせるテストは 1 つも無い（走らせると本物が返ってきて、失敗時の差分や
+    テストログに載りうる）。
+    """
+
+    STUB_KEY = "k-" + "stub-not-a-real-key"
+
+    def setUp(self):
+        # [`jev.api_key`] は取り出した鍵を覚えるので、テスト間で持ち越さない。
+        jev._api_key = None
+        self.addCleanup(setattr, jev, "_api_key", None)
+
+    def env(self, **values):
+        """`os.environ` を差し替える。既定では `TYPESAFE_API_KEY` を外す。
+
+        `patch.dict` は `start()` の時点の中身を丸ごと覚えて `stop()` で戻すので、
+        **`start()` の後に**消すぶんには元に戻る（前に消すと戻らない）。
+        """
+        patch = unittest.mock.patch.dict(os.environ, values, clear=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        if "TYPESAFE_API_KEY" not in values:
+            os.environ.pop("TYPESAFE_API_KEY", None)
+
+    def test_the_environment_variable_wins(self):
+        self.env(TYPESAFE_API_KEY=self.STUB_KEY)
+        with unittest.mock.patch.object(jev.subprocess, "run") as run:
+            self.assertEqual(jev.api_key(), self.STUB_KEY)
+        run.assert_not_called()
+
+    def test_the_keychain_answers_when_the_variable_is_unset(self):
+        self.env()
+        completed = subprocess.CompletedProcess([], 0, self.STUB_KEY + "\n", "")
+        with unittest.mock.patch.object(jev.sys, "platform", "darwin"):
+            with unittest.mock.patch.object(
+                jev.subprocess, "run", return_value=completed
+            ) as run:
+                self.assertEqual(jev.api_key(), self.STUB_KEY)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], "security")
+        self.assertIn(jev.KEYCHAIN_SERVICE, argv)
+        self.assertNotIn("shell", run.call_args.kwargs)
+        self.assertEqual(run.call_args.kwargs["timeout"], 5)
+
+    def test_the_keychain_is_read_once_per_process(self):
+        """[`jev.ask_jev`] が 1 リクエストごとに呼ぶので、覚えないと叩き続ける。"""
+        self.env()
+        completed = subprocess.CompletedProcess([], 0, self.STUB_KEY, "")
+        with unittest.mock.patch.object(jev.sys, "platform", "darwin"):
+            with unittest.mock.patch.object(
+                jev.subprocess, "run", return_value=completed
+            ) as run:
+                jev.api_key()
+                jev.api_key()
+        self.assertEqual(run.call_count, 1)
+
+    def test_a_non_zero_security_falls_through_to_the_error(self):
+        self.env()
+        completed = subprocess.CompletedProcess([], 44, "", "The specified item…")
+        with unittest.mock.patch.object(jev.sys, "platform", "darwin"):
+            with unittest.mock.patch.object(
+                jev.subprocess, "run", return_value=completed
+            ):
+                with self.assertRaises(jev.JevError) as caught:
+                    jev.api_key()
+        self.assertIn("TYPESAFE_API_KEY", str(caught.exception))
+        self.assertIn("add-generic-password", str(caught.exception))
+
+    def test_a_missing_security_binary_is_just_absence(self):
+        self.env()
+        with unittest.mock.patch.object(jev.sys, "platform", "darwin"):
+            with unittest.mock.patch.object(
+                jev.subprocess, "run", side_effect=FileNotFoundError
+            ):
+                with self.assertRaises(jev.JevError):
+                    jev.api_key()
+
+    def test_a_locked_keychain_does_not_hang_the_analysis(self):
+        """ダイアログ待ちは `timeout` で切れて「無い」になる。"""
+        self.env()
+        expired = subprocess.TimeoutExpired(["security"], 5)
+        with unittest.mock.patch.object(jev.sys, "platform", "darwin"):
+            with unittest.mock.patch.object(
+                jev.subprocess, "run", side_effect=expired
+            ):
+                with self.assertRaises(jev.JevError):
+                    jev.api_key()
+
+    def test_other_platforms_never_run_security(self):
+        self.env()
+        with unittest.mock.patch.object(jev.sys, "platform", "linux"):
+            with unittest.mock.patch.object(jev.subprocess, "run") as run:
+                with self.assertRaises(jev.JevError):
+                    jev.api_key()
+        run.assert_not_called()
+
+
 class MissingKeyTest(unittest.TestCase):
     def test_a_missing_key_exits_non_zero_with_one_actionable_line(self):
         request = {
@@ -1241,14 +1343,22 @@ class MissingKeyTest(unittest.TestCase):
             "source": "本文。",
             "atoms": [atom(0, "sentence", "本文。")],
         }
-        out = DryRunTest.run_script([], request)
+        # **キーチェーンに届かせない。** ここは別プロセスなので mock が効かず、
+        # mac で走らせると本物の鍵が見つかって成功してしまう。`security` の
+        # 無い PATH を渡して「鍵がどこにも無い」状況そのものを作る（`PATH=""`
+        # だと cwd 相対で探しにいくので、空のディレクトリを 1 つ置く）。
+        with tempfile.TemporaryDirectory() as empty:
+            out = DryRunTest.run_script([], request, env={"PATH": empty})
         self.assertNotEqual(out.returncode, 0)
         self.assertEqual(out.stdout, "")
         lines = [line for line in out.stderr.splitlines() if line.strip()]
-        self.assertEqual(len(lines), 1, out.stderr)
         # akapen はステータス行に stderr の最後の非空行を 160 字まで出す。
+        # **保存のしかたを別の行にできない**のはこれが理由で、`main` の
+        # `one_line` も改行を潰す。
+        self.assertEqual(len(lines), 1, out.stderr)
         self.assertLessEqual(len(lines[0]), 160)
         self.assertIn("TYPESAFE_API_KEY", lines[0])
+        self.assertIn("add-generic-password", lines[0])
 
     def test_a_broken_request_never_reaches_the_network(self):
         out = DryRunTest.run_script([], {"version": 99, "source": "", "atoms": []})
