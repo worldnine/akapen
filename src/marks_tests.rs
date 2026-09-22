@@ -15,7 +15,6 @@ use crate::highlight::Highlighter;
 use crate::ime::ImeMode;
 use crate::marks_questions::Questions;
 use crate::source::Source;
-use unicode_width::UnicodeWidthStr;
 use crate::view::ViewState;
 use semantic_reading::marks;
 use std::path::PathBuf;
@@ -162,7 +161,7 @@ fn a_scoreless_annotation_says_why_it_is_empty() {
     app.refresh_semantic_decorations();
     assert_eq!(app.marks_has_scores(), Some(false));
     assert!(marked(&app).is_empty());
-    let readout = app.marks_readout(200).expect("理由は必ず出る");
+    let readout = app.marks_readout(200).expect("理由は必ず出る").text();
     assert!(readout.contains("no scores"), "理由が出ていない: {readout}");
     // 誰のせいかまで言う。**逃げ道は無い** — DIM 版は消えたので、
     // 直すのは判定器の側である。
@@ -170,10 +169,11 @@ fn a_scoreless_annotation_says_why_it_is_empty() {
         readout.contains("the analyser returned none"),
         "誰のせいかが出ていない: {readout}"
     );
-    // フッタはもう読み出しを持たない（操作案内だけ）。
-    let footer = crate::chrome::footer_hints(&app);
-    assert!(!footer.contains("no scores"), "フッタに残っている: {footer}");
-    assert!(!footer.contains("MARK"), "フッタに残っている: {footer}");
+    // 理由はフッタ右下の読み出しに出る。**キー案内の側には混ざらない**
+    // （打てるキーの一覧と、押しても何も起きない値は別物である）。
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(!hints.contains("no scores"), "案内に混ざっている: {hints}");
+    assert!(!hints.contains("MARK"), "案内に混ざっている: {hints}");
 }
 
 #[test]
@@ -184,11 +184,16 @@ fn the_readout_counts_what_is_on_screen() {
         app.refresh_semantic_decorations();
         let readout = app.marks_readout(200).expect("問いも答えもある");
         let lit = app.marks_lit().unwrap();
-        assert!(readout.contains(&format!("{share}%")), "{readout}");
-        // 単位の「本」は 2026-09-22 に落とした（UI の言葉は全部英語）。
-        // 区切りごと見て、`20%` の `20` を拾ってしまわないようにする。
-        assert!(readout.contains(&format!("· {lit} ·")), "{readout}");
-        assert!(readout.contains("settled"), "問いの名前が出ている: {readout}");
+        assert!(readout.dim.contains(&format!("{share}%")), "{}", readout.text());
+        // 本数は**座布団に乗る**ので、薄い文の側には出ない（2026-09-22 に
+        // フッタ右下へ移した形）。前後 1 桁の余白は座布団の一部である。
+        assert_eq!(readout.lit, Some(lit));
+        assert_eq!(readout.count(), format!(" {lit} "));
+        assert!(
+            readout.dim.contains("settled"),
+            "問いの名前が出ている: {}",
+            readout.text()
+        );
         // 画面の本数と一致する（読み出しの数字が嘘をつかない）。
         assert_eq!(lit, marked(&app).len());
     }
@@ -207,25 +212,27 @@ fn a_free_question_reads_as_ask_colon() {
     app.marks_question = Some(questions.free("費用の話"));
 
     assert_eq!(app.marks_question_display().as_deref(), Some("Ask: 費用の話"));
-    let readout = app.marks_readout(200).expect("問いも答えもある");
+    let readout = app.marks_readout(200).expect("問いも答えもある").text();
     assert!(readout.starts_with("Ask: 費用の話 · "), "{readout}");
     assert!(!readout.contains('「'), "鉤括弧が残っている: {readout}");
 }
 
 #[test]
 fn the_readout_drops_from_the_right_when_the_room_runs_out() {
-    // **最後まで残るのは問いの名前である**（読み手の決定、2026-09-22）。
-    // % と本数はつまみを動かせば分かるが、名前が無いと「なぜここが
-    // 光っているのか」が読めない。
+    // **最後まで残るのは座布団の本数である**（読み手の決定、2026-09-22。
+    // フッタへ移したときに変わった）。いちばん小さくて意味がある値で、
+    // % は問いを覚えていれば足り、名前は popup でも `?` でも確かめられる。
     let app = app_with("demo-marks.json");
+    let lit = app.marks_lit().unwrap();
     let full = app.marks_readout(200).unwrap();
-    assert!(full.contains('%'), "広ければ全部出る: {full}");
+    assert!(full.dim.contains('%'), "広ければ全部出る: {}", full.text());
     let narrower = app.marks_readout(full.width() - 1).unwrap();
-    assert!(!narrower.contains('%'), "まず % が落ちる: {narrower}");
-    assert!(narrower.contains("settled"), "{narrower}");
+    assert!(!narrower.dim.contains('%'), "まず % が落ちる: {}", narrower.text());
+    assert!(narrower.dim.contains("settled"), "{}", narrower.text());
     let narrowest = app.marks_readout(narrower.width() - 1).unwrap();
-    assert_eq!(narrowest, "settled", "最後は問いの名前だけ: {narrowest}");
-    // それも入らなければ、何も言わずに引き下がる（path を削らない）。
+    assert_eq!(narrowest.dim, "", "最後は本数だけ: {}", narrowest.text());
+    assert_eq!(narrowest.lit, Some(lit));
+    // それも入らなければ、何も言わずに引き下がる。
     assert_eq!(app.marks_readout(narrowest.width() - 1), None);
 }
 
@@ -475,9 +482,13 @@ fn the_default_marks_mode_binds_nothing_without_a_layer() {
     let app = app_without_a_layer();
     assert!(!app.semantic_enabled(), "層は立っていない");
 
-    let footer = crate::chrome::footer_hints(&app);
-    assert!(!footer.contains("MARK"), "つまみの読み出しが出ている: {footer}");
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(!hints.contains("MARK"), "つまみの読み出しが出ている: {hints}");
     assert_eq!(app.marks_readout(60), None, "読み出しが出ている");
+    assert!(
+        crate::chrome::footer_metrics(&app, 120).readout.is_none(),
+        "層が無いのにフッタが読み出しの場所を取っている"
+    );
 
     let rows = crate::overlay::help_rows(false, false, false, app.semantic_enabled());
     assert!(
@@ -731,24 +742,174 @@ fn the_focus_badge_sits_in_the_mode_slot_and_yields_to_select() {
 
 // ---- 7. 読み出しの移設 --------------------------------------------------
 
-/// **読み出しはタイトル行に出て、フッタには出ない。** 画面のセルで見る
-/// （`title_metrics` と `footer_hints` を別々に呼ぶと、描かれているかは
-/// 分からない）。
+/// **読み出しはフッタの右下に出て、タイトル行には出ない**（2026-09-22 に
+/// 移した）。画面のセルで見る — `footer_metrics` と `title_metrics` を
+/// 別々に呼んでも、実際に描かれているかは分からない。
 #[test]
-fn the_readout_is_drawn_in_the_title_row_and_the_footer_only_hints_keys() {
+fn the_readout_is_drawn_at_the_footers_right_and_the_title_keeps_the_path() {
     let mut app = app_with("demo-marks.json");
     let backend = ratatui::backend::TestBackend::new(120, 24);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
     let screen = buffer_text(terminal.backend().buffer());
-    let mut rows = screen.lines();
-    let title = rows.next().unwrap();
-    assert!(title.contains("settled"), "問いがタイトルに無い:\n{screen}");
-    assert!(title.contains('%'), "つまみがタイトルに無い:\n{screen}");
+    let title = screen.lines().next().unwrap();
+    assert!(!title.contains("settled"), "タイトルに読み出しが残っている: {title}");
+    assert!(!title.contains('%'), "タイトルにつまみが残っている: {title}");
     let footer = screen.lines().last().unwrap();
-    assert!(!footer.contains("MARK"), "フッタに読み出しが残っている: {footer}");
+    assert!(footer.contains("settled"), "問いがフッタに無い:\n{screen}");
+    assert!(footer.contains('%'), "つまみがフッタに無い:\n{screen}");
     assert!(footer.contains("j/k scroll"), "操作案内が消えた: {footer}");
     assert!(footer.contains("f focus"), "f の案内が無い: {footer}");
+    // 読み出しは**右端**に寄る（本数の座布団の右の余白が最後の桁）。
+    let lit = app.marks_lit().unwrap();
+    assert!(
+        footer.trim_end().ends_with(&format!(" {lit}")),
+        "本数が右端に無い: {footer}"
+    );
+}
+
+/// **本数はマーカーと同じ琥珀の座布団に乗る。** セルの色で見る — 字面
+/// だけ見ていると、薄い灰のまま出ていても通ってしまう。
+#[test]
+fn the_count_sits_on_an_amber_cushion() {
+    let mut app = app_with("demo-marks.json");
+    // 静止した絵を見る（`docs/gotchas/rendering.md`「演出の立っている
+    // 1 枚目には琥珀が無い」）。
+    app.config.fx = false;
+    app.marks_fx = None;
+    app.readout_fx = None;
+    let amber = app.decoration_styles.mark_tick();
+    let lit = app.marks_lit().unwrap();
+    assert!(lit > 0, "座布団を敷く前提が崩れている");
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = 23;
+    let cushion: String = (0..120)
+        .filter(|x| buffer[(*x, row)].style().bg == Some(amber))
+        .map(|x| buffer[(x, row)].symbol().to_string())
+        .collect();
+    // 前後 1 桁の余白込み。`FOCUS` バッジも同じ琥珀なので、そちらが
+    // 出ていない VIEW のときだけこの形になる。
+    assert_eq!(cushion, format!(" {lit} "), "座布団が琥珀で敷かれていない");
+    let digit_x = (0..120u16)
+        .find(|x| buffer[(*x, row)].style().bg == Some(amber))
+        .unwrap()
+        + 1;
+    // **`Rgb(0,0,0)` であって `Color::Black` ではない** — フラッシュの
+    // lerp は RGB 同士でしか混ざらない（下のテストが理由を書いている）。
+    assert_eq!(
+        buffer[(digit_x, row)].style().fg,
+        Some(ratatui::style::Color::Rgb(0, 0, 0)),
+        "座布団の字が黒くない"
+    );
+}
+
+/// **300 ms のフラッシュは座布団の上にだけ乗る。**
+///
+/// 実機では速すぎて captured frame に写らない（CLI の往復が 300 ms より
+/// 遅い）ので、演出を途中まで進めた 1 枚をここで見る。`last_draw` を
+/// 過去にずらすと、`draw` が出す差分がそのまま演出の進み方になる。
+#[test]
+fn the_flash_lands_on_the_cushion_and_nowhere_else() {
+    use std::time::{Duration, Instant};
+    let mut app = app_with("demo-marks.json");
+    app.marks_fx = None;
+    let amber = app.decoration_styles.mark_tick();
+    let lit = app.marks_lit().unwrap();
+    assert!(lit > 0, "座布団を敷く前提が崩れている");
+
+    // 演出を立て、300 ms のうち 150 ms ぶん進んだところで 1 枚描く。
+    app.start_readout_flash();
+    assert!(app.readout_fx.is_some(), "演出が立っていない");
+    app.last_draw = Some(Instant::now() - Duration::from_millis(150));
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = 23;
+
+    // 座布団の桁。地色は琥珀のままで、**字が動いている**
+    // （静止時は黒。琥珀から黒へ落ちてくる途中なので、まだ黒ではない）。
+    let cushion: Vec<u16> = (0..120)
+        .filter(|x| buffer[(*x, row)].style().bg == Some(amber))
+        .collect();
+    // 前後 1 桁の余白込み（本数の桁数で幅は変わる）。
+    assert_eq!(cushion.len(), format!(" {lit} ").len(), "座布団の幅が違う");
+    let digit = buffer[(cushion[1], row)].style().fg.unwrap();
+    assert_ne!(
+        digit,
+        ratatui::style::Color::Rgb(0, 0, 0),
+        "座布団が光っていない（静止時の黒のまま）"
+    );
+    assert_ne!(digit, amber, "演出が始まっていない（alpha が 0 のまま）");
+    // **名前付きの色だと演出が素通りする。** `crate::view::lerp_color` は
+    // RGB 同士でしか混ぜず、それ以外は行き先をそのまま返す — 座布団の字を
+    // `Color::Black` にしていた最初の実装は、ここで 1 フレームも光らな
+    // かった（`docs/gotchas/rendering.md`）。
+    assert!(
+        matches!(digit, ratatui::style::Color::Rgb(..)),
+        "混ざった結果が RGB でない: {digit:?}"
+    );
+
+    // **左の薄い字には乗らない。** 面で掴んでいるので、同じ行に並ぶ
+    // `Essential · 20%` やキー案内は 1 桁も触られない。
+    let dim = buffer[(cushion[0] - 2, row)].style().fg;
+    assert_eq!(
+        dim,
+        Some(ratatui::style::Color::DarkGray),
+        "座布団の外まで光っている"
+    );
+}
+
+/// **タイムマシン中は読み出しが出ない**（過去の世代ではフッタを timeline
+/// bar が覆っている）。**マーカーは引かれたまま**である — 消えるのは
+/// 値の方だけ。
+#[test]
+fn the_readout_steps_aside_in_the_past() {
+    let mut app = app_with("demo-marks.json");
+    assert!(!app.is_historical(), "fixture は NOW から始まる");
+    let now = crate::chrome::footer_metrics(&app, 120);
+    assert!(now.readout.is_some(), "NOW では読み出しが出る");
+    assert!(now.flash_w > 0, "NOW では演出の面がある");
+
+    // 1 世代前へ入る（この fixture の App は git の外なので、履歴を
+    // 手で組む — 見たいのは「過去にいる」だけである）。
+    let revision = |short: &str| crate::history::Revision {
+        id: Some(format!("local:{short}")),
+        short_id: short.into(),
+        summary: "local snapshot".into(),
+        content: app.source.content.clone(),
+        source: crate::history::RevisionSource::Local,
+        timestamp_ms: None,
+    };
+    app.histories = vec![crate::history::DocumentHistory {
+        revisions: vec![revision("now"), revision("old")],
+        position: 1,
+        rendered_position: 1,
+        reviewed_id: None,
+        reviewed_content: None,
+    }];
+    assert!(app.is_historical());
+
+    let past = crate::chrome::footer_metrics(&app, 120);
+    assert!(past.readout.is_none(), "過去の世代で読み出しが出ている");
+    assert_eq!(past.flash_w, 0, "覆われた行で演出が走る");
+
+    // **立てた演出は 1 枚描いた時点で捨てられる。** 描かずに見送ると
+    // tachyonfx のタイマーが進まず、`done()` にならないまま
+    // `has_active_fx` が速いティックを掴み続ける（`crate::draw`）。
+    app.start_readout_flash();
+    assert!(app.readout_fx.is_some(), "演出が立っていない");
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    assert!(app.readout_fx.is_none(), "面の無い演出が残った");
+    // マーカーは残る（`refresh_semantic_decorations` は通っていない）。
+    assert!(!app.semantic_decorations.is_empty(), "マーカーまで消えた");
+    // 余った幅はキー案内に回る。
+    assert!(past.hints.len() >= now.hints.len(), "案内が戻っていない");
 }
 
 /// 層の無いセッションのタイトル行は**1 バイトも変わらない**。
@@ -837,44 +998,26 @@ fn no_track_no_ticks() {
     );
 }
 
-/// **タイトル行では読み出しが先に譲る**（案 1。読み手の決定 2026-09-22）。
+/// **タイトル行は層の有無で 1 桁も変わらない**（2026-09-22 に読み出しを
+/// フッタへ移したので、path の取り分を削る物がもう無い）。
 ///
 /// 測り方は「層の無いセッションと同じ path が出ること」である。path の
 /// 短縮には `~` 表記や `…/` があるので（`truncate_path`）、字面を焼き
-/// 込むと path の作法を変えたときに落ちる。見たいのは **読み出しが
-/// path の取り分を削っていない**ことだけ。
+/// 込むと path の作法を変えたときに落ちる。
 ///
-/// `marks_readout` 単体のテスト（上）では足りない — そちらは渡された幅に
-/// 収める関数で、**幅をどう配るか**はタイトルの側にある。実際にこの
-/// 配り方を間違えていた（path を先に削って読み出しを丸ごと残していた
-/// ＝ 案 2 の振る舞い）。
+/// **これが移した理由そのものである。** 前は読み出しがタイトルに同居
+/// していて、ファイル名が長いだけで丸ごと引き下がっていた。
 #[test]
-fn the_title_shrinks_the_readout_before_the_path() {
+fn the_title_never_yields_the_path_to_the_layer() {
     let app = app_with("demo-marks.json");
-    // 同じ文書を、層の無い（＝読み出しの無い）セッションで開いたもの。
+    // 同じ文書を、層の無いセッションで開いたもの。
     let bare = app_without_a_layer();
-
-    let wide = crate::chrome::title_metrics(&app, 200);
-    assert!(wide.readout.contains('%'), "広ければ読み出しは丸ごと");
-
-    let mut saw_a_shorter_readout = false;
-    let mut saw_no_readout = false;
-    for width in [120u16, 100, 90, 84, 80, 76, 72, 68] {
+    for width in [200u16, 120, 100, 90, 84, 80, 76, 72, 68, 60, 40] {
         let m = crate::chrome::title_metrics(&app, width);
         let without = crate::chrome::title_metrics(&bare, width);
-        assert_eq!(
-            m.path, without.path,
-            "幅 {width}: 読み出しが path の取り分を削った"
-        );
-        if m.readout.width() < wide.readout.width() {
-            saw_a_shorter_readout = true;
-        }
-        if m.readout.is_empty() {
-            saw_no_readout = true;
-        }
+        assert_eq!(m.path, without.path, "幅 {width}: path が層に削られた");
+        assert_eq!(m.path_w, without.path_w, "幅 {width}");
     }
-    assert!(saw_a_shorter_readout, "狭くしても読み出しが縮んでいない");
-    assert!(saw_no_readout, "最後まで引き下がらない");
 }
 
 /// **沈んだまま 0 本の問いへ移っても、`f` で戻れる。**

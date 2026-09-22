@@ -2661,6 +2661,11 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
                 // transient なので先に引き取り、沈めたままの画面で
                 // Esc を押した人が終了させられるのは事故なので手前で受ける。
                 app.flash("focus off");
+            } else if app.clear_marks_question() {
+                // **問いを消す**（`crate::keys::MARKS_CLEAR_HINT`）。
+                // 沈めるのを解くより下なのは、消すと次に問うたときに
+                // 解析をやり直す（＝お金がかかる）操作だからである。
+                app.flash("question cleared");
             } else if app.esc_quit_enabled() {
                 request_quit(app);
             }
@@ -3393,8 +3398,10 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
                 app.focused_deletion = None;
                 app.flash("deletion focus cancelled");
             } else if app.clear_focus() {
-                // view と同じ順（選択 → フォーカス → 終了）。
+                // view と同じ順（選択 → フォーカス → 問いを消す → 終了）。
                 app.flash("focus off");
+            } else if app.clear_marks_question() {
+                app.flash("question cleared");
             } else if app.esc_quit_enabled() {
                 request_quit(app);
             }
@@ -4169,21 +4176,31 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     if app.marks_fx.as_ref().is_some_and(|fx| fx.done()) || !app.config.fx {
         app.marks_fx = None;
     }
-    // 読み出しの 300 ms。**面で掴む**ので、タイトル行の読み出しが実際に
-    // 占めている矩形を `title_metrics` からもらう（描画と同じ計算なので、
-    // 光る場所と書いてある場所がずれようがない）。読み出しが出ていない
-    // ときは矩形が幅 0 になり、演出は空振りして消える。
+    // 読み出しの 300 ms。**面で掴む**ので、フッタの読み出しが実際に
+    // 占めている矩形を `footer_metrics` からもらう（描画と同じ計算なので、
+    // 光る場所と書いてある場所がずれようがない）。座布団があればその
+    // 4 桁だけ、無ければ読み出し全体 — 変わったのは本数だからである。
+    // 読み出しが出ていないときは矩形が幅 0 になり、演出は空振りして消える。
+    //
+    // timeline bar が出ている間は走らせない。バーがフッタを覆っている
+    // ので、光らせても見えるのはバーの字である。
     if app.config.fx && app.readout_fx.as_ref().is_some_and(|fx| !fx.done()) {
-        let m = crate::chrome::title_metrics(app, f.area().width);
+        let m = crate::chrome::footer_metrics(app, f.area().width);
         let rect = Rect {
-            x: m.readout_x,
-            y: 0,
-            width: m.readout_w,
+            x: m.flash_x,
+            y: f.area().height.saturating_sub(1),
+            width: m.flash_w,
             height: 1,
         };
-        if let Some(effect) = app.readout_fx.as_mut()
-            && rect.width > 0
-        {
+        if timeline_on || rect.width == 0 {
+            // **面が無いときは捨てる。描かないのではない。** tachyonfx の
+            // タイマーは `render_effect` の中でしか進まないので、描くのを
+            // 見送ると演出は永遠に `done()` にならない。すると下の後始末も
+            // 走らず、`App::has_active_fx` が旗を立てたままになって
+            // **イベントループが速いティックを掴み続ける**。NOW へ戻った
+            // 瞬間に何秒も前のフラッシュが再生される、というおまけも付く。
+            app.readout_fx = None;
+        } else if let Some(effect) = app.readout_fx.as_mut() {
             f.render_effect(effect, rect, last_tick);
         }
     }

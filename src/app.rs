@@ -18,6 +18,7 @@ use crate::highlight::{Highlighter, Span as HiSpan, TaggedLine, wrap_spans};
 use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
 use crate::overlay::Overlay;
+use crate::chrome::Readout;
 use crate::marks_questions::{Question, Questions};
 use crate::semantic::SemanticSource;
 use crate::snapshot::SnapshotCache;
@@ -233,8 +234,10 @@ pub(crate) struct App {
     /// （他の演出が `view_active()` の中にいるのは、時間旅行の枠のように
     /// view にしか無いものを描いているからである）。`--no-fx` は尊重する。
     pub(crate) marks_fx: Option<tachyonfx::Effect>,
-    /// タイトル右の読み出しが一瞬明るくなる演出（問い・つまみ・答えの
-    /// 変化）。`crate::effects::readout_flash_effect`。
+    /// フッタ右下の読み出しが一瞬明るくなる演出（問い・つまみ・答えの
+    /// 変化）。座布団があればそこだけが光る
+    /// （`crate::effects::readout_flash_effect`、面は
+    /// `crate::chrome::FooterLayout::flash_x`）。
     pub(crate) readout_fx: Option<tachyonfx::Effect>,
     /// Scatter-in effects for the blocks that appeared in the selected
     /// history revision: `(first display row, height, effect)` in
@@ -992,44 +995,93 @@ impl App {
         true
     }
 
-    /// **タイトル行の右に出す読み出し** — `Essential · 19 · 20%`。
+    /// **フッタ右下に出す読み出しの候補**（広い順）— `Essential · 20% ` ＋
+    /// 座布団の `13`。
     ///
-    /// `max_cols` に収まる形まで**右から落とす**（読み手の決定、
-    /// 2026-09-22）: `20%` → 本数 → 最後まで残るのが問いの名前。名前が
-    /// 無いと「なぜここが光っているのか」が読めないためで、%と本数は
-    /// つまみを動かせば分かる。
+    /// 縮む順は読み手の決定（2026-09-22）で、`20%` → 問いの名前 と落ち、
+    /// **座布団の本数が最後まで残る**。いちばん小さくて意味がある値
+    /// だからで、%は問いを覚えていれば足りるし、名前は `?` でも popup でも
+    /// 確かめられる。どれも入らなければ呼び手が丸ごと引き下げる
+    /// （[`crate::chrome::footer_layout`]）。
     ///
-    /// 分岐はフッタから引っ越してきたもので、**文言は 1 字も変えていない**
-    /// （`crate::chrome::footer_hints` の marks の節にあったもの）。
-    pub(crate) fn marks_readout(&self, max_cols: usize) -> Option<String> {
-        use unicode_width::UnicodeWidthStr;
-        let fits = |candidates: &[String]| -> Option<String> {
+    /// 層の無いセッションでは空。**幅の計算はここにしない** — 収まるかを
+    /// 決めるのはフッタの側である。
+    pub(crate) fn marks_readouts(&self) -> Vec<Readout> {
+        let state = |candidates: Vec<String>| -> Vec<Readout> {
             candidates
-                .iter()
-                .find(|text| UnicodeWidthStr::width(text.as_str()) <= max_cols)
-                .cloned()
+                .into_iter()
+                .map(|dim| Readout { dim, lit: None })
+                .collect()
         };
         let question = self.marks_question_display();
         if self.semantic_inflight.is_some() {
             // 解析中だけは**問いの名前から落とす**。まだ 1 本も光っていない
             // ので「なぜ光っているか」は無く、要るのは「待っている」の方。
             let asking = question.unwrap_or_else(|| "…".to_string());
-            return fits(&[format!("{asking} · analyzing…"), "analyzing…".to_string()]);
+            return state(vec![format!("{asking} · analyzing…"), "analyzing…".to_string()]);
         }
         if self.marks_has_scores() == Some(false) {
-            return fits(&[
+            return state(vec![
                 "no scores in this answer — the analyser returned none".to_string(),
                 "no scores in this answer".to_string(),
                 "no scores".to_string(),
             ]);
         }
-        let question = question?;
-        let lit = self.marks_lit()?;
-        fits(&[
-            format!("{question} · {lit} · {}%", self.marks_share),
-            format!("{question} · {lit}"),
-            question,
-        ])
+        let (Some(question), Some(lit)) = (question, self.marks_lit()) else {
+            return Vec::new();
+        };
+        // **末尾の空白 1 桁は薄い方に付ける**（読み手の注文、2026-09-22 の
+        // 実機）。座布団の左の余白は琥珀なので、それだけだと `20%` と
+        // 琥珀が地続きに見える。薄い空白を 1 桁挟むと離れる。
+        // 本数だけまで縮んだ段（`dim` が空）には付けない — 前に何も無い。
+        vec![
+            Readout {
+                dim: format!("{question} · {}% ", self.marks_share),
+                lit: Some(lit),
+            },
+            Readout { dim: format!("{question} "), lit: Some(lit) },
+            Readout { dim: String::new(), lit: Some(lit) },
+        ]
+    }
+
+    /// `max_cols` に収まるいちばん広い候補。
+    ///
+    /// 描画は通らない — フッタは候補の列をそのまま受け取って、案内を
+    /// 落とす所まで含めて配る（[`crate::chrome::footer_layout`]）。
+    /// 読み出しを「1 つの値」として見たいテストの口である。
+    #[cfg(test)]
+    pub(crate) fn marks_readout(&self, max_cols: usize) -> Option<Readout> {
+        self.marks_readouts()
+            .into_iter()
+            .find(|readout| readout.width() <= max_cols)
+    }
+
+    /// **問いを消す**（Esc）。消したら `true`。
+    ///
+    /// マーカーも読み出しも消えて、層を渡す前の画面へ戻る。つまみ
+    /// （`marks_share`）は残す — 次に問うたときに前の位置から見たい値で、
+    /// 「問いを消す」は量の好みを消す話ではない。
+    ///
+    /// **走っている解析も切る。** 世代を 1 つ進めるので、あとから届く答えは
+    /// [`Self::accept_analysis`] が古い世代として捨てる。切らないと、消した
+    /// 数百 ms 後にマーカーが独りでに戻ってくる。
+    ///
+    /// fixture 経路（`--semantic <fixture.json>`）では**断る**。そこは問いを
+    /// 選び直す道が無いので（`m` / `M` / `/` はどれも `false` を返す）、
+    /// 消すと二度と戻せない。
+    pub(crate) fn clear_marks_question(&mut self) -> bool {
+        if self.marks_question_is_fixed() {
+            return false;
+        }
+        if self.marks_question.is_none() && self.semantic_doc.is_none() {
+            return false;
+        }
+        self.marks_question = None;
+        self.semantic_doc = None;
+        self.semantic_generation += 1;
+        self.semantic_inflight = None;
+        self.refresh_semantic_decorations();
+        true
     }
 
     /// **定型を次へ巡る**（`m`）。巡ったら `true`。

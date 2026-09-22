@@ -495,11 +495,14 @@ pub(crate) fn help_rows(
         // （2026-09-22 の実機）。ヘルプが切れるのは、いちばん読まれる
         // 場面で読めないということである。
         rows.push(("mark", "m what to mark · M previous · / ask your own"));
-        rows.push(("amount", "-/+ ±1 · </> ±10 (count and % in the title bar)"));
+        rows.push(("amount", "-/+ ±1 · </> ±10 (count and % at the footer's right)"));
         // **トグル 1 つ**（`crate::focus`）。押している間だけ沈む形は
         // 試して捨てたので、端末による違いをここに書くことは無い。
         rows.push(("focus", "f sink everything unmarked (toggle) · Esc off"));
         rows.push(("marks", "]m next mark · [m previous mark"));
+        // 問いを消す道。`f` の Esc（沈めるのを解く）とは別の段で、
+        // 沈んでいれば先にそちらが取る（`crate::keys::MARKS_CLEAR_HINT`）。
+        rows.push(("clear", crate::keys::MARKS_CLEAR_HINT));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows

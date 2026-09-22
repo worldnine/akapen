@@ -6587,7 +6587,7 @@ fn without_semantic_the_layer_keys_are_not_bound_at_all() {
     );
 }
 
-/// 読み出しはタイトル行に出るが、semantic doc が読めているときだけ。
+/// 読み出しはフッタの右端に出るが、semantic doc が読めているときだけ。
 #[test]
 fn the_readout_appears_only_with_a_semantic_document() {
     let fixture = std::path::PathBuf::from(concat!(
@@ -6619,11 +6619,11 @@ fn the_readout_appears_only_with_a_semantic_document() {
     app.marks_question = app.marks_questions.as_ref().map(|q| q.presets()[0].clone());
 
     let readout = app.marks_readout(60).expect("注釈があれば読み出しが出る");
-    assert!(readout.contains("40%"), "{readout}");
+    assert!(readout.text().contains("40%"), "{}", readout.text());
     // モードによらず同じ読み出しになる（文書の性質であってモードの
     // 性質ではない）。キー操作は view だけ。
     app.mode = Mode::Source;
-    assert_eq!(app.marks_readout(60).as_deref(), Some(readout.as_str()));
+    assert_eq!(app.marks_readout(60), Some(readout));
     assert!(
         crate::overlay::help_rows(false, false, false, true)
             .iter()
@@ -6722,6 +6722,96 @@ fn pump_until_idle(app: &mut App, what: &str) {
     }
 }
 
+/// **Esc で問いを消す。** マーカーも読み出しも消えて、層を渡す前の画面に
+/// 戻る（`crate::keys::MARKS_CLEAR_HINT`）。
+#[test]
+fn esc_clears_the_question_and_everything_it_painted() {
+    let (mut app, _dir) = semantic_markdown_app();
+    install_semantic_command(&mut app, &reference_semantic_command());
+    app.reanalyze_semantics();
+    pump_until_idle(&mut app, "最初の解析");
+    assert!(app.semantic_doc.is_some());
+    assert!(!app.semantic_decorations.is_empty(), "マーカーが引かれている");
+    assert!(app.marks_readout(200).is_some(), "読み出しが出ている");
+    let share = app.marks_share;
+
+    on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+
+    assert!(app.marks_question.is_none(), "問いが残っている");
+    assert!(app.semantic_doc.is_none(), "注釈が残っている");
+    assert!(app.semantic_decorations.is_empty(), "マーカーが残っている");
+    assert_eq!(app.marks_readout(200), None, "読み出しが残っている");
+    assert!(app.running, "Esc が終了まで落ちた");
+    // **つまみは残る。** 消したのは問いであって、量の好みではない。
+    assert_eq!(app.marks_share, share);
+    // source モードでも同じ（Esc の順は 2 つのモードで揃えてある）。
+    assert!(app.ask_marks_preset(0));
+    pump_until_idle(&mut app, "もう一度聞く");
+    assert!(app.semantic_doc.is_some());
+    app.mode = Mode::Source;
+    on_source_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+    assert!(app.semantic_doc.is_none(), "source モードで消えない");
+}
+
+/// **走っている解析も切る。** 切らないと、消した数百 ms 後にマーカーが
+/// 独りでに戻ってくる（世代を進めて、遅れて届く答えを捨てる）。
+#[test]
+fn esc_does_not_let_an_in_flight_answer_paint_the_page_again() {
+    let (mut app, _dir) = semantic_markdown_app();
+    install_semantic_command(&mut app, &reference_semantic_command());
+    // 1 度走らせて、この文書に対する本物の答えを取っておく。
+    app.reanalyze_semantics();
+    pump_until_idle(&mut app, "答えの見本を取る");
+    let answer = app.semantic_doc.clone().expect("注釈が入ること");
+    assert!(app.clear_marks_question(), "一旦消す");
+    app.marks_question = app.marks_questions.as_ref().map(|q| q.presets()[0].clone());
+
+    app.reanalyze_semantics();
+    let generation = app.semantic_generation;
+    assert_eq!(app.semantic_inflight, Some(generation), "まだ走っている");
+
+    on_view_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, None);
+    assert!(app.semantic_inflight.is_none(), "走っている印が残っている");
+    assert!(app.semantic_generation > generation, "世代が進んでいない");
+
+    // 走っていたスレッドの答えが遅れて届く。**捨てられること。**
+    //
+    // `answer` はこの文書の本物の注釈である（下で 1 度走らせて取った）—
+    // 文書違いで弾かれたのでは、世代を見ているかが分からない。届け方は
+    // `accept_analysis` を直に呼ぶ形にしてある。スレッドから来る答えも
+    // `poll_semantic_analysis` がここへ渡すので、同じ 1 か所である。
+    app.accept_analysis(AnalysisMessage { generation, result: Ok(answer) });
+    assert!(app.semantic_doc.is_none(), "消したあとにマーカーが戻った");
+}
+
+/// **fixture 経路では断る。** `--semantic <fixture.json>` は問いを選び直す
+/// 道が無い（`m` / `M` / `/` はどれも `false`）ので、消すと戻れなくなる。
+#[test]
+fn esc_refuses_to_clear_a_fixture_answer() {
+    let (mut app, dir) = semantic_markdown_app();
+    // fixture の答えは 1 つの文書に紐づいている（`source_sha256`）ので、
+    // 開いている本文の方を demo.md に合わせる。
+    std::fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.md"),
+        dir.path().join("doc.md"),
+    )
+    .unwrap();
+    reload_source(&mut app, false).unwrap();
+    let fixture = dir.path().join("marks.json");
+    std::fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo-marks.json"),
+        &fixture,
+    )
+    .unwrap();
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Inline(
+        crate::semantic::load_fixture(&fixture).unwrap(),
+    )));
+    app.reanalyze_semantics();
+    assert!(app.semantic_doc.is_some());
+    assert!(!app.clear_marks_question(), "fixture の答えを消した");
+    assert!(app.semantic_doc.is_some(), "戻れない状態にした");
+}
+
 /// **遅延。** 開いただけでは外部コマンドが 1 度も起きず、問いを決めた
 /// 最初の 1 打で初めて解析が始まる。
 ///
@@ -6814,7 +6904,7 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
     assert!(app.semantic_doc.is_none(), "解析はまだ走っているだけ");
     assert_eq!(app.semantic_inflight, Some(1));
     // 読み出しは黙らずに「解析中」と言う。
-    let readout = app.marks_readout(60).expect("読み出しが出ること");
+    let readout = app.marks_readout(60).expect("読み出しが出ること").text();
     assert!(readout.contains("analyzing"), "{readout}");
 
     pump_until_idle(&mut app, "最初の解析");
@@ -6826,7 +6916,7 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
     );
     assert!(!app.semantic_decorations.is_empty());
     // 答えが来たら「解析中」は消え、問い・本数・% の読み出しだけが残る。
-    let readout = app.marks_readout(60).expect("読み出しが出ること");
+    let readout = app.marks_readout(60).expect("読み出しが出ること").text();
     assert!(!readout.contains("analyzing"), "{readout}");
     assert!(readout.contains('%'), "{readout}");
 }
