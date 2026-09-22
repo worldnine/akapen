@@ -44,6 +44,18 @@ pub(crate) const MARKS_FREE: char = '/';
 /// 2026-09-22 に試して捨てた（`crate::focus`）。
 pub(crate) const MARKS_FOCUS: char = 'f';
 
+/// **問いを消す**（Esc）。マーカーも読み出しも消える。
+///
+/// `KeyCode::Esc` は char ではないので [`semantic_key`] の表には載らない
+/// — ここに置いてあるのは**順番**である。Esc には先客が何人もいて、
+/// 終了確認 → 選択解除 → フォーカスを解く → **問いを消す** → 終了、の
+/// 順に受ける（popup と composer はそもそも別のハンドラが先に取る）。
+/// いちばん最後に近いのは、消すと解析をやり直す操作だからで、反射で
+/// 押した Esc がそこまで落ちてくることは無い。
+///
+/// 文字列そのものが `?` ヘルプの行になる（`crate::overlay::help_rows`）。
+pub(crate) const MARKS_CLEAR_HINT: &str = "Esc clear the question (marks and readout go)";
+
 /// `]` / `[` に続けて打つと次・前のマーク行へ飛ぶ。
 ///
 /// **chord の 2 打目**であって単独のキーではない（`]c` のレビューマーク
