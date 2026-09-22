@@ -2254,7 +2254,7 @@ class MarksModeTest(unittest.TestCase):
         claims = []
 
         def watching(state, chunk, model, timeout):
-            claims.extend(q.get("claim", "") for k, q in chunk.items() if k.startswith("marks:"))
+            claims.extend(q.get("instructions", "") for k, q in chunk.items() if k.startswith("marks:"))
             return self.fake([0.9, 0.9, 0.9, 0.9])(state, chunk, model, timeout)
 
         with_fake_ask(watching, lambda: jev.annotate(self.request(), "m", 1.0))

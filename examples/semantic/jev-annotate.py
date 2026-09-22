@@ -2101,7 +2101,11 @@ def marks_questions(atoms: list[dict], units: list[list[int]], text: str) -> dic
     return {
         f"marks:u{number}": {
             "type": "noul",
-            "claim": text + MARKS_FRAME.format(body=unit_body(atoms, indices)),
+            # **`instructions` である。** Noul の主張は `instructions` に置く
+            # （`PROBE_QUESTION` / `REDUNDANCY_PAIR` / `CONTEXT_STAGE1` と
+            # 同じ形）。別の名前で送ると HTTP 400
+            # 「Noul question must have criteria or instructions」になる。
+            "instructions": text + MARKS_FRAME.format(body=unit_body(atoms, indices)),
         }
         for number, indices in enumerate(units, start=1)
     }
