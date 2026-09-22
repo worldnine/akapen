@@ -44,6 +44,8 @@ fn app_with(fixture: &str) -> App {
         semantic: Some(demo(fixture)),
         semantic_cmd: None,
         marks_questions: None,
+        review_rules: None,
+        review_json: false,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -77,6 +79,8 @@ fn app_without_a_layer() -> App {
         semantic_cmd: None,
         // **既定をそのまま使う。** ここを書くとこのテストの意味が消える。
         marks_questions: None,
+        review_rules: None,
+        review_json: false,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };

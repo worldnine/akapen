@@ -26,6 +26,8 @@ mod marks_questions;
 mod overlay;
 mod reload;
 mod render;
+mod review;
+mod review_rules;
 mod semantic;
 mod semantic_cache;
 mod snapshot;
@@ -129,6 +131,13 @@ fn main() -> Result<()> {
                  \x20 --marks-questions <file>  read the marks questions from this\n\
                  \x20                   JSON instead of the built-in five (also\n\
                  \x20                   $XDG_CONFIG_HOME/akapen/marks-questions.json)\n\
+                 \x20 --review-rules <file>  read the Review rules (R) from this JSON\n\
+                 \x20                   instead of the built-in three (also\n\
+                 \x20                   $XDG_CONFIG_HOME/akapen/review-rules.json)\n\
+                 \x20 --review-json     print the Review candidates as JSON and exit,\n\
+                 \x20                   without starting the TUI (lines, rule, action\n\
+                 \x20                   and score only — never the document text).\n\
+                 \x20                   Needs --semantic-cmd\n\
                  \x20 --semantic-cache-clear  wipe that cache and exit (needed after\n\
                  \x20                   changing an analyser's prompts without\n\
                  \x20                   changing its command line)\n\
@@ -360,6 +369,12 @@ impl<W: std::io::Write + Send> Backend for NoBlinkBackend<W> {
 pub(crate) type AppTerminal = ratatui::Terminal<NoBlinkBackend<std::io::Stdout>>;
 
 fn run(config: Config) -> Result<()> {
+    // `--review-json` は TUI を立てない。端末にも IME にも触る前に抜ける
+    // — stdout へ JSON を出すだけの経路が raw mode を通ると、パイプの
+    // 向こうが制御シーケンスを受け取る。
+    if config.review_json {
+        return run_review_json(&config);
+    }
     // A piped/redirected stdin must not kill the TUI (see above).
     ensure_terminal_stdin();
     // Compile the macOS IME helper in the background so the first composer
@@ -515,6 +530,60 @@ fn run(config: Config) -> Result<()> {
         let _ = Command::new("sh").arg("-c").arg(cmd).spawn();
     }
     res
+}
+
+/// `--review-json`: 有効なルールの候補を JSON で stdout に出して終わる。
+///
+/// **TUI は立たない。** 端末にも IME にも触らないので、パイプの向こうは
+/// JSON だけを受け取る。段階 2（LLM へ送る側）と LSP の入口である。
+///
+/// 経路は `R` とまったく同じ — 同じルール、同じ
+/// [`crate::semantic::CommandProvider`]、同じキャッシュ、同じ足切り、
+/// 同じ `dismissed.jsonl` の除外である。**捨てた候補は出さない**: 捨てる
+/// という操作は「これは候補ではない」と読み手が言ったことで、出力先が
+/// 画面かパイプかでその判断が変わる理由が無い。
+///
+/// 解析は**逐次**に走らせる（ルール 1 本ずつ）。TUI と違って待っている
+/// 人が居ないので、スレッドを増やして判定器を同時に叩く理由が無い。
+fn run_review_json(config: &Config) -> Result<()> {
+    use anyhow::{Context, bail};
+    let rules = review_rules::Rules::discover(config.review_rules.as_deref())?;
+    let Some(semantic::SemanticSource::Command(provider)) =
+        semantic::source_from_config(config)?
+    else {
+        // `Config::parse` が弾いているので、ここへは来ない。
+        bail!("--review-json needs --semantic-cmd");
+    };
+    // 1 文書だけを見る。複数渡されたら先頭 — 出力が 1 つの `source_sha` を
+    // 名乗る形なので、2 つ目以降を黙って混ぜることはできない。
+    let path = &config.files[0];
+    let source = Source::load(path.clone())?;
+    let sha = semantic::source_digest(&source.content);
+    let dismissed = review::DismissedStore::discover()
+        .map(|store| store.load(&sha))
+        .unwrap_or_default();
+    let mut candidates = Vec::new();
+    for rule in rules.enabled() {
+        let document = provider
+            .analyze(&source.content, &rule.question())
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("review rule `{}`", rule.id))?;
+        candidates.extend(
+            review::candidates_for(&document, rule, &source.content)
+                .into_iter()
+                .filter(|c| {
+                    !dismissed.contains(&(c.rule.clone(), c.range.start, c.range.end))
+                }),
+        );
+    }
+    candidates.sort_by(|a, b| {
+        a.range
+            .start
+            .cmp(&b.range.start)
+            .then(a.rule.cmp(&b.rule))
+    });
+    println!("{}", review::to_json(&sha, &candidates)?);
+    Ok(())
 }
 
 /// Events processed per frame at most, so a pathological input flood can't
