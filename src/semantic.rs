@@ -253,10 +253,6 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 /// `[]` なら「核を持たない」でその Unit は MARKED にならない、`[i]` なら
 /// `i` だけが MARKED（`protocol.rs` の「`core_atoms` は 3 値」）。
 ///
-/// `section_of` も任意で、その Unit が属する節の見出し Unit を指す。
-/// **この層に読み手は居ない**（`crates/semantic-reading/src/unit.rs`）—
-/// 構文から決まる値をワイヤに載せているだけである。
-///
 /// # コマンドは range を返さない
 ///
 /// **Atom 生成は akapen 側**で行う（設計書「Jev に判断させないもの:
@@ -929,8 +925,6 @@ mod tests {
             (r#"{"version":1,"units":[{"id":"u1","atoms":[0]},{"id":"u1","atoms":[1]}]}"#, "duplicate"),
             // 自分の atom でない核
             (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"core_atoms":[1]}]}"#, "core atom 1"),
-            // 存在しない節の見出し
-            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"section_of":"u9"}]}"#, "unknown section head"),
             // version 不一致
             (r#"{"version":7,"units":[{"id":"u1","atoms":[0]}]}"#, "version 7"),
             // JSON ですらない
@@ -1235,4 +1229,3 @@ mod tests {
         assert!(source_from_config(&config).unwrap().is_some());
     }
 }
-
