@@ -96,8 +96,10 @@ pub const SCORE_FLOOR: f32 = 0.20;
 /// 光る Unit を、スコアの降順（同点は文書順）で返す。
 ///
 /// 足切りを超えていて、かつ核を持つ Unit だけが候補になる — 核を持たない
-/// Unit（`core_atoms` が `Some([])`。run キャップで選に漏れたもの）は
-/// 光らせる先が無いので、上位に居ても数に入れない。
+/// Unit（`core_atoms` が `Some([])`）は光らせる先が無いので、上位に居ても
+/// 数に入れない。marks の判定器は**run キャップを掛けない**ので、ここに
+/// 落ちるのは散文の Atom を 1 つも持たない Unit と、核の選択肢が 32k 枠を
+/// 超えた Unit である。
 fn ranked(doc: &SemanticDocument) -> Vec<usize> {
     let mut candidates: Vec<usize> = doc
         .units
@@ -332,7 +334,7 @@ mod tests {
     #[test]
     fn a_unit_without_a_core_is_not_counted() {
         let mut document = doc(&[Some(0.95), Some(0.90)]);
-        // run キャップで選に漏れた Unit（`Some([])`）。
+        // 核を持たない Unit（`Some([])`）。
         document.units[0].set_core([]);
         assert_eq!(lit(&document, MAX_SHARE), 1);
         assert_eq!(marked(&document, MAX_SHARE), vec![1]);
