@@ -703,7 +703,7 @@ mtime を見る案も、シェル文字列の中からパスを推測するこ�
 **marks モードの「問い」だけは踏みません**（2026-09-22）。
 問いつきの項目は `<sha(source)>.q<sha(問いの文面)>.json` と
 いう名前なので、**定型の文面を直せば自動で外れます**
-（`assets/marks-questions.json`、`SemanticCache::entry_path_asking`）。
+（`assets/marks-questions.json`、`SemanticCache::entry_path`）。
 外れないのは判定器の中の文面（核の Choice など）の方で、そちらはどちらの
 モードでも上の逃げ道が要ります。
 
@@ -742,7 +742,7 @@ mtime を見る案も、シェル文字列の中からパスを推測するこ�
 **そして、消すまでは新しい割り方が画面に出ません。** akapen 側の項目は
 `atomize` の変更で**壊れません**が、当たり続けます。鍵は（コマンド行 × 文書 ×
 問い）で、`atomize` はどこにも入っていないからです。中の `SemanticDocument` は
-**古い割り方の Atom 列をそのまま持っている**ので、`get_asking` はそれを返します。
+**古い割り方の Atom 列をそのまま持っている**ので、`get` はそれを返します。
 表の行割りで言えば、既に開いたことのある文書は**変更後も表が光りません**。
 `akapen --semantic-cache-clear` を 1 回打つまでです。
 

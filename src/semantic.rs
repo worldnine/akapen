@@ -7,7 +7,7 @@
 //! である（crate からは akapen も ratatui も見えない）。
 //!
 //! ```text
-//! Provider::analyze  ->  SemanticDocument      遅い / 非決定的 / 問いか文書が変わったときだけ
+//! analyze            ->  SemanticDocument      遅い / 非決定的 / 問いか文書が変わったときだけ
 //! marks::mark        ->  Vec<(range, state)>   速い / 決定論的 / つまみを動かすたび
 //! decoration_kind    ->  Vec<Decoration>       ここが akapen の語彙への変換
 //! ```
@@ -57,9 +57,9 @@
 //!
 //! 外部コマンドはプロセス起動とネットワーク往復を挟むので、同期に呼ぶと
 //! `event::poll` で回っているイベントループが止まる。だから
-//! [`SemanticSource`] が型として 2 つを分けている — 「遅いかもしれない」は
-//! [`Provider`] の中には隠せない（`analyze` の戻り値が「あとで」を
-//! 表現できない）。
+//! [`SemanticSource`] が型として 2 つを分けている。fixture は [`Provider`]、
+//! 外部コマンドは問いを必須引数にする [`CommandProvider::analyze`] から同じ
+//! [`SemanticDocument`] を供給する。
 //!
 //! [`App::semantic_source`]: crate::app::App::semantic_source
 //! [`App::semantic_enabled`]: crate::app::App::semantic_enabled
@@ -292,7 +292,6 @@ pub(crate) struct CommandProvider {
     cmd: String,
     deadline: Deadline,
     cache: Option<SemanticCache>,
-    question: Option<Question>,
 }
 
 impl CommandProvider {
@@ -307,21 +306,7 @@ impl CommandProvider {
                 backstop: COMMAND_BACKSTOP,
             },
             cache: None,
-            question: None,
         }
-    }
-
-    /// 問いを載せる。**載っていない要求は判定器が明確なエラーで断る**
-    /// （問いを持たない解析はこの層に無い）。
-    ///
-    /// **問いは provider の状態である。** `Provider::analyze` の引数は
-    /// `source` だけなので、問いを渡す口がそこに無い — trait を変えると
-    /// [`FixtureProvider`] まで巻き込むので、marks モードだけが持つ状態と
-    /// して `CommandProvider` に置く。[`crate::app::App`] は解析を投げる
-    /// たびにこれを載せ直す（`reanalyze_semantics`）。
-    pub(crate) fn asking(mut self, question: Option<Question>) -> Self {
-        self.question = question;
-        self
     }
 
     /// 解析結果の置き場を付ける。
@@ -338,7 +323,6 @@ impl CommandProvider {
             cmd: cmd.into(),
             deadline,
             cache: None,
-            question: None,
         }
     }
 
@@ -347,41 +331,33 @@ impl CommandProvider {
     pub(crate) fn command(&self) -> &str {
         &self.cmd
     }
-}
 
-impl Provider for CommandProvider {
     /// 文書を Atom へ割り、それを渡して Unit を受け取る 1 往復。
     ///
     /// **この関数は数十秒かかりうる。** 呼ぶのはワーカースレッドだけで、
     /// イベントループから直接呼んではならない
     /// （[`crate::app::App::reanalyze_semantics`]）。
-    fn analyze(&self, source: &str) -> semantic_reading::Result<SemanticDocument> {
+    pub(crate) fn analyze(
+        &self,
+        source: &str,
+        question: &Question,
+    ) -> semantic_reading::Result<SemanticDocument> {
         // ディスクを先に引く。当たればプロセスもネットワークも無い。
         // 外れ方（壊れた項目・別の文書を名乗る項目）はすべて `None` に
         // 畳まれていて、ここからは「無かった」と区別が要らない。
         // キャッシュの鍵は (コマンド行, 文書, 問い) である。問いを変えれば
         // 別の項目になり、**同じ (文書, 問い) は二度呼ばない**。
-        let asked = self.question.as_ref();
-        let key = asked.map(|q| q.text.as_str());
         if let Some(cache) = self.cache.as_ref()
-            && let Some(document) = match key {
-                // 問いも鍵の一部である。
-                Some(question) => cache.get_asking(&self.cmd, source, Some(question)),
-                // 問いの無い要求（`dump-request` 相当）。実運用では通らない。
-                None => cache.get(&self.cmd, source),
-            }
+            && let Some(document) = cache.get(&self.cmd, source, &question.text)
         {
             return Ok(document);
         }
         let atoms = atomize(source);
-        let mut request = AnalyzeRequest::new(source, &atoms);
-        if let Some(question) = asked {
-            request = request.asking(RequestQuestion {
-                id: &question.id,
-                text: &question.text,
-                core_floor: marks::SCORE_FLOOR,
-            });
-        }
+        let request = AnalyzeRequest::new(source, &atoms).asking(RequestQuestion {
+            id: &question.id,
+            text: &question.text,
+            core_floor: marks::SCORE_FLOOR,
+        });
         let request = request.to_json()?;
         let stdout = crate::export::run_capturing(
             "--semantic-cmd",
@@ -398,10 +374,7 @@ impl Provider for CommandProvider {
         // 書けなくても注釈は返す。ディスクが一杯でも読み手の画面は動く
         // （次に開いたときにもう一度払うだけ）。
         if let Some(cache) = self.cache.as_ref() {
-            let _ = match key {
-                Some(question) => cache.put_asking(&self.cmd, source, Some(question), &document),
-                None => cache.put(&self.cmd, source, &document),
-            };
+            let _ = cache.put(&self.cmd, source, &question.text, &document);
         }
         Ok(document)
     }
@@ -414,9 +387,8 @@ impl Provider for CommandProvider {
 /// ならないからである。fixture はその場で答えるので同期でよい。外部
 /// コマンドはプロセス起動とネットワーク往復を挟むので、同じ扱いをすると
 /// UI が固まる。
-/// 「遅いかもしれない」を [`Provider`] の中に隠すことはできない —
-/// `analyze` の戻り値は `Result<SemanticDocument>` であって「あとで」を
-/// 表現できないからである。
+/// 同じ [`SemanticDocument`] を供給する 2 経路。外部コマンドだけは問いを
+/// 必須引数にし、別スレッドで走らせる。
 pub(crate) enum SemanticSource {
     /// `--semantic <fixture.json>`: 即座に答えが出る。その場で呼ぶ。
     Inline(Box<dyn Provider>),
@@ -468,7 +440,7 @@ pub(crate) fn decoration_kind(state: DisplayState) -> Option<DecorationKind> {
 /// **MARKED しか返さない**（DIM が 1 つも無い）。沈める分を足すのは
 /// [`focus_decorations_for`] の仕事である。
 ///
-/// **この関数から `Provider::analyze` へ到達する経路は無い。** つまみを
+/// **この関数から解析へ到達する経路は無い。** つまみを
 /// 1 ポイント動かすたびに走るのはここだけで、`marks::mark` は純粋関数である。
 pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> Vec<Decoration> {
     marks::mark(document, share)
@@ -500,8 +472,7 @@ pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> V
 /// 誰も傷つかないので、`f` を離せば戻る 1 本の描画で足りる
 /// （`docs/design/marks-only-and-review-mode.md` 1 節「判決」）。
 ///
-/// `marks_decorations_for` と同じく、**この関数から `Provider::analyze` へ
-/// 到達する経路は無い**。
+/// `marks_decorations_for` と同じく、**この関数から解析へ到達する経路は無い**。
 pub(crate) fn focus_decorations_for(document: &SemanticDocument, share: u8) -> Vec<Decoration> {
     let states = marks::mark(document, share);
     // 光った Unit の Atom（核もそれ以外も）を集める。`marks::mark` は
@@ -606,9 +577,9 @@ mod tests {
         }
     }
 
-    /// 問いを載せた参照実装の provider。
+    /// 参照実装の provider。
     fn reference_provider() -> CommandProvider {
-        CommandProvider::new(reference_command()).asking(Some(a_question()))
+        CommandProvider::new(reference_command())
     }
 
     /// `sh -c` で走る、決まった JSON を返すだけのコマンド。
@@ -634,7 +605,7 @@ mod tests {
     }
 
     const ONE_UNIT: &str =
-        r#"{"version":1,"units":[{"id":"u1","atoms":[0],"score":0.9,"core_atoms":[0]}]}"#;
+        r#"{"version":1,"question":"essential","units":[{"id":"u1","atoms":[0],"score":0.9,"core_atoms":[0]}]}"#;
 
     fn demo() -> (String, SemanticDocument) {
         let source = std::fs::read_to_string(DEMO_MD).unwrap();
@@ -845,7 +816,7 @@ mod tests {
     fn the_reference_script_speaks_the_protocol_end_to_end() {
         let source = std::fs::read_to_string(DEMO_MD).unwrap();
         let document = reference_provider()
-            .analyze(&source)
+            .analyze(&source, &a_question())
             .expect("参照実装が応答すること");
 
         // **range は akapen 自身のもの。** コマンドは index しか返して
@@ -888,7 +859,7 @@ mod tests {
     fn the_command_result_is_stamped_with_the_source_it_read() {
         let source = "# 見出し\n\n本文です。\n";
         let document = echoing(r#"{"version":1,"units":[]}"#)
-            .analyze(source)
+            .analyze(source, &a_question())
             .unwrap();
         assert_eq!(document.source_digest(), Some(source_digest(source).as_str()));
     }
@@ -903,7 +874,7 @@ mod tests {
         let document = echoing(
             r#"{"version":1,"units":[{"id":"u1","atoms":[0],"score":0.9,"range":{"start":9999,"end":99999}}]}"#,
         )
-        .analyze(source)
+        .analyze(source, &a_question())
         .unwrap();
         assert_eq!(document.atoms, atomize(source));
         // 文書の外を指す range は 1 つも無い。
@@ -932,7 +903,7 @@ mod tests {
         ];
         for (response, expected) in cases {
             let err = echoing(response)
-                .analyze(source)
+                .analyze(source, &a_question())
                 .expect_err("{response} は拒否されること");
             assert!(
                 err.to_string().contains(expected),
@@ -948,7 +919,7 @@ mod tests {
         let err = CommandProvider::new(
             "cat >/dev/null; echo 'starting' >&2; echo 'ANTHROPIC_API_KEY is not set' >&2; exit 2",
         )
-        .analyze("# a\n")
+        .analyze("# a\n", &a_question())
         .expect_err("異常終了は Err");
         let message = err.to_string();
         assert!(message.contains("--semantic-cmd"), "{message}");
@@ -961,7 +932,7 @@ mod tests {
     #[test]
     fn a_command_that_does_not_exist_is_an_error_not_a_panic() {
         let err = CommandProvider::new("akapen-no-such-command-exists-here")
-            .analyze("# a\n")
+            .analyze("# a\n", &a_question())
             .expect_err("起動できなければ Err");
         assert!(err.to_string().contains("--semantic-cmd"), "{err}");
     }
@@ -980,7 +951,7 @@ mod tests {
                 backstop: Duration::from_secs(30),
             },
         )
-        .analyze("# a\n")
+        .analyze("# a\n", &a_question())
         .expect_err("返ってこなければ Err");
         assert!(err.to_string().contains("timed out"), "{err}");
         assert!(
@@ -1023,7 +994,7 @@ mod tests {
                 backstop: Duration::from_secs(60),
             },
         )
-        .analyze("")
+        .analyze("", &a_question())
         .expect("進捗があるかぎり殺さない");
         assert!(document.units.is_empty());
         assert!(
@@ -1045,7 +1016,7 @@ mod tests {
                 backstop: Duration::from_millis(300),
             },
         )
-        .analyze("# a\n")
+        .analyze("# a\n", &a_question())
         .expect_err("backstop で止まること");
         assert!(err.to_string().contains("backstop"), "{err}");
         assert!(
@@ -1070,7 +1041,7 @@ mod tests {
     /// 空の文書でも一周する（Atom 0 個・Unit 0 個）。
     #[test]
     fn an_empty_document_round_trips_as_an_empty_annotation() {
-        let document = reference_provider().analyze("").unwrap();
+        let document = reference_provider().analyze("", &a_question()).unwrap();
         assert!(document.atoms.is_empty());
         assert!(document.units.is_empty());
         assert!(marks_decorations_for(&document, 50).is_empty());
@@ -1128,15 +1099,15 @@ mod tests {
             .with_cache(Some(SemanticCache::at(dir.path().join("cache"))));
         let source = "# 見出し\n\n本文です。\n";
 
-        let first = provider.analyze(source).unwrap();
+        let first = provider.analyze(source, &a_question()).unwrap();
         assert_eq!(calls(&counter), 1);
-        let second = provider.analyze(source).unwrap();
+        let second = provider.analyze(source, &a_question()).unwrap();
         assert_eq!(calls(&counter), 1, "2 回目はコマンドが起きない");
         assert_eq!(first, second, "同じ注釈が返る");
         // 別の `CommandProvider` でも当たる（再起動が 0 円である、の形）。
         let restarted = counting(&counter, ONE_UNIT)
             .with_cache(Some(SemanticCache::at(dir.path().join("cache"))));
-        assert_eq!(restarted.analyze(source).unwrap(), first);
+        assert_eq!(restarted.analyze(source, &a_question()).unwrap(), first);
         assert_eq!(calls(&counter), 1, "別プロセスに相当する読み直しでも 0 円");
     }
 
@@ -1148,8 +1119,12 @@ mod tests {
         let counter = dir.path().join("calls");
         let provider = counting(&counter, ONE_UNIT)
             .with_cache(Some(SemanticCache::at(dir.path().join("cache"))));
-        provider.analyze("# 見出し\n\n本文です。\n").unwrap();
-        provider.analyze("# 見出し\n\n本文です。 \n").unwrap();
+        provider
+            .analyze("# 見出し\n\n本文です。\n", &a_question())
+            .unwrap();
+        provider
+            .analyze("# 見出し\n\n本文です。 \n", &a_question())
+            .unwrap();
         assert_eq!(calls(&counter), 2);
     }
 
@@ -1166,11 +1141,11 @@ mod tests {
         // コマンド行が違う（counter のパスが違う）＝ 別の判定器。
         counting(&one, ONE_UNIT)
             .with_cache(Some(cache.clone()))
-            .analyze(source)
+            .analyze(source, &a_question())
             .unwrap();
         counting(&two, ONE_UNIT)
             .with_cache(Some(cache.clone()))
-            .analyze(source)
+            .analyze(source, &a_question())
             .unwrap();
         assert_eq!(calls(&one), 1);
         assert_eq!(calls(&two), 1, "別の判定器は自分で払う");
@@ -1178,7 +1153,7 @@ mod tests {
         // それぞれ自分の分には当たる。
         counting(&one, ONE_UNIT)
             .with_cache(Some(cache))
-            .analyze(source)
+            .analyze(source, &a_question())
             .unwrap();
         assert_eq!(calls(&one), 1);
     }
@@ -1192,8 +1167,8 @@ mod tests {
         let counter = dir.path().join("calls");
         let provider = counting(&counter, ONE_UNIT);
         let source = "# 見出し\n\n本文です。\n";
-        provider.analyze(source).unwrap();
-        provider.analyze(source).unwrap();
+        provider.analyze(source, &a_question()).unwrap();
+        provider.analyze(source, &a_question()).unwrap();
         assert_eq!(calls(&counter), 2);
     }
 
@@ -1207,7 +1182,7 @@ mod tests {
         std::fs::write(&blocked, "").unwrap();
         let provider =
             counting(&counter, ONE_UNIT).with_cache(Some(SemanticCache::at(blocked)));
-        assert!(provider.analyze("# 見出し\n").is_ok());
+        assert!(provider.analyze("# 見出し\n", &a_question()).is_ok());
         assert_eq!(calls(&counter), 1);
     }
 

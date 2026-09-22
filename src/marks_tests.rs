@@ -430,20 +430,16 @@ fn a_different_question_is_a_different_cache_entry() {
     document.source_sha256 = Some(crate::semantic::source_digest(source));
     document.question = Some("settled".into());
     cache
-        .put_asking("cmd", source, Some("決まったことか。"), &document)
+        .put("cmd", source, "決まったことか。", &document)
         .unwrap();
 
     assert!(
-        cache.get_asking("cmd", source, Some("決まったことか。")).is_some(),
+        cache.get("cmd", source, "決まったことか。").is_some(),
         "同じ問いは当たる"
     );
     assert!(
-        cache.get_asking("cmd", source, Some("決まっていないことか。")).is_none(),
+        cache.get("cmd", source, "決まっていないことか。").is_none(),
         "別の問いは当たらない"
-    );
-    assert!(
-        cache.get("cmd", source).is_none(),
-        "問いを持たない項目とは混ざらない"
     );
 }
 
@@ -462,10 +458,10 @@ fn editing_a_preset_misses_the_cache_on_its_own() {
     document.question = Some("settled".into());
     let before = "下の「対象」は、決定・合意・確定した事柄を述べている箇所である。";
     let after = format!("{before}なお、見出しは当てはまらない。");
-    cache.put_asking("cmd", source, Some(before), &document).unwrap();
-    assert!(cache.get_asking("cmd", source, Some(before)).is_some());
+    cache.put("cmd", source, before, &document).unwrap();
+    assert!(cache.get("cmd", source, before).is_some());
     assert!(
-        cache.get_asking("cmd", source, Some(&after)).is_none(),
+        cache.get("cmd", source, &after).is_none(),
         "文面を 1 文足しただけで外れる"
     );
 }
