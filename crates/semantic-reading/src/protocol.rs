@@ -66,6 +66,27 @@
 //! 読んで「絞り込み無し」に倒す — 表示は従来どおり Unit 全体が MARKED に
 //! なるだけで、位置を取り違えることはない。
 //!
+//! # `score` と `question` を足しても版は上げない — marks モードの分
+//!
+//! [`crate::SemanticUnit::score`]（問いへの答えの強さ）と、要求側の
+//! [`RequestQuestion`]・応答側の [`AnalyzeResponse::question`]
+//! （2026-09-22。`docs/design/marks-only-and-review-mode.md`）も
+//! [`VERSION`] を 1 のままにしてある。どちらも**追加されたフィールド**なので、
+//! 上の `core_atoms` とまったく同じ表になる。
+//!
+//! | 組み合わせ | 起きること |
+//! | ---------- | ---------- |
+//! | 新しい akapen（marks モード）+ 古い判定器 | 要求の `question` は未知フィールドとして無視され、DIM 版の答えが返る。`score` が 1 つも無いので **0 本**になり、akapen は「この判定器はスコアを返さない」とステータス行に出す（[`crate::marks::has_scores`]）。黙った空白にはならない |
+//! | 古い akapen + 新しい判定器 | `score` も `question` も未知のフィールドとして読み飛ばされる。marks の答えは `reading_tier` が全部 `detail` なので、DIM 版の投影では**何も光らない** |
+//!
+//! どちらも「意味を取り違える」側へは倒れない。1 行目は理由を言い、
+//! 2 行目は安全側（光らせすぎない）へ倒れる。
+//!
+//! **`reading_tier` は必須のままにしてある。** marks の答えでは使われない
+//! ので `#[serde(default)]` を足したくなるが、足すと「Tier を書き忘れた
+//! DIM 版の判定器が黙って `detail` になる」— いまエラーとして見えている
+//! 誤りが見えなくなる。marks の判定器は `detail` を明示して書く。
+//!
 //! # `section_of` を足しても版は上げない — `core_atoms` と同じ話である
 //!
 //! [`crate::SemanticUnit::section_of`]（節の見出し Unit。2026-09-22）も
@@ -209,6 +230,33 @@ pub struct AnalyzeRequest<'a> {
     pub source: &'a str,
     /// 文書を割った Atom 列。`index` の昇順に並ぶ。
     pub atoms: Vec<RequestAtom<'a>>,
+    /// **いま聞きたいこと**（marks モード）。無ければ DIM 版の解析。
+    ///
+    /// 「marks モードである」を表すフラグは**これ 1 つ**である。モードの
+    /// フラグと問いを別々に置くと食い違いうるので、置かない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<RequestQuestion<'a>>,
+}
+
+/// 要求に載る問い 1 つ（marks モード）。
+///
+/// **文面は akapen が持って送る。** 判定器は文面を知らない汎用の器で
+/// あってよく、定型の正本は akapen 側のデータファイル 1 か所になる
+/// （2 か所に置くとずれる）。自由入力も、akapen が型へ埋めてから送る。
+#[derive(Clone, Debug, Serialize)]
+pub struct RequestQuestion<'a> {
+    /// 問いの識別子（`essential` / `settled` / `free` など）。応答が
+    /// そのまま echo し、キャッシュの読み戻しの照合に使われる。
+    pub id: &'a str,
+    /// Jev へ渡す問いの文面。`docs/design/marks-only-and-review-mode.md`
+    /// 0 節の表の逐語（自由入力は `{q}` を埋めたもの）。
+    pub text: &'a str,
+    /// **核をどの Unit に聞くか**の足切り。判定器はこの値を超えた Unit に
+    /// だけ「核はどの一文か」を聞けばよい（越えない Unit は光らないので
+    /// 核が要らない）。狭い問いでは核のラウンドごと消える。
+    ///
+    /// 値は akapen 側の [`crate::marks::SCORE_FLOOR`] である。
+    pub core_floor: f32,
 }
 
 /// 要求に載る Atom 1 つ。
@@ -251,7 +299,16 @@ impl<'a> AnalyzeRequest<'a> {
                     text: source.get(atom.range.clone()).unwrap_or(""),
                 })
                 .collect(),
+            question: None,
         }
+    }
+
+    /// marks モードの問いを載せる。
+    ///
+    /// これが載っていない要求は DIM 版の解析になる（判定器の既定）。
+    pub fn asking(mut self, question: RequestQuestion<'a>) -> Self {
+        self.question = Some(question);
+        self
     }
 
     /// 要求を JSON 1 行にする。
@@ -279,6 +336,14 @@ pub struct AnalyzeResponse {
     /// 外部コマンドが知覚した意味的まとまり。
     #[serde(default)]
     pub units: Vec<SemanticUnit>,
+    /// **この応答が答えている問いの id**（marks モード）。判定器が要求の
+    /// [`RequestQuestion::id`] をそのまま echo する。
+    ///
+    /// [`SemanticDocument::question`] へそのまま移り、キャッシュの
+    /// 読み戻しで「別の問いの答え」を撥ねるために使われる。DIM 版の
+    /// 応答は持たない。
+    #[serde(default)]
+    pub question: Option<String>,
 }
 
 impl AnalyzeResponse {
@@ -375,7 +440,8 @@ impl AnalyzeResponse {
                 core.retain(|index| !lost.contains(index));
             }
         }
-        let document = SemanticDocument::new(atoms, units);
+        let mut document = SemanticDocument::new(atoms, units);
+        document.question = self.question;
         document.validate()?;
         Ok(document)
     }

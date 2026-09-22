@@ -110,6 +110,7 @@ mod atomize;
 mod display;
 mod document;
 mod error;
+pub mod marks;
 pub mod policy;
 pub mod protocol;
 mod provider;
@@ -120,7 +121,7 @@ pub use atomize::atomize;
 pub use display::DisplayState;
 pub use document::SemanticDocument;
 pub use error::Error;
-pub use protocol::{AnalyzeRequest, AnalyzeResponse};
+pub use protocol::{AnalyzeRequest, AnalyzeResponse, RequestQuestion};
 pub use provider::{FixtureProvider, Provider};
 pub use unit::{ReadingTier, Relation, SemanticUnit, UnitId};
 
