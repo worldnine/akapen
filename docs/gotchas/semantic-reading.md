@@ -633,39 +633,30 @@ parsing」）。**似た規則が 2 つあると読まないこと** — `bounda
 
 ---
 
-### `docs/design/semantic-reading-layer.md` も test の fixture — 書き足すと 1 リクエストから溢れる
+### 設計書の凍結コピーは、ラウンド 2 の天井に近い場所で凍っている
 
-`examples/semantic/test_jev_annotate.py` の
-`test_small_documents_still_go_in_one_request` は、設計書を「ラウンド 1〜3 が
-1 チャンクに収まる小さい文書」の実例として読んでいます。**設計書に節を
-1 つ足しただけで（+1.1 KB、9.9 KB → 11.0 KB）ラウンド 2 が 2 チャンクに割れ、
-このテストが落ちました**（2026-09-22）。Rust 側を 1 行も触っていなくても
-`python3 -m pytest examples/semantic` が赤になります。
+`crates/semantic-reading/tests/fixtures/design-doc-frozen-2026-09-22.md` は
+2 つのテストが読む fixture です（`tests/atomize.rs` と
+`examples/semantic/test_jev_annotate.py::test_small_documents_still_go_in_one_request`）。
+後者は「ラウンド 1〜3 が 1 チャンクに収まる」を要求し、**その余地は実測で
+残り 2,282 tokens**（`whole` 58,161 − question 55,879）です。
+**書き足すなら測り直してください** —— ラウンド 2 の question はほぼ Unit ごと
+なので、**Atom が 1 つ増えると約 300 tokens 増えます**（実測 55,879 ÷ 188）。
 
-上の「`examples/semantic/README.md` は測定対象の文書でもある」と同じ形です。
-設計書へ書き足すときは短く書くか、テストの前提（見積もりは実測の 1.4 倍まで
-過大評価）と合わせて判断してください。10.7 KB では通っています。
+**2026-09-22 まで、この fixture は設計書の正典そのものでした。** そのため
+`docs/design/semantic-reading-layer.md` へ節を 1 つ足しただけで（+1.1 KB）
+ラウンド 2 が 2 チャンクに割れ、Rust を 1 行も触っていなくても
+`python3 -m pytest examples/semantic` が赤になりました。**テストが設計書の
+大きさを決めていて**、残りは 30〜45 バイトでした —— 同じ日に入った規則
+「核は奪わない」が正典に載せられず `policy.rs` の docstring にしか無い、
+という状態がそれで起きていました。いまは凍結コピーへ切り離したので
+**正典の側に上限はなく**、その規則も正典に載っています
+（`docs/design/semantic-reading-layer.md`「Reading Policy」）。
 
-**残りはバイトではなく Atom で数えてください（2026-09-22 に測り直し）。**
-ラウンド 2 の question はほぼ Unit ごとなので、**Atom が 1 つ増えるだけで
-question が 1 つ増え、約 5,900 tokens 増えます**。10,664 バイト・232 Atom の
-時点で残っていたのは **113 tokens**（`whole` 58,150 − question 58,037）で、
-`。` を 1 つ足せばそこで溢れます。逆に **Atom を増やさなければ 105 バイトまで
-入り、120 バイトで割れました**（同じ Atom の中を伸ばして測定）。
-
-つまり書き足す側の選択肢は実質 2 つです。
-
-- **既存の文の中を伸ばす**（`。` を足さない）。予算は 100 バイト強
-- **文や段落を足したいなら、同じだけ他を削る**
-
-2026-09-22 の「冗長な対の負け」では前者を採り、`Redundancy` の 1 文に括弧書き
-（+74 バイト）と `REDUNDANT` の 1 行（+12 バイト）だけを入れました。説明の
-本体は `crates/semantic-reading/src/policy.rs` のモジュールドキュメントにあり、
-設計書には**その層が守る規則の一行**だけを置いています。
-
-**確認したこと**: 同じ変更を main（`ab3ef7b`）に当てる前は通り、設計書だけを
-伸ばして落ち、追記を 700 バイト縮めて通ったこと。tokens の内訳と 105 / 120
-バイトの境目は `dry_run` の `rounds[1].plan` を直接読んで数えました。
+**確認したこと**: 切り離し前の正典で `dry_run` の `rounds[1]` を読み、
+残りが 21 tokens だったこと。コピーは注記を足し「Role」節と「最初のデモ」節
+（計 579 バイト）を落として 2,282 tokens にしたこと。正典に「核は奪わない」
+（4 行）と「遅延」節（6 行）を足してもゲートが 4 本とも緑であること。
 
 ---
 

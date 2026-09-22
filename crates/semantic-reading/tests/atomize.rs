@@ -8,10 +8,16 @@ use semantic_reading::{Atom, AtomKind, SemanticDocument, atomize};
 const SAMPLE_MD: &str = include_str!("fixtures/sample.md");
 const SAMPLE_JSON: &str = include_str!("fixtures/sample.json");
 
-/// crate の外のファイルだが、`include_str!` はテストソースからの相対パスで
-/// 解決されるのでビルド時に取り込める（`publish = false` なので配布物の
-/// 完結性は問題にならない）。`sample.md` より雑で長い実文書として食わせる。
-const DESIGN_DOC: &str = include_str!("../../../docs/design/semantic-reading-layer.md");
+/// 設計書の**凍結コピー**。`sample.md` より雑で長い実文書として食わせる。
+///
+/// 正典（`docs/design/semantic-reading-layer.md`）を直接読んでいた頃は、
+/// **このテストと Python 側の「1 リクエストに収まる」が設計書の大きさに
+/// 上限を掛けていた**（余地は実測 30〜45 バイト）。正典を自由に伸ばせる
+/// ように、`8994544` の内容を切り出したコピーへ読む先を移した。
+/// **内容の更新は不要**で、要るのは「雑で長い実文書」という性質だけである。
+/// 逐語ではない（冒頭に注記があり、2 節を落としてある）ので、正典の
+/// 当時の姿が要るなら git を見ること —— 詳しくは `fixtures/README.md`。
+const DESIGN_DOC: &str = include_str!("fixtures/design-doc-frozen-2026-09-22.md");
 
 /// 設計書が Atom に求める性質を全部検査する。
 fn assert_invariants(source: &str, atoms: &[Atom]) {
@@ -90,8 +96,9 @@ fn a_real_design_document_holds_every_invariant() {
     assert_invariants(DESIGN_DOC, &atoms);
     assert_deterministic(DESIGN_DOC);
 
-    // 実文書なので個数は固定しない（設計書は crate の外にあり、更新される）。
-    // 見出し・本文・リスト・コード・引用が一通り出ていることだけ確かめる。
+    // 実文書なので個数は固定しない（見たいのは大きさと雑さで、Atom の数
+    // そのものではない）。見出し・本文・リスト・コード・引用が一通り出て
+    // いることだけ確かめる。
     let seen: Vec<AtomKind> = atoms.iter().map(|atom| atom.kind).collect();
     for kind in [
         AtomKind::Heading,

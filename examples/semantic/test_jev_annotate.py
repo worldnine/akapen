@@ -26,6 +26,20 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+#: 設計書の凍結コピー（`HERE` からの相対パス）。
+#:
+#: **正典（`docs/design/semantic-reading-layer.md`）は読まない。** 直接読んで
+#: いた頃は、この下の `test_small_documents_still_go_in_one_request` が設計書の
+#: 大きさに上限を掛けていて、**書き足せる余地は実測で 30〜45 バイト**しか
+#: 残っていなかった。正典を自由に伸ばせるように 2026-09-22 の内容で凍結した
+#: コピーへ移した。ここに要るのは「1 リクエストに収まる実文書」という性質
+#: だけなので、**コピーの内容は更新しない**。コピーは逐語ではなく、注記の
+#: ぶんの余地を作るために 2 節を落としてある（残りは実測 2,282 tokens）。
+#: 経緯は `crates/semantic-reading/tests/fixtures/README.md`。
+FROZEN_DESIGN_DOC = (
+    "../../crates/semantic-reading/tests/fixtures/design-doc-frozen-2026-09-22.md"
+)
 SCRIPT = HERE / "jev-annotate.py"
 
 
@@ -1465,14 +1479,15 @@ class SendInChunksTest(unittest.TestCase):
     def test_small_documents_still_go_in_one_request(self):
         """合格条件 3 — 分割が不要なら 1 リクエストのまま。
 
-        実文書で確かめる。`demo.md` と `design/semantic-reading-layer.md` は
-        **ラウンド 1〜3 が** 1 チャンクでなければならない（見積もりは実測の
-        1.4 倍まで過大評価するので、ここが本番より厳しい側の判定になる）。
+        実文書で確かめる。`demo.md` と設計書の**凍結コピー**
+        （[`FROZEN_DESIGN_DOC`]）は **ラウンド 1〜3 が** 1 チャンクでなければ
+        ならない（見積もりは実測の 1.4 倍まで過大評価するので、ここが本番より
+        厳しい側の判定になる）。
 
         **ラウンド 5 は数えない。** context preservation の段階 2 は自分より
         前の Unit の本文を全部並べるので、question の大きさが Unit 数の 2 乗で
         効く。dry-run はさらに「全 Unit が ESSENTIAL で段階 1 が全部はい」と
-        仮定するので、**本番より桁で多い question を組む**（design.md で
+        仮定するので、**本番より桁で多い question を組む**（凍結コピーで
         173 seed）。ここが 1 チャンクにならないのは分割の不具合ではなく、
         この仮定と question の形の帰結である。**代わりに `unsent` を見る** —
         分割で外せない 32k 枠に当たっていないことが、この経路で確かめたい
@@ -1480,10 +1495,10 @@ class SendInChunksTest(unittest.TestCase):
 
         **ラウンド 3 の redundancy も同じ形になった**（2026-09-22。Choice の
         選択肢が自分より前の Unit の本文）。dry-run の「全 Unit が ESSENTIAL」
-        の仮定で design.md は 170 本を超える Choice を組むので、ここでは
+        の仮定で凍結コピーは 170 本を超える Choice を組むので、ここでは
         redundancy を外した残り（核）だけを 1 チャンクに収まるかで見る。
         """
-        for name in ("demo.md", "../../docs/design/semantic-reading-layer.md"):
+        for name in ("demo.md", FROZEN_DESIGN_DOC):
             with self.subTest(document=name):
                 source = (HERE / name).read_text(encoding="utf-8")
                 request = dump_request(HERE / name)
@@ -1514,7 +1529,7 @@ class SendInChunksTest(unittest.TestCase):
         この枠に当たるかどうかが、context preservation を実文書に当てられるか
         そのものだからである。
         """
-        for name in ("demo.md", "../../docs/design/semantic-reading-layer.md"):
+        for name in ("demo.md", FROZEN_DESIGN_DOC):
             with self.subTest(document=name):
                 request = dump_request(HERE / name)
                 plan = jev.dry_run(request, "jev-latest")
