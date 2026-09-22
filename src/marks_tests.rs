@@ -195,6 +195,24 @@ fn the_readout_counts_what_is_on_screen() {
     }
 }
 
+/// **自由入力の問いは `Ask: …` で出る。**
+///
+/// 鉤括弧（`Ask 「…」`）は日本語 UI の名残で、2026-09-22 に外した。
+/// 外したのは枠だけで、**問いの本文は読み手が打ったまま**である。
+#[test]
+fn a_free_question_reads_as_ask_colon() {
+    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    // fixture 経路は問いを変えないので、自由入力の問いを直に載せる
+    // （`ask_marks_free` は fixture では断る。上のテストで固定してある）。
+    let questions = Questions::built_in().unwrap();
+    app.marks_question = Some(questions.free("費用の話"));
+
+    assert_eq!(app.marks_question_display().as_deref(), Some("Ask: 費用の話"));
+    let readout = app.marks_readout(200).expect("問いも答えもある");
+    assert!(readout.starts_with("Ask: 費用の話 · "), "{readout}");
+    assert!(!readout.contains('「'), "鉤括弧が残っている: {readout}");
+}
+
 #[test]
 fn the_readout_drops_from_the_right_when_the_room_runs_out() {
     // **最後まで残るのは問いの名前である**（読み手の決定、2026-09-22）。

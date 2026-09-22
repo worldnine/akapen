@@ -106,7 +106,7 @@ struct Preset {
 ///
 /// データファイルの `free.label`（`Ask`）は**人が読むためだけ**に
 /// あるので、ここでは読まない — ステータス行に出る名前は読み手が打った
-/// 入力そのものである（`Ask 「…」` の枠は [`crate::app`] が付ける）。
+/// 入力そのものである（`Ask: …` の枠は [`crate::app`] が付ける）。
 #[derive(Deserialize)]
 struct Free {
     /// popup の最下段（`/ Ask...`）に出る英語の 1 行。
