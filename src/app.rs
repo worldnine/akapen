@@ -18,7 +18,6 @@ use crate::highlight::{Highlighter, Span as HiSpan, TaggedLine, wrap_spans};
 use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
 use crate::overlay::Overlay;
-use crate::config::SemanticMode;
 use crate::marks_questions::{Question, Questions};
 use crate::semantic::SemanticSource;
 use crate::snapshot::SnapshotCache;
@@ -431,11 +430,10 @@ pub(crate) struct App {
     /// 文書にそれを払わない（`docs/design/marks-only-and-review-mode.md` の
     /// 1 節の実測）。
     ///
-    /// 起点は **Reading Budget キー（`-` `+` `<` `>`）の最初の 1 打**で、
-    /// [`crate::adjust_reading_budget`] がここを立てる。それまでは
-    /// `semantic_doc` も [`App::semantic_inflight`] も `None` のままなので、
-    /// 表示は `--semantic-cmd` を渡していないときと 1 文字も変わらない
-    /// （`chrome.rs` の `read`）。
+    /// 起点は **問いを決めた最初の 1 打**（`m` / `M` / `/`）で、
+    /// [`App::ask_marks`] がここを立てる。それまでは `semantic_doc` も
+    /// [`App::semantic_inflight`] も `None` のままなので、表示は
+    /// `--semantic-cmd` を渡していないときと 1 文字も変わらない。
     ///
     /// 一度立てたらセッションの終わりまで立ったまま（読み手は「この層を
     /// 使う」と言った）で、以降は文書が入れ替わるたびに解析する。2 度目から
@@ -444,16 +442,9 @@ pub(crate) struct App {
     /// `--semantic <fixture>` と、層が無いセッションはこの値を見ない
     /// （[`App::reanalyze_semantics`] の Command 腕だけが読む）。
     pub(crate) semantic_armed: bool,
-    /// Reading Budget: "how much attention can I spend on this
-    /// document", 1..=100 %, default 100. A pure reading preference, so
-    /// it is NOT per-file state — switching files keeps it.
-    pub(crate) reading_budget: u8,
-    // ---- marks モード (docs/design/marks-only-and-review-mode.md 0 節) ----
-    /// どちらの投影を使うか。`--semantic-mode` で起動時に決まり、走っている
-    /// あいだ変わらない（**文書の種類の推定はしない**）。
-    pub(crate) semantic_mode: SemanticMode,
-    /// marks モードの問いの一式（定型 4 本 ＋ 自由入力の型）。
-    /// budget モードのセッションは読まないので `None` のまま。
+    // ---- marks (docs/design/marks-only-and-review-mode.md 0 節) ----
+    /// 問いの一式（定型 5 本 ＋ 自由入力の型）。層の無いセッションは
+    /// 読まないので `None` のまま。
     pub(crate) marks_questions: Option<Questions>,
     /// **いま聞いている問い。** `None` は「まだ何も聞いていない」で、
     /// marks モードの遅延の起点がここである — 問いが決まるまで判定器は
@@ -523,9 +514,6 @@ impl App {
     ) -> Self {
         let ime_session = ime::SessionIme::new(config.ime);
         let files = config.files.clone();
-        // `Config` から取る。`main` が後から代入していたので、`App` を
-        // 直に組むテストだけが別の既定を見ていた。
-        let semantic_mode = config.semantic_mode;
         // Non-markdown files open in source mode (view is unavailable).
         let initial_mode = if supports_view(&files[0]) {
             Mode::View
@@ -629,8 +617,6 @@ impl App {
             semantic_inflight: None,
             semantic_results: None,
             semantic_armed: false,
-            reading_budget: crate::semantic::DEFAULT_BUDGET,
-            semantic_mode,
             marks_questions: None,
             marks_question: None,
             marks_preset: 0,
@@ -693,7 +679,7 @@ impl App {
     ///
     /// **`--semantic-cmd` は起点を越えるまで走らない**
     /// （[`App::semantic_armed`]）。開いただけの文書に 1 回分の解析費用を
-    /// 払わないためで、起点は [`App::arm_semantic_layer`] が立てる。
+    /// 払わないためで、起点は [`App::ask_marks`] が立てる。
     pub(crate) fn reanalyze_semantics(&mut self) {
         if self.semantic_source.is_none() {
             return;
@@ -705,10 +691,9 @@ impl App {
         {
             return;
         }
-        // marks モードは**問いが無ければ何も聞かない**。問いの無い解析は
-        // DIM 版の答え（Tier）を連れてくるだけで、この投影では使えない。
-        if self.marks_mode()
-            && self.marks_question.is_none()
+        // **問いが無ければ何も聞かない**。問いの無い要求は判定器が
+        // 明確なエラーで断るし、そもそもこの投影では使えない。
+        if self.marks_question.is_none()
             && matches!(self.semantic_source, Some(SemanticSource::Command(_)))
         {
             return;
@@ -743,11 +728,9 @@ impl App {
                     return;
                 };
                 // 問いは provider の状態として渡す（`Provider::analyze` の
-                // 引数は source だけ）。budget モードでは常に `None` で、
-                // 要求に `question` が載らない = 従来どおりの解析になる。
-                let provider = provider
-                    .clone()
-                    .asking(self.marks_mode().then(|| self.marks_question.clone()).flatten());
+                // 引数は source だけ）。ここへ来る時点で問いは必ずある
+                // （上の遅延の検査を通っている）。
+                let provider = provider.clone().asking(self.marks_question.clone());
                 let tx = channel.tx.clone();
                 let source = self.source.content.clone();
                 self.semantic_inflight = Some(generation);
@@ -760,27 +743,6 @@ impl App {
             }
             None => unreachable!("checked above"),
         }
-    }
-
-    /// **遅延の起点。** 読み手が Semantic Reading Layer を初めて使った、を
-    /// ここで受ける。立てたのがこの呼び出しなら `true`。
-    ///
-    /// 起点を越えた瞬間に、いま開いている文書の解析が始まる（キャッシュに
-    /// 当たれば外部プロセスは起きない）。`--semantic-cmd` のセッションに
-    /// しか意味が無く、fixture 経路と層の無いセッションでは `false` を返して
-    /// 何もしない。
-    ///
-    /// 立ち上がりは一方向なので、ここへ来た時点で解析が走っていることは
-    /// ありえない — [`App::semantic_inflight`] の後始末は要らない。
-    pub(crate) fn arm_semantic_layer(&mut self) -> bool {
-        if self.semantic_armed
-            || !matches!(self.semantic_source, Some(SemanticSource::Command(_)))
-        {
-            return false;
-        }
-        self.semantic_armed = true;
-        self.reanalyze_semantics();
-        true
     }
 
     /// Drop the annotation in hand when it names a document other than
@@ -830,24 +792,19 @@ impl App {
         let refusal = match message.result {
             Ok(document) => {
                 self.semantic_doc = Some(document);
-                // 下限は Reading Budget のもの。marks モードに下限は無い。
-                if !self.marks_mode() {
-                    self.lift_budget_onto_floor();
-                } else {
-                    // **演出の起点はここ 1 つ**である。新しい問いも、
-                    // キャッシュに当たった答えも、文書を開き直したときも、
-                    // 答えが `semantic_doc` に入るのはこの行だけなので、
-                    // 「マーカーが引かれる」は必ず 1 回だけ走る。
-                    //
-                    // つまみ（`-` `+` `<` `>`）はここを通らない — 意図的で
-                    // ある。頻繁に打つ操作に 700 ms の演出を付けると邪魔に
-                    // なるし、「今回新しく光った箇所」を出すには装飾集合の
-                    // 差分が要って、つまみ 1 打の費用（いまは `marks::mark`
-                    // 1 回）が上がる。
-                    self.start_marks_reveal();
-                    // 読み出しも同じ瞬間に変わる（`analyzing…` → 本数）。
-                    self.start_readout_flash();
-                }
+                // **演出の起点はここ 1 つ**である。新しい問いも、
+                // キャッシュに当たった答えも、文書を開き直したときも、
+                // 答えが `semantic_doc` に入るのはこの行だけなので、
+                // 「マーカーが引かれる」は必ず 1 回だけ走る。
+                //
+                // つまみ（`-` `+` `<` `>`）はここを通らない — 意図的で
+                // ある。頻繁に打つ操作に 700 ms の演出を付けると邪魔に
+                // なるし、「今回新しく光った箇所」を出すには装飾集合の
+                // 差分が要って、つまみ 1 打の費用（いまは `marks::mark`
+                // 1 回）が上がる。
+                self.start_marks_reveal();
+                // 読み出しも同じ瞬間に変わる（`analyzing…` → 本数）。
+                self.start_readout_flash();
                 None
             }
             Err(e) => Some(e),
@@ -865,7 +822,7 @@ impl App {
     /// （[`Self::accept_analysis`]）。**どれも読み出しの字が変わる瞬間**で、
     /// 変わらない操作（スクロール、選択）では立たない。
     pub(crate) fn start_readout_flash(&mut self) {
-        if !self.config.fx || !self.marks_mode() {
+        if !self.config.fx {
             return;
         }
         self.readout_fx = Some(crate::effects::readout_flash_effect(
@@ -902,22 +859,18 @@ impl App {
         }
     }
 
-    /// Project the annotation onto the current budget.
+    /// 注釈をいまのつまみへ投影する。
     ///
-    /// This is the whole cost of moving the budget: `policy::decorate`
-    /// over the units already in hand. No parsing, no rendering, no
-    /// provider.
+    /// **つまみを動かす費用はこれで全部である** — 手元の Unit に
+    /// `marks::mark` を 1 回。解析も描画も provider も通らない。
     pub(crate) fn refresh_semantic_decorations(&mut self) {
         self.semantic_decorations = match self.semantic_doc.as_ref() {
             // フォーカス中だけ投影が変わる。答えもつまみも同じままで、
             // **沈める分を足すだけ**である（`crate::semantic::focus_decorations_for`）。
-            Some(document) if self.semantic_mode.is_marks() && self.marks_focus.is_on() => {
+            Some(document) if self.marks_focus.is_on() => {
                 crate::semantic::focus_decorations_for(document, self.marks_share)
             }
-            Some(document) if self.semantic_mode.is_marks() => {
-                crate::semantic::marks_decorations_for(document, self.marks_share)
-            }
-            Some(document) => crate::semantic::decorations_for(document, self.reading_budget),
+            Some(document) => crate::semantic::marks_decorations_for(document, self.marks_share),
             None => Vec::new(),
         };
         // 行の台帳はここでだけ作る（装飾が変わった瞬間 = 目盛りとジャンプ先が
@@ -926,23 +879,16 @@ impl App {
             crate::semantic::marked_lines(&self.source.content, &self.semantic_decorations);
     }
 
-    // ---- marks モード ------------------------------------------------
+    // ---- marks ---------------------------------------------------------
     //
-    // `docs/design/marks-only-and-review-mode.md` 0 節。DIM 版の腕
-    // （`nudge_reading_budget` / `reading_floor` / `lift_budget_onto_floor`）
-    // はこの下に 1 行も入っていない — 2 つの投影は App の上で並んでいる
-    // だけで、互いを呼ばない。
-
-    /// marks モードか。
-    pub(crate) fn marks_mode(&self) -> bool {
-        self.semantic_mode.is_marks()
-    }
+    // `docs/design/semantic-reading-layer.md`。この層の投影はこれ 1 つで
+    // ある（2026-09-22 に DIM 版を削除した）。
 
     /// **つまみを `delta` ポイント動かす**（1..=100 に丸める）。動いたら `true`。
     ///
-    /// Reading Budget の [`App::nudge_reading_budget`] と同じ形だが、
-    /// **下限は無い**。marks モードに `policy::floor` は無く、0 本は
-    /// 足切り（`marks::SCORE_FLOOR`）だけが作る。
+    /// **下限は無い。** 0 本になるのは足切り（`marks::SCORE_FLOOR`）が
+    /// 作るときだけで、それは「この問いに答えている箇所が無い」という
+    /// 意味を持つ。
     ///
     /// ここから `Provider::analyze` へ到達する経路は無い。つまみを動かす
     /// 費用は [`semantic_reading::marks::mark`] 1 回だけである。
@@ -1020,12 +966,12 @@ impl App {
         self.marks_focus.is_on()
     }
 
-    /// 沈める先があるか — marks モードで、光っている箇所が 1 つ以上ある。
+    /// 沈める先があるか — 光っている箇所が 1 つ以上ある。
     ///
     /// 0 本のときに沈めると**画面全部が沈む**（正しい答えではあるが、
     /// 読み手が頼んだのは「他を沈める」であって「全部沈める」ではない）。
     pub(crate) fn can_focus(&self) -> bool {
-        self.marks_mode() && self.marks_lit().is_some_and(|lit| lit > 0)
+        self.marks_lit().is_some_and(|lit| lit > 0)
     }
 
     /// `f` の押下。画面が変わったら `true`。
@@ -1063,9 +1009,6 @@ impl App {
                 .find(|text| UnicodeWidthStr::width(text.as_str()) <= max_cols)
                 .cloned()
         };
-        if !self.marks_mode() {
-            return None;
-        }
         let question = self.marks_question_display();
         if self.semantic_inflight.is_some() {
             // 解析中だけは**問いの名前から落とす**。まだ 1 本も光っていない
@@ -1106,7 +1049,7 @@ impl App {
     /// （議事録で 0.3 円が 0.9 円になり、スレッドが 3 本競合する）。
     /// 位置を先に決めて、解析は 1 度だけ頼む。
     pub(crate) fn cycle_marks_question(&mut self, step: isize) -> bool {
-        if !self.marks_mode() || self.marks_question_is_fixed() {
+        if self.marks_question_is_fixed() {
             return false;
         }
         let Some(questions) = self.marks_questions.as_ref() else {
@@ -1143,7 +1086,7 @@ impl App {
     /// 巡る位置（`marks_preset`）も動かす — popup で選んでから `M` を
     /// 押したら、その隣へ戻るのが素直である。
     pub(crate) fn ask_marks_preset(&mut self, index: usize) -> bool {
-        if !self.marks_mode() || self.marks_question_is_fixed() {
+        if self.marks_question_is_fixed() {
             return false;
         }
         let Some(question) = self
@@ -1165,7 +1108,7 @@ impl App {
     /// 差し込む（[`crate::marks_questions::Questions::free`]）。
     pub(crate) fn ask_marks_free(&mut self, input: &str) -> bool {
         let input = input.trim();
-        if !self.marks_mode() || input.is_empty() || self.marks_question_is_fixed() {
+        if input.is_empty() || self.marks_question_is_fixed() {
             return false;
         }
         let Some(question) = self.marks_questions.as_ref().map(|q| q.free(input)) else {
@@ -1180,7 +1123,8 @@ impl App {
         self.marks_question = Some(question);
         // 読み出しの字がここで変わる（問いの名前 → `analyzing…`）。
         self.start_readout_flash();
-        // 起点。budget モードの `arm_semantic_layer` に当たる。
+        // **遅延の起点はここ 1 つである。** `--semantic-cmd` は開いた
+        // だけでは走らない（`App::semantic_armed`）。
         self.semantic_armed = true;
         self.reanalyze_semantics();
     }
@@ -1190,64 +1134,6 @@ impl App {
     /// `--semantic <fixture.json>` は 1 つの問いへの答えを固定で持っている。
     pub(crate) fn marks_question_is_fixed(&self) -> bool {
         matches!(self.semantic_source, Some(SemanticSource::Inline(_)))
-    }
-
-    /// Move the Reading Budget by `delta` percentage points, clamped to
-    /// 1..=100. Returns whether it actually moved (already at an end is
-    /// not an error — the readout simply does not change).
-    ///
-    /// 設計書「Budget 変更では Jev を呼ばない」: the body is a clamp plus
-    /// [`App::refresh_semantic_decorations`], and neither reaches
-    /// `Provider::analyze` or `render::render`. That is the property of
-    /// this layer, and it is held here by the call graph rather than by
-    /// a comment.
-    ///
-    /// **遅延の起点だけは、その保証の外にある。** 同じキーの最初の 1 打は
-    /// [`crate::adjust_reading_budget`] で [`App::arm_semantic_layer`] も
-    /// 通り、そちらが `analyze` へ届く（セッションに 1 度だけ）。この関数
-    /// 自体は起点の前も後も provider を知らない。
-    pub(crate) fn nudge_reading_budget(&mut self, delta: i16) -> bool {
-        // 下限より下へは回せない。下限は文書の測定値で、そこから下では
-        // Budget を下げても画面は動かず、`READ` の数字だけが嘘になる
-        // （`policy::floor`）。上限は 100 のまま。
-        let next = (self.reading_budget as i16 + delta).clamp(
-            self.reading_floor().unwrap_or(crate::semantic::MIN_BUDGET) as i16,
-            crate::semantic::MAX_BUDGET as i16,
-        ) as u8;
-        if next == self.reading_budget {
-            return false;
-        }
-        self.reading_budget = next;
-        self.refresh_semantic_decorations();
-        true
-    }
-
-    /// The Reading Budget's floor for the annotation in hand — the
-    /// smallest `READ %` at which the number matches what is on screen
-    /// ([`semantic_reading::policy::floor`]). `None` without an
-    /// annotation: no analysis, no floor.
-    pub(crate) fn reading_floor(&self) -> Option<u8> {
-        self.semantic_doc.as_ref().map(crate::semantic::floor_for)
-    }
-
-    /// Is the budget sitting on its floor? Lowering it would do nothing.
-    pub(crate) fn at_reading_floor(&self) -> bool {
-        self.reading_floor()
-            .is_some_and(|floor| self.reading_budget <= floor)
-    }
-
-    /// Lift the budget onto the floor if an annotation just arrived (or
-    /// was replaced) with a floor above it. The budget is a reading
-    /// preference and rides along across documents, so it can land under
-    /// the new document's floor — where it would read `READ 1%` while
-    /// showing 40 %. Raising it keeps the number honest; lowering never
-    /// happens here (a budget above the floor is the user's choice).
-    fn lift_budget_onto_floor(&mut self) {
-        if let Some(floor) = self.reading_floor()
-            && self.reading_budget < floor
-        {
-            self.reading_budget = floor;
-        }
     }
 
     /// Set a transient footer message.

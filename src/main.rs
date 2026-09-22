@@ -110,31 +110,22 @@ fn main() -> Result<()> {
                  \x20                   then loses its anchor)\n\
                  \x20 --semantic <file> paint the Semantic Reading Layer from a\n\
                  \x20                   semantic-reading annotation (JSON); -/+ by 1\n\
-                 \x20                   and </> by 10 move the amount in both views\n\
-                 \x20                   (MARK % by default, READ % under\n\
-                 \x20                   --semantic-mode budget)\n\
+                 \x20                   and </> by 10 move how many passages light\n\
+                 \x20                   up, in both views\n\
                  \x20 --semantic-cmd <cmd> get that annotation from a command instead:\n\
                  \x20                   akapen writes version/source/atoms JSON to\n\
                  \x20                   its stdin and reads version/units back (atom\n\
                  \x20                   INDICES, never ranges). Runs off the UI thread;\n\
                  \x20                   see examples/semantic/annotate-doc.py.\n\
-                 \x20                   Exclusive with --semantic. The first press of\n\
-                 \x20                   a READ key starts the analysis (opening a file\n\
-                 \x20                   does not), and answers are cached per document\n\
-                 \x20                   under $XDG_CACHE_HOME/akapen/semantic.\n\
+                 \x20                   Exclusive with --semantic. Picking a question\n\
+                 \x20                   (m/M, or / to type one) starts the analysis\n\
+                 \x20                   (opening a file does not), and answers are\n\
+                 \x20                   cached per document and question under\n\
+                 \x20                   $XDG_CACHE_HOME/akapen/semantic.\n\
                  \x20                   $AKAPEN_SEMANTIC_CMD is the default when\n\
                  \x20                   this flag is absent (the flag wins)\n\
-                 \x20 --semantic-mode <m>  marks|budget (default marks). `marks`\n\
-                 \x20                   drops DIM entirely: pick a question (m/M, or\n\
-                 \x20                   / to type one) and the passages that answer\n\
-                 \x20                   it light up; -/+ and </> then move HOW MANY\n\
-                 \x20                   (MARK % in the footer). 0 marks is a real\n\
-                 \x20                   answer — nothing here answers that question.\n\
-                 \x20                   `budget` is the DIM version: every Unit gets\n\
-                 \x20                   a verdict and -/+ move the READ budget. An\n\
-                 \x20                   annotation without scores needs it\n\
                  \x20 --marks-questions <file>  read the marks questions from this\n\
-                 \x20                   JSON instead of the built-in four (also\n\
+                 \x20                   JSON instead of the built-in five (also\n\
                  \x20                   $XDG_CONFIG_HOME/akapen/marks-questions.json)\n\
                  \x20 --semantic-cache-clear  wipe that cache and exit (needed after\n\
                  \x20                   changing an analyser's prompts without\n\
@@ -392,11 +383,11 @@ fn run(config: Config) -> Result<()> {
     // 何も光らない TUI ではなく普通のコマンドラインエラーであるべきで、
     // fixture を起動前に読むのと同じ理由である。
     //
-    // **層が無ければ読まない。** marks が既定になった（2026-09-22）ので、
-    // ここを `is_marks()` だけで判定すると、`$XDG_CONFIG_HOME` の問いの
-    // ファイルが壊れている人は `akapen foo.md` すら開けなくなる。問いは
-    // 層が無ければ 1 度も使われないので、読む理由も無い。
-    let marks_questions = if config.semantic_mode.is_marks() && semantic_source.is_some() {
+    // **層が無ければ読まない。** ここを無条件にすると、
+    // `$XDG_CONFIG_HOME` の問いのファイルが壊れている人は
+    // `akapen foo.md` すら開けなくなる。問いは層が無ければ 1 度も
+    // 使われないので、読む理由も無い。
+    let marks_questions = if semantic_source.is_some() {
         Some(crate::marks_questions::Questions::discover(
             config.marks_questions.as_deref(),
         )?)
@@ -803,9 +794,7 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
             // 代償は marks モードにある: `]` のあとの `m` は「ファイル
             // 切替 ＋ 問いの popup」ではなくジャンプになる。popup は `]` を
             // 挟まずに `m` を打てば開く。
-            KeyCode::Char(crate::keys::MARK_JUMP)
-                if modifiers.is_empty() && app.marks_mode() =>
-            {
+            KeyCode::Char(crate::keys::MARK_JUMP) if modifiers.is_empty() => {
                 app.pending_chord = None;
                 jump_mark(app, if bracket == ']' { 1 } else { -1 });
                 return;
@@ -2628,14 +2617,12 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // も `<` も `>` も、この層が存在しなかったときと 1 バイトも違わない
         // 動きをする。「使えない機能があります」という UI を見せないため、
         // 断りの toast すら出さない。
-        // 割り当ては `crate::keys` の 1 か所にある。marks モードでない
-        // セッションで `m` / `M` / `/` は `None` を返すので、ここは素通り
-        // する（使えないキーを呑み込まない）。
+        // 割り当ては `crate::keys` の 1 か所にある。層の無いセッションは
+        // `semantic_enabled()` で素通りする（使えないキーを呑み込まない）。
         KeyCode::Char(c)
-            if app.semantic_enabled()
-                && crate::keys::semantic_key(c, app.marks_mode()).is_some() =>
+            if app.semantic_enabled() && crate::keys::semantic_key(c).is_some() =>
         {
-            if let Some(action) = crate::keys::semantic_key(c, app.marks_mode()) {
+            if let Some(action) = crate::keys::semantic_key(c) {
                 on_semantic_key(app, action);
             }
         }
@@ -2908,8 +2895,7 @@ fn active_review_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
 fn on_semantic_key(app: &mut App, action: crate::keys::SemanticKey) {
     use crate::keys::SemanticKey;
     match action {
-        SemanticKey::Amount(delta) if app.marks_mode() => adjust_marks_share(app, delta),
-        SemanticKey::Amount(delta) => adjust_reading_budget(app, delta),
+        SemanticKey::Amount(delta) => adjust_marks_share(app, delta),
         SemanticKey::CycleQuestion(step) => cycle_marks_question(app, step),
         SemanticKey::PickQuestion => open_marks_picker(app),
         SemanticKey::FreeQuestion => open_marks_prompt(app),
@@ -2952,11 +2938,20 @@ fn press_focus(app: &mut App) {
 /// だからこの関数は `Provider::analyze` へ到達しない。走るのは
 /// `marks::mark` 1 回だけで、新しい本数はステータス行に出る。
 fn adjust_marks_share(app: &mut App, delta: i16) {
-    if app.marks_question.is_none() && app.semantic_doc.is_none() {
+    // **注釈が無いあいだは動かさない。** 光っている箇所が 0 本なのに
+    // % だけが動くと、読み出しの数字が画面と食い違う。断り方は 3 通りで、
+    // どれも「なぜ今使えないか」を言う。
+    if app.semantic_doc.is_none() {
         if app.semantic_inflight.is_some() {
+            // 答え待ち。まだ無いのは事実だが「使えない」とは違う —
+            // 数秒後には来る。
             app.flash("analyzing…");
-        } else {
+        } else if app.marks_question.is_none() {
             app.flash("no question yet — m to pick one, / to type one");
+        } else {
+            // `--semantic`（fixture）でしか来ない: 層は頼まれているのに
+            // provider がこの文書を断った（別の文書の fixture、など）。
+            app.flash_err("semantic annotation unavailable for this document");
         }
         return;
     }
@@ -3052,30 +3047,6 @@ pub(crate) fn open_marks_prompt(app: &mut App) {
     app.mode = Mode::Input;
     app.ime_guard = Some(ime::ImeGuard::enter(app.config.ime));
     app.cursor = line;
-}
-
-fn adjust_reading_budget(app: &mut App, delta: i16) {
-    if app.arm_semantic_layer() {
-        app.nudge_reading_budget(delta);
-        return;
-    }
-    if app.semantic_doc.is_none() && app.semantic_inflight.is_some() {
-        // `--semantic-cmd` の答え待ち。まだ無いのは事実だが「使えない」
-        // とは違う — 数秒後には来る。
-        app.flash("analyzing…");
-        return;
-    }
-    if app.semantic_doc.is_none() {
-        // Only reachable WITH `--semantic`: the layer was asked for and
-        // the provider refused this document (a fixture belonging to
-        // another file, or a provider error). Same shape as the other
-        // "not here" refusals (`Tab` on a non-Markdown file): say why.
-        // A session without `--semantic` never gets here — the key is
-        // not bound at all.
-        app.flash_err("semantic annotation unavailable for this document");
-        return;
-    }
-    app.nudge_reading_budget(delta);
 }
 
 fn jump_review_mark(app: &mut App, dir: isize) {
@@ -3520,14 +3491,12 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         // one. While the decoration layer was view-only these keys were
         // deliberately left out — a key that moved `READ %` in the footer
         // and changed nothing else would have been a lie.
-        // 割り当ては `crate::keys` の 1 か所にある。marks モードでない
-        // セッションで `m` / `M` / `/` は `None` を返すので、ここは素通り
-        // する（使えないキーを呑み込まない）。
+        // 割り当ては `crate::keys` の 1 か所にある。層の無いセッションは
+        // `semantic_enabled()` で素通りする（使えないキーを呑み込まない）。
         KeyCode::Char(c)
-            if app.semantic_enabled()
-                && crate::keys::semantic_key(c, app.marks_mode()).is_some() =>
+            if app.semantic_enabled() && crate::keys::semantic_key(c).is_some() =>
         {
-            if let Some(action) = crate::keys::semantic_key(c, app.marks_mode()) {
+            if let Some(action) = crate::keys::semantic_key(c) {
                 on_semantic_key(app, action);
             }
         }
@@ -5945,8 +5914,7 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: Default::default(),
-            marks_questions: None,
+                marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5998,8 +5966,7 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: Default::default(),
-            marks_questions: None,
+                marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6065,8 +6032,7 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: Default::default(),
-            marks_questions: None,
+                marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6215,8 +6181,7 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: Default::default(),
-            marks_questions: None,
+                marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6260,8 +6225,7 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: Default::default(),
-            marks_questions: None,
+                marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6401,8 +6365,7 @@ mod mouse_view_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: Default::default(),
-            marks_questions: None,
+                marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6697,8 +6660,7 @@ mod source_decoration_tests {
             fx: false,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: Default::default(),
-            marks_questions: None,
+                marks_questions: None,
             decoration_blend: Default::default(),
             decorations,
         };

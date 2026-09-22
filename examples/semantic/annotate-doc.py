@@ -7,13 +7,14 @@ stdin から
 
     {"version": 1,
      "source": "<文書全文>",
+     "question": {"id": "essential", "text": "…", "core_floor": 0.2},
      "atoms": [{"index": 0, "kind": "heading", "range": {...}, "text": "..."}]}
 
 を受け取り、stdout へ
 
-    {"version": 1,
-     "units": [{"id": "u1", "atoms": [0], "reading_tier": "essential",
-                "relations": []}]}
+    {"version": 1, "question": "essential",
+     "units": [{"id": "u1", "atoms": [0], "reading_tier": "detail",
+                "score": 0.9, "core_atoms": [0]}]}
 
 を返す。**range は返さない** — 返すのは Atom の index だけで、位置の
 管理は akapen 側に残る。これがこのプロトコルの安全性の芯で、外部コマンド
@@ -21,18 +22,24 @@ stdin から
 
 このスクリプトの目的は、**API キー無しでパイプライン全体を端から端まで
 動かせること**である。判断そのものは意図的に素朴で、Jev への question
-設計（`docs/design/jev.md`）はここには無い。
+設計（`docs/design/jev.md`）はここには無い。**問いの文面は読まない** —
+どの問いで呼ばれても同じスコアを返す。
 
 判断規則（完全に決定論的）:
 
-    heading                  -> ESSENTIAL
-    heading 直後の 1 Atom    -> SUPPORTING
-    code block / table       -> DETAIL
-    それ以外                 -> DETAIL
+    heading                  -> 0.90
+    heading 直後の 1 Atom    -> 0.70
+    code block / table       -> 0.05
+    それ以外                 -> 0.30
 
-そのうえで、直前の Atom と語が大きく重なる文には REDUNDANT_WITH を付ける。
-Atom 1 つが Unit 1 つで、意味境界の判断（複数 Atom を 1 Unit に束ねる）は
-していない — そこは Jev の仕事である。
+そのうえで、直前までに出た Atom と語が大きく重なる文はスコアを半分に
+する（言い直しは答えとして弱い、という素朴な代用）。核は Atom 1 つ
+なのでその Atom 自身で、散文でない Atom（見出し・コード・表）は核を
+持たない ＝ 光らない。Atom 1 つが Unit 1 つで、意味境界の判断（複数
+Atom を 1 Unit に束ねる）はしていない — そこは Jev の仕事である。
+
+**`question` の無い要求は断る。** 問いを持たない解析はこの層に無い
+（2026-09-22 に DIM 版を削除した）。
 """
 
 from __future__ import annotations
@@ -42,8 +49,16 @@ import sys
 
 VERSION = 1
 
-#: 直前の Atom と語がこの割合以上重なったら REDUNDANT_WITH を付ける。
+#: 直前までの Atom と語がこの割合以上重なったら、言い直しとみなす。
 REDUNDANCY_THRESHOLD = 0.6
+
+#: 言い直しとみなした Atom のスコアに掛ける係数。
+REDUNDANCY_PENALTY = 0.5
+
+#: 核（MARKED を絞る先）の候補になる Atom の種別。akapen 側の
+#: `PROSE_KINDS` と同じ考え方で、見出し・コード・表は「ここだけ読めば
+#: 要点が取れる」の答えにならない。
+PROSE_KINDS = frozenset({"sentence", "list_item", "block_quote", "table_row"})
 
 #: redundancy を見るときに無視する、内容を持たない語。
 STOP_WORDS = frozenset(
@@ -77,18 +92,21 @@ def overlap(a: set[str], b: set[str]) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
-def tier_for(atom: dict, previous_kind: str | None) -> str:
-    """その Atom の Reading Tier。
+def score_for(atom: dict, previous_kind: str | None) -> float:
+    """その Atom のスコア（問いにどれだけ答えているか、の代用）。
 
-    見出しは文書の骨格なので ESSENTIAL、その直後の 1 文は見出しが名指した
-    話の本体なので SUPPORTING。残りは DETAIL に落とす。
+    見出しは文書の骨格なので高く、その直後の 1 文は見出しが名指した話の
+    本体なので次に高い。コードと表は低い。**問いの文面は見ていない** —
+    この参照実装は判断をしない。
     """
     kind = atom.get("kind")
     if kind == "heading":
-        return "essential"
+        return 0.90
+    if kind in ("code_block", "table"):
+        return 0.05
     if previous_kind == "heading":
-        return "supporting"
-    return "detail"
+        return 0.70
+    return 0.30
 
 
 def annotate(request: dict) -> dict:
@@ -96,43 +114,51 @@ def annotate(request: dict) -> dict:
     if version != VERSION:
         raise ValueError(f"unsupported protocol version: {version!r}")
 
+    question = request.get("question")
+    if not isinstance(question, dict) or not question.get("text"):
+        raise ValueError(
+            "this request carries no question — akapen must send one "
+            "(the DIM version was removed on 2026-09-22)"
+        )
+
     atoms = request.get("atoms") or []
     units = []
     previous_kind: str | None = None
-    previous: list[tuple[str, set[str]]] = []
+    previous: list[set[str]] = []
 
     for atom in atoms:
         index = atom["index"]
         text = atom.get("text", "")
-        unit_id = f"u{index + 1}"
-        tier = tier_for(atom, previous_kind)
+        score = score_for(atom, previous_kind)
 
         # 直前までに出た Atom のうち、語の重なりがいちばん大きいもの。
-        relations = []
         bag = words(text)
         if atom.get("kind") not in ("heading", "code_block"):
-            best = max(
-                (
-                    (overlap(bag, other_bag), other_id)
-                    for other_id, other_bag in previous
-                ),
-                default=(0.0, None),
-            )
-            if best[1] is not None and best[0] >= REDUNDANCY_THRESHOLD:
-                relations.append({"redundant_with": best[1]})
+            best = max((overlap(bag, other) for other in previous), default=0.0)
+            if best >= REDUNDANCY_THRESHOLD:
+                score *= REDUNDANCY_PENALTY
+
+        # 核は「この Unit のどこを読むか」。Atom 1 つの Unit なので、
+        # 散文ならその Atom 自身、そうでなければ **核を持たない**
+        # （`[]` は「絞り込み無し」ではない。プロトコルの 3 値）。
+        core = [index] if atom.get("kind") in PROSE_KINDS and text.strip() else []
 
         units.append(
             {
-                "id": unit_id,
+                "id": f"u{index + 1}",
                 "atoms": [index],
-                "reading_tier": tier,
-                "relations": relations,
+                # `reading_tier` は wire の必須フィールドとして残っている
+                # だけで、誰も読まない（DIM 版は 2026-09-22 に削除）。
+                "reading_tier": "detail",
+                "score": round(score, 2),
+                "core_atoms": core,
+                "relations": [],
             }
         )
-        previous.append((unit_id, bag))
+        previous.append(bag)
         previous_kind = atom.get("kind")
 
-    return {"version": VERSION, "units": units}
+    return {"version": VERSION, "question": question.get("id"), "units": units}
 
 
 def main() -> int:

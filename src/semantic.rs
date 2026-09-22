@@ -7,8 +7,8 @@
 //! である（crate からは akapen も ratatui も見えない）。
 //!
 //! ```text
-//! Provider::analyze  ->  SemanticDocument      遅い / 非決定的 / 文書が変わったときだけ
-//! policy::decorate   ->  Vec<(range, state)>   速い / 決定論的 / Budget を動かすたび
+//! Provider::analyze  ->  SemanticDocument      遅い / 非決定的 / 問いか文書が変わったときだけ
+//! marks::mark        ->  Vec<(range, state)>   速い / 決定論的 / つまみを動かすたび
 //! decoration_kind    ->  Vec<Decoration>       ここが akapen の語彙への変換
 //! ```
 //!
@@ -24,26 +24,22 @@
 //!
 //! で全部出る — フィールドを `.analyze` で触っているのは
 //! `reanalyze_semantics` の 2 本の腕（同期・非同期）だけで、残りは宣言・
-//! 初期化・代入と [`App::semantic_enabled`] / [`App::arm_semantic_layer`] の
-//! 型の検査である。[`DigestChecked`] の `analyze` も inner へ委譲するが、
+//! 初期化・代入と [`App::semantic_enabled`] の型の検査である。[`DigestChecked`] の `analyze` も inner へ委譲するが、
 //! それは Provider チェーンの**内側**であって App からは 1 回の呼び出しに
 //! 見える。[`CommandProvider`] のキャッシュも同じく内側にある。
 //!
-//! Budget を動かす [`App::nudge_reading_budget`] からは
-//! [`decorations_for`] にしか到達せず、その中身は `policy::decorate` の
-//! 呼び出し 1 本である。
+//! つまみを動かす [`App::nudge_marks_share`] からは
+//! [`marks_decorations_for`] / [`focus_decorations_for`] にしか到達せず、
+//! その中身は `marks::mark` の呼び出し 1 本である。
 //!
-//! > Budget 変更では Jev を呼ばない
+//! > つまみの操作では Jev を呼ばない
 //!
 //! を、コメントではなく呼び出しグラフで満たしている。
 //!
 //! **ただし、遅延の起点だけはその外にある。** `--semantic-cmd` は開いた
-//! だけでは走らず、Budget キーの**最初の 1 打**が
-//! [`App::arm_semantic_layer`] 経由で `reanalyze_semantics` を 1 度だけ
-//! 呼ぶ（`crate::adjust_reading_budget`）。2 打目以降と fixture 経路は
-//! 上の保証のままである。「Budget を動かすたびに Jev を呼ぶ」ことは
-//! 変わらず起きない — 起点はセッションに 1 度で、Budget の値とは無関係で
-//! ある。
+//! だけでは走らず、**問いを決めた最初の 1 打**（`m` / `M` / `/`）が
+//! `App::ask_marks` 経由で `reanalyze_semantics` を呼ぶ。つまみの操作は
+//! 起点にならない — 問いの無い解析はこの投影では使えないからである。
 //!
 //! # 同じ文書は二度解析しない
 //!
@@ -68,8 +64,7 @@
 //! [`App::semantic_source`]: crate::app::App::semantic_source
 //! [`App::semantic_enabled`]: crate::app::App::semantic_enabled
 //! [`App::reanalyze_semantics`]: crate::app::App::reanalyze_semantics
-//! [`App::nudge_reading_budget`]: crate::app::App::nudge_reading_budget
-//! [`App::arm_semantic_layer`]: crate::app::App::arm_semantic_layer
+//! [`App::nudge_marks_share`]: crate::app::App::nudge_marks_share
 
 use std::path::Path;
 use std::time::Duration;
@@ -77,7 +72,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use semantic_reading::{
     AnalyzeRequest, AnalyzeResponse, AtomKind, DisplayState, Error as SemanticError,
-    FixtureProvider, Provider, RequestQuestion, SemanticDocument, atomize, marks, policy,
+    FixtureProvider, Provider, RequestQuestion, SemanticDocument, atomize, marks,
 };
 use sha2::{Digest, Sha256};
 
@@ -85,14 +80,6 @@ use crate::decoration::{Decoration, DecorationKind};
 use crate::export::Deadline;
 use crate::marks_questions::Question;
 use crate::semantic_cache::SemanticCache;
-
-/// Reading Budget の下限・上限・既定値。刻みは 1 % で、設計書どおり
-/// 「43 / 42 / 41 で表示が変わらなくても問題ない」粒度である。
-pub(crate) const MIN_BUDGET: u8 = policy::MIN_BUDGET;
-pub(crate) const MAX_BUDGET: u8 = policy::MAX_BUDGET;
-/// 既定は 100 %。全文を表示したまま ESSENTIAL に薄いマーカーを重ねる、
-/// 設計書「最初のデモ」の初期状態。
-pub(crate) const DEFAULT_BUDGET: u8 = MAX_BUDGET;
 
 /// source テキストの SHA-256（小文字 hex 64 桁）。
 pub(crate) fn source_digest(source: &str) -> String {
@@ -477,26 +464,13 @@ pub(crate) fn decoration_kind(state: DisplayState) -> Option<DecorationKind> {
     }
 }
 
-/// 現在の Budget での decoration 列。
+/// 現在のつまみでの decoration 列（[`marks::mark`]）。
 ///
-/// **この関数から `Provider::analyze` へ到達する経路は無い。** Budget を
-/// 1 % 動かすたびに走るのはここだけで、`policy::decorate` は純粋関数である。
-pub(crate) fn decorations_for(document: &SemanticDocument, budget: u8) -> Vec<Decoration> {
-    policy::decorate(document, budget)
-        .into_iter()
-        .filter_map(|(range, state)| {
-            decoration_kind(state).map(|kind| Decoration { range, kind })
-        })
-        .collect()
-}
-
-/// **marks モードの** decoration 列（[`marks::mark`]）。
+/// **MARKED しか返さない**（DIM が 1 つも無い）。沈める分を足すのは
+/// [`focus_decorations_for`] の仕事である。
 ///
-/// `decorations_for` と同じ形で返すので、描画は 1 本の経路のままである。
-/// 違いは投影だけで、こちらは **MARKED しか返さない**（DIM が 1 つも無い）。
-///
-/// `decorations_for` と同じく、**この関数から `Provider::analyze` へ到達する
-/// 経路は無い**。つまみを 1 ポイント動かすたびに走るのはここだけである。
+/// **この関数から `Provider::analyze` へ到達する経路は無い。** つまみを
+/// 1 ポイント動かすたびに走るのはここだけで、`marks::mark` は純粋関数である。
 pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> Vec<Decoration> {
     marks::mark(document, share)
         .into_iter()
@@ -510,9 +484,8 @@ pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> V
 /// **フォーカスの** decoration 列（`f`）。
 ///
 /// marks の投影（[`marks::mark`]）の上に、akapen 側で沈める分を足しただけの
-/// ものである。**`marks.rs` にも `policy.rs` にも 1 行も入れていない** —
-/// フォーカスは読み手の操作であって判定ではないので、判定器の語彙を
-/// 増やす理由が無い。
+/// ものである。**`marks.rs` には 1 行も入れていない** — フォーカスは
+/// 読み手の操作であって判定ではないので、判定器の語彙を増やす理由が無い。
 ///
 /// # 何を沈め、何を沈めないか（読み手の決定、2026-09-22）
 ///
@@ -524,10 +497,9 @@ pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> V
 /// | それ以外の Unit の Atom | 沈む（[`DecorationKind::Dim`]） | フォーカスの本体 |
 /// | どの Unit にも属さない Atom | 沈む | 上と同じ扱い（見出しは上で除いてある） |
 ///
-/// **DIM の描画をそのまま使う。** 判決（`--semantic-mode budget`）ではなく
-/// 読み手が自分で押した結果なので、外れても誰も傷つかない — 沈める機構を
-/// 2 つ目作る理由が無い（`docs/design/marks-only-and-review-mode.md` 1 節
-/// 「判決」）。
+/// **沈めるのは読み手が自分で押した結果である**（判決ではない）。外れても
+/// 誰も傷つかないので、`f` を離せば戻る 1 本の描画で足りる
+/// （`docs/design/marks-only-and-review-mode.md` 1 節「判決」）。
 ///
 /// `marks_decorations_for` と同じく、**この関数から `Provider::analyze` へ
 /// 到達する経路は無い**。
@@ -605,19 +577,14 @@ pub(crate) fn marked_lines(source: &str, decorations: &[Decoration]) -> Vec<usiz
     lines
 }
 
-/// Reading Budget の下限（[`policy::floor`]）。`decorations_for` と同じ
-/// 一段目で数えるので、下限で止めた Budget の数字は表示量と一致する。
-pub(crate) fn floor_for(document: &SemanticDocument) -> u8 {
-    policy::floor(document)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use semantic_reading::{Atom, AtomKind, AtomIndex, ReadingTier, Relation, SemanticUnit};
+    use semantic_reading::{Atom, AtomKind, AtomIndex, SemanticUnit};
 
     const DEMO_MD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.md");
-    const DEMO_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.json");
+    const DEMO_JSON: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo-marks.json");
     /// 参照実装。Jev を呼ばない決定論的なスクリプトで、API キー無しで
     /// パイプライン全体を端から端まで動かせることがその存在理由である。
     const ANNOTATE_PY: &str =
@@ -627,6 +594,22 @@ mod tests {
     /// 明示する（配布物のパーミッションでテストが落ちないように）。
     fn reference_command() -> String {
         format!("python3 '{ANNOTATE_PY}'")
+    }
+
+    /// 参照実装へ渡す問い。**文面は読まれない**（参照実装は判断を
+    /// しない）が、問いの無い要求は断られるので載せる必要がある。
+    fn a_question() -> crate::marks_questions::Question {
+        crate::marks_questions::Question {
+            id: "essential".into(),
+            label: "Essential".into(),
+            hint: String::new(),
+            text: "テスト用の問い。".into(),
+        }
+    }
+
+    /// 問いを載せた参照実装の provider。
+    fn reference_provider() -> CommandProvider {
+        CommandProvider::new(reference_command()).asking(Some(a_question()))
     }
 
     /// `sh -c` で走る、決まった JSON を返すだけのコマンド。
@@ -705,7 +688,7 @@ mod tests {
     fn a_fixture_without_a_digest_is_not_checked() {
         let document = SemanticDocument::new(
             vec![Atom::new(0..3, AtomKind::Sentence)],
-            vec![SemanticUnit::new("u1", [AtomIndex(0)], ReadingTier::Essential)],
+            vec![SemanticUnit::new("u1", [AtomIndex(0)], semantic_reading::ReadingTier::Essential)],
         );
         assert!(document.source_digest().is_none());
         let provider = DigestChecked::new(FixtureProvider::from_document(document).unwrap());
@@ -784,114 +767,17 @@ mod tests {
         );
     }
 
-    /// 設計書が求める 4 段階すべてと、REDUNDANT_WITH を使っていること。
+    /// demo の fixture がスコアと核を持っていること — marks の投影が
+    /// 効く形かどうか。
     #[test]
-    fn the_demo_fixture_uses_all_four_tiers_and_a_redundancy() {
+    fn the_demo_fixture_carries_scores_and_cores() {
         let (_, document) = demo();
-        for tier in [
-            ReadingTier::Essential,
-            ReadingTier::Supporting,
-            ReadingTier::Context,
-            ReadingTier::Detail,
-        ] {
-            assert!(
-                document.units.iter().any(|u| u.reading_tier == tier),
-                "{tier:?} を使う Unit が無い"
-            );
-        }
-        let redundant: Vec<_> = document.units.iter().filter(|u| u.is_redundant()).collect();
-        assert_eq!(redundant.len(), 1, "REDUNDANT な Unit は 1 つ");
-        assert_eq!(
-            redundant[0].relations,
-            vec![Relation::RedundantWith("u3".into())],
-            "補足は結論の言い換え"
+        assert!(marks::has_scores(&document), "スコアを持たない fixture");
+        assert!(
+            document.units.iter().all(|u| u.core_atoms.is_some()),
+            "核を絞っていない Unit がある（つまみ 100 % で丸ごと光る）"
         );
-    }
-
-    /// 設計書「最初のデモ」の初期状態: 全文を表示し、ESSENTIAL を薄く
-    /// マーキングする。DIM は 1 つも無い。
-    #[test]
-    fn budget_100_marks_the_essentials_and_dims_nothing() {
-        let (_, document) = demo();
-        let states = policy::decorate(&document, 100);
-
-        let essential_atoms: Vec<usize> = document
-            .units
-            .iter()
-            .filter(|u| u.reading_tier == ReadingTier::Essential && !u.is_redundant())
-            .flat_map(|u| u.atoms.iter().map(|a| a.0))
-            .collect();
-        assert!(!essential_atoms.is_empty());
-
-        for (i, (_, state)) in states.iter().enumerate() {
-            let want = if essential_atoms.contains(&i) {
-                DisplayState::Marked
-            } else {
-                DisplayState::Normal
-            };
-            assert_eq!(*state, want, "atom {i}");
-        }
-        assert_eq!(
-            states.iter().filter(|(_, s)| *s == DisplayState::Dim).count(),
-            0,
-            "budget 100 で DIM は 0 個"
-        );
-    }
-
-    /// Budget を下げると DETAIL と REDUNDANT が先に落ちる。閾値は
-    /// 生成スクリプトが出す累積表から取っている（勘で選ばない）。
-    ///
-    /// | 順 | unit | 実効 Tier | 残る下限 budget |
-    /// | -- | ---- | --------- | --------------- |
-    /// |  9 | u9   | CONTEXT※ | 74              |
-    /// | 10 | u4   | DETAIL    | 76              |
-    /// | 11 | u10  | DETAIL    | 78              |
-    /// | 12 | u12  | DETAIL    | 88              |
-    /// | 13 | u13  | DETAIL    | 100             |
-    #[test]
-    fn lowering_the_budget_dims_the_details_and_the_redundancy_first() {
-        let (_, document) = demo();
-        let dim_units = |budget: u8| -> Vec<String> {
-            let states = policy::decorate(&document, budget);
-            document
-                .units
-                .iter()
-                .filter(|unit| {
-                    unit.atoms
-                        .iter()
-                        .all(|a| states[a.0].1 == DisplayState::Dim)
-                })
-                .map(|unit| unit.id.to_string())
-                .collect()
-        };
-
-        // 75 %: DETAIL 4 つだけが落ちる。REDUNDANT はまだ残る。
-        assert_eq!(dim_units(75), ["u4", "u10", "u12", "u13"]);
-        // 73 %: REDUNDANT な u9 も落ちる。CONTEXT（u6/u8/u11）はまだ全部残る。
-        assert_eq!(dim_units(73), ["u4", "u9", "u10", "u12", "u13"]);
-        // 30 %: ESSENTIAL 3 つと、いちばん短い SUPPORTING だけが残る。
-        assert_eq!(
-            dim_units(30),
-            ["u2", "u4", "u6", "u8", "u9", "u10", "u11", "u12", "u13"]
-        );
-        // どの Budget でも ESSENTIAL は MARKED のまま（Budget に依存しない）。
-        let marked = |budget: u8| -> Vec<usize> {
-            policy::decorate(&document, budget)
-                .into_iter()
-                .enumerate()
-                .filter(|(_, (_, s))| *s == DisplayState::Marked)
-                .map(|(i, _)| i)
-                .collect()
-        };
-        // ESSENTIAL の 3 Unit（タイトル / 結論 / 制約）の核は、
-        // **どの Budget でも MARKED である**。1 % も含む。
-        //
-        // 台帳が一段だった頃はここが `[0]` で、READ を下げると
-        // 「最低限これを読め」が 3 つから 1 つへ減っていた
-        // （`semantic_reading::policy` の「台帳の単位」）。
-        for budget in [100, 75, 73, 30, 14, 5, 1] {
-            assert_eq!(marked(budget), [0, 3, 4, 11, 12, 13], "budget {budget}");
-        }
+        assert_eq!(document.question.as_deref(), Some("settled"));
     }
 
     /// 同じ source 行の中で状態が切り替わること — マイルストーンの
@@ -904,47 +790,48 @@ mod tests {
         let line_start = source.find("採用する方式は差分配信である。").unwrap();
         let line_end = line_start + source[line_start..].find('\n').unwrap();
 
-        for (budget, want) in [
-            (100, [DisplayState::Marked, DisplayState::Normal]),
-            (75, [DisplayState::Marked, DisplayState::Dim]),
-            (30, [DisplayState::Marked, DisplayState::Dim]),
-        ] {
-            let inside: Vec<(std::ops::Range<usize>, DisplayState)> =
-                policy::decorate(&document, budget)
-                    .into_iter()
-                    .filter(|(range, _)| range.start >= line_start && range.end <= line_end)
-                    .collect();
-            assert_eq!(inside.len(), 2, "budget {budget}");
-            assert_eq!(
-                [inside[0].1, inside[1].1],
-                want,
-                "budget {budget} で 1 行が {inside:?}"
-            );
-            // 2 つは隙間なく隣り合い、行を覆い尽くす。
-            assert_eq!(inside[0].0.start, line_start);
-            assert_eq!(inside[0].0.end, inside[1].0.start);
-            assert_eq!(inside[1].0.end, line_end);
-            assert_eq!(&source[inside[0].0.clone()], "採用する方式は差分配信である。");
-            assert_eq!(&source[inside[1].0.clone()], "詳細は付録にまとめた。");
-        }
+        // 前半は u3 の核、後半は別の Unit（既定のつまみではまだ上位に
+        // 入っていない）— **同じ行の途中で状態が変わる**。
+        let inside: Vec<(std::ops::Range<usize>, DisplayState)> =
+            marks::mark(&document, marks::DEFAULT_SHARE)
+            .into_iter()
+            .filter(|(range, _)| range.start >= line_start && range.end <= line_end)
+            .collect();
+        assert_eq!(inside.len(), 2);
+        assert_eq!(
+            [inside[0].1, inside[1].1],
+            [DisplayState::Marked, DisplayState::Normal],
+            "1 行が {inside:?}"
+        );
+        // 2 つは隙間なく隣り合い、行を覆い尽くす。
+        assert_eq!(inside[0].0.start, line_start);
+        assert_eq!(inside[0].0.end, inside[1].0.start);
+        assert_eq!(inside[1].0.end, line_end);
+        assert_eq!(&source[inside[0].0.clone()], "採用する方式は差分配信である。");
+        assert_eq!(&source[inside[1].0.clone()], "詳細は付録にまとめた。");
     }
 
     /// decoration へ変換する段で NORMAL が消えること。
     #[test]
-    fn decorations_carry_only_the_marked_and_the_dimmed() {
+    fn decorations_carry_only_the_marked() {
         let (_, document) = demo();
-        let at_100 = decorations_for(&document, 100);
-        assert_eq!(at_100.len(), 6, "ESSENTIAL の Atom 6 個だけ");
-        assert!(at_100.iter().all(|d| d.kind == DecorationKind::SemanticMark));
-
-        let at_30 = decorations_for(&document, 30);
-        assert!(at_30.iter().any(|d| d.kind == DecorationKind::Dim));
-        assert!(at_30.iter().any(|d| d.kind == DecorationKind::SemanticMark));
-        // 範囲外の budget は丸められる（0 も 200 も端に寄る）。
-        assert_eq!(decorations_for(&document, 0), decorations_for(&document, 1));
+        let wide = marks_decorations_for(&document, 100);
+        assert!(!wide.is_empty());
+        assert!(
+            wide.iter().all(|d| d.kind == DecorationKind::SemanticMark),
+            "marks の投影に DIM は 1 つも無い"
+        );
+        // つまみを下げると本数が減る（層として生きている）。
+        let narrow = marks_decorations_for(&document, 10);
+        assert!(narrow.len() < wide.len());
+        // 範囲外のつまみは丸められる（0 も 200 も端に寄る）。
         assert_eq!(
-            decorations_for(&document, 200),
-            decorations_for(&document, 100)
+            marks_decorations_for(&document, 0),
+            marks_decorations_for(&document, 1)
+        );
+        assert_eq!(
+            marks_decorations_for(&document, 200),
+            marks_decorations_for(&document, 100)
         );
     }
 
@@ -957,7 +844,7 @@ mod tests {
     #[test]
     fn the_reference_script_speaks_the_protocol_end_to_end() {
         let source = std::fs::read_to_string(DEMO_MD).unwrap();
-        let document = CommandProvider::new(reference_command())
+        let document = reference_provider()
             .analyze(&source)
             .expect("参照実装が応答すること");
 
@@ -969,28 +856,27 @@ mod tests {
         assert_eq!(document.units.len(), document.atoms.len());
         assert!(document.validate().is_ok());
 
-        // 見出しは ESSENTIAL、その直後は SUPPORTING という素朴な規則が
-        // 実際に効いている（no-op ではない）。
-        let tier_of = |atom: usize| {
+        // 応答は問いの id を echo している。
+        assert_eq!(document.question.as_deref(), Some("essential"));
+        // 見出しは高く、その直後が次に高いという素朴な規則が実際に効いて
+        // いる（no-op ではない）。
+        let score_of = |atom: usize| {
             document
                 .units
                 .iter()
                 .find(|unit| unit.atoms.contains(&AtomIndex(atom)))
                 .unwrap()
-                .reading_tier
+                .score
+                .unwrap()
         };
         assert_eq!(document.atoms[0].kind, AtomKind::Heading);
-        assert_eq!(tier_of(0), ReadingTier::Essential);
-        assert_eq!(tier_of(1), ReadingTier::Supporting);
-        assert!(
-            document.units.iter().any(|u| u.reading_tier == ReadingTier::Detail),
-            "DETAIL も出る"
-        );
-        // Budget を動かすと実際に表示状態が変わる（層として生きている）。
-        let at_100 = decorations_for(&document, 100);
-        let at_30 = decorations_for(&document, 30);
-        assert_ne!(at_100, at_30);
-        assert!(at_30.iter().any(|d| d.kind == DecorationKind::Dim));
+        assert!(score_of(0) > score_of(1));
+        assert!(score_of(1) > score_of(2));
+        // つまみを動かすと実際に表示状態が変わる（層として生きている）。
+        let wide = marks_decorations_for(&document, 100);
+        let narrow = marks_decorations_for(&document, 10);
+        assert_ne!(wide, narrow);
+        assert!(wide.len() > narrow.len());
     }
 
     /// 組み立てた文書は、解析した source の素性を名乗る。
@@ -1186,10 +1072,10 @@ mod tests {
     /// 空の文書でも一周する（Atom 0 個・Unit 0 個）。
     #[test]
     fn an_empty_document_round_trips_as_an_empty_annotation() {
-        let document = CommandProvider::new(reference_command()).analyze("").unwrap();
+        let document = reference_provider().analyze("").unwrap();
         assert!(document.atoms.is_empty());
         assert!(document.units.is_empty());
-        assert!(decorations_for(&document, 50).is_empty());
+        assert!(marks_decorations_for(&document, 50).is_empty());
     }
 
     /// `--semantic-cmd` から Command の供給源が立ち、`--semantic` からは

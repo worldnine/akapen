@@ -13,7 +13,7 @@
 
 use crate::*;
 
-use crate::config::{Config, EscQuit, SemanticMode};
+use crate::config::{Config, EscQuit};
 use crate::highlight::Highlighter;
 use crate::ime::ImeMode;
 use crate::marks_questions::Questions;
@@ -30,8 +30,8 @@ fn demo(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// `demo.md` を `--semantic-mode <mode> --semantic <fixture>` で開いた App。
-fn app_with(fixture: &str, mode: SemanticMode) -> App {
+/// `demo.md` を `--semantic <fixture>` で開いた App。
+fn app_with(fixture: &str) -> App {
     let path = demo("demo.md");
     let config = Config {
         files: vec![path.clone()],
@@ -47,7 +47,6 @@ fn app_with(fixture: &str, mode: SemanticMode) -> App {
         fx: true,
         semantic: Some(demo(fixture)),
         semantic_cmd: None,
-        semantic_mode: mode,
         marks_questions: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
@@ -56,7 +55,6 @@ fn app_with(fixture: &str, mode: SemanticMode) -> App {
     let highlight = Highlighter::new(config.theme.as_deref(), false);
     let view = ViewState::render(&source, 75, &highlight, Default::default());
     let mut app = App::new(config, source, highlight, view, false);
-    app.semantic_mode = mode;
     app.marks_questions = Some(Questions::built_in().unwrap());
     let source = crate::semantic::source_from_config(&app.config).unwrap();
     app.set_semantic_source(source);
@@ -82,7 +80,6 @@ fn app_without_a_layer() -> App {
         semantic: None,
         semantic_cmd: None,
         // **既定をそのまま使う。** ここを書くとこのテストの意味が消える。
-        semantic_mode: SemanticMode::default(),
         marks_questions: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
@@ -109,42 +106,34 @@ fn dimmed(app: &App) -> usize {
         .count()
 }
 
-// ---- 1. モードの切り替え ------------------------------------------------
+// ---- 1. 投影 ------------------------------------------------------------
 
 #[test]
-fn the_same_fixture_projects_differently_in_the_two_modes() {
-    // marks の fixture は Tier が全部 detail なので、budget モードでは
-    // 何も光らない（`protocol.rs` の版の表の 2 行目そのもの）。
-    let budget = app_with("demo-marks.json", SemanticMode::Budget);
-    assert!(marked(&budget).is_empty(), "budget モードでは光らない");
-
-    let marks = app_with("demo-marks.json", SemanticMode::Marks);
-    assert!(!marked(&marks).is_empty(), "marks モードでは光る");
+fn the_fixture_lights_something_up() {
+    let app = app_with("demo-marks.json");
+    assert!(!marked(&app).is_empty(), "スコアのある fixture は光る");
 }
 
 #[test]
-fn marks_mode_never_dims_anything() {
-    let app = app_with("demo-marks.json", SemanticMode::Marks);
+fn the_projection_never_dims_anything_on_its_own() {
+    // 沈めるのは `f`（フォーカス）だけである。つまみは沈めない。
     for share in [1, 20, 50, 100] {
-        let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+        let mut app = app_with("demo-marks.json");
         app.marks_share = share;
         app.refresh_semantic_decorations();
-        assert_eq!(dimmed(&app), 0, "marks モードは DIM を出さない (share {share})");
+        assert_eq!(dimmed(&app), 0, "つまみは DIM を出さない (share {share})");
     }
-    // DIM 版は同じ文書を沈める（比較のための対照）。
-    let budget = app_with("demo.json", SemanticMode::Budget);
-    let mut budget = budget;
-    budget.reading_budget = 20;
-    budget.refresh_semantic_decorations();
-    assert!(dimmed(&budget) > 0, "budget モードは沈める（対照）");
-    let _ = app;
+    // `f` を押したときだけ沈む（対照）。
+    let mut focused = app_with("demo-marks.json");
+    assert!(focused.press_focus(std::time::Instant::now()));
+    assert!(dimmed(&focused) > 0, "フォーカスは沈める（対照）");
 }
 
 // ---- 2. スコアの保持 ----------------------------------------------------
 
 #[test]
 fn the_scores_survive_into_the_annotation() {
-    let app = app_with("demo-marks.json", SemanticMode::Marks);
+    let app = app_with("demo-marks.json");
     let doc = app.semantic_doc.as_ref().expect("注釈が載っている");
     assert!(marks::has_scores(doc), "スコアが残っている");
     assert_eq!(doc.units[0].score, Some(0.94), "u1 のスコア");
@@ -159,7 +148,7 @@ fn a_budget_fixture_in_marks_mode_says_why_it_is_empty() {
     //
     // 読み出しは 2026-09-22 にフッタからタイトル行の右へ引っ越した。
     // 文言は 1 字も変わっていない。
-    let app = app_with("demo.json", SemanticMode::Marks);
+    let app = app_with("demo.json");
     assert_eq!(app.marks_has_scores(), Some(false));
     assert!(marked(&app).is_empty());
     let readout = app.marks_readout(200).expect("理由は必ず出る");
@@ -179,7 +168,7 @@ fn a_budget_fixture_in_marks_mode_says_why_it_is_empty() {
 
 #[test]
 fn the_readout_counts_what_is_on_screen() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     for share in [1, 20, 50, 100] {
         app.marks_share = share;
         app.refresh_semantic_decorations();
@@ -201,7 +190,7 @@ fn the_readout_counts_what_is_on_screen() {
 /// 外したのは枠だけで、**問いの本文は読み手が打ったまま**である。
 #[test]
 fn a_free_question_reads_as_ask_colon() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     // fixture 経路は問いを変えないので、自由入力の問いを直に載せる
     // （`ask_marks_free` は fixture では断る。上のテストで固定してある）。
     let questions = Questions::built_in().unwrap();
@@ -218,7 +207,7 @@ fn the_readout_drops_from_the_right_when_the_room_runs_out() {
     // **最後まで残るのは問いの名前である**（読み手の決定、2026-09-22）。
     // % と本数はつまみを動かせば分かるが、名前が無いと「なぜここが
     // 光っているのか」が読めない。
-    let app = app_with("demo-marks.json", SemanticMode::Marks);
+    let app = app_with("demo-marks.json");
     let full = app.marks_readout(200).unwrap();
     assert!(full.contains('%'), "広ければ全部出る: {full}");
     let narrower = app.marks_readout(full.width() - 1).unwrap();
@@ -234,7 +223,7 @@ fn the_readout_drops_from_the_right_when_the_room_runs_out() {
 
 #[test]
 fn raising_the_knob_grows_a_nested_set() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     let mut previous: Vec<usize> = Vec::new();
     let mut counts = Vec::new();
     for share in marks::MIN_SHARE..=marks::MAX_SHARE {
@@ -257,7 +246,7 @@ fn raising_the_knob_grows_a_nested_set() {
 fn the_knob_never_reaches_the_provider() {
     // つまみを動かすのに要るのは `marks::mark` だけ。世代が上がらない
     // ことでそれを言う（世代が上がる = 解析を頼んだ）。
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     let generation = app.semantic_generation;
     for _ in 0..20 {
         app.nudge_marks_share(10);
@@ -268,7 +257,7 @@ fn the_knob_never_reaches_the_provider() {
 
 #[test]
 fn the_knob_stops_at_both_ends() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     app.marks_share = marks::MIN_SHARE;
     assert!(!app.nudge_marks_share(-1), "下限より下へは回らない");
     app.marks_share = marks::MAX_SHARE;
@@ -279,7 +268,7 @@ fn the_knob_stops_at_both_ends() {
 fn the_default_knob_is_the_measured_one() {
     // 段 1 の 6 節: ラン間でいちばん動かないのが上位 20 %。
     assert_eq!(marks::DEFAULT_SHARE, 20);
-    let app = app_with("demo-marks.json", SemanticMode::Marks);
+    let app = app_with("demo-marks.json");
     assert_eq!(app.marks_share, 20);
     assert_eq!(app.marks_lit(), Some(3), "13 Unit の 20 % = 3 本");
 }
@@ -288,7 +277,7 @@ fn the_default_knob_is_the_measured_one() {
 
 #[test]
 fn a_question_nothing_answers_lights_nothing_at_any_knob() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     // 該当の無い問いの形（段 1 の `demo` に「判断が要る」= 最大 0.11）を
     // 注釈の上で作る。
     if let Some(doc) = app.semantic_doc.as_mut() {
@@ -311,7 +300,7 @@ fn a_question_nothing_answers_lights_nothing_at_any_knob() {
 
 #[test]
 fn the_fixture_path_refuses_to_change_the_question() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     assert!(app.marks_question_is_fixed());
     assert!(!app.cycle_marks_question(1), "fixture では巡らない");
     assert!(!app.cycle_marks_question(-1), "逆回りも断る");
@@ -322,7 +311,7 @@ fn the_fixture_path_refuses_to_change_the_question() {
 
 #[test]
 fn only_the_core_of_a_unit_lights() {
-    let app = app_with("demo-marks.json", SemanticMode::Marks);
+    let app = app_with("demo-marks.json");
     let doc = app.semantic_doc.as_ref().unwrap();
     // fixture は Unit ごとに核を 1 つだけ持つ。光った range の数が
     // 光った Unit の数と一致する = 核だけが光っている。
@@ -334,14 +323,13 @@ fn only_the_core_of_a_unit_lights() {
 fn cycling_backwards_asks_jev_exactly_once() {
     // **1 打 = 解析 1 回。** 逆回りを「残り全部ぶん進む」で書くと、
     // 定型 4 本なら 1 打で Jev を 3 回呼ぶ（議事録で 0.3 円が 0.9 円）。
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     // fixture は問いを固定するので、巡回を見るために外部コマンドへ差し替える。
     // `true` は黙って終わるので Jev もネットワークも出てこないが、
     // **解析を頼んだ回数は世代に出る**。
     app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
         crate::semantic::CommandProvider::new("true"),
     )));
-    app.semantic_mode = SemanticMode::Marks;
     let presets = app.marks_questions.as_ref().unwrap().presets().len();
     assert!(presets >= 2);
 
@@ -371,11 +359,10 @@ fn cycling_backwards_asks_jev_exactly_once() {
 
 #[test]
 fn cycling_forward_walks_the_ring_in_order() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
         crate::semantic::CommandProvider::new("true"),
     )));
-    app.semantic_mode = SemanticMode::Marks;
     let ids: Vec<String> = app
         .marks_questions
         .as_ref()
@@ -398,29 +385,15 @@ fn cycling_forward_walks_the_ring_in_order() {
 // ---- キーの割り当て ------------------------------------------------------
 
 #[test]
-fn the_question_keys_do_nothing_in_budget_mode() {
-    // budget モードのセッションで `m` `/` は層に触らない（`crate::keys`）。
-    for c in [
-        crate::keys::MARKS_PICK,
-        crate::keys::MARKS_CYCLE_BACK,
-        crate::keys::MARKS_FREE,
-    ] {
-        assert!(crate::keys::semantic_key(c, false).is_none());
-    }
-}
-
-#[test]
-fn the_amount_keys_move_the_knob_in_marks_mode() {
+fn the_amount_keys_move_the_knob() {
     use crate::keys::{SemanticKey, semantic_key};
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     let before = app.marks_share;
-    let Some(SemanticKey::Amount(delta)) = semantic_key('>', true) else {
+    let Some(SemanticKey::Amount(delta)) = semantic_key('>') else {
         panic!("`>` は量のつまみ");
     };
     app.nudge_marks_share(delta);
     assert_eq!(app.marks_share, before + 10);
-    // Reading Budget は動いていない（2 つの投影は互いを呼ばない）。
-    assert_eq!(app.reading_budget, crate::semantic::DEFAULT_BUDGET);
 }
 
 // ---- キャッシュの鍵に問いが入る -----------------------------------------
@@ -494,31 +467,26 @@ fn the_default_marks_mode_binds_nothing_without_a_layer() {
     // 「`--semantic` を渡さなければ、これらのキーは束縛されない。読み出しも
     // `?` ヘルプの行も出ず、この層が無かったときと完全に同じ動きをする」。
     let app = app_without_a_layer();
-    assert!(app.marks_mode(), "既定は marks である（前提の確認）");
     assert!(!app.semantic_enabled(), "層は立っていない");
 
     let footer = crate::chrome::footer_hints(&app);
     assert!(!footer.contains("MARK"), "つまみの読み出しが出ている: {footer}");
-    assert!(!footer.contains("READ"), "READ の読み出しが出ている: {footer}");
-    assert!(
-        !footer.contains("no scores"),
-        "注釈を 1 度も求めていないのに理由を言っている: {footer}"
-    );
+    assert_eq!(app.marks_readout(60), None, "読み出しが出ている");
 
     let rows = crate::overlay::help_rows(false, false, false, app.semantic_enabled());
     assert!(
-        !rows.iter().any(|(label, _)| *label == "read"),
+        !rows.iter().any(|(label, _)| *label == "amount"),
         "? ヘルプが使えないキーを宣伝している"
     );
 
     // **キーの門番は `semantic_enabled()` の側にある。** 割り当ての方は
-    // marks なので 7 本とも `Some` を返す — だから門番が閉じていることが
-    // そのまま「束縛されない」の中身である（`main` の `KeyCode::Char(c)`
-    // の腕は 2 つの条件の AND）。
+    // 7 本とも `Some` を返す — だから門番が閉じていることがそのまま
+    // 「束縛されない」の中身である（`main` の `KeyCode::Char(c)` の腕は
+    // 2 つの条件の AND）。
     for c in ['-', '+', '=', '<', '>', 'm', 'M'] {
         assert!(
-            crate::keys::semantic_key(c, app.marks_mode()).is_some(),
-            "{c} は marks の割り当てにある（門番だけが止めている）"
+            crate::keys::semantic_key(c).is_some(),
+            "{c} は割り当てにある（門番だけが止めている）"
         );
     }
     assert!(!app.semantic_enabled(), "その門番が閉じている");
@@ -534,7 +502,7 @@ fn the_default_marks_mode_binds_nothing_without_a_layer() {
 /// 「片方だけを見て『直った』と判断しないこと」。
 #[test]
 fn the_question_prompt_does_not_open_the_comment_composer() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     app.marks_questions = Some(Questions::built_in().unwrap());
     // `/` を押した状態を作る（fixture 経路は問いを固定するので、旗と
     // モードだけを直に置く — ここで見たいのは描画である）。
@@ -570,7 +538,7 @@ fn the_question_prompt_does_not_open_the_comment_composer() {
 /// 上のテストだけだと「composer が壊れた」でも通ってしまう。
 #[test]
 fn the_comment_composer_still_opens_its_bubble() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     app.mode = Mode::Input;
     app.composer_return = Mode::View;
     app.marks_prompt = false;
@@ -607,7 +575,7 @@ fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
 /// 残す、それ以外が沈む。ここが投影の全部である。
 #[test]
 fn focus_sinks_the_others_but_spares_the_lit_unit_and_the_headings() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     let lit_before = marked(&app);
     assert!(!lit_before.is_empty(), "前提: 光っている");
     assert_eq!(dimmed(&app), 0, "前提: marks は沈めない");
@@ -661,7 +629,7 @@ fn focus_sinks_the_others_but_spares_the_lit_unit_and_the_headings() {
 /// フォーカスを解けば元に戻る — **元の投影と 1 バイトも違わない**。
 #[test]
 fn leaving_focus_restores_the_plain_marks_projection() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     let before = app.semantic_decorations.clone();
     app.press_focus(std::time::Instant::now());
     assert_ne!(app.semantic_decorations, before, "沈んだ");
@@ -672,7 +640,7 @@ fn leaving_focus_restores_the_plain_marks_projection() {
 /// **沈んだまま問いとつまみを動かせる**（注文の要）。
 #[test]
 fn the_knob_and_the_question_still_work_while_focused() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     app.press_focus(std::time::Instant::now());
     let lit_at_20 = marked(&app).len();
     assert!(app.nudge_marks_share(50), "つまみが効かない");
@@ -685,7 +653,7 @@ fn the_knob_and_the_question_still_work_while_focused() {
 /// 「他を沈める」ではない。
 #[test]
 fn focus_refuses_when_nothing_is_marked() {
-    let app = app_with("demo.json", SemanticMode::Marks);
+    let app = app_with("demo.json");
     assert_eq!(app.marks_lit(), Some(0), "前提: 0 本");
     assert!(!app.can_focus());
 }
@@ -694,7 +662,7 @@ fn focus_refuses_when_nothing_is_marked() {
 /// 旗（`focused()`）だけを見ていると、投影を切り替え忘れても通る。
 #[test]
 fn focus_changes_what_is_painted_not_just_a_flag() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     // **演出を止めてから撮る。** マーカーが引かれる演出は琥珀のセルを
     // ページ色から立ち上げるので（`effects::marks_reveal_effect`）、
     // 立った直後の 1 枚は「琥珀が 1 セルも無い」画面になる。
@@ -736,7 +704,7 @@ fn focus_changes_what_is_painted_not_just_a_flag() {
 /// `FOCUS` はフッタのモードバッジのスロットに出る。**選択が優先する**。
 #[test]
 fn the_focus_badge_sits_in_the_mode_slot_and_yields_to_select() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     app.press_focus(std::time::Instant::now());
     let backend = ratatui::backend::TestBackend::new(120, 24);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -759,7 +727,7 @@ fn the_focus_badge_sits_in_the_mode_slot_and_yields_to_select() {
 /// 分からない）。
 #[test]
 fn the_readout_is_drawn_in_the_title_row_and_the_footer_only_hints_keys() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     let backend = ratatui::backend::TestBackend::new(120, 24);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
@@ -792,7 +760,7 @@ fn a_session_without_the_layer_has_no_readout() {
 /// **溝の目盛りとジャンプ先は同じ台帳を見る。**
 #[test]
 fn the_ruler_and_the_jump_read_the_same_ledger() {
-    let app = app_with("demo-marks.json", SemanticMode::Marks);
+    let app = app_with("demo-marks.json");
     assert!(!app.marks_lines.is_empty(), "マーク行が無い");
     let lines = app.marks_lines.clone();
     assert!(lines.windows(2).all(|w| w[0] < w[1]), "昇順で重複なし");
@@ -810,7 +778,7 @@ fn the_ruler_and_the_jump_read_the_same_ledger() {
 /// 環である（最後の次は最初）。
 #[test]
 fn the_mark_jump_wraps_around() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     let lines = app.marks_lines.clone();
     app.mode = Mode::View;
     // **いまいる行より先**のマークへ飛ぶ（同じ行には留まらない）。
@@ -838,7 +806,7 @@ fn ticks_in_the_track(buf: &ratatui::buffer::Buffer) -> usize {
 /// 溝が無い（本文が収まっている）ときは目盛りを打たない。
 #[test]
 fn no_track_no_ticks() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     // 本文が全部入る高さ。
     let tall = (app.view.rows.len() + 10) as u16;
     let backend = ratatui::backend::TestBackend::new(120, tall);
@@ -873,7 +841,7 @@ fn no_track_no_ticks() {
 /// ＝ 案 2 の振る舞い）。
 #[test]
 fn the_title_shrinks_the_readout_before_the_path() {
-    let app = app_with("demo-marks.json", SemanticMode::Marks);
+    let app = app_with("demo-marks.json");
     // 同じ文書を、層の無い（＝読み出しの無い）セッションで開いたもの。
     let bare = app_without_a_layer();
 
@@ -906,7 +874,7 @@ fn the_title_shrinks_the_readout_before_the_path() {
 /// あとに 0 本になった画面で `f` を断ると、Esc しか出口が無くなる。
 #[test]
 fn focus_can_always_be_turned_off_even_when_nothing_is_lit() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     // 1 秒前に押した形にする（auto-repeat よけの門は 120 ms なので、
     // テストの中で 2 打が同じ瞬間になると 2 打目が捨てられる）。
     app.press_focus(std::time::Instant::now() - std::time::Duration::from_secs(1));
@@ -930,7 +898,7 @@ fn focus_can_always_be_turned_off_even_when_nothing_is_lit() {
 /// カーソルを置いた行の字だけが霞んで読めなくなる。
 #[test]
 fn the_cursor_band_over_a_sunken_line_is_not_dim() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     app.config.fx = false;
     app.marks_fx = None;
     app.readout_fx = None;
@@ -980,7 +948,7 @@ fn the_cursor_band_over_a_sunken_line_is_not_dim() {
 /// 沈んだ本文の上でもコメントの吹き出しは普通に出る（沈まない）。
 #[test]
 fn a_comment_bubble_over_the_sunken_body_is_not_dim() {
-    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    let mut app = app_with("demo-marks.json");
     app.config.fx = false;
     app.marks_fx = None;
     app.readout_fx = None;

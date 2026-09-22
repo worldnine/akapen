@@ -975,20 +975,17 @@ class RunCapTest(unittest.TestCase):
 
 
 class ReferenceImplementationTest(unittest.TestCase):
-    """隣の決定論的な参照実装 `annotate-doc.py` が 3 値の意味を壊さないこと。
+    """隣の決定論的な参照実装 `annotate-doc.py` が 3 値の意味を守ること。
 
     `core_atoms` の空の配列は「**核を持たない** = MARKED にならない」という
-    意味を持つようになった（`crates/semantic-reading/src/protocol.rs`）。
-    `annotate-doc.py` は run のロジックを持たないので、ここが `[]` を出すと
-    **意味が変わって黙って何も光らなくなる。**
-
-    いまは `core_atoms` を一切出さない（= `None` = 絞り込み無し = Unit 全体が
-    MARKED）。それが正しい振る舞いなので、**出さないことを固定する**。
+    意味を持つ（`crates/semantic-reading/src/protocol.rs`）。参照実装は
+    Atom 1 つを Unit 1 つにするので、散文ならその Atom 自身が核、見出しや
+    コードなら `[]` になる。**`[]` と「省略」を取り違えない**ことを固定する。
     """
 
     REFERENCE = HERE / "annotate-doc.py"
 
-    def units(self):
+    def request(self, with_question=True):
         source = "# 見出し\n\n本文である。二文目。\n\n- 一つ目。\n- 二つ目。\n"
         raw = source.encode()
         atoms, cursor = [], 0
@@ -1009,25 +1006,52 @@ class ReferenceImplementationTest(unittest.TestCase):
                 }
             )
             cursor = start + len(text.encode())
-        proc = subprocess.run(
+        request = {"version": 1, "source": source, "atoms": atoms}
+        if with_question:
+            request["question"] = {
+                "id": "essential",
+                "text": "テスト用の問い。",
+                "core_floor": 0.2,
+            }
+        return request
+
+    def run_reference(self, request):
+        return subprocess.run(
             [sys.executable, str(self.REFERENCE)],
-            input=json.dumps({"version": 1, "source": source, "atoms": atoms}),
+            input=json.dumps(request),
             capture_output=True,
             text=True,
             timeout=60,
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        return json.loads(proc.stdout)["units"]
 
-    def test_the_reference_never_emits_core_atoms(self):
-        units = self.units()
+    def test_the_reference_scores_every_unit_and_echoes_the_question(self):
+        proc = self.run_reference(self.request())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        answer = json.loads(proc.stdout)
+        self.assertEqual(answer["question"], "essential", "問いの id を echo する")
+        units = answer["units"]
         self.assertTrue(units, "Unit が 1 つも返っていない")
         for unit in units:
-            self.assertNotIn(
-                "core_atoms",
-                unit,
-                "`[]` を出すと「核を持たない」の意味になり、何も光らなくなる",
-            )
+            self.assertIn("score", unit, "スコアの無い Unit は光らない")
+            self.assertIsInstance(unit["core_atoms"], list)
+
+    def test_prose_gets_its_own_atom_as_its_core_and_a_heading_gets_none(self):
+        answer = json.loads(self.run_reference(self.request()).stdout)
+        units = answer["units"]
+        # Atom 0 は見出し。核の候補にならないので `[]`（= 核を持たない）。
+        self.assertEqual(units[0]["core_atoms"], [], "見出しは核を持たない")
+        # 散文は自分自身が核。**省略しない** — 省くと「絞り込み無し」に
+        # なり、Unit 全体が光る。
+        for position in (1, 2, 3, 4):
+            self.assertEqual(units[position]["core_atoms"], [position])
+
+    def test_a_request_without_a_question_is_refused(self):
+        # DIM 版は 2026-09-22 に削除された。問いを持たない要求は、黙って
+        # 別のものを返すのではなく**明確なエラーで終わる**。
+        proc = self.run_reference(self.request(with_question=False))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("no question", proc.stderr)
+        self.assertEqual(proc.stdout, "")
 
 
 class CoreBudgetTest(unittest.TestCase):
