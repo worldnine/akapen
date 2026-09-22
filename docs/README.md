@@ -40,7 +40,7 @@
 | [`design/range-attribution-plan.md`](design/range-attribution-plan.md) | 内部位置モデルを source byte range にする計画。**Phase 番号はこの文書が正典** | Phase 1・2 実装済み、Phase 3 以降は未着手 |
 | [`design/jev.md`](design/jev.md) | 意味判断を担う判定器 Jev（**LLM ではなく System One モデル**）の primitive と呼び出し方 | 参照資料。akapen からの接続はまだ（`--semantic-cmd` の口まで） |
 | [`design/reading-research.md`](design/reading-research.md) | **拾い読みの研究の保管庫。** 合図（signaling）・satisficing・核性・位置の効き方と、先行システム Scim。**採らなかった手とその理由**（TextTiling / 文書レベルの LEAD） | 参照資料。実装の指示ではない |
-| [`design/marks-only-and-review-mode.md`](design/marks-only-and-review-mode.md) | **設計候補（実装の指示ではない）。** DIM を廃止してマーカーだけにする層と、読み手の判断が要る箇所を光らせる赤入れモード。2026-09-22 の費用の実測つき | 候補。いまの実装はそのまま置く |
+| [`design/marks-only-and-review-mode.md`](design/marks-only-and-review-mode.md) | **設計候補（実装の指示ではない）。** DIM を廃止してマーカーだけにする層、読み手の判断が要る箇所を光らせる赤入れモード、自然語で聞く意味の検索。2026-09-22 の費用の実測つき | 候補。いまの実装はそのまま置く |
 | [`design/local-snapshot-spec.md`](design/local-snapshot-spec.md) | LOCAL スナップショットと統合タイムラインの仕様 | 現行仕様（v0.1 の基本機能は実装済み） |
 | [`design/git-integration-spec.md`](design/git-integration-spec.md) | 旧 Git 連携仕様 | **akapen に関する記述は `local-snapshot-spec.md` で置換済み**（ashiato 側の 4 章が残っている） |
 | [`design/review-badge-design.md`](design/review-badge-design.md) | レビュー未確認件数バッジ（`! N`）のデザインと、別案へ戻すときの切り替え箇所 | 実装済み（文書の自己申告は 2026-08） |
