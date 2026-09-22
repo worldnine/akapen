@@ -91,7 +91,7 @@ Phase 1 Range Attribution / 2 Range Decoration / 3 Render Mapping 強化 /
 `AnalyzeResponse` が `version` と `units` しか持たないこと
 （`confidence` / `probabilities` というフィールドはこの crate のどこにも
 無い）。`examples/semantic/jev-annotate.py` が各 Unit の `jev` フィールドへ
-`tier_confidence` / `redundancy_noul` を書いていること。
+`tier_confidence` / `redundancy_confidence` を書いていること。
 `docs/design/jev.md` に未解決として記録済みであること。
 
 ### 4. 同一 Tier 内の rule の逐次性 — `context preservation`（**解決済み。2026-09-21**）
@@ -289,7 +289,7 @@ question は 5,469 tokens、`state` 込みで 23,030 tokens ＝ **32k 枠の 70 
 | ├ 器（型と criteria のキー名） | 68 |
 | ├ criteria の説明文 4 つ | 65 |
 | └ instructions の枠組み文 | 65 |
-| redundancy question 全体 | **81** |
+| redundancy question 全体（**2026-09-22 まで**。下記） | **81** |
 | **Unit 1 つあたり合計** | **262** |
 
 **器の 68 tokens は削れません。** `README.md`（113 Unit）のラウンド 2 は
@@ -300,6 +300,12 @@ question は 5,469 tokens、`state` 込みで 23,030 tokens ＝ **32k 枠の 70 
 SUPPORTING 以上にだけ聞くようにして（[`redundancy_questions`]）、
 `README.md` のラウンド 2 は 62,523 → **50,895 tokens（天井の 78 %）**に
 下がり、**通るようになりました**。
+
+**redundancy の 81 tokens はもう固定費ではありません**（2026-09-22）。Choice に
+替えたので選択肢が自分より前の Unit の本文全部になり、**Unit 数の 2 乗**で
+効きます。ラウンド 3 は実測で 2.7〜17 倍、大きい文書で 1 → 8〜13 リクエスト
+（`examples/semantic/measurements/redundancy.md` の 5 節）。ラウンド 2 側の
+話は変わりません。
 
 #### 採らなかった手と、その理由
 

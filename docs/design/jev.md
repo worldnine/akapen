@@ -138,7 +138,8 @@ SDK の定数（<https://docs.typesafe.ai/sdk/python/api/constants.md> で確認
 Atom 間の意味境界（SAME_UNIT / NEW_UNIT）  → Choice（2 択）
 Reading Tier（ESSENTIAL / SUPPORTING /
               CONTEXT / DETAIL）            → Choice（4 択）
-semantic redundancy                          → Noul
+semantic redundancy                          → Choice（先行 Unit + 該当なし）
+                                               ＋ 選んだ対の Noul
 Unit の核（MARKED を絞る先）                → Choice（Unit 内の Atom の数だけ）
 ```
 
@@ -148,9 +149,10 @@ Unit の核（MARKED を絞る先）                → Choice（Unit 内の Ato
 
 設計書が挙げる問いの例（上の「この層は何のためにあるか」）は、そのまま
 question の文面の出発点になる。ただし**疑問文であることと Noul であることは
-別**で、primitive は 1 つではない。「これは前に出た内容と実質同じ？」は Noul
-だが、残り 3 つは Tier の段階（ESSENTIAL / SUPPORTING / CONTEXT）に対応して
-いて、Choice の criteria になる（文面は
+別**で、primitive は 1 つではない。「これは前に出た内容と実質同じ？」は
+**どれの言い直しか**を先行 Unit から選ばせる Choice（下の「redundancy の
+question は方向を持つ」）で、残り 3 つは Tier の段階（ESSENTIAL / SUPPORTING /
+CONTEXT）に対応していて、Choice の criteria になる（文面は
 `examples/semantic/jev-annotate.py` の `TIER_CRITERIA`）。
 
 **state は文書全文**。設計書の
@@ -171,7 +173,30 @@ Noul の文面を対称に書いてはならない。「他の箇所で既に述
 持つ関係なのも同じ理由で、Reading Policy 側の根拠は
 `crates/semantic-reading/src/policy.rs` のモジュールドキュメントにある。
 
-現在の文面は `examples/semantic/jev-annotate.py` の `unit_questions`。
+**2026-09-22 に Noul から Choice へ替えた。** Noul は「言い直しか」までしか
+答えず、**どれの**言い直しかは語の重なりの argmax でローカルに選んでいた。
+業務議事録の実測で相手が 7 件中 3 件誤り（見出しだけの Unit を指す、別の節を
+指す）、閾値 0.7 の真上に 0.70〜0.71 の Unit が乗って 1 ランだけ出る揺れが
+あった。`Presupposes` の段階 2 と同じ形にして、選択肢を「対象より前の Unit の
+本文（DETAIL を除く）＋**該当なし**」にした。該当なしが閾値の代わりで、値で
+倒す定数は無い。方向は文面と `range(target)` の両方で入っている。
+
+**Choice 単独では冗長が増える。** 「該当なし」を選択肢に置いても、Choice は
+「同じ話題」の先行 Unit を選ぶ（context preservation の第 2 版が「Choice は
+『無い』と言えない」と書いたのと同じ性質）。議事録では相手の正否は直ったが、
+設計書や記事では冗長 0〜1 件 → 24〜30 件になった。
+
+**だから段を 1 つ足した（第 2 版）。** Choice が相手を返した対にだけ、
+「前の部分を読んだ人にとって後の部分は新しい情報を加えていない」の Noul を
+1 つ聞き、0.5 以上のときだけ `REDUNDANT_WITH` を付ける。**閾値は消えていない**
+— 旧 `REDUNDANCY_THRESHOLD` の 0.7（`demo.md` の 2 点から取った暫定値）が、
+0.5（Noul の「はい」の自然な境目。`CONTEXT_YES` と同じ値・同じ理由）に
+置き換わった。「Choice は『無い』と言えないので、無いと言う役を Noul に
+持たせる」という形は context preservation の段階 1 と同じである。
+
+前後の数字は `examples/semantic/measurements/redundancy.md`。文面は
+`examples/semantic/jev-annotate.py` の `REDUNDANCY_CHOICE` と
+`REDUNDANCY_PAIR`。
 
 ### Unit の核 — 選択肢が本文そのものになる Choice
 
@@ -192,8 +217,10 @@ MARKED を Unit 全体ではなく「Unit の核となる Atom」に絞るため
 - **instructions に Unit の本文を書かない。** 選択肢の総和がその Unit の全文に
   なるので、instructions にも入れると同じテキストを 2 回送ることになる。
   効くのは時間ではなく context window である
-- **聞く対象を絞る。** MARKED になりうる Unit（ESSENTIAL かつ非 REDUNDANT）で、
-  かつ Atom が 2 つ以上あるものだけ。実測では 34 Unit のうち 8 つ
+- **聞く対象を絞る。** ESSENTIAL で、かつ Atom が 2 つ以上あるものだけ。
+  実測では 34 Unit のうち 8 つ。**冗長かどうかでは絞らない**（2026-09-22。
+  核が無い Unit は「絞り込み無し ＝ Unit 全体が MARKED」に読まれるので、
+  冗長な ESSENTIAL に核が無いと冗長な項目ほど大きく光る）
 - **「重要な部分はどれか」と聞かない。** それだと「どれも重要」と答えられて
   しまい、Unit を丸ごと光らせていた元の状態に戻る。答えを強制的に 1 つへ倒す
   問い方にする
@@ -412,6 +439,13 @@ criteria の説明文 65 + 枠組み文 65、redundancy（Noul）が 81 = 器 8 
 しかもラウンド 3 に置いてあるので、**ラウンド 2 に乗る固定費は Tier の 181 だけ**
 である。2026-09-21 に、262 で「規則 4 を入れると context window を超える」と
 予測して外した（実測は 62 % → 89 % で収まった）。
+
+**redundancy の 81 は 2026-09-22 までの値である。** いまの redundancy は
+Choice で、選択肢が自分より前の Unit の本文全部なので、固定費ではなく
+**Unit 数の 2 乗**で効く。ラウンド 3 は実測で 2.7〜17 倍になった
+（`examples/semantic/measurements/redundancy.md`）。ラウンド 4 の対の Noul は
+本文 2 つぶんで、同じ Unit のラウンド 3 の Choice より必ず小さい。ラウンド 2 に
+乗る固定費が Tier の 181 だけ、という下の話は変わらない。
 
 `README.md`（113 Unit）の旧ラウンド 2 は `state` 11,180 + 本文の 2 度引き
 21,818 + 固定費 29,525 = 62,523 tokens で、**固定費が全体の 47 %** だった。

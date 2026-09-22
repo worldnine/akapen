@@ -62,6 +62,7 @@
 - 中身が残っているのに見出しが沈む — 規則 2 の意図は境界だけでは守れない
 - `docs/design/semantic-reading-layer.md` も test の fixture — 書き足すと 1 リクエストから溢れる
 - Budget の下限は「数字の約束」であって「集合の約束」ではない — `decorate(floor)` と `decorate(floor - 1)` は同じとは限らない
+- Choice に「該当なし」を置いても Jev は「無い」と言わない — redundancy を Choice 単独にすると冗長が 0〜1 件から数十件になる
 
 ### [公開リポジトリとしての約束](gotchas/public-repo.md)
 
