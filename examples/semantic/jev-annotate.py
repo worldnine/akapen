@@ -44,10 +44,10 @@ CONTEXT / DETAIL は聞いても表示が変わらない。実測で question �
 （`examples/semantic/README.md` の 113 Unit 中、聞くのは 8 個だけ）、28.2 KB の
 文書が context window に入るようになった。
 
-核をラウンド 3 で redundancy と**同時に**聞いているのは、本来なら
-「ESSENTIAL かつ非 REDUNDANT」に絞りたいがそれだとラウンドが 4 つになるため。
-実測では 4 文書とも「ESSENTIAL かつ REDUNDANT」は 0〜1 件しかなく、捨てる
-question はほぼ出ない。
+核は ESSENTIAL の Unit 全部に聞く — **冗長でも聞く**（`wants_core`）。冗長な
+ESSENTIAL に核が無いと、policy 側が「絞り込み無し ＝ Unit 全体が MARKED」と
+読んで、冗長な項目ほど大きく光る。redundancy の答えを待たずに核を聞けるので、
+2 つを同じラウンド 3 に置ける。
 
 akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、3 ラウンドは
 このスクリプトの内部事情である。
@@ -920,18 +920,24 @@ def is_redundant(unit: dict) -> bool:
 
 
 def wants_core(unit: dict) -> bool:
-    """この Unit に核を聞く意味があるか。
+    """この Unit に核を聞く意味があるか — **ESSENTIAL なら聞く。冗長でも聞く。**
 
-    聞くのは **MARKED になりうる Unit だけ**である。`policy::decorate` が
-    MARKED にするのは「Budget に残った ESSENTIAL かつ非 REDUNDANT」なので、
-    ここで Tier と redundancy を見れば足りる（Budget はこのスクリプトから
-    見えないし、見る必要もない — 核の選択は Budget に依存しない）。
+    核は「Unit の中で落とすと取り違える部分」で、Budget にも redundancy にも
+    依存しない（Budget はこのスクリプトから見えないし、見る必要もない）。
 
-    絞り込むことで question 数が減る。実測（45.6 KB の文書）では 34 Unit の
-    うち 11 が ESSENTIAL かつ非 REDUNDANT で、さらに Atom が 2 つ以上ある
-    7 つだけがラウンド 3 の question になった。
+    **2026-09-22 まで「ESSENTIAL かつ非 REDUNDANT」に絞っていた。** そのとき
+    冗長な Unit は MARKED になりえなかったので核が要らなかった。Reading Policy
+    側で「冗長でも ESSENTIAL なら核を持って一段目に入る」に変えると、核を
+    聞いていない冗長 Unit は `core_atoms` が無い ＝ 絞り込み無し ＝ **Unit 全体
+    が MARKED** になり、冗長な項目ほど大きく光る逆さの絵になる。だから冗長でも
+    聞き、run キャップの候補にも入れる（[`plan_run_cores`]）。`core_atoms` の
+    3 値の意味は [`apply_run_cores`] を見ること。
+
+    ラウンド 3 の時点では redundancy の答えがまだ無いので、ここで redundancy を
+    見ることはもともとできない。以前は答えが出たあとで冗長 Unit の核を捨てて
+    いた（[`annotate`] のエピローグ）。いまは捨てない。
     """
-    return unit["reading_tier"] == "essential" and not is_redundant(unit)
+    return unit["reading_tier"] == "essential"
 
 
 def core_candidates(atoms: list[dict], unit: dict) -> dict:
@@ -1893,10 +1899,8 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
 
     # --- ラウンド 3: redundancy（SUPPORTING 以上）と、核 ----------------
     #
-    # 2 つを 1 ラウンドにまとめている。核を聞く相手は本来「ESSENTIAL かつ非
-    # REDUNDANT」だが、redundancy の答えを待つとラウンドが 4 つになる。
-    # 実測では 4 文書とも「ESSENTIAL かつ REDUNDANT」は 0〜1 件しかないので、
-    # 捨てることになる核の question はほぼ出ない。
+    # 2 つを 1 ラウンドにまとめている。核は ESSENTIAL 全部に聞く（冗長でも。
+    # [`wants_core`]）ので、redundancy の答えを待つ必要が無い。
     #
     # ここで送れなかった question は、どちらも**聞かなかった場合と同じ**に
     # 倒れる。redundancy を聞かなければ REDUNDANT にならず、核を聞かなければ
@@ -1943,13 +1947,9 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     apply_run_cores(built, questions, fixed, scope, answers)
     assign_lone_cores(atoms, built, handled)
     apply_core_answers(built, questions, answers)
-    # REDUNDANT だった Unit は MARKED にならないので、核は使われない。
-    # **`relations` が空でないこと、ではない**（[`is_redundant`]）。
-    for unit in built:
-        if is_redundant(unit):
-            unit.pop("core_atoms", None)
-            unit["jev"].pop("core_choice", None)
-            unit["jev"].pop("core_by", None)
+    # 冗長な ESSENTIAL の核も**捨てない**（[`wants_core`]）。以前はここで
+    # `core_atoms` を pop していたが、policy が冗長 ESSENTIAL に核を要求する
+    # ようになると、無い核は「Unit 全体が MARKED」に読まれる。
 
     # --- ラウンド 4 以降: context preservation の前提 -------------------
     #

@@ -618,12 +618,15 @@ class CoreQuestionTest(unittest.TestCase):
         # 本文を instructions に書かない約束はそのまま。
         self.assertLess(len(jev.CORE_INSTRUCTIONS), 200)
 
-    def test_only_units_that_can_become_marked_are_asked(self):
-        # MARKED は「ESSENTIAL かつ非 REDUNDANT」だけ。
+    def test_only_essential_units_are_asked_but_redundant_ones_still_are(self):
+        # 核を聞くのは ESSENTIAL だけ。**冗長でも聞く** — 核が無いと
+        # 「絞り込み無し = Unit 全体が MARKED」に読まれ、冗長な項目ほど
+        # 大きく光る（[`wants_core`]）。
         for tier in ["supporting", "context", "detail"]:
             self.assertEqual(self.ask(self.units(reading_tier=tier)), {})
         self.assertEqual(
-            self.ask(self.units(relations=[{"redundant_with": "u0"}])), {}
+            sorted(self.ask(self.units(relations=[{"redundant_with": "u0"}]))),
+            ["core:u1"],
         )
 
     def test_a_unit_with_one_usable_atom_is_not_asked(self):

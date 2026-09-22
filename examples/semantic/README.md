@@ -338,8 +338,9 @@ API を叩かず、送る 3 ラウンドのリクエスト（`state` / `model` /
 （`assumptions` にも載る）。
 
 - ラウンド 2: **Jev に聞く境界はすべて `new_unit` だった**と仮定する
-- ラウンド 3: **すべての Unit が `essential` かつ非 REDUNDANT だった**と仮定
-  する。本番ではここが絞られるので、実際に送る question はこれより少ない
+- ラウンド 3: **すべての Unit が `essential` だった**と仮定する。本番では
+  redundancy は SUPPORTING 以上にだけ、核は ESSENTIAL（冗長かどうかは見ない）
+  にだけ聞くので、実際に送る question はこれより少ない
 
 akapen から使うものではなく、要求の JSON を自分で流し込んで見る。
 
