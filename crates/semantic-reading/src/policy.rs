@@ -45,8 +45,9 @@
 //! 1. **Unit を「残したい順」に一列に並べる**（`keep_order` の並び替え鍵）。
 //!    この順序は Budget に依存しない。
 //! 2. **一段目 — 核を先に、単独で確保する。** 核を持つ Unit
-//!    （= MARKED になりうるもの。ESSENTIAL かつ非 REDUNDANT かつ
-//!    `core_atoms != Some([])`）を、**Budget を見ずに**残す。そのとき
+//!    （= MARKED になりうるもの。ESSENTIAL かつ `core_atoms != Some([])`。
+//!    **冗長かどうかは見ない** — 下の「核は奪わない」）を、
+//!    **Budget を見ずに**残す。そのとき
 //!    **その Unit が前提にしている Unit（`PRESUPPOSES` の閉包）も一緒に
 //!    残す**（下の「context preservation」）。
 //! 3. **二段目 — 残りの予算を、残りの Unit が奪い合う。** `keep_order` の
@@ -73,22 +74,95 @@
 //! 鍵は次の 5 つ組で、小さいほど残りやすい。
 //!
 //! ```text
-//! (実効 Tier, redundant か, バイト長, 先頭バイト位置, Unit の並び順)
+//! (実効 Tier, 対に負けたか, バイト長, 先頭バイト位置, Unit の並び順)
 //! ```
 //!
 //! - **実効 Tier**: `ESSENTIAL < SUPPORTING < CONTEXT < DETAIL`。
-//!   ただし redundant な Unit は 1 段だけ弱い Tier として扱う
+//!   ただし冗長な対に**負けた** Unit は 1 段だけ弱い Tier として扱う
 //!   （[`crate::ReadingTier::weakened`]）。これが「REDUNDANT は元 Tier に
 //!   かかわらず優先的に DIM 候補」の実装。Tier を無視して重複を一律
 //!   最下位へ落とす案も取れるが、それでは redundancy が Tier を上書きして
-//!   しまい「別軸」でなくなるので採らなかった。重複した ESSENTIAL は
-//!   重複した SUPPORTING より長く残る。
-//! - **redundant か**: 同じ実効 Tier なら、重複していない方を先に残す。
-//!   これで「REDUNDANT は同 Tier の非 REDUNDANT より先に DIM になる」。
+//!   しまい「別軸」でなくなるので採らなかった。負けた ESSENTIAL は
+//!   負けた SUPPORTING より長く残る。
+//! - **対に負けたか**: 同じ実効 Tier なら、負けていない方を先に残す。
+//!   これで「負けた側は同 Tier の勝った側より先に DIM になる」。
 //! - **バイト長**: 短い方を先に残す。同じ attention でより多くの意味単位が
 //!   残り、文書全体の骨格が見えやすくなる。
 //! - **先頭バイト位置 / Unit の並び順**: 文書順。最後の同点崩しであり、
 //!   これで順序は必ず全順序になる（安定でない並び替えでも結果が揺れない）。
+//!
+//! # 負けは位置で決めない — 冗長な対のどちらが弱まるか
+//!
+//! `REDUNDANT_WITH` は持ち主から前の Unit へ向く。**方向は変えていない** —
+//! 方向は**対を見つけるため**に要る（判定器側で落とすと、結論のように文書中
+//! で何度も触れられる箇所を重複と見なす。上の「redundancy」）。変えたのは
+//! **勝者の決め方**だけである。
+//!
+//! > 対のうち **Tier が低い方、同 Tier なら長い方**が負けて 1 段弱まる。
+//!
+//! 2026-09-22 まで、弱まるのは必ず `REDUNDANT_WITH` の**持ち主**、つまり
+//! 対の**後ろ**にある方だった。位置で負けを決める根拠は文献に無い
+//! （`docs/design/reading-research.md`「冗長な対のどちらを残すか」）。
+//!
+//! - Reder & Anderson — **要約が主旨の記憶に優る**。細部の無さが独立に効く
+//! - MMR（Carbonell & Goldstein）— 冗長性を引いたうえで**勝者は関連度で
+//!   決める**。位置は使わない
+//! - Scim — 学習データが **abstract（書き手の要約）に似ている側を重要側**と
+//!   置いている。要約側を沈めるのは、この前提と逆向きである
+//!
+//! 「短い方」は要約と省略を区別しないが、**この層が持っている値のうち
+//! 「どちらが要約か」にいちばん近いのは長さである**。1 軸しかない Tier を
+//! 第 1 キーに置いたうえで、同 Tier の中を長さで決める。
+//!
+//! ## 引き分けは前を勝たせる
+//!
+//! 同 Tier・同長のときは先頭バイト位置で前を勝たせ、負けを後ろにする。
+//! `REDUNDANT_WITH` は必ず後ろから前へ向くので、**引き分けは 2026-09-22 より
+//! 前の規則（持ち主が負ける）にそのまま退化する** — 変える理由の無い場合に
+//! 変わらない。satisficing の逐次性（「もう読んだ」のは前である）とも
+//! 整合する。位置がさらに同じなら Unit の並び順で崩し、全順序を保つ。
+//!
+//! ## 1 つの Unit が複数の対に入るとき
+//!
+//! **1 つでも負ければ負け**で、弱まるのは**それでも 1 段だけ**である
+//! （[`losers`] は `bool` を返し、数えない）。`A -> B` と `C -> B` があって
+//! B が片方で勝ち片方で負けるなら、B は 1 段弱まる。勝った対があっても
+//! 救われない — 冗長な対の勝者は「その内容の代表」であり、どこかで代表の座を
+//! 譲った Unit は代表ではない。「全部の対で負けたときだけ」にすると、
+//! **無関係な第 3 の対があるかどうかで弱まるかが変わる**。
+//!
+//! ## 両方向から集める
+//!
+//! 負けが相手側（前の Unit）に来ることがあるので、
+//! [`crate::SemanticUnit::redundant_with`] を持ち主から見るだけでは足りない。
+//! [`losers`] は全 Unit の `REDUNDANT_WITH` を走査して**対の両端に印を
+//! 付ける**。
+//!
+//! # 核は奪わない
+//!
+//! **冗長と判定されても、ESSENTIAL で核を持つなら一段目に入り MARKED に
+//! なる**（[`bears_a_core`] は `is_redundant()` を見ない）。
+//!
+//! 設計書は Reader Persona を「含めない」と決めている。文献はその選択の代償を
+//! 正確に言っていて、**何が重要かは読み手の目的で変わり、目的が違えば逆に
+//! なる**（Pichert & Anderson、McCrudden & Schraw）。議事録の末尾の決定事項
+//! リストは「決定を確認しに来た読み手」には ESSENTIAL で、「経緯を追う
+//! 読み手」には言い直しである。Reading Tier は 1 軸しかなく、どちらの読み手
+//! かを知らない。**読み手のモデルを持たないと決めている以上、読み手によって
+//! 重要度が逆転する対で、どちらか一方の核を切る規則は持てない。**
+//! Scim も分布の後処理で「同じ内容が 2 段落にあれば両方に光る可能性を残す」
+//! を選んでいる。
+//!
+//! 冗長が消えたわけではない。**効き先が核から実効 Tier だけに狭まった** —
+//! 負けた側は同 Tier の中で先に沈むが、核を持つ ESSENTIAL なら一段目に
+//! いるので沈まない。つまり**この 2 つは重なると (b) が見えなくなる**:
+//! 対の両側が ESSENTIAL かつ核持ちなら、どちらを弱めても表示は変わらない。
+//! 負けの決め方が表示に効くのは、負けた側が二段目にいるとき
+//! （ESSENTIAL 以外、または `core_atoms == Some([])`）である。
+//!
+//! **代償は分布である。** 決定事項リストと本文節が両方 MARKED になれば、
+//! 「これさえ見れば」の密度が上がり、一段目が太って [`floor`] が上がる
+//! （実測は `examples/semantic/measurements/redundancy-loser.md`）。
 //!
 //! # context preservation — 前提を一緒に生き残らせる
 //!
@@ -213,6 +287,11 @@
 //! 2. `keep_order` が Budget に依存しない
 //! 3. 打ち切りが `break` である（入らないものを飛ばして先を試さない）
 //!
+//! **冗長な対の負けを位置から Tier と長さへ変えても、この 3 点は動かない。**
+//! [`losers`] が読むのは `relations` と生の Tier・バイト長・先頭位置だけで、
+//! **Budget を引数にすら取っていない**。鍵が Budget 非依存であるかぎり、
+//! 負けの決め方は単調性の証明のどこにも現れない。
+//!
 //! 一段目で残る集合も、そこで使う額も Budget の関数ではない。つまり
 //! 二段目は**固定の下駄 `S_core` を履いて**始まる。二段目の各 rank で払う
 //! 額は「それまでに何が kept になったか」だけで決まり、それは rank だけの
@@ -250,9 +329,9 @@
 //!
 //! ## `REDUNDANT_WITH` のほうは、今回も相対にしていない
 //!
-//! `redundant` は [`crate::SemanticUnit::is_redundant`] であって、
-//! `REDUNDANT_WITH` の参照先がその Budget で残っているかは見ていない。
-//! u0 を参照して弱められた Unit は、u0 自身が DIM になる Budget でも
+//! 負けは [`losers`] が静的に決めるのであって、
+//! `REDUNDANT_WITH` の相手がその Budget で残っているかは見ていない。
+//! u0 との対に負けて弱められた Unit は、u0 自身が DIM になる Budget でも
 //! 弱められたままである。ここでの「既読」は「文書の中で前にある」であって
 //! 「読者が実際に辿る経路の上で前にある」ではない。**これは未解決のまま
 //! 残っている**（`docs/gotchas/open-questions.md`）。今回入れたのは
@@ -365,7 +444,7 @@
 //! # 表示状態の割り当て
 //!
 //! ```text
-//! 残った Unit で ESSENTIAL かつ非 REDUNDANT
+//! 残った Unit で ESSENTIAL かつ核を持つ（冗長かどうかは見ない）
 //!     その Unit の核（core_atoms）        -> MARKED
 //!     同じ Unit の残り                    -> NORMAL
 //! 残ったそれ以外                          -> NORMAL
@@ -465,7 +544,8 @@ pub const MAX_BUDGET: u8 = 100;
 pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, DisplayState)> {
     let budget = budget.clamp(MIN_BUDGET, MAX_BUDGET);
 
-    let order = keep_order(doc);
+    let by_id = index_by_id(doc);
+    let order = keep_order(doc, &by_id);
     let total: usize = doc.units.iter().map(|unit| cost(doc, unit)).sum();
 
     // ---- 一段目 — 核を先に、単独で確保する ----------------------------
@@ -476,7 +556,6 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
     // 「台帳の単位」）。この集合は Budget の関数ではないので、`spent` の
     // 初期値も Budget に依存しない定数である。**同じ集合を [`floor`] も
     // 読む** — 計算は `first_tier` の 1 箇所にある。
-    let by_id = index_by_id(doc);
     let mut kept = vec![false; doc.units.len()];
     let (mut spent, any_core) = first_tier(doc, &order, &by_id, &mut kept);
 
@@ -585,12 +664,12 @@ pub fn decorate(doc: &SemanticDocument, budget: u8) -> Vec<(Range<usize>, Displa
 /// `decorate(doc, floor)` と `decorate(doc, floor - 1)` が同じとは限らない
 /// — 同じであることが多いが、それは文書の性質で、この関数の約束ではない。
 pub fn floor(doc: &SemanticDocument) -> u8 {
-    let order = keep_order(doc);
+    let by_id = index_by_id(doc);
+    let order = keep_order(doc, &by_id);
     let total: usize = doc.units.iter().map(|unit| cost(doc, unit)).sum();
     if total == 0 {
         return MIN_BUDGET;
     }
-    let by_id = index_by_id(doc);
     let mut kept = vec![false; doc.units.len()];
     let (mut spent, any_core) = first_tier(doc, &order, &by_id, &mut kept);
     if !any_core {
@@ -611,11 +690,7 @@ pub fn floor(doc: &SemanticDocument) -> u8 {
 ///
 /// 範囲外の添字は validate で弾かれるが、ここでも黙って無視して panic しない。
 fn cost(doc: &SemanticDocument, unit: &crate::unit::SemanticUnit) -> usize {
-    unit.atoms
-        .iter()
-        .filter_map(|&index| doc.atom(index))
-        .map(|atom| atom.len())
-        .sum()
+    length_of(doc, unit)
 }
 
 /// **一段目。** 核を持つ Unit（[`bears_a_core`]）とその前提の閉包を `kept`
@@ -655,11 +730,16 @@ fn first_tier(
 
 /// この Unit は**一段目**に入るか — すなわち MARKED になりうるか。
 ///
-/// 表示状態の割り当てと同じ条件である（ESSENTIAL / 非 REDUNDANT / 核を持つ）。
+/// 表示状態の割り当てと同じ条件である（ESSENTIAL / 核を持つ）。
 /// **2 箇所で別々に書かない**こと — ずれると「一段目で確保したのに MARKED に
 /// ならない Unit」や、その逆が出る。
+///
+/// **`is_redundant()` は見ない。** 冗長と判定された Unit でも、ESSENTIAL で
+/// 核を持つなら核は取り上げない（モジュールドキュメントの「核は奪わない」）。
+/// 冗長が効くのは [`keep_order`] の実効 Tier だけで、そこでも効くのは
+/// 対の**負けた側**である。
 fn bears_a_core(unit: &crate::unit::SemanticUnit) -> bool {
-    unit.reading_tier == ReadingTier::Essential && !unit.is_redundant() && unit.has_core()
+    unit.reading_tier == ReadingTier::Essential && unit.has_core()
 }
 
 /// この Atom は見出しの行か。
@@ -718,35 +798,95 @@ fn restore_section_heads(
     restored
 }
 
+/// 冗長な対の**負けた側**に印を付ける。Budget には依存しない。
+///
+/// `REDUNDANT_WITH` は持ち主から前の Unit へ向くが、**弱まるのは持ち主とは
+/// 限らない**。対のうち Tier が低い方、同 Tier なら長い方が負ける
+/// （モジュールドキュメントの「負けは位置で決めない」）。だから
+/// **relation を両方向から集める必要がある** — 持ち主の `redundant_with()`
+/// だけを見ると、負けが相手側に来た対を取り逃がす。
+///
+/// 比べるのは `(Tier, 長さ, 先頭位置, 添字)` で、**どれも生の値**である。
+/// 実効 Tier（弱めた後）で比べると自分自身を参照することになる。
+///
+/// # 1 つの Unit が複数の対に入るとき
+///
+/// **1 つでも負ければ負け**で、弱まるのは**それでも 1 段だけ**である
+/// （`bool` であって数えない）。勝った対があっても救われない — 冗長な対の
+/// 勝者は「その内容の代表」であって、どこかで代表の座を譲った Unit は
+/// 代表ではない。「全部の対で負けたときだけ」にすると、無関係な第 3 の対が
+/// あるかどうかで弱まるかが変わる。
+///
+/// 知らない id は黙って飛ばす（弾くのは
+/// [`crate::SemanticDocument::validate`] の仕事）。
+fn losers(doc: &SemanticDocument, by_id: &HashMap<&str, usize>) -> Vec<bool> {
+    // 比較鍵。小さいほど強い（= 勝つ）。
+    let rank = |index: usize| {
+        let unit = &doc.units[index];
+        (unit.reading_tier, length_of(doc, unit), start_of(doc, unit), index)
+    };
+    let mut loser = vec![false; doc.units.len()];
+    for (owner, unit) in doc.units.iter().enumerate() {
+        // **`redundant_with()` ではない。** あれは最初の 1 つしか返さないので、
+        // 2 つ目以降の対を取り逃がす。
+        for target in unit.redundancies() {
+            let Some(&other) = by_id.get(target.as_str()) else {
+                continue;
+            };
+            if other == owner {
+                continue;
+            }
+            loser[if rank(owner) < rank(other) { other } else { owner }] = true;
+        }
+    }
+    loser
+}
+
+/// Unit の構成 Atom のバイト長の合計（並び替え鍵の「長さ」）。
+fn length_of(doc: &SemanticDocument, unit: &crate::unit::SemanticUnit) -> usize {
+    unit.atoms
+        .iter()
+        .filter_map(|&atom| doc.atom(atom))
+        .map(|atom| atom.len())
+        .sum()
+}
+
+/// Unit の先頭バイト位置（並び替え鍵の「文書順」）。
+fn start_of(doc: &SemanticDocument, unit: &crate::unit::SemanticUnit) -> usize {
+    unit.atoms
+        .iter()
+        .filter_map(|&atom| doc.atom(atom))
+        .map(|atom| atom.range.start)
+        .min()
+        .unwrap_or(usize::MAX)
+}
+
 /// Unit を「残したい順」に並べた添字列を返す。Budget には依存しない。
 ///
 /// 並び替え鍵はモジュールドキュメントのとおり。`decorate` の単調性は
 /// 「この順序が Budget に依存しないこと」と「prefix で打ち切ること」の
-/// 2 点だけに支えられている。
-fn keep_order(doc: &SemanticDocument) -> Vec<usize> {
+/// 2 点だけに支えられている。**[`losers`] も Budget を見ない**ので、
+/// 負けの決め方を変えてもこの 2 点は動かない。
+fn keep_order(doc: &SemanticDocument, by_id: &HashMap<&str, usize>) -> Vec<usize> {
+    let loser = losers(doc, by_id);
     let mut order: Vec<usize> = (0..doc.units.len()).collect();
     order.sort_by_cached_key(|&index| {
         let unit = &doc.units[index];
-        let redundant = unit.is_redundant();
-        let effective_tier = if redundant {
+        // 弱まるのは**負けた側**だけである。対の勝者は、冗長でない Unit と
+        // 区別が付かない（`REDUNDANT_WITH` の持ち主であっても）。
+        let lost = loser[index];
+        let effective_tier = if lost {
             unit.reading_tier.weakened()
         } else {
             unit.reading_tier
         };
-        let length: usize = unit
-            .atoms
-            .iter()
-            .filter_map(|&atom| doc.atom(atom))
-            .map(|atom| atom.len())
-            .sum();
-        let start = unit
-            .atoms
-            .iter()
-            .filter_map(|&atom| doc.atom(atom))
-            .map(|atom| atom.range.start)
-            .min()
-            .unwrap_or(usize::MAX);
-        (effective_tier, redundant, length, start, index)
+        (
+            effective_tier,
+            lost,
+            length_of(doc, unit),
+            start_of(doc, unit),
+            index,
+        )
     });
     order
 }
@@ -887,13 +1027,17 @@ mod tests {
             ReadingTier::Essential,
         );
         essential.set_core([AtomIndex(0)]);
-        // **REDUNDANT にしてある。** 二段目に落ちるのは核を持たない Unit
-        // だけなので（核は一段目が必ず確保する）、「核を持つのに沈む」を
-        // 作るには MARKED になれない Unit を使う。`core_atoms` は付いたまま
-        // で、**それが DIM に一切効かない**ことがここの主張である。
-        let mut dropped = SemanticUnit::new("drop", [AtomIndex(2)], ReadingTier::Essential);
+        // **SUPPORTING にしてある。** 二段目に落ちるのは MARKED になれない
+        // Unit だけなので（核を持つ ESSENTIAL は一段目が必ず確保する）、
+        // 「核を持つのに沈む」を作るには ESSENTIAL 以外を使う。
+        // `core_atoms` は付いたままで、**それが DIM に一切効かない**ことが
+        // ここの主張である。
+        //
+        // 2026-09-22 まではここを REDUNDANT な ESSENTIAL で作っていた。
+        // 冗長でも核は奪わなくなった（[`bears_a_core`]）ので、それでは
+        // 一段目に入ってしまう。
+        let mut dropped = SemanticUnit::new("drop", [AtomIndex(2)], ReadingTier::Supporting);
         dropped.set_core([AtomIndex(2)]);
-        dropped.relations.push(Relation::RedundantWith("keep".into()));
         let doc = SemanticDocument::new(atoms, vec![essential, dropped]);
         // 60 バイト中、一段目の "keep"（20 バイト）を引いた残りに
         // "drop"（40 バイト）は入らない。
@@ -988,15 +1132,26 @@ mod tests {
         );
     }
 
+    /// **核は奪わない。** 冗長な対の片側でも、ESSENTIAL で核を持つなら
+    /// MARKED になる。読み手のモデルを持たない以上、読み手によって重要度が
+    /// 逆転する対でどちらか一方を切る規則は持てない
+    /// （モジュールドキュメントの「核は奪わない」）。
+    ///
+    /// **2026-09-22 に逆になった。** それまでは片側が NORMAL に落ちていた。
     #[test]
-    fn a_redundant_essential_unit_is_never_marked() {
+    fn a_redundant_essential_unit_keeps_its_core() {
         let doc = doc(&[
             (ReadingTier::Essential, false),
             (ReadingTier::Essential, true),
         ]);
         assert_eq!(
             states(&doc, 100),
-            [DisplayState::Marked, DisplayState::Normal]
+            [DisplayState::Marked, DisplayState::Marked]
+        );
+        // どちらも一段目にいるので、Budget 1 % でも両方光る。
+        assert_eq!(
+            states(&doc, MIN_BUDGET),
+            [DisplayState::Marked, DisplayState::Marked]
         );
     }
 
@@ -1037,23 +1192,145 @@ mod tests {
         );
     }
 
+    /// 負けは Tier を上書きせず 1 段だけ押し下げる。負けた ESSENTIAL は
+    /// SUPPORTING として競い、負けた SUPPORTING（実効 CONTEXT）より長く残る。
+    ///
+    /// **核を空にしてある。** 核を持つ ESSENTIAL は一段目にいて沈まないので、
+    /// 実効 Tier の差が表示に出ない（モジュールドキュメントの「核は奪わない」
+    /// の最後の段落）。負けの効き目が見えるのは、負けた側が二段目にいるとき
+    /// だけである。
     #[test]
-    fn redundancy_weakens_the_tier_by_one_step_without_erasing_it() {
-        // 重複した ESSENTIAL は SUPPORTING として競い、重複した SUPPORTING
-        // （実効 CONTEXT）より長く残る。
-        let doc = doc(&[
-            (ReadingTier::Essential, false),
-            (ReadingTier::Essential, true),
-            (ReadingTier::Supporting, true),
+    fn losing_weakens_the_tier_by_one_step_without_erasing_it() {
+        let mut doc = sized(&[
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 10),
+            (ReadingTier::Context, 10),
         ]);
-        assert_eq!(
-            states(&doc, 70),
-            [
-                DisplayState::Marked,
-                DisplayState::Normal,
-                DisplayState::Dim
-            ]
-        );
+        // u1 と u2 が、それぞれ u0 を言い直している（どちらも負ける）。
+        doc.units[1]
+            .relations
+            .push(Relation::RedundantWith("u0".into()));
+        doc.units[2]
+            .relations
+            .push(Relation::RedundantWith("u0".into()));
+        doc.units[1].set_core([]);
+        // 一段目は u0 の 10 バイト。50 % = 20 バイトなので、あと 1 つだけ入る。
+        //
+        // 負けた ESSENTIAL は実効 SUPPORTING なので、非 REDUNDANT の
+        // CONTEXT（u3）より先に残る。**負けを一律最下位へ落とす実装なら
+        // ここは `[0, 3]` になる** — それが「消さない」の意味である。
+        assert_eq!(kept_units(&doc, 50), [0, 1]);
+    }
+
+    /// **負けるのは持ち主とは限らない。** 相手のほうが Tier が低ければ、
+    /// `REDUNDANT_WITH` を書いた側ではなく**指された側**が弱まる。
+    /// 2026-09-22 まではここが逆だった。
+    #[test]
+    fn the_loser_is_the_weaker_tier_not_the_owner() {
+        let mut doc = sized(&[
+            (ReadingTier::Supporting, 10),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 10),
+        ]);
+        // u1（ESSENTIAL・後ろ）が u0（SUPPORTING・前）を言い直している。
+        doc.units[1]
+            .relations
+            .push(Relation::RedundantWith("u0".into()));
+        // 核を空にして、u1 も取り合いに出す（一段目に隠れさせない）。
+        doc.units[1].set_core([]);
+        // 負けたのは u0（実効 CONTEXT）。u2 は同じ SUPPORTING のまま。
+        // 70 % = 21 バイト → u1（ESSENTIAL）と u2（SUPPORTING）が入り、
+        // u0 は入らない。**持ち主が負ける規則なら、沈むのは u1 だった。**
+        assert_eq!(kept_units(&doc, 70), [1, 2]);
+    }
+
+    /// 同 Tier なら**長い方**が負ける。位置は見ない。
+    #[test]
+    fn the_loser_is_the_longer_side_inside_the_same_tier() {
+        let mut doc = sized(&[
+            (ReadingTier::Essential, 40),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 10),
+        ]);
+        // 短い u1 が、長い u0 を言い直している。
+        doc.units[1]
+            .relations
+            .push(Relation::RedundantWith("u0".into()));
+        doc.units[0].set_core([]);
+        doc.units[1].set_core([]);
+        // 負けたのは長い u0（実効 SUPPORTING）。u0 は 40 バイトあるので、
+        // 同じ実効 SUPPORTING の u2（10 バイト）より後ろに回る。
+        // 60 バイト中 40 % = 24 バイト → u1（10）と u2（10）が入る。
+        assert_eq!(kept_units(&doc, 40), [1, 2]);
+    }
+
+    /// 引き分け（同 Tier・同長）は**前を勝たせる**。`REDUNDANT_WITH` は
+    /// 必ず後ろから前へ向くので、これは 2026-09-22 より前の規則
+    /// （持ち主が負ける）にそのまま退化する。
+    #[test]
+    fn a_tie_lets_the_earlier_unit_win() {
+        let mut doc = sized(&[
+            (ReadingTier::Supporting, 10),
+            (ReadingTier::Supporting, 10),
+        ]);
+        doc.units[1]
+            .relations
+            .push(Relation::RedundantWith("u0".into()));
+        // 負けたのは後ろの u1（実効 CONTEXT）。
+        assert_eq!(kept_units(&doc, 50), [0]);
+    }
+
+    /// 1 つの Unit が複数の対に入るとき — **1 つでも負ければ負け**、
+    /// それでも弱まるのは **1 段だけ**である（負けた回数を数えない）。
+    #[test]
+    fn losing_two_pairs_still_weakens_by_exactly_one_step() {
+        let mut doc = sized(&[
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 10),
+            (ReadingTier::Detail, 10),
+        ]);
+        // u2 は u0 とも u1 とも対を成し、**どちらでも負ける**（Tier が低い）。
+        doc.units[2]
+            .relations
+            .push(Relation::RedundantWith("u0".into()));
+        doc.units[2]
+            .relations
+            .push(Relation::RedundantWith("u1".into()));
+        doc.units[1].set_core([]);
+        // 一段目は u0 の 10 バイト。75 % = 30 バイトで、あと 2 つ入る。
+        //
+        // u2 は 2 回負けたが 1 段だけ弱まって実効 CONTEXT なので、
+        // 非 REDUNDANT の DETAIL（u3）より先に残る。**負けを数える実装なら
+        // u2 は実効 DETAIL に落ち、同じ実効 DETAIL の中で `lost` が真な
+        // ぶん u3 に負けて、ここは `[0, 1, 3]` になる。**
+        assert_eq!(kept_units(&doc, 75), [0, 1, 2]);
+    }
+
+    /// 勝った対があっても救われない — どこかで代表の座を譲った Unit は
+    /// 代表ではない。
+    #[test]
+    fn winning_one_pair_does_not_cancel_losing_another() {
+        let mut doc = sized(&[
+            (ReadingTier::Essential, 10),
+            (ReadingTier::Supporting, 10),
+            (ReadingTier::Detail, 10),
+            (ReadingTier::Context, 10),
+        ]);
+        // u1 は u0 との対では負け（Tier が低い）、u2 との対では勝つ。
+        doc.units[1]
+            .relations
+            .push(Relation::RedundantWith("u0".into()));
+        doc.units[2]
+            .relations
+            .push(Relation::RedundantWith("u1".into()));
+        // 一段目は u0 の 10 バイト。50 % = 20 バイトで、あと 1 つ。
+        //
+        // u1 は負けて実効 CONTEXT、`lost` が真。非 REDUNDANT の CONTEXT
+        // （u3）と同じ実効 Tier で競って**後ろに回る**。**勝った対で救う
+        // 実装なら u1 は SUPPORTING のままで、ここは `[0, 1]` になる。**
+        assert_eq!(kept_units(&doc, 50), [0, 3]);
     }
 
     #[test]
@@ -1781,10 +2058,13 @@ mod tests {
         );
     }
 
-    /// 前提でも重複でもある Unit は、重複として弱められる。2 つの relation は
-    /// 独立に効く。
+    /// 前提でも冗長でもある Unit は、**前提の側がそのまま効く**。
+    /// 2 つの relation は独立で、冗長は核を取り上げない。
+    ///
+    /// **2026-09-22 に逆になった。** それまでは REDUNDANT だと MARKED に
+    /// ならず、一段目にも入らないので前提を連れてこなかった。
     #[test]
-    fn a_redundant_essential_unit_does_not_bring_its_prerequisite() {
+    fn a_redundant_essential_unit_still_brings_its_prerequisite() {
         let mut doc = sized(&[
             (ReadingTier::Context, 10),
             (ReadingTier::Essential, 10),
@@ -1794,16 +2074,14 @@ mod tests {
             .relations
             .push(Relation::RedundantWith("u0".into()));
         assert!(doc.units[1].is_redundant());
-        // REDUNDANT なので MARKED にならない → **一段目に入らない**。
+        // 冗長でも ESSENTIAL で核を持つので MARKED → **一段目に入る**。
         assert_eq!(
             states(&doc, 100),
-            [DisplayState::Normal, DisplayState::Normal]
+            [DisplayState::Normal, DisplayState::Marked]
         );
-        // 55 % = 11 バイト。u1 は入るが、**前提の u0 は連れてこない**。
-        // 台帳が一段だった頃はここが `[0, 1]` で、20 バイトを 11 バイトの
-        // 予算で買っていた。
-        assert_eq!(kept_units(&doc, 55), [1]);
-        assert_eq!(kept_units(&doc, 100), [0, 1]);
+        // 一段目は Budget を見ないので、最小の Budget でも前提ごと残る。
+        assert_eq!(kept_units(&doc, MIN_BUDGET), [0, 1]);
+        assert_eq!(floor(&doc), MAX_BUDGET);
     }
 
     // ---- 見出しの復帰 ---------------------------------------------------
