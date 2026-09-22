@@ -63,6 +63,35 @@ fn app_with(fixture: &str, mode: SemanticMode) -> App {
     app
 }
 
+/// **層を渡さない既定の起動。** `--semantic` も `--semantic-cmd` も無い。
+fn app_without_a_layer() -> App {
+    let path = demo("demo.md");
+    let config = Config {
+        files: vec![path.clone()],
+        send_cmd: None,
+        send_agent: false,
+        reply: false,
+        theme: Some("base16-ocean.dark".into()),
+        ime: ImeMode::Off,
+        light: None,
+        callback: None,
+        esc_quit: EscQuit::Auto,
+        cursor_anchor: true,
+        fx: true,
+        semantic: None,
+        semantic_cmd: None,
+        // **既定をそのまま使う。** ここを書くとこのテストの意味が消える。
+        semantic_mode: SemanticMode::default(),
+        marks_questions: None,
+        decoration_blend: Default::default(),
+        decorations: Vec::new(),
+    };
+    let source = Source::load(path).unwrap();
+    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let view = ViewState::render(&source, 75, &highlight, Default::default());
+    App::new(config, source, highlight, view, false)
+}
+
 /// 光っている（MARKED の）range の始まり。
 fn marked(app: &App) -> Vec<usize> {
     app.semantic_decorations
@@ -133,6 +162,13 @@ fn a_budget_fixture_in_marks_mode_says_why_it_is_empty() {
     assert!(
         footer.contains("no scores"),
         "理由がステータス行に出ていない: {footer}"
+    );
+    // **逃げ道まで固定する。** 既定が marks になった（2026-09-22）ので、
+    // ここに来るのは「スコアの無い fixture を既定のまま開いた」人である。
+    // 理由だけ言って次の一手を言わないと、画面は光らないままになる。
+    assert!(
+        footer.contains("--semantic-mode budget"),
+        "逃げ道がステータス行に出ていない: {footer}"
     );
 }
 
@@ -401,4 +437,47 @@ fn editing_a_preset_misses_the_cache_on_its_own() {
         cache.get_asking("cmd", source, Some(&after)).is_none(),
         "文面を 1 文足しただけで外れる"
     );
+}
+
+
+// ---- 6. 既定が marks でも、層が無ければ何も起きない --------------------
+
+#[test]
+fn the_default_marks_mode_binds_nothing_without_a_layer() {
+    // **既定が marks になった（2026-09-22）ことで開いた穴を塞ぐ。**
+    // `state_tests` 側の同じ趣旨のテストは `--semantic-mode budget` を
+    // 明示するようになったので、**出荷される既定を通るのはここだけ**である。
+    //
+    // `examples/semantic/README.md` が散文で約束していること —
+    // 「`--semantic` を渡さなければ、これらのキーは束縛されない。読み出しも
+    // `?` ヘルプの行も出ず、この層が無かったときと完全に同じ動きをする」。
+    let app = app_without_a_layer();
+    assert!(app.marks_mode(), "既定は marks である（前提の確認）");
+    assert!(!app.semantic_enabled(), "層は立っていない");
+
+    let footer = crate::chrome::footer_hints(&app);
+    assert!(!footer.contains("MARK"), "つまみの読み出しが出ている: {footer}");
+    assert!(!footer.contains("READ"), "READ の読み出しが出ている: {footer}");
+    assert!(
+        !footer.contains("no scores"),
+        "注釈を 1 度も求めていないのに理由を言っている: {footer}"
+    );
+
+    let rows = crate::overlay::help_rows(false, false, false, app.semantic_enabled());
+    assert!(
+        !rows.iter().any(|(label, _)| *label == "read"),
+        "? ヘルプが使えないキーを宣伝している"
+    );
+
+    // **キーの門番は `semantic_enabled()` の側にある。** 割り当ての方は
+    // marks なので 7 本とも `Some` を返す — だから門番が閉じていることが
+    // そのまま「束縛されない」の中身である（`main` の `KeyCode::Char(c)`
+    // の腕は 2 つの条件の AND）。
+    for c in ['-', '+', '=', '<', '>', 'm', 'M'] {
+        assert!(
+            crate::keys::semantic_key(c, app.marks_mode()).is_some(),
+            "{c} は marks の割り当てにある（門番だけが止めている）"
+        );
+    }
+    assert!(!app.semantic_enabled(), "その門番が閉じている");
 }

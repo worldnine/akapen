@@ -315,7 +315,12 @@ STANDALONE_KINDS = frozenset({"code_block", "table"})
 #: 核（ラウンド 3 の選択肢）になれる Atom の種別 — **散文だけ**。
 #: 見出し・コードブロック・テーブルは「1 か所だけ読むならどこか」の答えに
 #: ならない（[`core_candidates`]）。
-PROSE_KINDS = frozenset({"sentence", "list_item"})
+#:
+#: **引用（`block_quote`）は散文なので入る。** 2026-09-22 まで外れていたが、
+#: 外す理由（要点の言い換えではない）はコードと表の話で、引用には当たらない。
+#: 引用だらけの文書では、引用を含む Unit の核が空になり**一度も光らなかった**
+#: （marks では核の無い Unit は光らない）。
+PROSE_KINDS = frozenset({"sentence", "list_item", "block_quote"})
 
 
 class JevError(Exception):
@@ -1054,6 +1059,10 @@ def core_candidates(atoms: list[dict], unit: dict) -> dict:
     言い換えではない。種別は構文の話なので、設計書「Jev に判断させないもの:
     **syntax parsing**」のとおりここで落とす — 実測でも、候補に見出しがあると
     Jev は見出しを選んだ（demo.md の `## 結論` / `## 制約`）。
+
+    **引用（`block_quote`）は落とさない。** 引用は散文で、要点そのものを
+    述べていることがある。落としていたのは上の規則に巻き込まれた事故で、
+    引用の多い文書では核が空のまま Unit が一度も光らなかった。
 
     本文が空の Atom は選択肢にしない（選ばれても光らせる中身が無い）。
     """

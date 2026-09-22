@@ -175,7 +175,9 @@ m            → 数字と日付                    →  28本
 
 ### DIM 版は従来どおり
 
-同じ判定器・同じ akapen を `--semantic-mode` 無しで起動すると:
+同じ判定器・同じ akapen を `--semantic-mode budget` で起動すると（**この日は
+それが既定だったので、測ったときはフラグ無しである**。既定が marks に
+変わったのは同じ 2026-09-22 の後段）:
 
 - 応答は 95 Unit、Tier が essential 29 / supporting 29 / detail 22 / context 15、
   relations 65 本、核 29 本。**`score` も `question` も付かない**

@@ -485,8 +485,15 @@ pub(crate) fn footer_hints(app: &App) -> String {
         // DIM 版の判定器や budget 用の fixture を marks モードで開いた場合で、
         // そこには問いの名前が無い（誰も聞いていない）。名前を先に要求すると
         // このまま黙った空白になる — いちばん理由の要る場面で何も言わない。
+        //
+        // **逃げ道まで言う。** marks が既定になった（2026-09-22）ので、
+        // ここに来るのは「スコアの無い fixture を既定のまま開いた」人が
+        // いちばん多い。理由だけ言って次の一手を言わないと、画面は光らない
+        // ままである。黙って budget へ落とさないのはそのためで、落とすと
+        // 「marks のつもりで DIM を見ている」を画面で見分けられない
+        // （`crate::config::SemanticMode::parse` と同じ判断）。
         if app.marks_has_scores() == Some(false) {
-            return format!("{p} · MARK · no scores in this answer");
+            return format!("{p} · MARK · no scores in this answer (try --semantic-mode budget)");
         }
         let Some(question) = question else {
             return p;

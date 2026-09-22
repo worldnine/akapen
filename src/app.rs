@@ -506,6 +506,9 @@ impl App {
     ) -> Self {
         let ime_session = ime::SessionIme::new(config.ime);
         let files = config.files.clone();
+        // `Config` から取る。`main` が後から代入していたので、`App` を
+        // 直に組むテストだけが別の既定を見ていた。
+        let semantic_mode = config.semantic_mode;
         // Non-markdown files open in source mode (view is unavailable).
         let initial_mode = if supports_view(&files[0]) {
             Mode::View
@@ -608,7 +611,7 @@ impl App {
             semantic_results: None,
             semantic_armed: false,
             reading_budget: crate::semantic::DEFAULT_BUDGET,
-            semantic_mode: SemanticMode::Budget,
+            semantic_mode,
             marks_questions: None,
             marks_question: None,
             marks_preset: 0,
