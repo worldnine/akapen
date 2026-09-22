@@ -2205,6 +2205,41 @@ class MarksModeTest(unittest.TestCase):
         self.assertNotIn("core", rounds, f"送ったラウンド: {rounds}")
         self.assertTrue(all(u["core_atoms"] == [] for u in out["units"]))
 
+    #: `- 決定A。` / `- 決定B。` / `- 決定C。` の 3 項目 ＝ 規則 4 でつながる
+    #: 1 本のリスト。[`RunCapTest`] と同じ形の source である。
+    LIST_SOURCE = "- 決定A。\n- 決定B。\n- 決定C。\n"
+
+    def list_request(self):
+        atoms = atoms_from(
+            self.LIST_SOURCE,
+            ("list_item", "- 決定A。"),
+            ("list_item", "- 決定B。"),
+            ("list_item", "- 決定C。"),
+        )
+        return dict(self.request(), source=self.LIST_SOURCE, atoms=atoms)
+
+    def test_every_item_of_one_list_can_hold_a_core(self):
+        """**marks では run キャップを掛けない。** 問いが既に選んでいる。
+
+        DIM 版は「1 本のリストにつき核 1 つ」に畳む（[`RunCapTest`]）。marks
+        では、足切りを超えた項目はそれぞれ核を持つ — リストの項目が全部光る
+        のは「答えが全部光る」で正しく、量はつまみが受け持つ。
+        """
+        out = with_fake_ask(
+            self.fake([0.95, 0.94, 0.93]),
+            lambda: jev.annotate(self.list_request(), "m", 1.0),
+        )
+        # **テストが空振りしないこと。** 規則 4 は構造で決まるので、境界が
+        # 1 本の run になっていなければ run キャップはそもそも掛からず、
+        # 下の assert は何も守らない。
+        self.assertEqual(
+            jev.unit_runs([u["atoms"] for u in out["units"]], out["jev"]["boundaries"]),
+            [[0, 1, 2]],
+        )
+        self.assertEqual([u["core_atoms"] for u in out["units"]], [[0], [1], [2]])
+        capped = [u["id"] for u in out["units"] if u["jev"].get("core_by") == "rule:run_cap"]
+        self.assertEqual(capped, [], f"run キャップに掛かった: {capped}")
+
     def test_the_boundary_round_runs_once_and_then_comes_from_the_cache(self):
         """**境界を 1 回取る（キャッシュ）** — 問いを変えても回し直さない。"""
         rounds = []

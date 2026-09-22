@@ -2115,8 +2115,13 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
     """marks モードの解析 — 境界 → スコア → 核 の 3 ラウンド。
 
     DIM 版（[`annotate`]）とはラウンドの数も中身も違うが、**部品は同じもの**を
-    使う（`send_in_chunks` / `RequestBudget` / run キャップ / 核の Choice）。
-    数字が同じコードに帰属しないと、既存の実測と並べられない。
+    使う（`send_in_chunks` / `RequestBudget` / 核の Choice）。数字が同じコードに
+    帰属しないと、既存の実測と並べられない。
+
+    **run キャップは掛けない**（[`plan_run_cores`] を呼ばない）。DIM 版でそれが
+    要るのは「しょうもない決定事項が全部光る」を防ぐためだが、marks では**問いが
+    既に選んでいる**ので、1 本のリストの項目が全部光るのは「答えが全部光る」で
+    正しい。量はつまみが受け持つ（`measurements/marks-mode.md`）。
 
     **問いの連鎖は無い。** 核のラウンドは「どの Unit に聞くか」を前の答えで
     絞るだけで、問いの文面は Unit の本文しか見ない（設計書 0 節「Jev への
@@ -2184,9 +2189,13 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
     # question が 0 本になり、リクエストも 0 回である（設計書 0 節の費用の項）。
     #
     # `reading_tier` をここで `essential` / `detail` に使っているのは、DIM 版の
-    # 核の機構（[`wants_core`] / [`plan_run_cores`] / [`core_questions`]）が
-    # そのフィールドで「核が要るか」を読むからである。**この値は応答に出ない**
-    # — 最後に全部 [`MARKS_TIER`] へ畳む。
+    # 核の機構（[`wants_core`] / [`core_questions`]）がそのフィールドで「核が
+    # 要るか」を読むからである。**この値は応答に出ない** — 最後に全部
+    # [`MARKS_TIER`] へ畳む。
+    #
+    # **Unit ごとの経路だけを通す。** 足切りを超えた Unit はそれぞれ核を持つ
+    # （候補が 1 つなら [`assign_lone_cores`] が聞かずに埋める）。散文の候補が
+    # 0 本の Unit と、選択肢が予算を超えた Unit だけが核を持たないままになる。
     provisional = [
         {
             "id": f"u{n}",
@@ -2202,18 +2211,13 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
         }
         for n, ix in enumerate(units, start=1)
     ]
-    runs = unit_runs(units, plan)
-    run_questions, fixed, scope, handled = plan_run_cores(atoms, provisional, runs, budget)
-    questions = dict(run_questions)
-    questions.update(core_questions(atoms, provisional, budget, handled))
+    questions = core_questions(atoms, provisional, budget)
     if questions:
         third = ask(questions, "core")
         for key in unsent.get("core", ()):
             questions.pop(key, None)
-            scope.pop(key, None)
         answers.update(third)
-    apply_run_cores(provisional, questions, fixed, scope, answers)
-    assign_lone_cores(atoms, provisional, handled)
+    assign_lone_cores(atoms, provisional)
     apply_core_answers(provisional, questions, answers)
 
     built = []
