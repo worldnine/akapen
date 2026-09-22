@@ -827,6 +827,8 @@ $0.14**。第 1 版は 16 ランで 638 / 22.2M / $0.93 だった。
 （akapen の `COMMAND_TIMEOUT` は 60 秒）。60 Unit / ESSENTIAL 3 /
 REDUNDANT 0。波は 3 回で、3 波目に新しい前提が出ずに止まった。
 
+> **`COMMAND_TIMEOUT` はもうありません**（2026-09-22）。壁時計の固定値をやめ、`COMMAND_IDLE_TIMEOUT`（無音 30 秒）と `COMMAND_BACKSTOP`（600 秒）に分かれています。理由と実測は
+> [`speed-and-limits.md`](speed-and-limits.md)「第 2 版」。
 > **Unit の切り方は第 1・2 版と一致しない。** ライブ実行は境界と Tier を
 > Jev に聞き直すので、この節の添字は 60 Unit のもので、上の節の 57 Unit の
 > 添字とは 1 前後ずれる。**同じ穴を指していることは閉包の形で確認した**

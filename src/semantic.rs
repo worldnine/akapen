@@ -82,6 +82,7 @@ use semantic_reading::{
 use sha2::{Digest, Sha256};
 
 use crate::decoration::{Decoration, DecorationKind};
+use crate::export::Deadline;
 use crate::semantic_cache::SemanticCache;
 
 /// Reading Budget の下限・上限・既定値。刻みは 1 % で、設計書どおり
@@ -155,46 +156,82 @@ pub(crate) fn load_fixture(path: &Path) -> Result<Box<dyn Provider>> {
 // `--semantic-cmd` — 意味判断を外部コマンドへ委譲する
 // ---------------------------------------------------------------------------
 
-/// 外部コマンドが答えを返すまで待つ上限。**設定値はここ 1 箇所**。
+/// 外部コマンドを**無音で**待つ上限。**設定値はここと
+/// [`COMMAND_BACKSTOP`] の 2 つだけ**。
 ///
-/// 寛容に取ってある。この先に繋がるのは Jev のアダプタスクリプトである。
-/// Jev 自体は多数の question を 1 リクエストで並列評価する判定器で、
-/// TypeSafe 自身の Python SDK は `DEFAULT_TIMEOUT = 10.0`（秒）を既定に
-/// している（`docs/design/jev.md`）。つまり Jev の応答そのものは 10 秒
-/// スケールで、ここの 60 秒はその想定ではない。
+/// この先に繋がるのは Jev のアダプタスクリプトで、そのプロセス寿命は
+/// **文書の大きさで決まる**。だから akapen は壁時計では測らない —
+/// 最後に子が何か言ってからの**無音時間**で判定し、進捗が続くかぎり
+/// 殺さない（[`crate::export::Deadline::WhileProgressing`]）。
 ///
-/// # 合計を実測した（2026-09-21）
+/// # 固定値をやめた理由（2026-09-22 の実測）
 ///
-/// かつてここには「**実測していないのは合計の方**」と書いてあった。測った。
-/// プロセス起動 + ネットワーク往復 + 2 ラウンドを含む**全体**が:
+/// かつてここは 60 秒の壁時計で、コメントは「2.4〜3.3 秒、18 倍の余裕」と
+/// 言っていた。**測り直したら 1.27 倍だった**（`--semantic-cmd` の経路その
+/// ままで、アダプタのプロセス壁時計を 5 文書 × 2 ラン）:
 ///
 /// ```text
-/// 文書サイズ      解析の全体（アダプタのプロセス寿命）
-///  1,664 B         1.50〜1.55 秒
-///  9,857 B         2.33〜2.45 秒
-/// 24,280 B         2.88〜3.27 秒
-/// 45,650 B         2.42〜2.63 秒（7 回）
+/// 文書サイズ   プロセス壁時計   リクエスト   1 req 最遅
+///  1,664 B      6.7〜7.0 秒        12         0.76 秒
+///  9,857 B     17.3〜20.2 秒     19〜23       1.48 秒
+/// 18,250 B     11.8〜13.1 秒     14〜16       1.31 秒
+/// 22,685 B     28.9〜29.4 秒     27〜28       1.56 秒
+/// 35,021 B    46.9〜47.4 秒     40〜41       1.64 秒
 /// ```
 ///
-/// **60 秒には 18 倍の余裕がある。** 文書サイズに対して時間はほとんど伸びない —
-/// Jev は全 question を 1 リクエストで並列評価するので、伸びるのは question 数
-/// ではなく input token 数の方で、それも時間への効きは浅い（実測の線形あてはめで
-/// 約 0.55 秒 + 1.3 マイクロ秒/token）。
+/// 伸びたのは 1 リクエストの時間ではなく**リクエストの本数**である。
+/// かつての「3 ラウンド」は今 9 種のラウンド（probe / boundary / tier /
+/// core / redundancy_gate / context1 / pick / context3 / pick2）で、
+/// リクエストはチャンクに割られて 12〜41 本になる。
+///
+/// **そして本数は spawn 前に見積もれない。** Atom あたりのリクエスト数は
+/// 実測で 0.095〜0.44 と 4.6 倍ぶれる（文書の構造で決まる。18 KB の散文が
+/// 15 本、10 KB の設計書が 21 本）。バイト数もAtom 数も代理変数として
+/// 足りない。
+///
+/// **測定対象そのものがその日のうちに 1.55 倍になった。** 上の表の
+/// 35,021 B は `docs/gotchas/semantic-reading.md` の 2026-09-22 09:16 時点で、
+/// 同日の版は 54,435 B / 推定 63 リクエスト / **推定 74 秒**である
+/// （`examples/semantic/measurements/speed-and-limits.md` 第 2 版）。
+/// どんな固定値も、次に育った文書に越される。
+///
+/// # 誤って殺す側の害が大きい
+///
+/// タイムアウトに当たると読み手は**約 8 円払って何も得ない**。子が殺される
+/// ので stdout は空（アダプタは JSON を終了時に 1 回だけ書く）、
+/// [`SemanticCache`] にも入らないので開き直せばもう一度払う。
+/// 「動いているのに切られる」は読み手には「壊れている」と区別がつかない。
+///
+/// # 30 秒の根拠は「アダプタ自身の 1 リクエストより長い」
+///
+/// アダプタは 1 リクエストを 20 秒で諦めて**その理由を stderr に書く**
+/// （`jev-annotate.py` の `DEFAULT_TIMEOUT`）。ここがそれより短いと、
+/// 子が自分で報告できたはずの障害を akapen が kill で潰してしまう。
+/// 実測の最遅リクエストは 1.72 秒（30 ラン / 680 リクエスト）なので、
+/// 20 秒に対して 11.6 倍、この 30 秒に対して 17 倍の余裕がある。
 ///
 /// # 大文書で先に当たるのはここではない
 ///
 /// **タイムアウトは大文書の制約ではない。** 先に当たるのは Jev の context
 /// window（実測で input 約 65,536 tokens）で、超えると 2 秒台で HTTP 400
-/// （`max_tokens_exceeded`）が返る。45,650 バイトの実文書はその 92〜96 % を
-/// 使っており、1.06 倍にすると失敗した。**この値を上げても何も救われない**
-/// （詳細は `docs/gotchas.md` と `examples/semantic/jev-annotate.py` の
-/// `http_error_message`）。
+/// （`max_tokens_exceeded`）が返る。**この値を上げても何も救われない**
+/// （詳細は `docs/gotchas/semantic-reading.md` と
+/// `examples/semantic/jev-annotate.py` の `http_error_message`）。
 ///
-/// それでも短くしないのは、ネットワークが遅い日に「動いているのに切られる」が
-/// ユーザーには「壊れている」と区別がつかないためで、寛容な既定の害は小さい。
 /// UI が固まらないのはタイムアウトではなく別スレッドで走らせていること
 /// （[`crate::app::App::reanalyze_semantics`]）が担保している。
-pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const COMMAND_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 進捗があっても必ず止める上限。**無音判定の逃げ道を塞ぐためだけにある。**
+///
+/// [`COMMAND_IDLE_TIMEOUT`] は「喋っているかぎり殺さない」なので、
+/// 壊れて喋り続けるアダプタ（進捗行を吐くループに落ちた、など）を
+/// 永遠に走らせてしまう。ここがその天井である。
+///
+/// 10 分は実測の最大（47 秒）の 12 倍、推定の最悪（74 秒）の 8 倍で、
+/// **正常な解析がここへ届くことは想定していない**。届いたらそれは
+/// 「遅い」ではなく「壊れている」であり、殺してよい。
+pub(crate) const COMMAND_BACKSTOP: Duration = Duration::from_secs(600);
 
 /// 応答として受け取る stdout の上限。超えたら応答を捨てる
 /// （途中で切れた JSON を「壊れた応答」として報告するより、
@@ -266,17 +303,21 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub(crate) struct CommandProvider {
     cmd: String,
-    timeout: Duration,
+    deadline: Deadline,
     cache: Option<SemanticCache>,
 }
 
 impl CommandProvider {
-    /// 既定のタイムアウト（[`COMMAND_TIMEOUT`]）でコマンドを包む。
+    /// 既定の見切り方（[`COMMAND_IDLE_TIMEOUT`] の無音 ＋
+    /// [`COMMAND_BACKSTOP`] の天井）でコマンドを包む。
     /// **キャッシュは付かない。**
     pub(crate) fn new(cmd: impl Into<String>) -> Self {
         Self {
             cmd: cmd.into(),
-            timeout: COMMAND_TIMEOUT,
+            deadline: Deadline::WhileProgressing {
+                idle: COMMAND_IDLE_TIMEOUT,
+                backstop: COMMAND_BACKSTOP,
+            },
             cache: None,
         }
     }
@@ -287,13 +328,13 @@ impl CommandProvider {
         self
     }
 
-    /// タイムアウトを指定して作る（テスト用。本番経路は
+    /// 見切り方を指定して作る（テスト用。本番経路は
     /// [`CommandProvider::new`] だけを通る）。
     #[cfg(test)]
-    pub(crate) fn with_timeout(cmd: impl Into<String>, timeout: Duration) -> Self {
+    pub(crate) fn with_deadline(cmd: impl Into<String>, deadline: Deadline) -> Self {
         Self {
             cmd: cmd.into(),
-            timeout,
+            deadline,
             cache: None,
         }
     }
@@ -326,7 +367,7 @@ impl Provider for CommandProvider {
             "--semantic-cmd",
             &self.cmd,
             &request,
-            self.timeout,
+            self.deadline,
             RESPONSE_LIMIT,
         )
         .map_err(|e| SemanticError::Provider(format!("{e:#}")))?;
@@ -889,26 +930,105 @@ mod tests {
         assert!(err.to_string().contains("--semantic-cmd"), "{err}");
     }
 
-    /// タイムアウト: 返ってこないコマンドは殺して Err にする。
+    /// タイムアウト: **黙って**返ってこないコマンドは殺して Err にする。
     ///
-    /// 既定は [`COMMAND_TIMEOUT`]（60 秒）だが、テストは注入した短い値で
-    /// 同じ経路を通す（export.rs の子プロセステストと同じ流儀）。
+    /// 既定は [`COMMAND_IDLE_TIMEOUT`]（無音 30 秒）だが、テストは注入した
+    /// 短い値で同じ経路を通す（export.rs の子プロセステストと同じ流儀）。
     #[test]
-    fn a_command_that_never_answers_is_killed_and_reported() {
+    fn a_silent_command_that_never_answers_is_killed_and_reported() {
         let start = std::time::Instant::now();
-        let err = CommandProvider::with_timeout("sleep 30", Duration::from_millis(200))
-            .analyze("# a\n")
-            .expect_err("返ってこなければ Err");
+        let err = CommandProvider::with_deadline(
+            "sleep 30",
+            Deadline::WhileProgressing {
+                idle: Duration::from_millis(200),
+                backstop: Duration::from_secs(30),
+            },
+        )
+        .analyze("# a\n")
+        .expect_err("返ってこなければ Err");
         assert!(err.to_string().contains("timed out"), "{err}");
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "待たずに殺すこと（{:?} かかった）",
             start.elapsed()
         );
-        // 既定値は寛容 — 実測した全体は最大 3.3 秒で、18 倍の余裕がある
-        // （`COMMAND_TIMEOUT` のコメントの表）。大文書で先に当たるのは
-        // ここではなく Jev の context window である。
-        assert_eq!(COMMAND_TIMEOUT, Duration::from_secs(60));
+    }
+
+    /// **進捗が続くなら、かつての 60 秒を越えても殺さない。**
+    ///
+    /// これがこの層の値を実測へ合わせ直した中身である（2026-09-22）。
+    /// 35 KB の文書で 47 秒、同じ文書の当日の版で推定 74 秒かかるので、
+    /// 壁時計の固定値ではどれを選んでも次に育った文書に越される
+    /// （[`COMMAND_IDLE_TIMEOUT`] のコメント）。
+    ///
+    /// テストは秒ではなくミリ秒で同じ形を通す: 無音の上限より短い間隔で
+    /// stderr に 1 行ずつ出す子が、上限の何倍生きても殺されないこと。
+    ///
+    /// **間隔と上限の比は本番に揃える**（本番は 1.2 秒に対して 30 秒 =
+    /// 25 倍）。詰めると並列に走る他のテストの負荷で `sleep` が伸び、
+    /// 偽陽性になる（`export.rs` の
+    /// `run_capturing_does_not_kill_a_child_that_keeps_talking` に経緯）。
+    #[test]
+    fn a_command_that_keeps_reporting_progress_outlives_the_idle_limit() {
+        let start = std::time::Instant::now();
+        // 50 ms 間隔で 50 行 ≒ 2.5 秒。無音の上限 1.5 秒に対して間隔は
+        // 30 倍の余裕があり、壁時計では上限を越えている。
+        let document = CommandProvider::with_deadline(
+            format!(
+                "cat >/dev/null; \
+                 i=0; while [ $i -lt 50 ]; do i=$((i+1)); \
+                   printf 'round %s\\n' \"$i\" >&2; sleep 0.05; \
+                 done; \
+                 printf %s '{}'",
+                r#"{"version":1,"units":[]}"#
+            ),
+            Deadline::WhileProgressing {
+                idle: Duration::from_millis(1500),
+                backstop: Duration::from_secs(60),
+            },
+        )
+        .analyze("")
+        .expect("進捗があるかぎり殺さない");
+        assert!(document.units.is_empty());
+        assert!(
+            start.elapsed() > Duration::from_millis(1500),
+            "無音の上限より長く生きたことを確かめる（{:?}）",
+            start.elapsed()
+        );
+    }
+
+    /// **backstop は必ず止める。** 喋り続ける子の逃げ道を塞ぐ。
+    #[test]
+    fn a_chatty_command_is_still_stopped_by_the_backstop() {
+        let start = std::time::Instant::now();
+        let err = CommandProvider::with_deadline(
+            "cat >/dev/null; while :; do printf 'still here\\n' >&2; sleep 0.01; done",
+            Deadline::WhileProgressing {
+                // 無音では絶対に当たらない（10 ms ごとに喋る）。
+                idle: Duration::from_secs(30),
+                backstop: Duration::from_millis(300),
+            },
+        )
+        .analyze("# a\n")
+        .expect_err("backstop で止まること");
+        assert!(err.to_string().contains("backstop"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "backstop で止まること（{:?} かかった）",
+            start.elapsed()
+        );
+    }
+
+    /// 本番経路の既定値。**壁時計ではなく無音で測る**のがこの層の判断で、
+    /// 数字の出どころは [`COMMAND_IDLE_TIMEOUT`] のコメントの表である。
+    #[test]
+    fn the_default_deadline_watches_silence_not_the_wall_clock() {
+        // 30 秒はアダプタ自身の 1 リクエスト（20 秒）より長い — 子が自分で
+        // 報告できたはずの障害を kill で潰さないため。
+        assert_eq!(COMMAND_IDLE_TIMEOUT, Duration::from_secs(30));
+        assert!(COMMAND_IDLE_TIMEOUT > Duration::from_secs(20));
+        assert_eq!(COMMAND_BACKSTOP, Duration::from_secs(600));
+        assert!(COMMAND_BACKSTOP > COMMAND_IDLE_TIMEOUT);
     }
 
     /// 空の文書でも一周する（Atom 0 個・Unit 0 個）。
@@ -1073,3 +1193,4 @@ mod tests {
         assert!(source_from_config(&config).unwrap().is_some());
     }
 }
+

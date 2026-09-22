@@ -1207,6 +1207,123 @@ class MissingKeyTest(unittest.TestCase):
         self.assertTrue(out.stderr.startswith("unsupported"), out.stderr)
 
 
+class ProgressTest(unittest.TestCase):
+    """1 リクエストごとの生存信号（[`jev.progress`]）。
+
+    **akapen はこの行に頼って子を殺さない判断をしている** —— 壁時計ではなく
+    最後の出力からの無音時間で見ていて（`src/export.rs` の
+    `Deadline::WhileProgressing`、上限は `src/semantic.rs` の
+    `COMMAND_IDLE_TIMEOUT` = 30 秒）、黙って働くアダプタは固まったアダプタと
+    区別がつかない。だから「出ること」をテストで留める。
+    """
+
+    class Capturing:
+        """`isatty` を持つ、書いた行を溜めるだけの stderr。"""
+
+        def __init__(self, tty=False, boom=None):
+            self.lines = []
+            self._tty = tty
+            self._boom = boom
+
+        def isatty(self):
+            return self._tty
+
+        def write(self, text):
+            if self._boom:
+                raise self._boom
+            self.lines.append(text)
+
+        def flush(self):
+            if self._boom:
+                raise self._boom
+
+    def setUp(self):
+        self.real_stderr = jev.sys.stderr
+        self.real_count = jev._requests_sent
+        jev._requests_sent = 0
+
+    def tearDown(self):
+        jev.sys.stderr = self.real_stderr
+        jev._requests_sent = self.real_count
+
+    def test_one_line_per_request_numbered_in_order(self):
+        fake = self.Capturing()
+        jev.sys.stderr = fake
+        jev.progress(9, 0.712)
+        jev.progress(42, 1.2)
+        written = "".join(fake.lines).splitlines()
+        self.assertEqual(len(written), 2, written)
+        self.assertEqual(written[0], "request 1: 9 questions in 0.71s")
+        self.assertEqual(written[1], "request 2: 42 questions in 1.20s")
+
+    def test_the_line_fits_the_status_bar(self):
+        # akapen は stderr の最後の非空行を 160 字まで出す。進捗行が
+        # そこに載ることがあるので、溢れさせない。
+        fake = self.Capturing()
+        jev.sys.stderr = fake
+        jev.progress(99999, 123.456)
+        self.assertLessEqual(len("".join(fake.lines).strip()), 160)
+
+    def test_a_closed_stderr_does_not_break_the_analysis(self):
+        # 進捗行が出せなくても解析は続ける（akapen の猶予は縮むだけ）。
+        jev.sys.stderr = self.Capturing(boom=ValueError("closed"))
+        jev.progress(1, 0.1)  # 例外を投げないこと
+        jev.sys.stderr = self.Capturing(boom=OSError("broken pipe"))
+        jev.progress(1, 0.1)
+
+    def test_the_request_timeout_stays_under_akapens_idle_limit(self):
+        """**順序の約束を Python 側からも留める。**
+
+        akapen は無音 30 秒で子を殺す（`src/semantic.rs` の
+        `COMMAND_IDLE_TIMEOUT`）。`DEFAULT_TIMEOUT` がそれを越えると、
+        固まったリクエストを子が自分で諦めて理由を stderr に書く前に
+        akapen の kill が来て、**理由が消える**。
+
+        Rust 側は `the_default_deadline_watches_silence_not_the_wall_clock`
+        が `COMMAND_IDLE_TIMEOUT > 20 秒` を留めている。片側だけだと
+        こちらを 40 秒に上げても両方のテストが緑のまま約束が壊れるので、
+        反対側からも留める（`docs/gotchas/external-processes.md`
+        「どちらかを動かすなら両方を見ること」）。
+        """
+        self.assertLess(jev.DEFAULT_TIMEOUT, 30.0)
+
+    def test_ask_jev_reports_every_request(self):
+        """**`ask_jev` が出す** —— `send_in_chunks` ではない。
+
+        probe は分割を通らない 1 本なので、分割側に置くと漏れる。
+        """
+        fake = self.Capturing()
+        jev.sys.stderr = fake
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"answers": {"q": {"choice": "a"}}}).encode()
+
+        real_urlopen = jev.urllib.request.urlopen
+        real_key = os.environ.get("TYPESAFE_API_KEY")
+        jev.urllib.request.urlopen = lambda *a, **k: FakeResponse()
+        os.environ["TYPESAFE_API_KEY"] = "stub"
+        try:
+            for _ in range(3):
+                jev.ask_jev("state", {"q": {"type": "choice", "criteria": {}}}, "m", 5.0)
+        finally:
+            jev.urllib.request.urlopen = real_urlopen
+            if real_key is None:
+                os.environ.pop("TYPESAFE_API_KEY", None)
+            else:
+                os.environ["TYPESAFE_API_KEY"] = real_key
+
+        written = "".join(fake.lines).splitlines()
+        self.assertEqual(len(written), 3, written)
+        self.assertTrue(written[-1].startswith("request 3: 1 questions in "), written)
+
+
 class StderrPrefixTest(unittest.TestCase):
     """人が直接走らせたときだけ名乗る（[`stderr_prefix`]）。"""
 

@@ -102,26 +102,40 @@ DEFAULT_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_MODEL = "jev-latest"
 API_PATH = "/v1/systemone"
 
-#: 1 リクエストあたりのタイムアウト（秒）。
+#: 1 リクエストあたりのタイムアウト（秒）。**ラウンドやプロセス全体ではない。**
 #:
-#: Jev の SDK 既定は 10 秒（`docs/jev.md`）で、実測は 52 question を 1 リクエスト
-#: にまとめて 0.84 秒だった。akapen 側は子プロセスを 60 秒で殺すので、3 ラウンド
-#: と Python の起動コストを 60 秒に収めるためここは 20 秒に留める。
+#: Jev の SDK 既定は 10 秒（`docs/jev.md`）。**1 リクエストは実測でその 1/6 で
+#: 済んでいる** —— 30 ラン / 680 リクエストの最遅が 1.72 秒で、20 秒には
+#: **11.6 倍**の余裕がある（2026-09-22。
+#: `examples/semantic/measurements/speed-and-limits.md` 第 2 版）。
 #:
-#: **この 20 秒はもう 3 回ぶんではない。** リクエストは分割されるので、上限は
-#: 「20 秒 × チャンクの総数 + probe」になる。実測（2026-09-21）では 65 KB の
-#: `docs/gotchas.md` が 10 リクエスト（probe 1 + チャンク 9）で、理屈の上では
-#: 200 秒 — akapen の `COMMAND_TIMEOUT`（60 秒）を**超えうる**。
+#: | 文書 | リクエスト | 1 req 最遅 |
+#: | --- | ---: | ---: |
+#: | 1,664 B | 12 | 0.76 秒 |
+#: | 9,857 B | 19〜23 | 1.48 秒 |
+#: | 18,250 B | 14〜16 | 1.31 秒 |
+#: | 22,685 B | 27〜28 | 1.56 秒 |
+#: | 35,021 B | 40〜41 | 1.64 秒 |
 #:
-#: **実測では超えない。** 同じ文書のプロセス全体が 12.7〜13.0 秒で、1 リクエスト
-#: あたりは最遅でも 1.5 秒である。20 秒はその 13 倍で、そこまで遅くなるなら
-#: 打ち切られるべきでもある。**だが「3 × 20 = 60 でちょうど並ぶ」という以前の
-#: 理屈はもう成り立たない** — 天井に張り付く文書を足すときは、ここではなく
-#: リクエストの総数を見ること。
+#: ## 「3 × 20 = 60 でちょうど並ぶ」という理屈は捨てた
 #:
-#: **大きな文書でもこの 20 秒は余っている**（2026-09-21 の実測）。1 リクエスト
-#: あたりは 65 KB の文書でも 1.5 秒以内で、20 秒には 13 倍の余裕がある。
-#: プロセス全体は 1.7 秒（1.6 KB）〜13.0 秒（65 KB）だった。
+#: かつてここには「3 ラウンドと Python の起動コストを akapen の 60 秒に
+#: 収めるため」と書いてあった。**前提が 2 つとも崩れている:**
+#:
+#: - ラウンドは 3 本ではない。probe / boundary / tier / core /
+#:   redundancy_gate / context1 / pick / context3 / pick2 の **9 種**で、
+#:   チャンクに割られてリクエストは 12〜41 本になる
+#: - akapen はもうプロセスを壁時計で殺さない。最後の出力からの**無音時間**で
+#:   見ていて（`src/semantic.rs` の `COMMAND_IDLE_TIMEOUT` = 30 秒）、
+#:   進捗が続くかぎり待つ。Python の起動コストは実測で 0.1〜0.2 秒しかなく、
+#:   気にする量ではなかった
+#:
+#: ## いまの 20 秒の役目は「akapen より先に理由を言う」ことである
+#:
+#: **ここは akapen の無音の上限（30 秒）より短くなければならない。**
+#: 固まったリクエストを 20 秒でこちらが諦めて stderr に理由を書けば、
+#: 読み手はステータス行でそれを読める。逆にここが 30 秒を越えると、
+#: akapen が先に子を kill して**理由が消える**。
 #:
 #: 大文書で先に当たるのは**時間ではなく context window** である
 #: （[`http_error_message`]）。そこは 400 で即座に返るので、ここを延ばしても
@@ -1613,6 +1627,53 @@ def stderr_prefix() -> str:
         return ""
 
 
+#: これまでに投げたリクエストの本数（[`progress`] が数える）。
+_requests_sent = 0
+
+
+def progress(questions: int, elapsed: float) -> None:
+    """1 リクエスト終わるたびに stderr へ 1 行出す。**akapen への生存信号。**
+
+    akapen は `--semantic-cmd` の子を**壁時計では殺さない**。最後に何か
+    言ってからの無音時間で見ていて、進捗が続くかぎり待つ
+    （`src/export.rs` の `Deadline::WhileProgressing`、上限は
+    `src/semantic.rs` の `COMMAND_IDLE_TIMEOUT` = 30 秒）。
+    **この行が出ないと、その仕組みは働かない** —— 何も言わない子は
+    固まった子と区別がつかず、無音の上限がそのまま全予算になる。
+
+    ## 1 リクエストごとに出せば足りる
+
+    リクエストの最中は黙るが、そこは [`DEFAULT_TIMEOUT`]（20 秒）が
+    受け持つ。固まったリクエストは 20 秒でこちらが諦めて**理由を書く**ので、
+    akapen の 30 秒より先に必ず声が出る。この順序が崩れると、子が自分で
+    報告できたはずの障害が kill に潰される（`COMMAND_IDLE_TIMEOUT` の
+    コメントが同じことを反対側から書いている）。
+
+    ## 置き場所は [`ask_jev`] であって [`send_in_chunks`] ではない
+
+    進捗は「リクエストを 1 本投げ終えた」という事実で、分割の都合とは別の
+    話である。`send_in_chunks` に数え上げを持たせると、probe（分割を通らない
+    1 本）が漏れるうえ、分割の関心に無関係なものが混ざる。
+
+    ## 失敗しても解析は止めない
+
+    stderr が閉じている・差し替えられている場合に例外を投げうるので、
+    **黙って諦める**。進捗行が出ないと akapen の猶予は縮むが、
+    解析そのものは壊れない。
+    """
+    global _requests_sent
+    _requests_sent += 1
+    try:
+        print(
+            f"{stderr_prefix()}request {_requests_sent}: "
+            f"{questions} questions in {elapsed:.2f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
 def api_key() -> str:
     """環境変数 `TYPESAFE_API_KEY` **だけ**を見る。値は絶対に出力しない。"""
     key = os.environ.get("TYPESAFE_API_KEY", "").strip()
@@ -1686,6 +1747,9 @@ def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
     if not isinstance(payload.get("answers"), dict):
         raise JevError("Jev's answer has no answers")
     payload["elapsed_s"] = round(time.monotonic() - started, 3)
+    # akapen への生存信号。**`return` の前に出す** —— 呼び出し側が答えを
+    # 使い終わるまで黙っていると、そのぶん無音が伸びる（[`progress`]）。
+    progress(len(questions), payload["elapsed_s"])
     return payload
 
 

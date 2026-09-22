@@ -152,6 +152,8 @@ is 30808 tokens, leaving 0 of the 32k budget, so not one Tier question fits.
 いちばん遅い `gotchas.md` で **12.7〜13.0 秒**、akapen の `COMMAND_TIMEOUT`
 （60 秒）に 4.6 倍の余裕がある。1 リクエストあたりは最遅でも 1.5 秒。
 
+> **`COMMAND_TIMEOUT` はもうありません**（2026-09-22）。壁時計の固定値をやめ、`COMMAND_IDLE_TIMEOUT`（無音 30 秒）と `COMMAND_BACKSTOP`（600 秒）に分かれています。理由と実測は
+> [`speed-and-limits.md`](speed-and-limits.md)「第 2 版」。
 **ただし以前の「3 ラウンド × 20 秒 = ちょうど 60 秒」という理屈はもう
 成り立たない。** リクエストは 10 本になりうるので、`DEFAULT_TIMEOUT` が
 そのまま効けば 200 秒である。天井に張り付く文書を足すときは、1 リクエストの
