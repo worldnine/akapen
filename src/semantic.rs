@@ -24,9 +24,10 @@
 //!
 //! で全部出る — フィールドを `.analyze` で触っているのは
 //! `reanalyze_semantics` の 2 本の腕（同期・非同期）だけで、残りは宣言・
-//! 初期化・代入と [`App::semantic_enabled`] の `is_some()` である。
-//! [`DigestChecked`] の `analyze` も inner へ委譲するが、それは Provider
-//! チェーンの**内側**であって App からは 1 回の呼び出しに見える。
+//! 初期化・代入と [`App::semantic_enabled`] / [`App::arm_semantic_layer`] の
+//! 型の検査である。[`DigestChecked`] の `analyze` も inner へ委譲するが、
+//! それは Provider チェーンの**内側**であって App からは 1 回の呼び出しに
+//! 見える。[`CommandProvider`] のキャッシュも同じく内側にある。
 //!
 //! Budget を動かす [`App::nudge_reading_budget`] からは
 //! [`decorations_for`] にしか到達せず、その中身は `policy::decorate` の
@@ -35,6 +36,21 @@
 //! > Budget 変更では Jev を呼ばない
 //!
 //! を、コメントではなく呼び出しグラフで満たしている。
+//!
+//! **ただし、遅延の起点だけはその外にある。** `--semantic-cmd` は開いた
+//! だけでは走らず、Budget キーの**最初の 1 打**が
+//! [`App::arm_semantic_layer`] 経由で `reanalyze_semantics` を 1 度だけ
+//! 呼ぶ（`crate::adjust_reading_budget`）。2 打目以降と fixture 経路は
+//! 上の保証のままである。「Budget を動かすたびに Jev を呼ぶ」ことは
+//! 変わらず起きない — 起点はセッションに 1 度で、Budget の値とは無関係で
+//! ある。
+//!
+//! # 同じ文書は二度解析しない
+//!
+//! [`crate::semantic_cache::SemanticCache`] が `--semantic-cmd` の答えを
+//! `source_sha256` で引ける形で残す。開き直し・再起動・READ の操作は 0 円で、
+//! 費用が発生するのは文書が変わったときだけになる。`--semantic` 経路は
+//! 通らない（そちらに費用が無い）。
 //!
 //! # 供給源は 2 つ、違いは「いつ答えるか」だけ
 //!
@@ -53,6 +69,7 @@
 //! [`App::semantic_enabled`]: crate::app::App::semantic_enabled
 //! [`App::reanalyze_semantics`]: crate::app::App::reanalyze_semantics
 //! [`App::nudge_reading_budget`]: crate::app::App::nudge_reading_budget
+//! [`App::arm_semantic_layer`]: crate::app::App::arm_semantic_layer
 
 use std::path::Path;
 use std::time::Duration;
@@ -65,6 +82,7 @@ use semantic_reading::{
 use sha2::{Digest, Sha256};
 
 use crate::decoration::{Decoration, DecorationKind};
+use crate::semantic_cache::SemanticCache;
 
 /// Reading Budget の下限・上限・既定値。刻みは 1 % で、設計書どおり
 /// 「43 / 42 / 41 で表示が変わらなくても問題ない」粒度である。
@@ -233,19 +251,40 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 ///
 /// 返ってきた JSON は全項目を検証し、1 つでも失敗したら**レスポンス全体を
 /// 捨てる**（[`AnalyzeResponse::into_document`]）。部分適用はしない。
+///
+/// # 同じ文書は二度解析しない
+///
+/// [`SemanticCache`] を持っていれば、コマンドを起こす前にディスクを引く。
+/// 当たれば**プロセスも起きず、ネットワークにも出ない** — 開き直し・再起動・
+/// READ の上げ下げは 0 円になる。費用が発生するのは文書が変わったときだけで
+/// ある（`docs/gotchas/open-questions.md` の 1 番が待っていた実測が
+/// 2026-09-22 に出た）。
+///
+/// キャッシュを**持たない** `CommandProvider` も同じ挙動で動く
+/// （[`CommandProvider::new`]）。付けるのは [`source_from_config`] だけで、
+/// テストが実ユーザーの `~/.cache` を書かないのはそのためである。
 #[derive(Clone, Debug)]
 pub(crate) struct CommandProvider {
     cmd: String,
     timeout: Duration,
+    cache: Option<SemanticCache>,
 }
 
 impl CommandProvider {
     /// 既定のタイムアウト（[`COMMAND_TIMEOUT`]）でコマンドを包む。
+    /// **キャッシュは付かない。**
     pub(crate) fn new(cmd: impl Into<String>) -> Self {
         Self {
             cmd: cmd.into(),
             timeout: COMMAND_TIMEOUT,
+            cache: None,
         }
+    }
+
+    /// 解析結果の置き場を付ける。
+    pub(crate) fn with_cache(mut self, cache: Option<SemanticCache>) -> Self {
+        self.cache = cache;
+        self
     }
 
     /// タイムアウトを指定して作る（テスト用。本番経路は
@@ -255,6 +294,7 @@ impl CommandProvider {
         Self {
             cmd: cmd.into(),
             timeout,
+            cache: None,
         }
     }
 
@@ -272,6 +312,14 @@ impl Provider for CommandProvider {
     /// イベントループから直接呼んではならない
     /// （[`crate::app::App::reanalyze_semantics`]）。
     fn analyze(&self, source: &str) -> semantic_reading::Result<SemanticDocument> {
+        // ディスクを先に引く。当たればプロセスもネットワークも無い。
+        // 外れ方（壊れた項目・別の文書を名乗る項目）はすべて `None` に
+        // 畳まれていて、ここからは「無かった」と区別が要らない。
+        if let Some(cache) = self.cache.as_ref()
+            && let Some(document) = cache.get(&self.cmd, source)
+        {
+            return Ok(document);
+        }
         let atoms = atomize(source);
         let request = AnalyzeRequest::new(source, &atoms).to_json()?;
         let stdout = crate::export::run_capturing(
@@ -284,7 +332,13 @@ impl Provider for CommandProvider {
         .map_err(|e| SemanticError::Provider(format!("{e:#}")))?;
         let mut document = AnalyzeResponse::from_json(&stdout)?.into_document(atoms)?;
         // 素性の記録（照合のためではない — 上のドキュメント参照）。
+        // キャッシュから読み戻すときは、これが照合に使われる。
         document.source_sha256 = Some(source_digest(source));
+        // 書けなくても注釈は返す。ディスクが一杯でも読み手の画面は動く
+        // （次に開いたときにもう一度払うだけ）。
+        if let Some(cache) = self.cache.as_ref() {
+            let _ = cache.put(&self.cmd, source, &document);
+        }
         Ok(document)
     }
 }
@@ -326,7 +380,9 @@ pub(crate) fn source_from_config(
     match (config.semantic.as_deref(), config.semantic_cmd.as_deref()) {
         (Some(path), _) => Ok(Some(SemanticSource::Inline(load_fixture(path)?))),
         // コマンドは起動時には走らせない（文書が乗ってから、別スレッドで）。
-        (None, Some(cmd)) => Ok(Some(SemanticSource::Command(CommandProvider::new(cmd)))),
+        (None, Some(cmd)) => Ok(Some(SemanticSource::Command(
+            CommandProvider::new(cmd).with_cache(SemanticCache::discover()),
+        ))),
         (None, None) => Ok(None),
     }
 }
@@ -385,6 +441,24 @@ mod tests {
         // シングルクォートを含まない JSON だけを渡す前提（テスト内で管理）。
         CommandProvider::new(format!("cat >/dev/null; printf %s '{json}'"))
     }
+
+    /// 呼ばれた回数を数える `echoing`。`counter` に 1 バイト足してから
+    /// 答えるので、ファイルサイズがそのまま起動回数になる。
+    ///
+    /// プロセスが本当に起きたかを数えている — 「キャッシュに当たった」を
+    /// 内部のフラグではなく**外から観測できる事実**で判定するためである。
+    fn counting(counter: &Path, json: &str) -> CommandProvider {
+        CommandProvider::new(format!(
+            "cat >/dev/null; printf x >> '{}'; printf %s '{json}'",
+            counter.display()
+        ))
+    }
+
+    fn calls(counter: &Path) -> usize {
+        std::fs::read(counter).map(|bytes| bytes.len()).unwrap_or(0)
+    }
+
+    const ONE_UNIT: &str = r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"}]}"#;
 
     fn demo() -> (String, SemanticDocument) {
         let source = std::fs::read_to_string(DEMO_MD).unwrap();
@@ -880,6 +954,105 @@ mod tests {
             .unwrap()
             .expect("--semantic で層が立つ");
         assert!(matches!(fixture, SemanticSource::Inline(_)));
+    }
+
+
+    // -----------------------------------------------------------------
+    // キャッシュ — 同じ文書は二度解析しない
+    // -----------------------------------------------------------------
+
+    /// **これが機能の全部である。** 同じ文書を 2 回解析しても、外部コマンドは
+    /// 1 回しか起きない。開き直し・再起動・READ の操作が 0 円になるのは
+    /// これによる。
+    #[test]
+    fn the_same_document_is_analysed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("calls");
+        let provider = counting(&counter, ONE_UNIT)
+            .with_cache(Some(SemanticCache::at(dir.path().join("cache"))));
+        let source = "# 見出し\n\n本文です。\n";
+
+        let first = provider.analyze(source).unwrap();
+        assert_eq!(calls(&counter), 1);
+        let second = provider.analyze(source).unwrap();
+        assert_eq!(calls(&counter), 1, "2 回目はコマンドが起きない");
+        assert_eq!(first, second, "同じ注釈が返る");
+        // 別の `CommandProvider` でも当たる（再起動が 0 円である、の形）。
+        let restarted = counting(&counter, ONE_UNIT)
+            .with_cache(Some(SemanticCache::at(dir.path().join("cache"))));
+        assert_eq!(restarted.analyze(source).unwrap(), first);
+        assert_eq!(calls(&counter), 1, "別プロセスに相当する読み直しでも 0 円");
+    }
+
+    /// 文書が 1 バイト変われば払う。**費用が発生するのは文書が変わったとき
+    /// だけ**、の裏側。
+    #[test]
+    fn one_byte_of_change_costs_another_analysis() {
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("calls");
+        let provider = counting(&counter, ONE_UNIT)
+            .with_cache(Some(SemanticCache::at(dir.path().join("cache"))));
+        provider.analyze("# 見出し\n\n本文です。\n").unwrap();
+        provider.analyze("# 見出し\n\n本文です。 \n").unwrap();
+        assert_eq!(calls(&counter), 2);
+    }
+
+    /// **判定器を変えたら古いキャッシュは当たらない。** キーはコマンド行の
+    /// sha を含む。
+    #[test]
+    fn a_different_analyser_does_not_hit_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SemanticCache::at(dir.path().join("cache"));
+        let source = "# 見出し\n\n本文です。\n";
+
+        let one = dir.path().join("one");
+        let two = dir.path().join("two");
+        // コマンド行が違う（counter のパスが違う）＝ 別の判定器。
+        counting(&one, ONE_UNIT)
+            .with_cache(Some(cache.clone()))
+            .analyze(source)
+            .unwrap();
+        counting(&two, ONE_UNIT)
+            .with_cache(Some(cache.clone()))
+            .analyze(source)
+            .unwrap();
+        assert_eq!(calls(&one), 1);
+        assert_eq!(calls(&two), 1, "別の判定器は自分で払う");
+
+        // それぞれ自分の分には当たる。
+        counting(&one, ONE_UNIT)
+            .with_cache(Some(cache))
+            .analyze(source)
+            .unwrap();
+        assert_eq!(calls(&one), 1);
+    }
+
+    /// キャッシュを持たない `CommandProvider` は毎回払う。これが
+    /// [`CommandProvider::new`] の既定で、テストが実ユーザーの `~/.cache`
+    /// を書かないのはこれによる。
+    #[test]
+    fn a_provider_without_a_cache_pays_every_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("calls");
+        let provider = counting(&counter, ONE_UNIT);
+        let source = "# 見出し\n\n本文です。\n";
+        provider.analyze(source).unwrap();
+        provider.analyze(source).unwrap();
+        assert_eq!(calls(&counter), 2);
+    }
+
+    /// 書けない置き場でも注釈は返る（ディスクが一杯でも読み手の画面は動く）。
+    #[test]
+    fn a_cache_that_cannot_be_written_does_not_refuse_the_annotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("calls");
+        // ファイルをルートに据える = `create_dir_all` が必ず失敗する置き場。
+        let blocked = dir.path().join("not-a-dir");
+        std::fs::write(&blocked, "").unwrap();
+        let provider =
+            counting(&counter, ONE_UNIT).with_cache(Some(SemanticCache::at(blocked)));
+        assert!(provider.analyze("# 見出し\n").is_ok());
+        assert_eq!(calls(&counter), 1);
     }
 
     /// 起動時にコマンドは走らない。存在しないコマンドを渡しても

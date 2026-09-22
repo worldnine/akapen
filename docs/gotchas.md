@@ -64,6 +64,7 @@
 - 冗長の効き目を測るなら、対の両側が一段目にいないかを先に見る — 応答の版で結論が逆になる
 - Budget の下限は「数字の約束」であって「集合の約束」ではない — `decorate(floor)` と `decorate(floor - 1)` は同じとは限らない
 - Choice に「該当なし」を置いても Jev は「無い」と言わない — redundancy を Choice 単独にすると冗長が 0〜1 件から数十件になる
+- 判定器のプロンプトだけ変えると、古いキャッシュが当たる — キーはコマンド行であって中身ではない
 
 ### [公開リポジトリとしての約束](gotchas/public-repo.md)
 
@@ -80,7 +81,7 @@
 
 ### [未解決（地雷ではなく、設計判断が要るもの）](gotchas/open-questions.md)
 
-- 1. `cache` と `incremental reanalysis` は、実測して作らないと決めた
+- 1. `incremental reanalysis` は無い（`cache` は 2026-09-22 に作った）
 - 2. Phase 番号が 2 つの意味で使われている（アーカイブ側）
 - 3. `--semantic-cmd` が `confidence` / `probabilities` を運ばない
 - 4. 同一 Tier 内の rule の逐次性 — `context preservation`（**解決済み。2026-09-21**）

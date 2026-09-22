@@ -779,3 +779,35 @@ question は方向を持つ」。数字は
 `MIN_BUDGET` と一致し表示量が超えていること、`budget >= floor` で表示量が
 収まること）。fixture ごとの `floor_equals_floor_minus_1` は repo 外
 `runs/2026-09-22-read-floor/floors*.jsonl`。
+
+### 判定器のプロンプトだけ変えると、古いキャッシュが当たる
+
+2026-09-22 から、`--semantic-cmd` の答えは
+`~/.cache/akapen/semantic/` に残ります（`src/semantic_cache.rs`）。
+**キーは文書の `sha256` と、`--semantic-cmd` に渡した文字列の `sha256`**
+です。文書が変われば自動で外れますが、**同じコマンド行のまま
+`jev-annotate.py` の `TIER_CRITERIA` や question の文面を書き換えると、
+古い答えが当たります。** 「変えたのに結果が変わらない」は、まずこれを
+疑ってください。
+
+```sh
+akapen --semantic-cache-clear   # 全部消す。逃げ道はこれ 1 つ
+```
+
+**判定器に「自分の識別子」を応答に載せさせる案は採りませんでした。**
+識別子は走らせないと分からないので、**引き当ての判断に使えません**
+（照合できるのは払った後だけです）。走らせる前に聞く probe 往復も却下
+しました — アダプタを更新していない人の環境では、probe が
+**全文解析（議事録で約 5 円）で返ってきます**。コマンド行に含まれるパスの
+mtime を見る案も、シェル文字列の中からパスを推測することになるので
+採りませんでした。
+
+**測るときは踏みません。** 実測は `dump-request` でアダプタを直接叩くので
+（`examples/semantic/README.md`）、TUI のキャッシュを通りません。刺さるのは
+**akapen で開いて確かめている**ときだけです。
+
+**確認したこと**: `src/semantic_cache.rs` の `analyzer_dir`（キーが
+`sha256(コマンド行)` のディレクトリであること）と、テスト
+`a_different_analyser_does_not_hit_the_cache` /
+`the_same_document_is_analysed_once`。逃げ道は `src/config.rs` の
+`Action::ClearSemanticCache`。

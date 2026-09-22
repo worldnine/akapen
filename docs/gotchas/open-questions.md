@@ -11,44 +11,57 @@
 刺しにくるものではありませんが、**設計書と実装の差**として残っています。
 どれも「誤記」ではないので、直すには判断が要ります。
 
-### 1. `cache` と `incremental reanalysis` は、実測して作らないと決めた
+### 1. `incremental reanalysis` は無い（`cache` は 2026-09-22 に作った）
 
 設計書 [`design/semantic-reading-layer.md`](../design/semantic-reading-layer.md)
-の MVP は `cache` と `incremental reanalysis` を挙げていますが、どちらも
-ありません。文書が入れ替わるたびに**全文を再解析**します。
-`RELOAD_DEBOUNCE`（300ms）はファイル変更の debounce であって解析結果の
-キャッシュではありません。
+の MVP は `cache` と `incremental reanalysis` を挙げていました。
+**`cache` は作りました**（`src/semantic_cache.rs`）。`incremental reanalysis`
+—— 文書の変わった部分だけを再解析する —— は**ありません**。文書が 1 バイトでも
+変われば全文を解析し直します。
 
-**これは未実装の取り残しではなく、実測に基づく判断です。**
-`examples/semantic/demo.md`（624 文字）に対する Jev の全文再解析は
-**2 ラウンドで 1.4 秒 / 約 $0.0004**。しかも `--semantic-cmd` 経路の解析は
-別スレッドで走り、その前にファイル変更の debounce が 300ms 入ります。
+**作った理由は速度ではなく費用です。** かつてここには「1 文書の再解析は
+1.4 秒 / 約 $0.0004 だから要らない」と書いてありました。その数字は
+`examples/semantic/demo.md`（1.6 KB）のもので、**実業務の大きさで測り直したら
+桁が違いました**（2026-09-22、`docs/design/marks-only-and-review-mode.md` の
+1 節）:
 
-**2026-09-21 に大きな文書で測り直し、この判断は維持されました。** かつてここには
-「測ったのは 624 文字の 1 ファイルだけ」という但し書きがありました。実業務の
-45,650 バイトの文書（`docs/design/jev.md` の「大きな文書での実測」）でも
-**2.42〜2.63 秒 / 約 $0.0035**で、1,664 バイトの demo.md の 1.5 秒から
-1.7 倍にしかなりません。文書が 27 倍になっても時間はほぼ伸びない —
-Jev が全 question を 1 リクエストで並列評価するためです。
+| 文書 | 1 回の解析 |
+| --- | ---: |
+| `examples/semantic/demo.md`（1.6 KB） | 0.1 ¢ |
+| 業務議事録（22.7 KB） | 3.0〜3.3 ¢（≈ 5 円） |
+| `docs/gotchas/semantic-reading.md` | 5.3〜5.6 ¢（≈ 8 円） |
 
-**しかも、これより大きい文書はキャッシュの有無に関係なく解析できません**
-（下の項目 5）。つまり「大きくなったらキャッシュが要る」という想定していた
-成長経路自体が、途中で別の壁に当たります。`Provider` の doc が「キャッシュや
-debounce、rate limit は実装側が内部に持てばよい」と委譲しているので、
-**置き場は空けたまま**にしてあります。
+**費用の 9 割は問いの中身ではなく、`state`（文書の全文）を 30 回近く送って
+いることにあります。** 開き直し・再起動・READ の上げ下げでそれを毎回払うのは、
+判定の質と何の関係もない出費でした。読み手の言葉は「思ったより高い」。
+
+いま入っているのは 2 つです。**どちらも判定には触っていません** —— 走る回数が
+変わるだけで、走ったときの答えは同じです。
+
+1. **sha キャッシュ**: キーは `sha256(source)` ＋ `sha256(--semantic-cmd の
+   文字列)`。同じ文書は二度解析しません。費用が発生するのは文書が変わった
+   ときだけです
+2. **解析の遅延**: `--semantic-cmd` は開いただけでは走らず、READ キー
+   （`-` `+` `<` `>`）の**最初の 1 打**で始まります。素で読むだけの文書に
+   1 回分を払いません
+
+`incremental reanalysis` を作らない判断は**維持されています**。理由は変わって
+いません —— Jev は全 question を 1 リクエストで並列評価するので、文書が 27 倍に
+なっても時間は 1.7 倍にしかならず（1.6 KB で 1.5 秒、45.6 KB で 2.4〜2.6 秒）、
+「大きくなったら差分更新が要る」という成長経路は**その前に別の壁に当たります**
+（下の項目 5 の context window）。そして費用の方は、上の 2 つが「変わって
+いない文書には払わない」で先に片付けています。差分更新が効くのは「少しだけ
+変わった文書」で、その効き目はまだ測っていません。
 
 **確認したこと**: `src/app.rs::reanalyze_semantics` が毎回
-`provider.analyze(&self.source.content)` に文書全文を渡していること。
-`SemanticSource::Command`（Jev を繋ぐ経路）の腕が `std::thread::spawn` で
-別スレッドへ投げ、その場で待たないこと。
-`App` に解析結果のキャッシュ用フィールドが無いこと
-（`semantic_decorations` は doc × budget の投影であって解析のキャッシュでは
-ない）。`RELOAD_DEBOUNCE`（300ms）の定義は `src/app.rs`。
-1.4 秒 / $0.0004 と 624 文字の出どころは
-[`design/jev.md`](../design/jev.md) の「実測」節と
-`examples/semantic/README.md`（`wc -m examples/semantic/demo.md` が 624）。
-大きな文書の数字は同じ 2 つの「大きな文書での実測」節（5 文書 × 2 回、
-45,650 バイトのものは 7 回）。
+`provider.analyze(&self.source.content)` に文書全文を渡すこと（差分ではない）。
+キャッシュは `src/semantic_cache.rs` にあり、`CommandProvider::analyze` の
+内側で引かれること（`src/semantic.rs`）。実機で業務議事録を 2 回開き、
+外部コマンドが 1 回しか起きないこと —— 1 回目 25 リクエスト / 809k input
+tokens / 27 秒、2 回目 0 リクエスト / 0.3 秒未満（2026-09-22）。
+上の費用の表の出どころは `examples/semantic/measurements/redundancy.md` の
+コストの節。1.5 秒と 2.4〜2.6 秒は [`design/jev.md`](../design/jev.md) の
+「大きな文書での実測」。
 
 ### 2. Phase 番号が 2 つの意味で使われている（アーカイブ側）
 

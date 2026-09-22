@@ -412,6 +412,24 @@ pub(crate) struct App {
     /// generation on the message — not the identity of the channel —
     /// decides whether the answer still applies.
     pub(crate) semantic_results: Option<AnalysisChannel>,
+    /// **遅延の起点を越えたか。** `--semantic-cmd` は、開いただけでは走らない
+    /// — 1 文書 1 回の解析は業務議事録で約 5 円かかるので、素で読むだけの
+    /// 文書にそれを払わない（`docs/design/marks-only-and-review-mode.md` の
+    /// 1 節の実測）。
+    ///
+    /// 起点は **Reading Budget キー（`-` `+` `<` `>`）の最初の 1 打**で、
+    /// [`crate::adjust_reading_budget`] がここを立てる。それまでは
+    /// `semantic_doc` も [`App::semantic_inflight`] も `None` のままなので、
+    /// 表示は `--semantic-cmd` を渡していないときと 1 文字も変わらない
+    /// （`chrome.rs` の `read`）。
+    ///
+    /// 一度立てたらセッションの終わりまで立ったまま（読み手は「この層を
+    /// 使う」と言った）で、以降は文書が入れ替わるたびに解析する。2 度目から
+    /// は文書が変わっていなければキャッシュに当たって 0 円である。
+    ///
+    /// `--semantic <fixture>` と、層が無いセッションはこの値を見ない
+    /// （[`App::reanalyze_semantics`] の Command 腕だけが読む）。
+    pub(crate) semantic_armed: bool,
     /// Reading Budget: "how much attention can I spend on this
     /// document", 1..=100 %, default 100. A pure reading preference, so
     /// it is NOT per-file state — switching files keeps it.
@@ -564,6 +582,7 @@ impl App {
             semantic_generation: 0,
             semantic_inflight: None,
             semantic_results: None,
+            semantic_armed: false,
             reading_budget: crate::semantic::DEFAULT_BUDGET,
             semantic_decorations: Vec::new(),
             decoration_styles,
@@ -617,8 +636,19 @@ impl App {
     /// A provider that refuses the document (the fixture belongs to
     /// another file) drops the annotation and says so, rather than
     /// painting confident nonsense at positions that mean nothing here.
+    ///
+    /// **`--semantic-cmd` は起点を越えるまで走らない**
+    /// （[`App::semantic_armed`]）。開いただけの文書に 1 回分の解析費用を
+    /// 払わないためで、起点は [`App::arm_semantic_layer`] が立てる。
     pub(crate) fn reanalyze_semantics(&mut self) {
         if self.semantic_source.is_none() {
+            return;
+        }
+        // 遅延。ここで抜けるので世代も上がらない — 起点前は「解析を 1 度も
+        // 頼んでいない」状態そのものである。fixture 経路（`Inline`）は
+        // 外部プロセスもネットワークも無いので、遅らせる理由が無い。
+        if !self.semantic_armed && matches!(self.semantic_source, Some(SemanticSource::Command(_)))
+        {
             return;
         }
         // Whatever happens next, the annotation in hand is only still
@@ -663,6 +693,27 @@ impl App {
             }
             None => unreachable!("checked above"),
         }
+    }
+
+    /// **遅延の起点。** 読み手が Semantic Reading Layer を初めて使った、を
+    /// ここで受ける。立てたのがこの呼び出しなら `true`。
+    ///
+    /// 起点を越えた瞬間に、いま開いている文書の解析が始まる（キャッシュに
+    /// 当たれば外部プロセスは起きない）。`--semantic-cmd` のセッションに
+    /// しか意味が無く、fixture 経路と層の無いセッションでは `false` を返して
+    /// 何もしない。
+    ///
+    /// 立ち上がりは一方向なので、ここへ来た時点で解析が走っていることは
+    /// ありえない — [`App::semantic_inflight`] の後始末は要らない。
+    pub(crate) fn arm_semantic_layer(&mut self) -> bool {
+        if self.semantic_armed
+            || !matches!(self.semantic_source, Some(SemanticSource::Command(_)))
+        {
+            return false;
+        }
+        self.semantic_armed = true;
+        self.reanalyze_semantics();
+        true
     }
 
     /// Drop the annotation in hand when it names a document other than
@@ -762,6 +813,11 @@ impl App {
     /// `Provider::analyze` or `render::render`. That is the property of
     /// this layer, and it is held here by the call graph rather than by
     /// a comment.
+    ///
+    /// **遅延の起点だけは、その保証の外にある。** 同じキーの最初の 1 打は
+    /// [`crate::adjust_reading_budget`] で [`App::arm_semantic_layer`] も
+    /// 通り、そちらが `analyze` へ届く（セッションに 1 度だけ）。この関数
+    /// 自体は起点の前も後も provider を知らない。
     pub(crate) fn nudge_reading_budget(&mut self, delta: i16) -> bool {
         // 下限より下へは回せない。下限は文書の測定値で、そこから下では
         // Budget を下げても画面は動かず、`READ` の数字だけが嘘になる

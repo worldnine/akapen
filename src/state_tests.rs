@@ -6796,10 +6796,19 @@ fn reference_semantic_command() -> String {
 
 /// `--semantic-cmd` を App に挿す（供給源と結果チャネルを同時に用意する
 /// のは `set_semantic_source` の仕事）。
+///
+/// **起点も越えさせる。** 下の各テストは「答えがどう届くか」を見るもので、
+/// 実際の読み手なら READ キーを 1 回押した後の状態にあたる。遅延そのものは
+/// [`the_external_command_does_not_run_until_a_read_key_is_pressed`] が
+/// 見ている。
 fn install_semantic_command(app: &mut App, cmd: &str) {
     app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
         crate::semantic::CommandProvider::new(cmd),
     )));
+    // 起点は立てるが、ここでは解析を始めない（`arm_semantic_layer` は
+    // その場で 1 世代使ってしまう）。各テストが自分で
+    // `reanalyze_semantics` を呼んで世代 1 から始められるように。
+    app.semantic_armed = true;
 }
 
 /// 見出しを持つ Markdown を開いた App。参照実装は見出しを ESSENTIAL に
@@ -6818,6 +6827,29 @@ fn semantic_markdown_app() -> (App, tempfile::TempDir) {
     (app, dir)
 }
 
+/// 起動回数を数える `--semantic-cmd` を挿す。`counter` のファイルサイズが
+/// そのまま外部プロセスの起動回数になる — 「走らなかった」を内部のフラグ
+/// ではなく**外から観測できる事実**で判定する。
+fn install_counting_semantic_command(
+    app: &mut App,
+    counter: &Path,
+    cache: Option<crate::semantic_cache::SemanticCache>,
+) {
+    let cmd = format!(
+        "printf x >> '{}'; python3 '{}'",
+        counter.display(),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/annotate-doc.py")
+    );
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
+        crate::semantic::CommandProvider::new(cmd).with_cache(cache),
+    )));
+    app.semantic_armed = true;
+}
+
+fn semantic_calls(counter: &Path) -> usize {
+    std::fs::read(counter).map(|bytes| bytes.len()).unwrap_or(0)
+}
+
 /// 答えが来るまでポンプを回す。来なければ panic（固まったのと同じなので
 /// テストとしては失敗させたい）。
 fn pump_until_idle(app: &mut App, what: &str) {
@@ -6827,6 +6859,84 @@ fn pump_until_idle(app: &mut App, what: &str) {
         std::thread::sleep(Duration::from_millis(10));
         app.poll_semantic_analysis();
     }
+}
+
+/// **遅延。** 開いただけでは外部コマンドが 1 度も起きず、READ キーの
+/// 最初の 1 打で初めて解析が始まる。
+///
+/// 1 文書 1 回の解析は業務議事録で約 5 円かかる
+/// （`docs/design/marks-only-and-review-mode.md` の 1 節）。素で読むだけの
+/// 文書にそれを払わない、がこの機構の全部である。
+///
+/// 起点前の表示が `--semantic-cmd` を渡していないときと同じであること —
+/// `READ` も `analyzing…` も出ない — も一緒に見ている。出てしまうと
+/// 「動いていない」に見える。
+#[test]
+fn the_external_command_does_not_run_until_a_read_key_is_pressed() {
+    let (mut app, dir) = semantic_markdown_app();
+    let counter = dir.path().join("calls");
+    install_counting_semantic_command(&mut app, &counter, None);
+    app.semantic_armed = false; // 実際の起動時の状態へ戻す
+
+    // 起動時の 1 回（`main.rs` が呼ぶ場所）。走らない。
+    app.reanalyze_semantics();
+    assert_eq!(semantic_calls(&counter), 0, "開いただけでは走らない");
+    assert_eq!(app.semantic_generation, 0, "世代も上がらない");
+    assert!(app.semantic_doc.is_none() && app.semantic_inflight.is_none());
+    let hints = crate::chrome::footer_hints(&app);
+    assert!(!hints.contains("READ"), "層が無いときと同じ表示: {hints}");
+    assert!(!hints.contains("analyzing"), "{hints}");
+
+    // ファイルが変わっても、起点前なら走らない。
+    app.reanalyze_semantics();
+    assert_eq!(semantic_calls(&counter), 0);
+
+    // 起点 — READ キーの 1 打。Budget も動く。
+    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
+    assert_eq!(app.reading_budget, 99, "押したのに数字が動かない、にしない");
+    assert!(app.semantic_inflight.is_some(), "ここで初めて走る");
+    pump_until_idle(&mut app, "起点の解析");
+    assert_eq!(semantic_calls(&counter), 1);
+    assert!(app.semantic_doc.is_some());
+
+    // 2 打目以降は起点にならない（`nudge` だけ）。
+    for _ in 0..5 {
+        on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
+    }
+    assert_eq!(semantic_calls(&counter), 1, "Budget 操作で解析は増えない");
+}
+
+/// **キャッシュ。** 同じ文書を開き直しても外部コマンドは 1 回しか起きない。
+///
+/// App の高さで見ている理由は、キャッシュに当たった解析も**非同期のまま**
+/// 一周すること（別スレッド → `poll_semantic_analysis`）を確かめたいから
+/// である。当たったときだけ経路が変わる、にはしていない。
+#[test]
+fn reopening_the_same_document_does_not_pay_again() {
+    let (mut app, dir) = semantic_markdown_app();
+    let counter = dir.path().join("calls");
+    let cache = crate::semantic_cache::SemanticCache::at(dir.path().join("cache"));
+    install_counting_semantic_command(&mut app, &counter, Some(cache.clone()));
+
+    app.reanalyze_semantics();
+    pump_until_idle(&mut app, "1 回目");
+    let first = app.semantic_doc.clone().expect("注釈が入ること");
+    assert_eq!(semantic_calls(&counter), 1);
+
+    // 開き直し（起動しなおしに相当 — App を作り直して同じ置き場を渡す）。
+    let (mut again, _dir2) = semantic_markdown_app();
+    assert_eq!(again.source.content, app.source.content, "同じ本文の別ファイル");
+    install_counting_semantic_command(&mut again, &counter, Some(cache));
+    again.reanalyze_semantics();
+    pump_until_idle(&mut again, "2 回目");
+    assert_eq!(semantic_calls(&counter), 1, "2 回目は 0 リクエスト");
+    assert_eq!(again.semantic_doc, Some(first), "同じ注釈が返る");
+
+    // 文書が変われば払う。
+    again.source.content.push_str("\n追記された段落。\n");
+    again.reanalyze_semantics();
+    pump_until_idle(&mut again, "変更後");
+    assert_eq!(semantic_calls(&counter), 2, "文書が変われば解析する");
 }
 
 /// 外部コマンド経路が App の高さで一周すること。**UI スレッドは待たない。**

@@ -594,7 +594,7 @@ REDUNDANT_WITH
 Reading Budget 1〜100%
 MARKED / NORMAL / DIM
 akapen integration
-cache
+cache（実装済み）
 incremental reanalysis
 ```
 
