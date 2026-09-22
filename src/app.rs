@@ -1030,12 +1030,16 @@ impl App {
         let (Some(question), Some(lit)) = (question, self.marks_lit()) else {
             return Vec::new();
         };
+        // **末尾の空白 1 桁は薄い方に付ける**（読み手の注文、2026-09-22 の
+        // 実機）。座布団の左の余白は琥珀なので、それだけだと `20%` と
+        // 琥珀が地続きに見える。薄い空白を 1 桁挟むと離れる。
+        // 本数だけまで縮んだ段（`dim` が空）には付けない — 前に何も無い。
         vec![
             Readout {
-                dim: format!("{question} · {}%", self.marks_share),
+                dim: format!("{question} · {}% ", self.marks_share),
                 lit: Some(lit),
             },
-            Readout { dim: question, lit: Some(lit) },
+            Readout { dim: format!("{question} "), lit: Some(lit) },
             Readout { dim: String::new(), lit: Some(lit) },
         ]
     }

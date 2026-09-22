@@ -797,10 +797,69 @@ fn the_count_sits_on_an_amber_cushion() {
         .find(|x| buffer[(*x, row)].style().bg == Some(amber))
         .unwrap()
         + 1;
+    // **`Rgb(0,0,0)` であって `Color::Black` ではない** — フラッシュの
+    // lerp は RGB 同士でしか混ざらない（下のテストが理由を書いている）。
     assert_eq!(
         buffer[(digit_x, row)].style().fg,
-        Some(ratatui::style::Color::Black),
+        Some(ratatui::style::Color::Rgb(0, 0, 0)),
         "座布団の字が黒くない"
+    );
+}
+
+/// **300 ms のフラッシュは座布団の上にだけ乗る。**
+///
+/// 実機では速すぎて captured frame に写らない（CLI の往復が 300 ms より
+/// 遅い）ので、演出を途中まで進めた 1 枚をここで見る。`last_draw` を
+/// 過去にずらすと、`draw` が出す差分がそのまま演出の進み方になる。
+#[test]
+fn the_flash_lands_on_the_cushion_and_nowhere_else() {
+    use std::time::{Duration, Instant};
+    let mut app = app_with("demo-marks.json");
+    app.marks_fx = None;
+    let amber = app.decoration_styles.mark_tick();
+    let lit = app.marks_lit().unwrap();
+    assert!(lit > 0, "座布団を敷く前提が崩れている");
+
+    // 演出を立て、300 ms のうち 150 ms ぶん進んだところで 1 枚描く。
+    app.start_readout_flash();
+    assert!(app.readout_fx.is_some(), "演出が立っていない");
+    app.last_draw = Some(Instant::now() - Duration::from_millis(150));
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = 23;
+
+    // 座布団の桁。地色は琥珀のままで、**字が動いている**
+    // （静止時は黒。琥珀から黒へ落ちてくる途中なので、まだ黒ではない）。
+    let cushion: Vec<u16> = (0..120)
+        .filter(|x| buffer[(*x, row)].style().bg == Some(amber))
+        .collect();
+    // 前後 1 桁の余白込み（本数の桁数で幅は変わる）。
+    assert_eq!(cushion.len(), format!(" {lit} ").len(), "座布団の幅が違う");
+    let digit = buffer[(cushion[1], row)].style().fg.unwrap();
+    assert_ne!(
+        digit,
+        ratatui::style::Color::Rgb(0, 0, 0),
+        "座布団が光っていない（静止時の黒のまま）"
+    );
+    assert_ne!(digit, amber, "演出が始まっていない（alpha が 0 のまま）");
+    // **名前付きの色だと演出が素通りする。** `crate::view::lerp_color` は
+    // RGB 同士でしか混ぜず、それ以外は行き先をそのまま返す — 座布団の字を
+    // `Color::Black` にしていた最初の実装は、ここで 1 フレームも光らな
+    // かった（`docs/gotchas/rendering.md`）。
+    assert!(
+        matches!(digit, ratatui::style::Color::Rgb(..)),
+        "混ざった結果が RGB でない: {digit:?}"
+    );
+
+    // **左の薄い字には乗らない。** 面で掴んでいるので、同じ行に並ぶ
+    // `Essential · 20%` やキー案内は 1 桁も触られない。
+    let dim = buffer[(cushion[0] - 2, row)].style().fg;
+    assert_eq!(
+        dim,
+        Some(ratatui::style::Color::DarkGray),
+        "座布団の外まで光っている"
     );
 }
 

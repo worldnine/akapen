@@ -817,9 +817,17 @@ pub(crate) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             // **座布団はマーカーと同じ琥珀**（`mark_tick()`）に黒字。
             // フッタの `FOCUS` バッジと同じ取り方なので、`--light` でも
             // `--theme` を変えても読める — 新しい色を作っていない。
+            //
+            // **字は `Color::Black` ではなく `Rgb(0,0,0)` である。** 300 ms の
+            // フラッシュ（`crate::effects::readout_flash_effect`）は
+            // `crate::view::lerp_color` で琥珀から**描かれた前景へ**戻すが、
+            // あれは RGB 同士でしか混ぜず、名前付きの色は素通りして
+            // そのまま返る。`Color::Black` のままだと演出が 1 フレームも
+            // 効かない（`docs/gotchas/rendering.md`）。バッジの方は光らない
+            // ので `Color::Black` のままでよい。
             let style = if readout.cushioned() {
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(Color::Rgb(0, 0, 0))
                     .bg(app.decoration_styles.mark_tick())
             } else {
                 dim
@@ -1062,11 +1070,12 @@ mod footer_layout_tests {
         ]
     }
 
-    /// `Essential` の問いに 13 本。
+    /// `Essential` の問いに 13 本。**`App::marks_readouts` と同じ形**
+    /// （末尾の空白 1 桁込み — 座布団の琥珀と地続きに見せないため）。
     fn readouts(question: &str, lit: usize, share: u8) -> Vec<Readout> {
         vec![
-            Readout { dim: format!("{question} · {share}%"), lit: Some(lit) },
-            Readout { dim: question.to_string(), lit: Some(lit) },
+            Readout { dim: format!("{question} · {share}% "), lit: Some(lit) },
+            Readout { dim: format!("{question} "), lit: Some(lit) },
             Readout { dim: String::new(), lit: Some(lit) },
         ]
     }
@@ -1098,7 +1107,7 @@ mod footer_layout_tests {
             "{line}"
         );
         let r = m.readout.as_ref().unwrap();
-        assert_eq!(r.dim, "Essential · 20%");
+        assert_eq!(r.dim, "Essential · 20% ");
         assert_eq!(r.count(), " 13 ");
         // 右端に寄る。
         assert_eq!(m.readout_x + r.width() as u16, 100);
@@ -1119,7 +1128,7 @@ mod footer_layout_tests {
         assert!(!line.contains("newer →"), "右端の案内から落ちる: {line}");
         assert!(!line.contains("f focus"), "案内がまだ落ちていない: {line}");
         let r = m.readout.as_ref().unwrap();
-        assert_eq!(r.dim, "Essential · 20%", "案内より先に読み出しを縮めた");
+        assert_eq!(r.dim, "Essential · 20% ", "案内より先に読み出しを縮めた");
         assert_eq!(r.count(), " 13 ");
         assert_eq!(m.readout_x + r.width() as u16, 80);
     }
