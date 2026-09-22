@@ -6,9 +6,20 @@
 akapen examples/semantic/demo.md --semantic examples/semantic/demo-marks.json
 ```
 
-view モードで `m` / `M` が問いを巡り、`/` で自由入力。`-` / `+`（`=` も可）が
-つまみ ±1、`<` / `>` が ±10 で、現在値はステータス行に `MARK 20% · 3本 · 要点`
+view モードで `m` が問いの popup（`M` は逆回り）、`/` で自由入力。`-` / `+`（`=` も可）が
+つまみ ±1、`<` / `>` が ±10 で、現在値はステータス行に `MARK 20% · 3 · Essential`
 として出る。
+
+判定器を繋いで試すなら、**架空の議事録** `showcase.md` が向いている（決定事項・
+要確認・宿題・継続議題・費用と日程の表・引用・コードブロックを 1 本に入れてある。
+登場する団体・人物・数字はすべて作り物）:
+
+```sh
+akapen examples/semantic/showcase.md   # AKAPEN_SEMANTIC_CMD を設定してあれば、これだけ
+```
+
+`Settled` で末尾の決定事項が、`Unsettled` で要確認・継続議題が、`Numbers` で表の行が、
+`/` に「費用」「日程」と打てばそれぞれの箇所が光る。
 
 DIM 版（Reading Budget と Tier）はフラグで残っている。
 
