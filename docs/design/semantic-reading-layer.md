@@ -235,7 +235,7 @@ ESSENTIALの理解・納得に役立つ。
 
 # Redundancy
 
-重複はReading Tierとは別軸にする。
+重複はReading Tierとは別軸にする（弱まるのは対のうちTierが低い方、同Tierなら長い方）。
 
 ```text
 reading_tier = SUPPORTING
@@ -404,7 +404,7 @@ DETAIL
 → 早めにDIM
 
 REDUNDANT
-→ 元Tierにかかわらず優先的にDIM候補
+→ 対の負けた側が、元TierにかかわらずDIM候補
 ```
 
 同じTier内部では、

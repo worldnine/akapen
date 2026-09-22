@@ -74,7 +74,8 @@ impl ReadingTier {
     /// 1 段だけ弱い Tier（DETAIL はこれ以上落ちない）。
     ///
     /// redundancy を「Tier を上書きする」のではなく「1 段押し下げる」形で
-    /// 効かせるために使う。詳細は [`crate::policy`] を参照。
+    /// 効かせるために使う。押し下がるのは冗長な対の**負けた側**で、
+    /// どちらが負けるかは [`crate::policy`]「負けは位置で決めない」にある。
     pub fn weakened(self) -> Self {
         match self {
             ReadingTier::Essential => ReadingTier::Supporting,
@@ -99,11 +100,18 @@ impl ReadingTier {
 ///
 /// | | 意味 | 誰に効くか |
 /// | --- | --- | --- |
-/// | [`Relation::RedundantWith`] | 参照先と実質同じ内容を言い直している | **持ち主を弱める**（[`ReadingTier::weakened`] で 1 段下げる） |
+/// | [`Relation::RedundantWith`] | **この 2 つは冗長な対である**（持ち主と参照先が実質同じ内容） | **対の負けた側を弱める**（[`ReadingTier::weakened`] で 1 段下げる） |
 /// | [`Relation::Presupposes`] | 参照先を読んでいないと持ち主の意味が決まらない | **指した先を引き上げる**（持ち主が残るなら参照先も一緒に残す） |
 ///
 /// 「重複しているから沈めてよい」と「前提だから一緒に残す」は、**判断の
 /// 向きが逆**である。名前で取り違えると、前提を沈める実装になる。
+///
+/// **`RedundantWith` の向きは、どちらが弱まるかを決めていない。** 向きが
+/// 要るのは**対を見つけるため**で（重複は「既読との相対」であり、方向を
+/// 落とすと結論のように何度も触れられる箇所を重複と見なす）、弱まるのは
+/// Tier が低い方・同 Tier なら長い方である。[`crate::policy`]
+/// 「負けは位置で決めない」を読むこと。2026-09-22 までは必ず持ち主が
+/// 弱まっていた。
 ///
 /// 将来 relation が増えても既存のパターンマッチが壊れないよう
 /// `#[non_exhaustive]` にしてある。
@@ -111,7 +119,13 @@ impl ReadingTier {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Relation {
-    /// この Unit は、参照先の Unit と実質同じ内容である。
+    /// この Unit と参照先の Unit は**冗長な対**である — 実質同じ内容を
+    /// 言い直している。
+    ///
+    /// **持ち主が弱まるとは限らない。** 弱まるのは対のうち Tier が低い方、
+    /// 同 Tier なら長い方である（[`crate::policy`]「負けは位置で決めない」）。
+    /// **`ESSENTIAL` で核を持つ側は、負けても核を取り上げられない**
+    /// （同「核は奪わない」）。
     RedundantWith(UnitId),
     /// この Unit は、参照先の Unit を**前提**にしている — 参照先を読まずに
     /// ここだけを読むと、何を指しているのかが決まらない。
@@ -236,14 +250,19 @@ impl SemanticUnit {
         self.core_atoms = Some(atoms.into_iter().collect());
     }
 
-    /// この Unit が重複だと判断された先。複数あれば最初のもの。
+    /// この Unit が冗長な対を成す相手。複数あれば最初のもの。
+    ///
+    /// **これは「この Unit が弱まる」を意味しない。** どちらが弱まるかは
+    /// [`crate::policy`] が対の両端を見て決める（「負けは位置で決めない」）。
+    /// 負けが相手側に来ることがあるので、**この関数だけでは負けを集め
+    /// きれない**。
     ///
     /// **先頭 1 つを見るのではなく `RedundantWith` を探す。** relation が
     /// 1 種類だった頃は `relations.first()` で足りたが、
     /// [`Relation::Presupposes`] が入ってからは先頭が前提のこともある。
     /// 先頭だけを見ると、**前提を持つ Unit が「重複していない」と正しく
     /// 答えられる一方で、前提のあとに重複が並んだ Unit を見落とす** —
-    /// 見落とした側は `weakened()` を受けずに実 Tier のまま残る。
+    /// 見落とした側は対の判定にすら入らない。
     pub fn redundant_with(&self) -> Option<&UnitId> {
         self.relations.iter().find_map(|relation| match relation {
             Relation::RedundantWith(target) => Some(target),
@@ -251,12 +270,28 @@ impl SemanticUnit {
         })
     }
 
-    /// 何かの重複として印が付いているか。
+    /// 冗長な対の片側として印が付いているか。
     ///
     /// **`relations` が空でないこと**ではない。[`Relation::Presupposes`] しか
-    /// 持たない Unit は重複ではないので、ESSENTIAL なら MARKED になれる。
+    /// 持たない Unit は冗長ではない。
+    ///
+    /// **MARKED の可否には効かない。** ESSENTIAL で核を持つなら、冗長でも
+    /// 核は取り上げられない（[`crate::policy`]「核は奪わない」）。
     pub fn is_redundant(&self) -> bool {
         self.redundant_with().is_some()
+    }
+
+    /// この Unit が片側を成す冗長な対の**相手を全部**返す。
+    ///
+    /// [`Self::redundant_with`] は最初の 1 つしか返さない。どちらが弱まるかを
+    /// 決めるには対を漏れなく見る必要があるので、[`crate::policy`] はこちらを
+    /// 全 Unit について回して**対の両端に印を付ける**
+    /// （「負けは位置で決めない」）。
+    pub fn redundancies(&self) -> impl Iterator<Item = &UnitId> {
+        self.relations.iter().filter_map(|relation| match relation {
+            Relation::RedundantWith(target) => Some(target),
+            Relation::Presupposes(_) => None,
+        })
     }
 
     /// この Unit が前提にしている Unit（[`Relation::Presupposes`] の参照先）を
@@ -418,6 +453,22 @@ mod tests {
     /// **いちばん大事な区別。** 前提を持つことは重複ではない。ここを混ぜると
     /// 「前提を足したら MARKED が消えた」になる — context preservation は
     /// 光らせ続けるための rule なので、真逆へ倒れる。
+    /// `redundancies` は**全部**返す。`redundant_with` は最初の 1 つだけ。
+    /// 2 つ目以降を落とすと、対の片方が負けの判定に入らない。
+    #[test]
+    fn redundancies_returns_every_pair_not_just_the_first() {
+        let mut unit = SemanticUnit::new("u1", [AtomIndex(0)], ReadingTier::Essential);
+        unit.relations.push(Relation::Presupposes("u2".into()));
+        unit.relations.push(Relation::RedundantWith("u3".into()));
+        unit.relations.push(Relation::RedundantWith("u4".into()));
+        assert_eq!(unit.redundant_with(), Some(&UnitId::from("u3")));
+        assert_eq!(
+            unit.redundancies().collect::<Vec<_>>(),
+            vec![&UnitId::from("u3"), &UnitId::from("u4")]
+        );
+        assert_eq!(unit.presupposes().collect::<Vec<_>>(), vec![&UnitId::from("u2")]);
+    }
+
     #[test]
     fn a_unit_that_only_presupposes_is_not_redundant() {
         let mut unit = SemanticUnit::new("u10", [AtomIndex(0)], ReadingTier::Essential);
