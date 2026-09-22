@@ -36,7 +36,7 @@
 
 | 文書 | 対象 | 状態 |
 |---|---|---|
-| [`design/semantic-reading-layer.md`](design/semantic-reading-layer.md) | Semantic Reading Layer（Atom / Unit / ReadingTier / Reading Budget）の設計 | 実装中（MVP のうち incremental reanalysis は未実装。cache は 2026-09-22 に実装 — [`gotchas/open-questions.md`](gotchas/open-questions.md) 参照） |
+| [`design/semantic-reading-layer.md`](design/semantic-reading-layer.md) | Semantic Reading Layer（Atom / Unit / ReadingTier / Reading Budget）の設計 | 実装中（MVP のうち incremental reanalysis は未実装。cache は 2026-09-22 に実装 — [`gotchas/open-questions.md`](gotchas/open-questions.md) 参照）。**テストの fixture ではなくなった**（2026-09-22。読む先は `crates/semantic-reading/tests/fixtures/design-doc-frozen-2026-09-22.md`）ので、大きさの上限は無い |
 | [`design/range-attribution-plan.md`](design/range-attribution-plan.md) | 内部位置モデルを source byte range にする計画。**Phase 番号はこの文書が正典** | Phase 1・2 実装済み、Phase 3 以降は未着手 |
 | [`design/jev.md`](design/jev.md) | 意味判断を担う判定器 Jev（**LLM ではなく System One モデル**）の primitive と呼び出し方 | 参照資料。akapen からの接続はまだ（`--semantic-cmd` の口まで） |
 | [`design/reading-research.md`](design/reading-research.md) | **拾い読みの研究の保管庫。** 合図（signaling）・satisficing・核性・位置の効き方と、先行システム Scim。**採らなかった手とその理由**（TextTiling / 文書レベルの LEAD） | 参照資料。実装の指示ではない |

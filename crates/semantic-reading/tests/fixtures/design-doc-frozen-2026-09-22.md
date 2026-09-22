@@ -1,5 +1,13 @@
 # Semantic Reading Layer 設計書
 
+**これは fixture であって正典ではない。** 正典は
+`docs/design/semantic-reading-layer.md` で、このコピーはそこから `8994544`
+（2026-09-22）の内容を切り出したもの。**内容の更新は不要** — 2 つのテストが
+要るのは中身ではなく、大きさと構造だけである。ラウンド 2 の余地を作るために
+「Role」節と「最初のデモ」節を落としてある。説明は `README.md`。
+
+---
+
 ## 概要
 
 AI生成文書は、内容が正しくても、長い・重複する・重要箇所が見えにくい、といった問題を持ちやすい。
@@ -260,29 +268,6 @@ REDUNDANT_WITH
 
 ---
 
-# Role
-
-必要であれば、
-
-```text
-decision
-requirement
-conclusion
-rationale
-risk
-evidence
-example
-background
-transition
-other
-```
-
-などのroleを保持できる。
-
-ただしMVPで必須とはしない。
-
----
-
 # Jevに判断させるもの
 
 主に以下。
@@ -407,11 +392,6 @@ REDUNDANT
 → 対の負けた側が、元TierにかかわらずDIM候補
 ```
 
-ただし**核は奪わない** — 冗長な対に負けても、ESSENTIALで核を持つUnitからは
-核を取り上げない。核はBudgetを見ずに残す側にあるので、負けても沈まない。
-Reader Personaを含めないと決めている以上、読み手によって重要度が逆転する対で
-どちらか一方の核を切る規則は持てず、冗長の効き先は実効Tierまでに留まる。
-
 同じTier内部では、
 
 - redundancy
@@ -488,13 +468,6 @@ Budget 1〜100%
      ↓
 View Decoration
 ```
-
-## 遅延
-
-解析は文書を開いた時点では走らせない。Reading Budgetキー（`-` `+` `<` `>`）の
-**最初の1打**が起点で、そこまで判定器を1度も呼ばない。素で読むだけの文書に
-解析1回分を払わないためで、2度目以降は文書が変わっていなければキャッシュに
-当たる。
 
 ---
 
@@ -625,33 +598,6 @@ range selection UI
 Google Docs
 agent auto-feedback
 ```
-
----
-
-# 最初のデモ
-
-AI生成Markdownをakapenで開く。
-
-```text
-READ 100%
-```
-
-全文を表示し、ESSENTIALな部分を薄くマーキングする。
-
-Budgetを下げる。
-
-```text
-READ 70%
-READ 50%
-READ 30%
-READ 10%
-```
-
-低優先度や重複部分が徐々にDIMになる。
-
-元文書は変化しない。
-
-Budget操作ではJevを呼ばない。
 
 ---
 
