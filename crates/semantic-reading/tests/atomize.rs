@@ -148,7 +148,7 @@ fn atoms_need_not_tile_the_document() {
     // `marks::mark` の扱いでそのまま NORMAL の地の文として残る。
     let source = "# 見出し\n\n---\n\n本文。\n";
     let atoms = atomize(source);
-    let covered: usize = atoms.iter().map(|atom| atom.len()).sum();
+    let covered: usize = atoms.iter().map(|atom| atom.range.len()).sum();
     assert!(covered < source.len());
     assert_invariants(source, &atoms);
 }

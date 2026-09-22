@@ -13,7 +13,7 @@ use crate::atom::AtomIndex;
 /// Semantic Unit の識別子。
 ///
 /// 値は provider（Jev を呼ぶ判定器）が付ける文字列で、この crate は中身を
-/// 解釈しない。[`SemanticUnit::section_of`] の参照先にだけ使う。
+/// 解釈しない。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UnitId(pub String);
@@ -75,23 +75,6 @@ pub struct SemanticUnit {
     /// 核を選ばなかった Unit が丸ごと光ってしまい絞れない。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_atoms: Option<Vec<AtomIndex>>,
-    /// この Unit が属する**節**の見出し Unit。節の外（見出しより前の前書き）
-    /// なら `None`。
-    ///
-    /// 見出し Unit 自身もこのフィールドを持ち、その値は**親の節**の見出し
-    /// Unit である（`### 費用` なら `## 決定事項` の Unit）。だから節は
-    /// このフィールドだけで入れ子になり、この crate は `#` の数を知らずに
-    /// 済む。
-    ///
-    /// **この crate には読み手が居ない。** [`crate::marks`] は節を見ない
-    /// （問いが選ぶので、見出しを構造で戻す必要が無い）。ワイヤを通って
-    /// [`crate::SemanticDocument`] まで運ばれ、`validate` が実在と
-    /// 自己参照だけを見る。判定器が埋めるのは
-    /// `examples/semantic/jev-annotate.py` の `assign_sections` で、
-    /// **構文から決まる値**である（設計書「Jev に判断させないもの:
-    /// syntax parsing」）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub section_of: Option<UnitId>,
     /// **いま問われていることに、この Unit がどれだけ答えているか**
     /// （`docs/design/semantic-reading-layer.md`）。
     ///
@@ -119,7 +102,6 @@ impl SemanticUnit {
             id: id.into(),
             atoms: atoms.into_iter().collect(),
             core_atoms: None,
-            section_of: None,
             score: None,
         }
     }
@@ -216,25 +198,6 @@ mod tests {
     }
 
     #[test]
-    fn section_of_is_absent_from_the_wire_until_the_annotator_fills_it() {
-        // 節を知らない判定器・既存の fixture の形を変えない。
-        let unit = SemanticUnit::new("u1", [AtomIndex(0)]);
-        assert_eq!(unit.section_of, None);
-        let json = serde_json::to_string(&unit).unwrap();
-        assert!(!json.contains("section_of"), "{json}");
-        assert_eq!(serde_json::from_str::<SemanticUnit>(&json).unwrap(), unit);
-    }
-
-    #[test]
-    fn section_of_round_trips_as_a_bare_id() {
-        let mut unit = SemanticUnit::new("u9", [AtomIndex(0)]);
-        unit.section_of = Some("u4".into());
-        let json = serde_json::to_string(&unit).unwrap();
-        assert_eq!(json, r#"{"id":"u9","atoms":[0],"section_of":"u4"}"#);
-        assert_eq!(serde_json::from_str::<SemanticUnit>(&json).unwrap(), unit);
-    }
-
-    #[test]
     fn a_score_rides_the_wire_only_when_the_annotator_gave_one() {
         let mut unit = SemanticUnit::new("u1", [AtomIndex(0)]);
         assert_eq!(unit.score, None);
@@ -251,10 +214,12 @@ mod tests {
     #[test]
     fn a_unit_from_the_old_wire_still_loads_with_its_extra_fields_ignored() {
         let json = r#"{"id":"u1","atoms":[0],"reading_tier":"essential",
-                       "relations":[{"redundant_with":"u2"}],"score":0.5}"#;
+                       "relations":[{"redundant_with":"u2"}],
+                       "section_of":"u9","score":0.5}"#;
         let unit: SemanticUnit = serde_json::from_str(json).unwrap();
         assert_eq!(unit.id, UnitId::from("u1"));
         assert_eq!(unit.score, Some(0.5));
         assert_eq!(unit.core_atoms, None);
+        assert!(!serde_json::to_string(&unit).unwrap().contains("section_of"));
     }
 }

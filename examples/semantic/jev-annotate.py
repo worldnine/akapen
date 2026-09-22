@@ -414,21 +414,6 @@ def boundary_rule(
     1 つの Unit になる（見出しだけの Unit は単独では Tier を判定しづらい）。
     ただし **この組み合わせは測っていない** — demo.md に出てこない。
 
-    ## 規則 2 は境界だけでは守りきれない — 続きは `section_of` にある
-
-    規則 2 が防いでいるのは「見出しが中身から切り離されて、単独では読めない
-    Unit になる」ことである。**規則 4 が入ってから、境界だけではこれを防げ
-    なくなった。** 箇条書きを項目ごとに割ると、見出しの Unit は「見出し ＋
-    せいぜい最初の項目」になり、2 つ目以降の項目は別 Unit として浮く。中身は
-    残っているのに、それが何なのかを言う見出しのほうが沈む（2026-09-22 に
-    削除した DIM 版での報告が 2 件）。
-
-    **新しい規則を足して直してはいない。** 同じ意図を「中身が複数 Unit に
-    なった場合」について言い直したのが [`assign_sections`] の `section_of`
-    である。**いまそれを読む人は居ない** — マーカーは問いが選ぶので、見出しを
-    構造で戻す必要が無い。**規則 2 とそれは 1 つのことである** — 似た規則が
-    2 つあると読んで、片方だけ直したり統合したりしないこと。
-
     ## 規則 3 — 表は行へ割れても 1 つの Unit のまま
 
     `atomize` は 2026-09-22 から表を行ごとの Atom へ割る（ヘッダ行 ＋ 区切り行
@@ -632,82 +617,6 @@ def noul_of(answers: dict, key: str) -> float:
 # ---------------------------------------------------------------------------
 # Unit の組み立て
 # ---------------------------------------------------------------------------
-
-
-#: setext 見出しの下線（`=====` / `-----`）。深さはこれで決まる。
-SETEXT_UNDERLINE = re.compile(r"^(=+|-+)$")
-
-
-def heading_level(atom: dict) -> int | None:
-    """見出し Atom の深さ（`#` の数）。見出しでなければ `None`。
-
-    **構造だけで決まる。** 設計書「Jev に判断させないもの: syntax parsing」の
-    とおり、ここに Jev は出てこない。
-
-    `atomize` は見出しの Atom を**マーカーから**始めるので（`## 節`）、
-    `#` を数えれば深さになる。setext（`見出し` + `=====`）は `#` を持たない
-    ので、下線の種類で 1 / 2 に落とす。
-
-    引用の中の見出し（`> ## 節`）も `atomize` は `heading` にする。ここでも
-    見出しとして扱い、`>` は深さに数えない。**引用された文書が `#` で
-    始まっていると、そこで外側の節が閉じる** — 測った 4 文書の見出し 81 件に
-    引用の中のものは 1 件も無かったので、直していない。
-
-    **setext も実文書では出ていない**（同じ 81 件で 0 件）。下の分岐は
-    `test_jev_annotate.py` の作り物でしか通っていない。
-
-    深さが読めない見出しは**いちばん深い 6** に倒す。浅い側へ倒すと外側の節を
-    誤って閉じるが、深い側なら「現在の節の下に小さい節ができる」だけで済み、
-    次の本物の見出しがそれを閉じる。
-    """
-    if atom.get("kind") != "heading":
-        return None
-    text = atom.get("text") or ""
-    lead = text.lstrip(" \t>")
-    if lead.startswith("#"):
-        return min(len(lead) - len(lead.lstrip("#")), 6)
-    lines = [line.strip(" \t>") for line in text.splitlines()]
-    if len(lines) >= 2 and SETEXT_UNDERLINE.match(lines[-1]):
-        return 1 if lines[-1].startswith("=") else 2
-    return 6
-
-
-def assign_sections(atoms: list[dict], units: list[list[int]], built: list[dict]) -> None:
-    """各 Unit に、自分が属する節の見出し Unit（`section_of`）を書き込む。
-
-    **構文から決まる値である**（設計書「Jev に判断させないもの: syntax
-    parsing」）。Jev は 1 度も出てこない。
-
-    **いまこれを読む人は居ない。** マーカーは問いが選ぶので、節の見出しを
-    構造で戻す必要が無い（2026-09-22 に DIM 版と一緒にその仕組みを削除した）。
-    それでも書いているのは、プロトコルが持つフィールドで、判定を眺める人が
-    「どの節の話か」を追えるからである。
-
-    **見出し Unit 自身も `section_of` を持つ**。値は**親の節**の見出し Unit
-    で、こうしておくと入れ子が属性だけで伝わる（`### 費用` が戻れば
-    `## 決定事項` が戻り、それが `#` を戻す）。crate 側は `#` の数を知らずに
-    済む。
-
-    節の外（最初の見出しより前の前書き）は `section_of` を持たない。
-    """
-    stack: list[tuple[int, str]] = []
-    for indices, unit in zip(units, built):
-        level = next(
-            (
-                depth
-                for index in indices
-                if (depth := heading_level(atoms[index])) is not None
-            ),
-            None,
-        )
-        if level is not None:
-            # 同じ深さ以浅の節はここで閉じる。
-            while stack and stack[-1][0] >= level:
-                stack.pop()
-        if stack:
-            unit["section_of"] = stack[-1][1]
-        if level is not None:
-            stack.append((level, unit["id"]))
 
 
 def wants_core(unit: dict) -> bool:
@@ -1486,11 +1395,6 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
     assign_lone_cores(atoms, provisional)
     apply_core_answers(provisional, questions, answers)
 
-    # 節の見出し。**Jev は出てこない**（構文だけで決まる）ので、ラウンドも
-    # リクエストも増えない。読む人はまだ居ないが、プロトコルのフィールドで
-    # あり、答えの JSON を眺める人が「どの節の話か」を追える。
-    assign_sections(atoms, units, provisional)
-
     built = []
     for position, unit in enumerate(provisional):
         score = scores[position]
@@ -1499,8 +1403,6 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
             "atoms": unit["atoms"],
             "jev": unit["jev"],
         }
-        if unit.get("section_of"):
-            out["section_of"] = unit["section_of"]
         if score is not None:
             out["score"] = score
         # 足切りを越えなかった Unit は核を聞いていない。`core_atoms` を

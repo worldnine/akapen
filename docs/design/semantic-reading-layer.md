@@ -664,7 +664,7 @@ agent auto-feedback
 ```
 
 **2026-09-22に「含めない」側へ移したものがある** — Reading Tier・Reading
-Budget・redundancy・前提の閉包・見出し復元。理由は
+Budget・redundancy・前提の閉包。理由は
 [`../gotchas/semantic-reading.md`](../gotchas/semantic-reading.md)。
 
 ---

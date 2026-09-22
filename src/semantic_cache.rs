@@ -41,7 +41,7 @@
 //! 採らなかった理由は `docs/gotchas/semantic-reading.md`）。
 //!
 //! **問いの文面は例外で、鍵に入っている**
-//! （[`SemanticCache::entry_path_asking`]）。定型を直せば自動で外れる。
+//! （[`SemanticCache::entry_path`]）。定型を直せば自動で外れる。
 //! 塞がっているのは判定器の中の文面（境界の criteria や核の問い）だけである。
 //!
 //! # 機密度
@@ -50,9 +50,9 @@
 //! 文書の隣にも置かない。ファイルは 0600、ディレクトリは 0700 で作る。
 //!
 //! 中身に**文書の本文は入らない** — [`semantic_reading::Atom`] は
-//! `{range, kind}` で、[`semantic_reading::SemanticUnit`] も添字と Tier と
-//! 関係しか持たない。それでも構造と Tier は業務文書を語る（節の数、どこが
-//! 要点か）ので、本文と同じ扱いにしてある。**文書のパスは書かない。**
+//! `{range, kind}` で、[`semantic_reading::SemanticUnit`] も添字・スコア・核しか
+//! 持たない。それでも構造とどこが要点かは業務文書を語るので、本文と同じ
+//! 扱いにしてある。**文書のパスは書かない。**
 //!
 //! **鍵も書かない。** 注記に残すコマンド行からは環境変数の代入の値を落とす
 //! （[`redacted`]）。`--semantic-cmd 'TYPESAFE_API_KEY=… python3 …'` と
@@ -137,29 +137,9 @@ impl SemanticCache {
     ///   の「同じコマンド行のままプロンプトだけ変えると当たる」が、問いに
     ///   ついては `--semantic-cache-clear` を待たずに塞がる
     ///
-    /// 問いを持たない項目の名前は従来どおりなので、既存の項目も当たり続ける。
-    /// 問いを持たない項目のパス。**テストだけが呼ぶ** — 本番経路は
-    /// [`Self::get`] / [`Self::put`] を通り、そちらが
-    /// [`Self::entry_path_asking`] へ降りる。
-    #[cfg(test)]
-    fn entry_path(&self, analyzer: &str, source_sha: &str) -> PathBuf {
-        self.entry_path_asking(analyzer, source_sha, None)
-    }
-
-    /// [`Self::entry_path`] に問いを添えたもの（上の説明のとおり）。
-    fn entry_path_asking(
-        &self,
-        analyzer: &str,
-        source_sha: &str,
-        question: Option<&str>,
-    ) -> PathBuf {
-        let name = match question {
-            Some(question) => {
-                let sha = digest_of(question);
-                format!("{source_sha}.q{}.json", &sha[..16])
-            }
-            None => format!("{source_sha}.json"),
-        };
+    fn entry_path(&self, analyzer: &str, source_sha: &str, question: &str) -> PathBuf {
+        let sha = digest_of(question);
+        let name = format!("{source_sha}.q{}.json", &sha[..16]);
         self.analyzer_dir(analyzer).join(name)
     }
 
@@ -169,29 +149,19 @@ impl SemanticCache {
     /// 別の文書を名乗る `source_sha256` — どれもエラーにせず `None` を返す。
     /// キャッシュが壊れていることは解析を拒む理由にならない（走らせ直せば
     /// 上書きされる）。
-    pub(crate) fn get(&self, analyzer: &str, source: &str) -> Option<SemanticDocument> {
-        self.get_asking(analyzer, source, None)
-    }
-
-    /// [`Self::get`] に**問い**を添えたもの（marks モード）。
-    ///
-    /// `None` を渡せば [`Self::get`] と 1 ビットも変わらない — 問いを
-    /// 持たない項目はこれまでと同じ名前のまま当たる。
-    pub(crate) fn get_asking(
+    pub(crate) fn get(
         &self,
         analyzer: &str,
         source: &str,
-        question: Option<&str>,
+        question: &str,
     ) -> Option<SemanticDocument> {
-        let path = self.entry_path_asking(analyzer, &source_digest(source), question);
+        let path = self.entry_path(analyzer, &source_digest(source), question);
         let json = fs::read_to_string(path).ok()?;
         let document: SemanticDocument = serde_json::from_str(&json).ok()?;
-        // 問いを聞いたなら、答えも問いを名乗っていなければならない。鍵
-        // （文面の sha）と二重になるが、こちらは**判定器が別の問いに
+        // 答えも問いを名乗っていなければならない。鍵（文面の sha）と
+        // 二重になるが、こちらは**判定器が別の問いに
         // 答えた**場合を捕まえる — 鍵は akapen が何を聞いたかしか知らない。
-        if question.is_some() && document.question.is_none() {
-            return None;
-        }
+        document.question.as_ref()?;
         // 読み戻しの検査は fixture 経路のものをそのまま使う —
         // `FixtureProvider` が `validate`、`DigestChecked` が `source_sha256`。
         let provider = DigestChecked::new(FixtureProvider::from_document(document).ok()?);
@@ -206,17 +176,7 @@ impl SemanticCache {
         &self,
         analyzer: &str,
         source: &str,
-        document: &SemanticDocument,
-    ) -> Result<()> {
-        self.put_asking(analyzer, source, None, document)
-    }
-
-    /// [`Self::put`] に**問い**を添えたもの（marks モード）。
-    pub(crate) fn put_asking(
-        &self,
-        analyzer: &str,
-        source: &str,
-        question: Option<&str>,
+        question: &str,
         document: &SemanticDocument,
     ) -> Result<()> {
         let dir = self.analyzer_dir(analyzer);
@@ -225,7 +185,7 @@ impl SemanticCache {
             .mode(0o700)
             .create(&dir)
             .with_context(|| format!("create {}", dir.display()))?;
-        let target = self.entry_path_asking(analyzer, &source_digest(source), question);
+        let target = self.entry_path(analyzer, &source_digest(source), question);
         let json = serde_json::to_string(&with_metadata(document, analyzer)?)?;
 
         // tmp + rename。半分書けたファイルが「壊れた項目」として残らない
@@ -352,41 +312,17 @@ mod tests {
 
     const CMD: &str = "python3 examples/semantic/jev-annotate.py";
     const SOURCE: &str = "# 見出し\n\n本文である。\n";
+    const QUESTION: &str = "テスト用の問い。";
 
     fn document() -> SemanticDocument {
         let json = format!(
             r#"{{"atoms":[{{"range":{{"start":0,"end":13}},"kind":"heading"}}],
                  "units":[{{"id":"u1","atoms":[0],"score":0.94,"core_atoms":[0]}}],
+                 "question":"essential",
                  "source_sha256":"{}"}}"#,
             source_digest(SOURCE)
         );
         serde_json::from_str(&json).unwrap()
-    }
-
-    /// **DIM 版が書いたキャッシュを捨てない。**
-    ///
-    /// `~/.cache/akapen/semantic/` には 2026-09-22 より前に書かれた答えが
-    /// 残っていて、その Unit は `reading_tier` と `relations` を持っている。
-    /// 読めなくなると `get` が黙って外れ、当たっていた文書が払い直しに
-    /// なる（議事録で約 5 円）。**serde が未知のフィールドとして読み飛ばす**
-    /// ことをここで固定する — `akapen --semantic-cache-clear` は要らない。
-    #[test]
-    fn an_entry_written_by_the_dim_version_still_loads() {
-        let (_dir, cache) = cache();
-        let json = format!(
-            r#"{{"atoms":[{{"range":{{"start":0,"end":13}},"kind":"heading"}}],
-                 "units":[{{"id":"u1","atoms":[0],"reading_tier":"essential",
-                            "relations":[],"score":0.94,"core_atoms":[0]}}],
-                 "source_sha256":"{}"}}"#,
-            source_digest(SOURCE)
-        );
-        let old: SemanticDocument = serde_json::from_str(&json).unwrap();
-        // 置いたのは古い形のまま（`put` は serde で書き直すので、ここは
-        // 「読めること」だけを見ている）。
-        cache.put(CMD, SOURCE, &old).unwrap();
-        let back = cache.get(CMD, SOURCE).expect("古い形でも引ける");
-        assert_eq!(back.units[0].score, Some(0.94));
-        assert_eq!(back.units[0].core_atoms, Some(vec![semantic_reading::AtomIndex(0)]));
     }
 
     fn cache() -> (tempfile::TempDir, SemanticCache) {
@@ -399,9 +335,9 @@ mod tests {
     #[test]
     fn a_stored_document_comes_back() {
         let (_dir, cache) = cache();
-        assert!(cache.get(CMD, SOURCE).is_none(), "空のキャッシュは外れる");
-        cache.put(CMD, SOURCE, &document()).unwrap();
-        let back = cache.get(CMD, SOURCE).expect("置いたものは引ける");
+        assert!(cache.get(CMD, SOURCE, QUESTION).is_none(), "空のキャッシュは外れる");
+        cache.put(CMD, SOURCE, QUESTION, &document()).unwrap();
+        let back = cache.get(CMD, SOURCE, QUESTION).expect("置いたものは引ける");
         assert_eq!(back.units.len(), 1);
         assert_eq!(back.source_digest(), Some(source_digest(SOURCE).as_str()));
     }
@@ -410,18 +346,18 @@ mod tests {
     #[test]
     fn one_byte_of_the_document_is_a_different_key() {
         let (_dir, cache) = cache();
-        cache.put(CMD, SOURCE, &document()).unwrap();
+        cache.put(CMD, SOURCE, QUESTION, &document()).unwrap();
         let changed = format!("{SOURCE} ");
-        assert!(cache.get(CMD, &changed).is_none());
+        assert!(cache.get(CMD, &changed, QUESTION).is_none());
     }
 
     /// 判定器が変われば別のキー。**プロンプトではなくコマンド行**で分かれる。
     #[test]
     fn a_different_analyzer_is_a_different_key() {
         let (_dir, cache) = cache();
-        cache.put(CMD, SOURCE, &document()).unwrap();
-        assert!(cache.get("python3 別のアダプタ.py", SOURCE).is_none());
-        assert!(cache.get(CMD, SOURCE).is_some(), "元の方は残っている");
+        cache.put(CMD, SOURCE, QUESTION, &document()).unwrap();
+        assert!(cache.get("python3 別のアダプタ.py", SOURCE, QUESTION).is_none());
+        assert!(cache.get(CMD, SOURCE, QUESTION).is_some(), "元の方は残っている");
     }
 
     /// 別の文書を名乗る項目は「外れ」であってエラーではない。
@@ -434,11 +370,11 @@ mod tests {
         let dir = cache.analyzer_dir(CMD);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
-            cache.entry_path(CMD, &source_digest(SOURCE)),
+            cache.entry_path(CMD, &source_digest(SOURCE), QUESTION),
             serde_json::to_string(&document).unwrap(),
         )
         .unwrap();
-        assert!(cache.get(CMD, SOURCE).is_none());
+        assert!(cache.get(CMD, SOURCE, QUESTION).is_none());
     }
 
     /// 壊れた項目もエラーにしない。走らせ直して上書きできる。
@@ -447,19 +383,19 @@ mod tests {
         let (_dir, cache) = cache();
         let dir = cache.analyzer_dir(CMD);
         fs::create_dir_all(&dir).unwrap();
-        let path = cache.entry_path(CMD, &source_digest(SOURCE));
+        let path = cache.entry_path(CMD, &source_digest(SOURCE), QUESTION);
         fs::write(&path, "{ not json").unwrap();
-        assert!(cache.get(CMD, SOURCE).is_none());
-        cache.put(CMD, SOURCE, &document()).unwrap();
-        assert!(cache.get(CMD, SOURCE).is_some());
+        assert!(cache.get(CMD, SOURCE, QUESTION).is_none());
+        cache.put(CMD, SOURCE, QUESTION, &document()).unwrap();
+        assert!(cache.get(CMD, SOURCE, QUESTION).is_some());
     }
 
     /// **機密度。** 中身は業務文書を語るので、ホームの下・0600・0700 で置く。
     #[test]
     fn entries_are_private_to_the_user() {
         let (_dir, cache) = cache();
-        cache.put(CMD, SOURCE, &document()).unwrap();
-        let file = fs::metadata(cache.entry_path(CMD, &source_digest(SOURCE))).unwrap();
+        cache.put(CMD, SOURCE, QUESTION, &document()).unwrap();
+        let file = fs::metadata(cache.entry_path(CMD, &source_digest(SOURCE), QUESTION)).unwrap();
         assert_eq!(file.permissions().mode() & 0o777, 0o600, "ファイルは 0600");
         let dir = fs::metadata(cache.analyzer_dir(CMD)).unwrap();
         assert_eq!(dir.permissions().mode() & 0o777, 0o700, "ディレクトリは 0700");
@@ -469,8 +405,9 @@ mod tests {
     #[test]
     fn an_entry_carries_neither_the_text_nor_the_path() {
         let (_dir, cache) = cache();
-        cache.put(CMD, SOURCE, &document()).unwrap();
-        let json = fs::read_to_string(cache.entry_path(CMD, &source_digest(SOURCE))).unwrap();
+        cache.put(CMD, SOURCE, QUESTION, &document()).unwrap();
+        let json =
+            fs::read_to_string(cache.entry_path(CMD, &source_digest(SOURCE), QUESTION)).unwrap();
         assert!(!json.contains("見出し"), "本文が入っていない: {json}");
         assert!(!json.contains("本文である"), "本文が入っていない: {json}");
         assert!(!json.contains(".md"), "文書のパスが入っていない: {json}");
@@ -483,8 +420,8 @@ mod tests {
     #[test]
     fn an_entry_is_still_a_fixture() {
         let (_dir, cache) = cache();
-        cache.put(CMD, SOURCE, &document()).unwrap();
-        let path = cache.entry_path(CMD, &source_digest(SOURCE));
+        cache.put(CMD, SOURCE, QUESTION, &document()).unwrap();
+        let path = cache.entry_path(CMD, &source_digest(SOURCE), QUESTION);
         let provider = crate::semantic::load_fixture(&path).expect("--semantic で読める");
         assert_eq!(provider.analyze(SOURCE).unwrap().units.len(), 1);
     }
@@ -497,26 +434,31 @@ mod tests {
     fn a_key_passed_inline_never_reaches_the_cache() {
         let (_dir, cache) = cache();
         let cmd = "TYPESAFE_API_KEY=sk-secret-value python3 jev-annotate.py --model=jev-latest";
-        cache.put(cmd, SOURCE, &document()).unwrap();
-        let json = fs::read_to_string(cache.entry_path(cmd, &source_digest(SOURCE))).unwrap();
+        cache.put(cmd, SOURCE, QUESTION, &document()).unwrap();
+        let json =
+            fs::read_to_string(cache.entry_path(cmd, &source_digest(SOURCE), QUESTION)).unwrap();
         assert!(!json.contains("sk-secret-value"), "鍵が落ちている: {json}");
         assert!(json.contains("TYPESAFE_API_KEY=…"), "伏せた形で残る: {json}");
         // 判定器の識別は落ちない（引き当てはコマンド行そのものの sha）。
         assert!(json.contains("jev-annotate.py"), "{json}");
         assert!(json.contains("--model=jev-latest"), "フラグは潰さない: {json}");
-        assert!(cache.get(cmd, SOURCE).is_some(), "引き当ては効いたまま");
+        assert!(cache.get(cmd, SOURCE, QUESTION).is_some(), "引き当ては効いたまま");
         // 伏せた形は別のコマンド行なので、当たらない。
-        assert!(cache.get("TYPESAFE_API_KEY=… python3 jev-annotate.py", SOURCE).is_none());
+        assert!(
+            cache
+                .get("TYPESAFE_API_KEY=… python3 jev-annotate.py", SOURCE, QUESTION)
+                .is_none()
+        );
     }
 
     /// 消す — プロンプトを変えたときの逃げ道。
     #[test]
     fn clearing_removes_every_entry_and_says_how_many() {
         let (_dir, cache) = cache();
-        cache.put(CMD, SOURCE, &document()).unwrap();
-        cache.put("別のアダプタ", SOURCE, &document()).unwrap();
+        cache.put(CMD, SOURCE, QUESTION, &document()).unwrap();
+        cache.put("別のアダプタ", SOURCE, QUESTION, &document()).unwrap();
         assert_eq!(cache.clear().unwrap(), 2);
-        assert!(cache.get(CMD, SOURCE).is_none());
+        assert!(cache.get(CMD, SOURCE, QUESTION).is_none());
         assert_eq!(cache.clear().unwrap(), 0, "無い置き場は 0 件");
     }
 

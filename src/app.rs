@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::style::Color;
 
-use semantic_reading::{Provider, SemanticDocument};
+use semantic_reading::SemanticDocument;
 
 use crate::comment::{Comment, Selection};
 use crate::config::{Config, EscQuit};
@@ -730,15 +730,19 @@ impl App {
                     self.flash_err("--semantic-cmd: no channel to receive the answer");
                     return;
                 };
-                // 問いは provider の状態として渡す（`Provider::analyze` の
-                // 引数は source だけ）。ここへ来る時点で問いは必ずある
-                // （上の遅延の検査を通っている）。
-                let provider = provider.clone().asking(self.marks_question.clone());
+                // ここへ来る時点で問いは必ずある（上の検査を通っている）。
+                let question = self
+                    .marks_question
+                    .clone()
+                    .expect("command analysis requires a question");
+                let provider = provider.clone();
                 let tx = channel.tx.clone();
                 let source = self.source.content.clone();
                 self.semantic_inflight = Some(generation);
                 std::thread::spawn(move || {
-                    let result = provider.analyze(&source).map_err(|e| e.to_string());
+                    let result = provider
+                        .analyze(&source, &question)
+                        .map_err(|e| e.to_string());
                     // 受け手が先に消えていても（終了・受信側の drop）
                     // ここは静かに終わる。
                     let _ = tx.send(AnalysisMessage { generation, result });
@@ -893,7 +897,7 @@ impl App {
     /// 作るときだけで、それは「この問いに答えている箇所が無い」という
     /// 意味を持つ。
     ///
-    /// ここから `Provider::analyze` へ到達する経路は無い。つまみを動かす
+    /// ここから解析へ到達する経路は無い。つまみを動かす
     /// 費用は [`semantic_reading::marks::mark`] 1 回だけである。
     pub(crate) fn nudge_marks_share(&mut self, delta: i16) -> bool {
         let next = (self.marks_share as i16 + delta).clamp(

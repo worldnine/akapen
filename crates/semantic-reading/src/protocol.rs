@@ -105,25 +105,12 @@
 //! `a_unit_from_the_old_wire_still_loads_with_its_extra_fields_ignored`）。
 //! 消さずに済む。
 //!
-//! # `section_of` を足しても版は上げない — `core_atoms` と同じ話である
+//! # `section_of` を落としても版は上げない
 //!
-//! [`crate::SemanticUnit::section_of`]（節の見出し Unit。2026-09-22）も
-//! [`VERSION`] を 1 のままにした。**こちらは追加された枝ではなく追加された
-//! フィールド**なので、上の `core_atoms` とまったく同じ表になる。
-//!
-//! | 組み合わせ | 起きること |
-//! | ---------- | ---------- |
-//! | 新しい akapen + 古い判定器 | フィールドが無い = 節を知らない。見出しは復帰せず、**この変更を入れる前の表示**になる |
-//! | 古い akapen + 新しい判定器 | 未知のフィールドとして無視される。同じく従来の表示 |
-//!
-//! どちらも「意味を取り違える」側へは倒れない。片方が損をするのは
-//! 「中身が残っているのに見出しが沈む」という**もともとの状態**であって、
-//! 新しく壊れるものは無い。
-//!
-//! **列挙の枝ではなくフィールドにしてある**のも、この表がそのまま理由に
-//! なっている。枝にすれば知らない側は `unknown variant` で応答を丸ごと
-//! 捨て、注釈が 1 つも付かなくなる。フィールドなら読み飛ばされるだけで
-//! 済む。
+//! DIM 版の見出し復元に使っていた `section_of` は 2026-09-23 に wire から
+//! 落とした。古い答えにフィールドが残っていても serde が未知フィールドとして
+//! 読み飛ばすため、[`VERSION`] は 1 のままでよい。両端ともこのリポジトリ内に
+//! しかなく、プロトコルは未公開である。
 //!
 //! # [`AtomKind`] に値を足しても版は上げない — **向きが片道だからである**
 //!
@@ -300,7 +287,7 @@ impl<'a> AnalyzeRequest<'a> {
 /// 外部コマンドの stdout から受け取る応答。
 ///
 /// `units` の要素は [`SemanticUnit`] そのままである — `id` / `atoms` /
-/// `core_atoms` / `section_of` / `score` の 5 つで、wire 形と内部表現が
+/// `core_atoms` / `score` の 4 つで、wire 形と内部表現が
 /// 1 対 1 に対応する。別の DTO を挟まないのは、挟めば両者がずれうるからで、
 /// ずれない形にしてあれば「wire では通るが内部では表現できない」値が
 /// 存在しなくなる。
@@ -344,7 +331,6 @@ impl AnalyzeResponse {
     /// | atom 添字が `atoms.len()` 未満 | [`SemanticDocument::validate`] |
     /// | `core_atoms` がその unit の `atoms` の部分集合 | [`SemanticDocument::validate`] |
     /// | unit の id が重複しない | [`SemanticDocument::validate`] |
-    /// | `section_of` の参照先が実在し、自分自身でない | [`SemanticDocument::validate`] |
     ///
     /// **1 つでも失敗したら `Err` を返し、応答は丸ごと捨てられる。**
     /// 通った Unit だけ適用する、はしない。
@@ -360,10 +346,8 @@ impl AnalyzeResponse {
     /// - 同じ Atom に 2 つの Unit のスコアが乗らない
     /// - 文書順に読んだときの最初の判断が残る（後から上書きされない）
     ///
-    /// の 2 点による。**添字を全部落とされて空になった Unit は残す** —
-    /// [`crate::marks::mark`] は装飾 0 として素通りさせるだけだし、
-    /// 他の Unit の `section_of` の参照先として生きている可能性がある
-    /// からである（消すと参照が宙に浮き、応答全体が捨てられることになる）。
+    /// の 2 点による。添字を全部落とされて空になった Unit も残す。
+    /// [`crate::marks::mark`] は装飾 0 として素通りさせる。
     pub fn into_document(self, atoms: Vec<Atom>) -> Result<SemanticDocument> {
         if self.version != VERSION {
             return Err(Error::Invalid(format!(
@@ -555,13 +539,6 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("duplicate unit id"), "{err}");
 
-        // 存在しない節の見出し。
-        let err = response(
-            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"section_of":"u9"}]}"#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("unknown section head"), "{err}");
-
         // JSON ですらない。
         assert!(matches!(response("not json at all"), Err(Error::Json(_))));
     }
@@ -603,15 +580,14 @@ mod tests {
         );
     }
 
-    /// 全部取られて空になった Unit は消さない — `section_of` の参照先として
-    /// 生きている。
+    /// 全部取られて空になった Unit も marks は素通りする。
     #[test]
-    fn a_unit_emptied_by_the_first_come_rule_survives_as_a_section_head() {
+    fn a_unit_emptied_by_the_first_come_rule_is_harmless() {
         let document = response(
             r#"{"version":1,"units":[
                 {"id":"u1","atoms":[0]},
                 {"id":"u2","atoms":[0]},
-                {"id":"u3","atoms":[1],"section_of":"u2"}
+                {"id":"u3","atoms":[1]}
             ]}"#,
         )
         .unwrap();
@@ -781,9 +757,9 @@ mod tests {
         assert!(document.source_digest().is_none());
     }
 
-    /// 節の見出しが wire を通って文書まで届く。
+    /// 削除前の答えに残る `section_of` は未知フィールドとして読み飛ばす。
     #[test]
-    fn a_section_head_survives_the_round_trip() {
+    fn an_old_section_of_field_is_ignored_without_changing_version_one() {
         let document = response(
             r#"{"version":1,"units":[
                 {"id":"u1","atoms":[0]},
@@ -791,6 +767,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(document.units[1].section_of, Some(UnitId::from("u1")));
+        assert_eq!(document.units[1].id, UnitId::from("u2"));
+        assert_eq!(document.units[1].atoms, [AtomIndex(1)]);
     }
 }
