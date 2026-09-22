@@ -45,21 +45,64 @@ impl EscQuit {
     }
 }
 
+/// Which projection the Semantic Reading Layer uses
+/// (`--semantic-mode <marks|budget>`).
+///
+/// **両方とも残る。** DIM 版（`Budget`）は測定が続いているので既定のままで、
+/// marks は切り替えて使う。設計書 `docs/design/marks-only-and-review-mode.md`
+/// の「いまの実装はそのまま置く。Jev 的なものが安くなったときに戻せるように」
+/// がこの enum である。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SemanticMode {
+    /// Reading Budget と Tier で全 Unit に判決を下す（MARKED / NORMAL / DIM）。
+    /// `docs/design/semantic-reading-layer.md` の正典。
+    #[default]
+    Budget,
+    /// 問いに答えている箇所だけを光らせる。DIM は出さない。
+    /// `docs/design/marks-only-and-review-mode.md` 0 節。
+    Marks,
+}
+
+impl SemanticMode {
+    /// **未知の値は既定に落とさずエラーにする。** `--esc-quit` と違って、
+    /// ここで黙って `budget` に落ちると「marks のつもりで DIM を見ている」
+    /// ことになり、画面を見ても気づけない（DIM 版も光りはする）。
+    pub fn parse(s: &str) -> Result<SemanticMode> {
+        match s {
+            "marks" => Ok(SemanticMode::Marks),
+            "budget" => Ok(SemanticMode::Budget),
+            other => bail!("--semantic-mode {other}: expected `marks` or `budget`"),
+        }
+    }
+
+    /// marks モードか。
+    pub fn is_marks(self) -> bool {
+        matches!(self, SemanticMode::Marks)
+    }
+}
+
 /// What the process should do, resolved from argv.
 pub enum Action {
     /// Run the TUI with the parsed configuration.
-    Run(Config),
+    ///
+    /// **Box に入れてある。** 他の枝はデータを持たないので、`Config` を
+    /// 直接抱えると列挙そのものがその大きさになる（`clippy::large_enum_variant`）。
+    Run(Box<Config>),
     /// Print usage and exit 0.
     Help,
     /// Print the version and exit 0.
     Version,
     /// `--semantic-cache-clear`: wipe the analysis cache and exit 0.
     ///
-    /// **判定器のプロンプトを変えたときの唯一の逃げ道**である。キャッシュの
+    /// **判定器のプロンプトを変えたときの逃げ道**である。キャッシュの
     /// キーは文書の sha とコマンド行の sha なので、同じコマンド行のまま
     /// プロンプトだけ変えると古い項目が当たる
     /// （`docs/gotchas/semantic-reading.md`）。ファイル引数を取らないので、
     /// `--help` と同じく短絡する。
+    ///
+    /// **marks モードの「問い」だけはこれを待たない** — 問いの文面が鍵に
+    /// 入っているので、定型を直せば自動で外れる（`crate::semantic_cache`）。
+    /// 判定器の中の文面はどちらのモードでもここが唯一の逃げ道である。
     ClearSemanticCache,
 }
 
@@ -145,6 +188,22 @@ pub struct Config {
     /// network round trip does not return within a frame (see
     /// [`crate::app::App::reanalyze_semantics`]).
     pub semantic_cmd: Option<String>,
+    /// `--semantic-mode <marks|budget>`: which projection the Semantic
+    /// Reading Layer uses. Default [`SemanticMode::Budget`] — the DIM
+    /// version, whose measurements are still running.
+    ///
+    /// **文書の種類は推定しない。** 推定は「読み手のモデルが無い」という
+    /// 穴を「書き手のモデル」に置き換えるだけで、同じ穴に落ちる
+    /// （`docs/design/marks-only-and-review-mode.md` 2 節）。だからフラグ。
+    pub semantic_mode: SemanticMode,
+    /// `--marks-questions <path>`: read the marks-mode questions from
+    /// this file instead of the built-in set (and instead of
+    /// `$XDG_CONFIG_HOME/akapen/marks-questions.json`).
+    ///
+    /// Measurement and tests point this at a file of their own so they
+    /// never read the real user's questions — the same care
+    /// [`crate::semantic_cache`] takes with `~/.cache`.
+    pub marks_questions: Option<PathBuf>,
     /// `--mark-blend <0.0..1.0>` / `--dim-blend <0.0..1.0>`: how strong
     /// the two range-decoration kinds are. `mark` lifts the mark
     /// background off the page toward the text color; `dim` moves a
@@ -238,6 +297,8 @@ impl Config {
         let mut decorations: Vec<Decoration> = Vec::new();
         let mut semantic: Option<PathBuf> = None;
         let mut semantic_cmd: Option<String> = None;
+        let mut semantic_mode = SemanticMode::Budget;
+        let mut marks_questions: Option<PathBuf> = None;
         let mut decoration_blend = DecorationBlend::default();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -266,6 +327,12 @@ impl Config {
                 }
                 "--semantic" => semantic = it.next().map(PathBuf::from),
                 "--semantic-cmd" => semantic_cmd = it.next(),
+                "--semantic-mode" => {
+                    if let Some(v) = it.next() {
+                        semantic_mode = SemanticMode::parse(&v)?;
+                    }
+                }
+                "--marks-questions" => marks_questions = it.next().map(PathBuf::from),
                 "--mark-blend" => {
                     if let Some(v) = it.next() {
                         decoration_blend.mark = parse_blend("--mark-blend", &v)?;
@@ -289,7 +356,7 @@ impl Config {
         }
         if files.is_empty() {
             bail!(
-                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>]"
+                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>] [--semantic-mode <marks|budget>]"
             );
         }
         if send_cmd.is_some() && send_agent {
@@ -301,7 +368,15 @@ impl Config {
         if semantic.is_some() && semantic_cmd.is_some() {
             bail!("--semantic and --semantic-cmd are mutually exclusive");
         }
-        Ok(Action::Run(Config {
+        // A mode without a layer is a flag that does nothing. Say so
+        // rather than starting a session where the keys refuse.
+        if semantic_mode != SemanticMode::Budget && semantic.is_none() && semantic_cmd.is_none() {
+            bail!("--semantic-mode needs --semantic or --semantic-cmd");
+        }
+        if marks_questions.is_some() && semantic_mode != SemanticMode::Marks {
+            bail!("--marks-questions needs --semantic-mode marks");
+        }
+        Ok(Action::Run(Box::new(Config {
             files,
             send_cmd,
             send_agent,
@@ -315,9 +390,11 @@ impl Config {
             cursor_anchor,
             semantic,
             semantic_cmd,
+            semantic_mode,
+            marks_questions,
             decoration_blend,
             decorations,
-        }))
+        })))
     }
 
     /// Parse from the real process arguments.

@@ -36,9 +36,14 @@
 //! - **`v1`** — [`semantic_reading::protocol::VERSION`]。[`SemanticDocument`]
 //!   の形が変わった日に、古い項目が黙って当たらないようにする
 //!
-//! **同じコマンド行のままプロンプトだけ変えると当たる。** これは仕様で、
-//! 逃げ道は `--semantic-cache-clear` の 1 つだけである（理由と、他の手を
-//! 採らなかった理由は `docs/gotchas/semantic-reading.md`）。
+//! **DIM 版では、同じコマンド行のままプロンプトだけ変えると当たる。**
+//! これは仕様で、逃げ道は `--semantic-cache-clear` の 1 つだけである
+//! （理由と、他の手を採らなかった理由は `docs/gotchas/semantic-reading.md`）。
+//!
+//! **marks モードはこれが当たらない。** 問いの文面が鍵に入っているので
+//! （[`SemanticCache::entry_path_asking`]）、定型を直せば自動で外れる。
+//! 塞がっているのは問いの文面だけで、判定器の中の文面（Tier の criteria や
+//! 核の問い）は marks でも DIM 版と同じく当たり続ける。
 //!
 //! # 機密度
 //!
@@ -122,8 +127,41 @@ impl SemanticCache {
             .join(digest_of(analyzer))
     }
 
+    /// 1 項目のファイル名。
+    ///
+    /// marks モードでは **問いの文面の sha** が名前に入る
+    /// （`<sha(source)>.q<sha(問い)[..16]>.json`）。3 つのことが同時に立つ:
+    ///
+    /// - **同じ (文書, 問い) は二度呼ばない** — 巡って戻れば 0 円
+    /// - **問いを変えれば別の項目** — 別の答えが同じ鍵に当たらない
+    /// - **定型の文面を直せば自動で外れる** — `docs/gotchas/semantic-reading.md`
+    ///   の「同じコマンド行のままプロンプトだけ変えると当たる」が、marks
+    ///   モードでは `--semantic-cache-clear` を待たずに塞がる
+    ///
+    /// DIM 版（問い無し）の名前は従来どおりなので、既存の項目は当たり続ける。
+    /// 問いを持たない項目のパス。**テストだけが呼ぶ** — 本番経路は
+    /// [`Self::get`] / [`Self::put`] を通り、そちらが
+    /// [`Self::entry_path_asking`] へ降りる。
+    #[cfg(test)]
     fn entry_path(&self, analyzer: &str, source_sha: &str) -> PathBuf {
-        self.analyzer_dir(analyzer).join(format!("{source_sha}.json"))
+        self.entry_path_asking(analyzer, source_sha, None)
+    }
+
+    /// [`Self::entry_path`] に問いを添えたもの（上の説明のとおり）。
+    fn entry_path_asking(
+        &self,
+        analyzer: &str,
+        source_sha: &str,
+        question: Option<&str>,
+    ) -> PathBuf {
+        let name = match question {
+            Some(question) => {
+                let sha = digest_of(question);
+                format!("{source_sha}.q{}.json", &sha[..16])
+            }
+            None => format!("{source_sha}.json"),
+        };
+        self.analyzer_dir(analyzer).join(name)
     }
 
     /// 当たれば [`SemanticDocument`]、外れれば `None`。
@@ -133,8 +171,28 @@ impl SemanticCache {
     /// キャッシュが壊れていることは解析を拒む理由にならない（走らせ直せば
     /// 上書きされる）。
     pub(crate) fn get(&self, analyzer: &str, source: &str) -> Option<SemanticDocument> {
-        let json = fs::read_to_string(self.entry_path(analyzer, &source_digest(source))).ok()?;
+        self.get_asking(analyzer, source, None)
+    }
+
+    /// [`Self::get`] に**問い**を添えたもの（marks モード）。
+    ///
+    /// `None` を渡せば [`Self::get`] と 1 ビットも変わらない — DIM 版の
+    /// 項目はこれまでと同じ名前のまま当たる。
+    pub(crate) fn get_asking(
+        &self,
+        analyzer: &str,
+        source: &str,
+        question: Option<&str>,
+    ) -> Option<SemanticDocument> {
+        let path = self.entry_path_asking(analyzer, &source_digest(source), question);
+        let json = fs::read_to_string(path).ok()?;
         let document: SemanticDocument = serde_json::from_str(&json).ok()?;
+        // 問いを聞いたなら、答えも問いを名乗っていなければならない。鍵
+        // （文面の sha）と二重になるが、こちらは**判定器が別の問いに
+        // 答えた**場合を捕まえる — 鍵は akapen が何を聞いたかしか知らない。
+        if question.is_some() && document.question.is_none() {
+            return None;
+        }
         // 読み戻しの検査は fixture 経路のものをそのまま使う —
         // `FixtureProvider` が `validate`、`DigestChecked` が `source_sha256`。
         let provider = DigestChecked::new(FixtureProvider::from_document(document).ok()?);
@@ -151,13 +209,24 @@ impl SemanticCache {
         source: &str,
         document: &SemanticDocument,
     ) -> Result<()> {
+        self.put_asking(analyzer, source, None, document)
+    }
+
+    /// [`Self::put`] に**問い**を添えたもの（marks モード）。
+    pub(crate) fn put_asking(
+        &self,
+        analyzer: &str,
+        source: &str,
+        question: Option<&str>,
+        document: &SemanticDocument,
+    ) -> Result<()> {
         let dir = self.analyzer_dir(analyzer);
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&dir)
             .with_context(|| format!("create {}", dir.display()))?;
-        let target = self.entry_path(analyzer, &source_digest(source));
+        let target = self.entry_path_asking(analyzer, &source_digest(source), question);
         let json = serde_json::to_string(&with_metadata(document, analyzer)?)?;
 
         // tmp + rename。半分書けたファイルが「壊れた項目」として残らない

@@ -78,6 +78,8 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -124,6 +126,8 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -825,6 +829,8 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -877,6 +883,8 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -916,6 +924,8 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -1894,6 +1904,8 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2010,6 +2022,8 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2311,6 +2325,8 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5979,6 +5995,8 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         fx: false,
         semantic: None,
         semantic_cmd: None,
+        semantic_mode: Default::default(),
+        marks_questions: None,
         decoration_blend: Default::default(),
         decorations: vec![
             mark_at("重要", DecorationKind::SemanticMark),
@@ -6100,6 +6118,8 @@ fn a_dimmed_list_item_dims_its_marker_too() {
         fx: false,
         semantic: None,
         semantic_cmd: None,
+        semantic_mode: Default::default(),
+        marks_questions: None,
         decoration_blend: Default::default(),
         decorations: vec![Decoration {
             range: first_item.range.clone(),
@@ -6175,6 +6195,8 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
         fx: false,
         semantic: Some(fixture.clone()),
         semantic_cmd: None,
+        semantic_mode: Default::default(),
+        marks_questions: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -6279,6 +6301,8 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
         fx: false,
         semantic: Some(fixture),
         semantic_cmd: None,
+        semantic_mode: Default::default(),
+        marks_questions: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -7201,6 +7225,8 @@ fn the_reading_budget_splits_one_source_line_into_two_styles() {
         fx: false,
         semantic: Some(fixture),
         semantic_cmd: None,
+        semantic_mode: Default::default(),
+        marks_questions: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };

@@ -14,7 +14,8 @@ use crate::unit::{Relation, SemanticUnit, UnitId};
 /// 1 つの文書についての semantic annotation 一式。
 ///
 /// `atoms` が文書内の位置の唯一の台帳で、`units` はそこへの添字だけを持つ。
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` は derive しない（[`crate::SemanticUnit::score`] が `f32` のため）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SemanticDocument {
     /// 文書を機械的に分割した Atom 列。文書順に並んでいることを期待する
     /// （[`crate::policy::decorate`] の出力順はこの並び順に従う）。
@@ -31,12 +32,25 @@ pub struct SemanticDocument {
     /// ハッシュ実装を持たない）、`validate` は**形だけ**を検査する。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_sha256: Option<String>,
+    /// **この annotation が答えている問いの id**（marks モード。
+    /// `docs/design/marks-only-and-review-mode.md` 0 節）。
+    ///
+    /// DIM 版の annotation は問いを持たないので `None` である。marks の
+    /// 答えは判定器が echo した id をここに載せ、キャッシュの読み戻しで
+    /// 「別の問いの答え」を撥ねるために使う（`crate::semantic_cache` は
+    /// akapen 側）。
+    ///
+    /// **文面ではなく id を持つ。** 文面は akapen 側の正本（定型のデータ
+    /// ファイル）にあり、こちらに写しを置くと 2 つがずれうる。文面が
+    /// 変わったことはキャッシュの鍵（文面の sha）が検出する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
 }
 
 impl SemanticDocument {
     /// Atom 列と Unit 列から文書を作る。検証はしない（[`Self::validate`]）。
     pub fn new(atoms: Vec<Atom>, units: Vec<SemanticUnit>) -> Self {
-        Self { atoms, units, source_sha256: None }
+        Self { atoms, units, source_sha256: None, question: None }
     }
 
     /// この annotation が想定している source のダイジェスト。

@@ -463,6 +463,8 @@ mod handoff_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+        semantic_mode: Default::default(),
+        marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -524,6 +526,8 @@ mod handoff_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+        semantic_mode: Default::default(),
+        marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

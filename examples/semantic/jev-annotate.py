@@ -87,8 +87,10 @@ macOS 固有の手段を埋めると他 OS で動かない。鍵の取り出し�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import pathlib
 import re
 import sys
 import time
@@ -1985,6 +1987,273 @@ def send_in_chunks(
 UNANSWERED_TIER = "detail"
 
 
+# ---------------------------------------------------------------------------
+# marks モード — 問いに答えている箇所だけを光らせる
+# （`docs/design/marks-only-and-review-mode.md` 0 節）
+# ---------------------------------------------------------------------------
+
+
+#: 問いの文面に付ける枠。**全問共通**で、段 1 の実測
+#: （`examples/semantic/measurements/marks-presets.md`）と 1 バイトも違わない。
+#: 文面そのものは akapen が送ってくる（正本は akapen 側の
+#: `assets/marks-questions.json`）。枠だけがここにあるのは、`{body}` を持って
+#: いるのが判定器だからである。
+MARKS_FRAME = "\n\n――― 対象 ―――\n{body}\n―――――――――"
+
+#: marks の答えが名乗る Tier。**使われないが、必須フィールドである。**
+#:
+#: `detail` を選ぶのは安全側だからで、この答えを DIM 版の akapen が読むと
+#: **何も光らない**（`crates/semantic-reading/src/protocol.rs` の版の表の
+#: 2 行目）。`essential` にすると、モードを取り違えた組み合わせで全文が光る。
+MARKS_TIER = "detail"
+
+#: 境界のキャッシュの置き場（`~/.cache/akapen/semantic/boundaries/v1/`）。
+#:
+#: **問いを変えるたびに境界を取り直さないため**にある。akapen 側のキャッシュは
+#: (コマンド行, 文書, 問い) で引くので、問いが変わればこのプロセスがもう一度
+#: 起きる — そのとき境界のラウンドまで回し直すと、設計書 0 節の「境界を 1 回
+#: 取る（キャッシュ）」が成り立たない。
+#:
+#: **中身に本文は入らない。** Atom の添字と境界の判定（`same_unit` /
+#: `new_unit`）と理由だけである。それでも節の切れ目は業務文書を語るので、
+#: `docs/gotchas/public-repo.md` の扱いに合わせてホームの下・0600/0700 に置く。
+BOUNDARY_CACHE_VERSION = 1
+
+
+def cache_root() -> pathlib.Path | None:
+    """解析キャッシュの根。akapen（`src/semantic_cache.rs`）と同じ規則。"""
+    for name in ("AKAPEN_CACHE_DIR", "XDG_CACHE_HOME"):
+        value = os.environ.get(name)
+        if value:
+            base = pathlib.Path(value)
+            return base if name == "AKAPEN_CACHE_DIR" else base / "akapen"
+    home = os.environ.get("HOME")
+    return pathlib.Path(home) / ".cache" / "akapen" if home else None
+
+
+def boundary_cache_path(source: str) -> pathlib.Path | None:
+    root = cache_root()
+    if root is None:
+        return None
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    return (
+        root
+        / "semantic"
+        / "boundaries"
+        / f"v{BOUNDARY_CACHE_VERSION}"
+        / f"{digest}.json"
+    )
+
+
+def load_boundaries(source: str, plan: list[dict]) -> bool:
+    """キャッシュした境界を `plan` へ流し込む。当たれば `True`。
+
+    **読めない項目は「外れ」である**（akapen 側のキャッシュと同じ作法）。
+    Atom の数が合わない項目も外れにする — 別の文書の境界を当てるよりは、
+    もう一度聞くほうが安い。
+    """
+    path = boundary_cache_path(source)
+    if path is None:
+        return False
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    decisions = cached.get("decisions")
+    if not isinstance(decisions, list) or len(decisions) != len(plan):
+        return False
+    if any(decision not in (SAME, NEW) for decision in decisions):
+        return False
+    for entry, decision in zip(plan, decisions):
+        entry["decision"] = decision
+        entry["by"] = entry["by"] or "cache"
+    return True
+
+
+def save_boundaries(source: str, plan: list[dict]) -> None:
+    """境界の判定を残す。書けなくても解析は続ける（次にもう一度払うだけ）。"""
+    path = boundary_cache_path(source)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temp = path.with_suffix(f".tmp-{os.getpid()}")
+        payload = {
+            "version": BOUNDARY_CACHE_VERSION,
+            "decisions": [entry["decision"] for entry in plan],
+        }
+        # 0600 で作ってから rename。一瞬でも 0644 のファイルを作らない。
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        os.replace(temp, path)
+    except OSError:
+        return
+
+
+def marks_questions(atoms: list[dict], units: list[list[int]], text: str) -> dict:
+    """スコアのラウンド — **Unit ごとに Noul 1 問**。
+
+    問いの文面は akapen が送ってきたものをそのまま使い、枠と本文だけを
+    付ける。**1 段の問いである**（`docs/design/jev.md`。前の答えを前提に
+    しない）。
+    """
+    return {
+        f"marks:u{number}": {
+            "type": "noul",
+            # **`instructions` である。** Noul の主張は `instructions` に置く
+            # （`PROBE_QUESTION` / `REDUNDANCY_PAIR` / `CONTEXT_STAGE1` と
+            # 同じ形）。別の名前で送ると HTTP 400
+            # 「Noul question must have criteria or instructions」になる。
+            "instructions": text + MARKS_FRAME.format(body=unit_body(atoms, indices)),
+        }
+        for number, indices in enumerate(units, start=1)
+    }
+
+
+def marks_annotate(request: dict, question: dict, model: str, timeout: float) -> dict:
+    """marks モードの解析 — 境界 → スコア → 核 の 3 ラウンド。
+
+    DIM 版（[`annotate`]）とはラウンドの数も中身も違うが、**部品は同じもの**を
+    使う（`send_in_chunks` / `RequestBudget` / run キャップ / 核の Choice）。
+    数字が同じコードに帰属しないと、既存の実測と並べられない。
+
+    **問いの連鎖は無い。** 核のラウンドは「どの Unit に聞くか」を前の答えで
+    絞るだけで、問いの文面は Unit の本文しか見ない（設計書 0 節「Jev への
+    問いは 1 段」）。DIM 版にあった context preservation の波はここに無い。
+    """
+    state = request.get("source") or ""
+    atoms = request.get("atoms") or []
+    text = question.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise JevError("the request carries a question with no text")
+    core_floor = question.get("core_floor")
+    core_floor = float(core_floor) if isinstance(core_floor, (int, float)) else 1.0
+
+    budget = measure_state_tokens(state, model, timeout)
+    rounds = [budget.probe] if budget.probe else []
+    unsent: dict[str, list[str]] = {}
+
+    def ask(questions: dict, label: str) -> dict:
+        answers, records, dropped = send_in_chunks(state, questions, budget, model, timeout)
+        for record in records:
+            record["round"] = label
+        rounds.extend(records)
+        if dropped:
+            unsent[label] = dropped
+        return answers
+
+    # --- ラウンド 1: 境界（キャッシュに当たれば 0 問）-------------------
+    plan = plan_boundaries(atoms, state)
+    cached = load_boundaries(state, plan)
+    if not cached:
+        questions = boundary_questions(atoms, plan)
+        if questions:
+            answers = ask(questions, "boundary")
+            for entry in plan:
+                key = f"boundary:{entry['after_atom']}"
+                if entry["decision"] is None and key not in answers:
+                    entry["decision"], entry["by"] = NEW, "rule:question_too_large"
+            apply_boundary_answers(plan, answers)
+        save_boundaries(state, plan)
+    units = group_units(atoms, plan)
+
+    # --- ラウンド 2: 問いへのスコア（Unit ごとに Noul 1 問）-------------
+    #
+    # **1 つも送れなかったら失敗させる。** 全部が「スコア無し」の応答は、
+    # akapen 側では 0 本と区別が付かない（`marks::has_scores`）。そこは
+    # 「答えている箇所が無い」という意味を持つ場所なので、送れなかったことを
+    # そこへ混ぜてはならない。
+    questions = marks_questions(atoms, units, text)
+    answers = dict(ask(questions, "marks"))
+    unanswered = set(unsent.get("marks", ()))
+    if questions and len(unanswered) == len(questions):
+        raise JevError(
+            "Document too large for Jev — shrink it. Splitting cannot help: "
+            f"state alone is {budget.state_tokens} tokens, leaving "
+            f"{max(budget.pair, 0)} of the 32k budget, so not one question fits."
+        )
+    scores = [
+        None if f"marks:u{n}" in unanswered else noul_of(answers, f"marks:u{n}")
+        for n in range(1, len(units) + 1)
+    ]
+
+    # --- ラウンド 3: 核（足切りを超えた Unit にだけ）---------------------
+    #
+    # **狭い問いではこのラウンドごと消える。** 足切りを超える Unit が無ければ
+    # question が 0 本になり、リクエストも 0 回である（設計書 0 節の費用の項）。
+    #
+    # `reading_tier` をここで `essential` / `detail` に使っているのは、DIM 版の
+    # 核の機構（[`wants_core`] / [`plan_run_cores`] / [`core_questions`]）が
+    # そのフィールドで「核が要るか」を読むからである。**この値は応答に出ない**
+    # — 最後に全部 [`MARKS_TIER`] へ畳む。
+    provisional = [
+        {
+            "id": f"u{n}",
+            "atoms": list(ix),
+            "reading_tier": (
+                "essential"
+                if scores[n - 1] is not None and scores[n - 1] >= core_floor
+                else "detail"
+            ),
+            "core_atoms": [],
+            "relations": [],
+            "jev": {"score": scores[n - 1]},
+        }
+        for n, ix in enumerate(units, start=1)
+    ]
+    runs = unit_runs(units, plan)
+    run_questions, fixed, scope, handled = plan_run_cores(atoms, provisional, runs, budget)
+    questions = dict(run_questions)
+    questions.update(core_questions(atoms, provisional, budget, handled))
+    if questions:
+        third = ask(questions, "core")
+        for key in unsent.get("core", ()):
+            questions.pop(key, None)
+            scope.pop(key, None)
+        answers.update(third)
+    apply_run_cores(provisional, questions, fixed, scope, answers)
+    assign_lone_cores(atoms, provisional, handled)
+    apply_core_answers(provisional, questions, answers)
+
+    built = []
+    for position, unit in enumerate(provisional):
+        score = scores[position]
+        out = {
+            "id": unit["id"],
+            "atoms": unit["atoms"],
+            "reading_tier": MARKS_TIER,
+            "relations": [],
+            "jev": unit["jev"],
+        }
+        if score is not None:
+            out["score"] = score
+        # 足切りを越えなかった Unit は核を聞いていない。`core_atoms` を
+        # 省くと「絞り込み無し」＝ Unit 全体が核になるが、スコアが低いので
+        # 光らない。**空で埋める**のは、つまみを 100 % まで上げたときに
+        # 核を持たない Unit が丸ごと光らないようにするためである。
+        out["core_atoms"] = list(unit.get("core_atoms") or [])
+        built.append(out)
+
+    report = {
+        "rounds": rounds,
+        "boundaries": plan,
+        "budget": budget.record(),
+        "mode": "marks",
+        "question": question.get("id"),
+        "core_floor": core_floor,
+        "boundaries_cached": cached,
+    }
+    if unsent:
+        report["unsent"] = unsent
+    return {
+        "version": VERSION,
+        "question": question.get("id"),
+        "units": built,
+        "jev": report,
+    }
+
+
 def annotate(request: dict, model: str, timeout: float) -> dict:
     version = request.get("version")
     if version != VERSION:
@@ -1993,6 +2262,13 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     atoms = request.get("atoms") or []
     if not atoms:
         return {"version": VERSION, "units": []}
+
+    # **marks モードの分岐はここ 1 か所である。** 要求に `question` が
+    # 載っていれば marks、無ければ従来どおり。以下の DIM 版のラウンドは
+    # 1 行も変わっていない。
+    question = request.get("question")
+    if isinstance(question, dict):
+        return marks_annotate(request, question, model, timeout)
 
     # 3 ラウンドで共有する予算。`state` のトークン数はここで 1 度だけ決める
     # （大きい文書では 1 リクエスト使って実測する。[`measure_state_tokens`]）。

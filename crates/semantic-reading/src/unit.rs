@@ -139,7 +139,10 @@ pub enum Relation {
 }
 
 /// Jev が知覚した意味的まとまり 1 つ。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// **`Eq` は derive しない。** [`SemanticUnit::score`] が `f32` で、
+// 浮動小数は全順序を持たない（NaN）。この型を HashMap の鍵にしている
+// 場所は無く、比較に要るのは `PartialEq`（テストの assert）だけである。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SemanticUnit {
     /// provider が付けた識別子。文書内で一意。
     pub id: UnitId,
@@ -198,6 +201,26 @@ pub struct SemanticUnit {
     /// 出てこない。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section_of: Option<UnitId>,
+    /// **いま問われていることに、この Unit がどれだけ答えているか**（marks
+    /// モード。`docs/design/marks-only-and-review-mode.md` 0 節）。
+    ///
+    /// [`crate::marks::mark`] が、この値の高い順に上から N % を光らせる。
+    /// DIM 版（[`crate::policy::decorate`]）はこのフィールドを**読まない** —
+    /// あちらの判断は [`Self::reading_tier`] と関係だけで決まる。
+    ///
+    /// **2 値でよい。** [`Self::core_atoms`] と違って「無い」と「空」を
+    /// 分ける必要が無い:
+    ///
+    /// | 値 | wire 形 | 意味 |
+    /// |---|---|---|
+    /// | `None` | フィールドが無い | **スコアを受け取っていない** — この Unit は光らない |
+    /// | `Some(v)` | `"score":0.94` | 問いへの答えの強さ。0.0〜1.0 |
+    ///
+    /// `None` が既定なので、このフィールドを知らない判定器・fixture は
+    /// 従来どおり動く（marks モードで開けば 0 本になり、理由はステータス行に
+    /// 出る。`crate::protocol` の版の表）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
     /// 他 Unit との関係。空でよい。
     #[serde(default)]
     pub relations: Vec<Relation>,
@@ -216,6 +239,7 @@ impl SemanticUnit {
             reading_tier,
             core_atoms: None,
             section_of: None,
+            score: None,
             relations: Vec::new(),
         }
     }

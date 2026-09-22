@@ -77,12 +77,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use semantic_reading::{
     AnalyzeRequest, AnalyzeResponse, DisplayState, Error as SemanticError, FixtureProvider,
-    Provider, SemanticDocument, atomize, policy,
+    Provider, RequestQuestion, SemanticDocument, atomize, marks, policy,
 };
 use sha2::{Digest, Sha256};
 
 use crate::decoration::{Decoration, DecorationKind};
 use crate::export::Deadline;
+use crate::marks_questions::Question;
 use crate::semantic_cache::SemanticCache;
 
 /// Reading Budget の下限・上限・既定値。刻みは 1 % で、設計書どおり
@@ -305,6 +306,7 @@ pub(crate) struct CommandProvider {
     cmd: String,
     deadline: Deadline,
     cache: Option<SemanticCache>,
+    question: Option<Question>,
 }
 
 impl CommandProvider {
@@ -319,7 +321,21 @@ impl CommandProvider {
                 backstop: COMMAND_BACKSTOP,
             },
             cache: None,
+            question: None,
         }
+    }
+
+    /// marks モードの問いを載せる（`docs/design/marks-only-and-review-mode.md`
+    /// 0 節）。載っていなければ DIM 版の解析になる。
+    ///
+    /// **問いは provider の状態である。** `Provider::analyze` の引数は
+    /// `source` だけなので、問いを渡す口がそこに無い — trait を変えると
+    /// [`FixtureProvider`] まで巻き込むので、marks モードだけが持つ状態と
+    /// して `CommandProvider` に置く。[`crate::app::App`] は解析を投げる
+    /// たびにこれを載せ直す（`reanalyze_semantics`）。
+    pub(crate) fn asking(mut self, question: Option<Question>) -> Self {
+        self.question = question;
+        self
     }
 
     /// 解析結果の置き場を付ける。
@@ -336,6 +352,7 @@ impl CommandProvider {
             cmd: cmd.into(),
             deadline,
             cache: None,
+            question: None,
         }
     }
 
@@ -356,13 +373,30 @@ impl Provider for CommandProvider {
         // ディスクを先に引く。当たればプロセスもネットワークも無い。
         // 外れ方（壊れた項目・別の文書を名乗る項目）はすべて `None` に
         // 畳まれていて、ここからは「無かった」と区別が要らない。
+        // キャッシュの鍵は (コマンド行, 文書, 問い) である。問いを変えれば
+        // 別の項目になり、**同じ (文書, 問い) は二度呼ばない**。
+        let asked = self.question.as_ref();
+        let key = asked.map(|q| q.text.as_str());
         if let Some(cache) = self.cache.as_ref()
-            && let Some(document) = cache.get(&self.cmd, source)
+            && let Some(document) = match key {
+                // marks モード: 問いも鍵の一部。
+                Some(question) => cache.get_asking(&self.cmd, source, Some(question)),
+                // DIM 版: **この経路は 1 ビットも変わっていない。**
+                None => cache.get(&self.cmd, source),
+            }
         {
             return Ok(document);
         }
         let atoms = atomize(source);
-        let request = AnalyzeRequest::new(source, &atoms).to_json()?;
+        let mut request = AnalyzeRequest::new(source, &atoms);
+        if let Some(question) = asked {
+            request = request.asking(RequestQuestion {
+                id: &question.id,
+                text: &question.text,
+                core_floor: marks::SCORE_FLOOR,
+            });
+        }
+        let request = request.to_json()?;
         let stdout = crate::export::run_capturing(
             "--semantic-cmd",
             &self.cmd,
@@ -378,7 +412,10 @@ impl Provider for CommandProvider {
         // 書けなくても注釈は返す。ディスクが一杯でも読み手の画面は動く
         // （次に開いたときにもう一度払うだけ）。
         if let Some(cache) = self.cache.as_ref() {
-            let _ = cache.put(&self.cmd, source, &document);
+            let _ = match key {
+                Some(question) => cache.put_asking(&self.cmd, source, Some(question), &document),
+                None => cache.put(&self.cmd, source, &document),
+            };
         }
         Ok(document)
     }
@@ -448,6 +485,23 @@ pub(crate) fn decorations_for(document: &SemanticDocument, budget: u8) -> Vec<De
     policy::decorate(document, budget)
         .into_iter()
         .filter_map(|(range, state)| {
+            decoration_kind(state).map(|kind| Decoration { range, kind })
+        })
+        .collect()
+}
+
+/// **marks モードの** decoration 列（[`marks::mark`]）。
+///
+/// `decorations_for` と同じ形で返すので、描画は 1 本の経路のままである。
+/// 違いは投影だけで、こちらは **MARKED しか返さない**（DIM が 1 つも無い）。
+///
+/// `decorations_for` と同じく、**この関数から `Provider::analyze` へ到達する
+/// 経路は無い**。つまみを 1 ポイント動かすたびに走るのはここだけである。
+pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> Vec<Decoration> {
+    marks::mark(document, share)
+        .into_iter()
+        .filter_map(|(range, state)| {
+            debug_assert!(state != DisplayState::Dim, "marks モードは DIM を出さない");
             decoration_kind(state).map(|kind| Decoration { range, kind })
         })
         .collect()
