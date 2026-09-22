@@ -227,7 +227,7 @@ Tier の question は Unit について聞くものだが、Unit は境界判定
 ラウンド1  state=文書全文, questions={ 散文どうしの境界を Choice } → Unit を確定
 ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) }
              → 誰に redundancy を聞くか / 誰の核を聞くかが確定
-ラウンド3  state=文書全文, questions={ SUPPORTING 以上の redundancy(Noul) と、
+ラウンド3  state=文書全文, questions={ SUPPORTING 以上の redundancy(Choice) と、
                                         ESSENTIAL な Unit の核(Choice) }
 ```
 
@@ -291,16 +291,24 @@ Unit）と、`block_quote` が規則 6 で単独になることは、**demo.md �
 **規則 2 とこれは 1 つのこと**である。似た規則が 2 つあると読まないこと。
 前後の数字は [`measurements/section-heads.md`](measurements/section-heads.md)。
 
-### redundancy は方向を指定する
+### redundancy は方向を指定する — 相手は Jev に選ばせる（2026-09-22）
 
-「これより**前**の箇所ですでに述べられた内容の言い直しか」と聞く。対称に
-「重複しているか」と聞くと結論まで拾う（実測で結論の Unit が 0.71 を出し、方向
-ありに直すと 0.36 へ落ちた）。設計書が「**既読内容との** redundancy」と書き、
-Duggan & Payne の satisficing が逐次的なモデルであることと整合する。
+SUPPORTING 以上の Unit ごとに **Choice 1 つ**。選択肢は「対象より**前**にある
+Unit の本文」（DETAIL を除く）と「**該当なし**」で、「対象が言い直している元は
+どれか」を聞く。**「該当なし」が閾値の代わり**で、値で倒す定数はもう無い
+（`jev-annotate.py` の `REDUNDANCY_NONE`）。
 
-Noul は「言い直しか」までしか答えないので、`REDUNDANT_WITH` の**参照先**は語の
-重なりでローカルに選ぶ。現在の `policy::keep_order` は `is_redundant()` しか見て
-いないため、参照先の選び方は表示に効かない。
+方向は文面と構造の両方で入れる。対称に「重複しているか」と聞くと結論まで拾う
+（Noul 時代の実測で結論の Unit が 0.71 を出し、方向ありに直すと 0.36 へ落ちた）。
+設計書が「**既読内容との** redundancy」と書き、Duggan & Payne の satisficing が
+逐次的なモデルであることと整合する。
+
+以前は Noul（「言い直しか」）を 0.7 で切り、参照先は語の重なりの argmax で
+ローカルに選んでいた。業務議事録で相手が 7 件中 3 件誤り（見出しだけの Unit を
+指す等）だったので、`Presupposes` と同じく Choice に替えた。**ただし Choice 単独
+では冗長が大きく増える** — 「該当なし」を選択肢に置いても、Jev は「同じ話題」の
+先行 Unit を選ぶ。前後の実測と、対の Noul を 1 つ足す案の測定は
+[`measurements/redundancy.md`](measurements/redundancy.md)。
 
 ### confidence は記録するだけ
 
@@ -311,7 +319,8 @@ Noul は「言い直しか」までしか答えないので、`REDUNDANT_WITH` �
 {"version": 1,
  "units": [{"id": "u3", "atoms": [3, 4], "reading_tier": "essential", "relations": [],
             "jev": {"tier_choice": "essential", "tier_confidence": 1.0,
-                    "redundancy_noul": 0.37}}],
+                    "redundancy_choice": "none", "redundancy_confidence": 0.9,
+                    "redundancy_none_probability": 0.92, "redundant_with": null}}],
  "jev": {"rounds": [{"questions": 9, "elapsed_s": 0.73, "usage": {…}}],
          "boundaries": [{"after_atom": 4, "decision": "new_unit", "by": "jev",
                          "confidence": 0.8}]}}
@@ -413,6 +422,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | 節に中身が残るなら見出しも残す（規則 2 の言い直し）の前後 — 4 文書 18 ラン × READ 1 / 5 / 30 / 100 %、入れ子の連鎖と予算への影響 | [`measurements/section-heads.md`](measurements/section-heads.md) |
 | `context preservation` の依存を聞いたとき、根まで辿った閉包がどれだけ大きくなるか（4 文書 × 4 ラン。第 1 版は対の Noul を閾値 0.4〜0.7 で、第 2 版は Choice で `probabilities` に閾値を置かずに）。**第 3 版で実装し**、参照実装との一致 288 件と実機で穴が塞がったことまで。**第 4 版で台帳を二段にした**（READ 1 % でも核が出る。前半への偏りは戻らない） | [`measurements/context-preservation.md`](measurements/context-preservation.md) |
 | ESSENTIAL の例示を「未決の論点や宿題」まで広げたとき、議事録の未決の節がDETAIL を脱するか / 他の 4 文書で ESSENTIAL が縮まないか（5 文書 × 前後 × 4 ラン）。**READ 30 % では直っていない**ことまで | [`measurements/essential-unsettled.md`](measurements/essential-unsettled.md) |
+| `REDUNDANT_WITH` の相手を Jev に Choice で選ばせ、閾値を「該当なし」に置き換えたとき — 議事録の相手の正否、他の 4 文書で冗長が**増えた**こと、選ばれた対に Noul を 1 つ足す案の測定（5 文書 × 前後 × 4 ラン） | [`measurements/redundancy.md`](measurements/redundancy.md) |
 
 **バイト数と Unit 数は分割前の値。** この README と `docs/gotchas.md` は
 どちらも測定対象なので、分割でどちらも小さくなっている

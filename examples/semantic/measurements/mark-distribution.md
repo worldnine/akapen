@@ -244,6 +244,10 @@ CONTEXT 0.36 のほうが低い）。「ESSENTIAL ではない」と言い切っ
 
 ### 先に、前提を 1 つ訂正する
 
+> **2026-09-22 追記**: 参照先は Jev の Choice が選ぶようになった
+> （[`redundancy.md`](redundancy.md)）。以下はこの測定を取った時点
+> （Noul + 語彙 argmax）の記述で、そのまま残す。
+
 **`relations[].redundant_with` の参照先は Jev の答えではない。**
 
 Jev の Noul が答えるのは「これより前の言い直しか」までで、**どの Unit かは

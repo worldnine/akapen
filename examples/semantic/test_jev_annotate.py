@@ -357,6 +357,77 @@ class SectionTest(unittest.TestCase):
         self.assertEqual(self.sections(atoms, [[0], [1], [2]]), [None, None, "u2"])
 
 
+class RedundancyQuestionTest(unittest.TestCase):
+    """ラウンド 3 — SUPPORTING 以上の Unit に「どれの言い直しか」を Choice で聞く。"""
+
+    ATOMS = [
+        atom(0, "heading", "結論"),
+        atom(1, "sentence", "採用する方式は差分配信である。"),
+        atom(2, "sentence", "詳細は付録にまとめた。"),
+        atom(3, "sentence", "背景として、全量配信は帯域を使い切っていた。"),
+        atom(4, "sentence", "つまり、採用する方式は差分配信だということである。"),
+    ]
+    UNITS = [[0, 1], [2], [3], [4]]
+    TIERS = ["essential", "detail", "context", "supporting"]
+    SOURCE = "".join(a["text"] for a in ATOMS)
+
+    def ask(self, tiers=None):
+        return jev.redundancy_questions(
+            self.ATOMS, self.UNITS, tiers or self.TIERS, jev.RequestBudget.estimated(self.SOURCE)
+        )
+
+    def test_only_supporting_or_better_units_are_asked(self):
+        questions, trim = self.ask()
+        self.assertEqual(sorted(questions), ["redundant:u4"])
+        self.assertEqual(trim["asked"], 1)
+
+    def test_the_first_unit_is_never_asked(self):
+        questions, _ = self.ask(["essential", "essential", "essential", "essential"])
+        self.assertNotIn("redundant:u1", questions)
+
+    def test_the_choices_are_earlier_bodies_plus_none_and_never_detail(self):
+        questions, _ = self.ask()
+        criteria = questions["redundant:u4"]["criteria"]
+        # 先頭に「該当なし」、続いて DETAIL を除いた先行 Unit の本文（`u:<添字>`）。
+        self.assertEqual(list(criteria)[0], jev.REDUNDANCY_NONE)
+        self.assertEqual(sorted(k for k in criteria if k != jev.REDUNDANCY_NONE), ["u:0", "u:2"])
+        self.assertIn("差分配信である", criteria["u:0"])
+        self.assertEqual(questions["redundant:u4"]["type"], "choice")
+
+    def test_the_question_is_a_choice_that_points_backwards(self):
+        questions, _ = self.ask()
+        text = questions["redundant:u4"]["instructions"]
+        self.assertIn("前", text)
+        self.assertIn("該当なし", text)
+        self.assertIn("つまり、採用する方式は差分配信だということである。", text)
+
+    def test_no_threshold_constant_remains(self):
+        self.assertFalse(hasattr(jev, "REDUNDANCY_THRESHOLD"))
+        self.assertFalse(hasattr(jev, "redundancy_target"))
+
+    def test_a_unit_with_no_candidate_is_not_asked(self):
+        # 先行が全部 DETAIL なら言い直せる相手が無い。聞かずに数えるだけ。
+        questions, trim = self.ask(["detail", "detail", "detail", "supporting"])
+        self.assertEqual(questions, {})
+        self.assertEqual(trim["no_candidate"], 1)
+
+    def test_far_candidates_are_dropped_when_over_budget(self):
+        atoms = [atom(i, "sentence", f"文{i}" + "あ" * 400) for i in range(6)]
+        units = [[i] for i in range(6)]
+        tiers = ["essential"] * 6
+        # 対象 + 「該当なし」+ 選択肢 1 つが入り、2 つ目は入らない予算（本文 1 つ ≈ 600 tokens）。
+        budget = jev.RequestBudget(jev.STATE_PLUS_QUESTION_LIMIT - jev.CORE_QUESTION_MARGIN - 2_000)
+        questions, trim = jev.redundancy_questions(atoms, units, tiers, budget)
+        # u2 は候補が 1 つしか無いので落とすものが無い。残りは全部当たる。
+        self.assertEqual(trim["asked"], 5)
+        self.assertEqual(trim["by_budget"], 4)
+        criteria = questions["redundant:u6"]["criteria"]
+        self.assertIn(jev.REDUNDANCY_NONE, criteria)
+        # 近い方（u:4）が残り、遠い方（u:0）が落ちる。
+        self.assertIn("u:4", criteria)
+        self.assertNotIn("u:0", criteria)
+
+
 class BuildUnitsTest(unittest.TestCase):
     """Jev のレスポンスを模したフィクスチャから Unit を組み立てる。"""
 
@@ -367,18 +438,29 @@ class BuildUnitsTest(unittest.TestCase):
         atom(3, "sentence", "つまり、採用する方式は差分配信だということである。"),
     ]
     UNITS = [[0, 1], [2], [3]]
+    TIERS = ["essential", "detail", "supporting"]
+    SOURCE = "".join(a["text"] for a in ATOMS)
     ANSWERS = {
         "tier:u1": {"choice": "essential", "confidence": 0.88},
         "tier:u2": {"choice": "detail", "confidence": 0.71},
-        "redundant:u2": {"noul": 0.12},
         "tier:u3": {"choice": "supporting", "confidence": 0.64},
-        "redundant:u3": {"noul": 0.93},
+        "redundant:u3": {
+            "choice": "u:0",
+            "confidence": 0.93,
+            "probabilities": {"none": 0.05, "u:0": 0.93},
+        },
     }
 
-    TIERS = ["essential", "detail", "supporting"]
+    def questions(self):
+        questions, _ = jev.redundancy_questions(
+            self.ATOMS, self.UNITS, self.TIERS, jev.RequestBudget.estimated(self.SOURCE)
+        )
+        return questions
 
-    def build(self):
-        return jev.build_units(self.ATOMS, self.UNITS, self.TIERS, self.ANSWERS)
+    def build(self, answers=None):
+        return jev.build_units(
+            self.ATOMS, self.UNITS, self.TIERS, answers or self.ANSWERS, self.questions()
+        )
 
     def test_units_keep_the_protocol_shape(self):
         units = self.build()
@@ -388,16 +470,31 @@ class BuildUnitsTest(unittest.TestCase):
             [u["reading_tier"] for u in units], ["essential", "detail", "supporting"]
         )
 
-    def test_a_high_noul_becomes_a_redundant_with_pointing_backwards(self):
+    def test_a_chosen_earlier_unit_becomes_a_redundant_with_pointing_backwards(self):
         units = self.build()
         self.assertEqual(units[1]["relations"], [])
         self.assertEqual(units[2]["relations"], [{"redundant_with": "u1"}])
 
-    def test_confidence_and_noul_are_recorded_not_thrown_away(self):
+    def test_none_means_not_redundant_and_there_is_no_threshold(self):
+        answers = dict(self.ANSWERS)
+        answers["redundant:u3"] = {
+            "choice": jev.REDUNDANCY_NONE,
+            "confidence": 0.51,
+            "probabilities": {"none": 0.51, "u:0": 0.49},
+        }
+        units = self.build(answers)
+        self.assertEqual(units[2]["relations"], [])
+        self.assertIsNone(units[2]["jev"]["redundant_with"])
+        self.assertEqual(units[2]["jev"]["redundancy_choice"], "none")
+
+    def test_confidence_and_choice_are_recorded_not_thrown_away(self):
         units = self.build()
         self.assertEqual(units[0]["jev"]["tier_confidence"], 0.88)
-        self.assertNotIn("redundancy_noul", units[0]["jev"])
-        self.assertEqual(units[2]["jev"]["redundancy_noul"], 0.93)
+        self.assertNotIn("redundancy_choice", units[0]["jev"])
+        self.assertEqual(units[2]["jev"]["redundancy_choice"], "u:0")
+        self.assertEqual(units[2]["jev"]["redundancy_confidence"], 0.93)
+        self.assertEqual(units[2]["jev"]["redundancy_none_probability"], 0.05)
+        self.assertEqual(units[2]["jev"]["redundancy_candidates"], 1)
         self.assertEqual(units[2]["jev"]["redundant_with"], "u1")
 
     def test_confidence_never_flips_a_decision(self):
@@ -405,42 +502,29 @@ class BuildUnitsTest(unittest.TestCase):
         # 答えが揺れたため）。confidence が低くても choice がそのまま通る。
         answers = dict(self.ANSWERS)
         answers["tier:u1"] = {"choice": "essential", "confidence": 0.01}
-        units = jev.build_units(self.ATOMS, self.UNITS, self.TIERS, answers)
+        answers["redundant:u3"] = {"choice": "u:0", "confidence": 0.01}
+        units = self.build(answers)
         self.assertEqual(units[0]["reading_tier"], "essential")
+        self.assertEqual(units[2]["relations"], [{"redundant_with": "u1"}])
 
-    def test_a_missing_noul_fails_loudly(self):
+    def test_a_missing_or_unknown_redundancy_answer_fails_loudly(self):
         answers = dict(self.ANSWERS)
         answers["redundant:u3"] = {"confidence": 0.5}
         with self.assertRaises(jev.JevError):
-            jev.build_units(self.ATOMS, self.UNITS, self.TIERS, answers)
+            self.build(answers)
+        answers["redundant:u3"] = {"choice": "u:2"}  # 自分自身は選択肢に無い
+        with self.assertRaises(jev.JevError):
+            self.build(answers)
 
     def test_a_unit_that_was_not_asked_about_redundancy_has_no_relation(self):
-        # CONTEXT / DETAIL には redundancy を聞かないので、答えが無い。
+        # CONTEXT / DETAIL には redundancy を聞かないので、question も答えも無い。
         # 黙って REDUNDANT 扱いにも非 REDUNDANT 扱いにもせず、relation を
         # 付けずに通す（聞いていないことは記録にも残らない）。
         answers = {k: v for k, v in self.ANSWERS.items() if not k.startswith("redundant:")}
-        units = jev.build_units(self.ATOMS, self.UNITS, self.TIERS, answers)
+        units = jev.build_units(self.ATOMS, self.UNITS, self.TIERS, answers, {})
         self.assertEqual([u["relations"] for u in units], [[], [], []])
         for unit in units:
-            self.assertNotIn("redundancy_noul", unit["jev"])
-
-    def test_the_relation_is_dropped_when_no_earlier_unit_overlaps(self):
-        # Noul が高くても参照先が選べなければ relation は付けない
-        # （プロトコルは実在しない参照先を拒否する）。値は記録に残す。
-        atoms = [atom(0, "sentence", "AAAA"), atom(1, "sentence", "ZZZZ")]
-        units = jev.build_units(
-            atoms,
-            [[0], [1]],
-            ["essential", "supporting"],
-            {
-                "tier:u1": {"choice": "essential", "confidence": 0.5},
-                "tier:u2": {"choice": "supporting", "confidence": 0.5},
-                "redundant:u2": {"noul": 0.99},
-            },
-        )
-        self.assertEqual(units[1]["relations"], [])
-        self.assertEqual(units[1]["jev"]["redundancy_noul"], 0.99)
-        self.assertIsNone(units[1]["jev"]["redundant_with"])
+            self.assertNotIn("redundancy_choice", unit["jev"])
 
 
 class CoreQuestionTest(unittest.TestCase):
@@ -946,15 +1030,19 @@ class DryRunTest(unittest.TestCase):
         self.assertEqual(len(redundant), len(tiers) - 1, "先頭 Unit だけ聞かない")
         self.assertNotIn("redundant:u1", asked)
         for key in redundant:
-            self.assertEqual(asked[key]["type"], "noul")
+            self.assertEqual(asked[key]["type"], "choice")
             # redundancy は方向を必ず指定する（対称に聞くと結論まで拾う）。
-            self.assertIn("これより**前**の箇所", asked[key]["instructions"])
+            self.assertIn("対象より**前**にある", asked[key]["instructions"])
+            # 閾値の代わりは「該当なし」の選択肢。
+            self.assertIn(jev.REDUNDANCY_NONE, asked[key]["criteria"])
 
     def test_redundancy_skips_context_and_detail(self):
         atoms = [atom(i, "sentence", f"文{i}。") for i in range(4)]
         units = [[0], [1], [2], [3]]
         tiers = ["essential", "supporting", "context", "detail"]
-        asked = jev.redundancy_questions(atoms, units, tiers)
+        asked, _trim = jev.redundancy_questions(
+            atoms, units, tiers, jev.RequestBudget.estimated("文0。文1。文2。文3。")
+        )
         # u1 は先頭なので聞かない。u3 / u4 は CONTEXT / DETAIL なので聞かない。
         self.assertEqual(sorted(asked), ["redundant:u2"])
 
@@ -1199,18 +1287,28 @@ class SendInChunksTest(unittest.TestCase):
         この仮定と question の形の帰結である。**代わりに `unsent` を見る** —
         分割で外せない 32k 枠に当たっていないことが、この経路で確かめたい
         ことだからである。
+
+        **ラウンド 3 の redundancy も同じ形になった**（2026-09-22。Choice の
+        選択肢が自分より前の Unit の本文）。dry-run の「全 Unit が ESSENTIAL」
+        の仮定で design.md は 170 本を超える Choice を組むので、ここでは
+        redundancy を外した残り（核）だけを 1 チャンクに収まるかで見る。
         """
         for name in ("demo.md", "../../docs/design/semantic-reading-layer.md"):
             with self.subTest(document=name):
                 source = (HERE / name).read_text(encoding="utf-8")
                 request = dump_request(HERE / name)
                 plan = jev.dry_run(request, "jev-latest")
+                budget = jev.RequestBudget(plan["budget"]["state_tokens"])
                 for entry in plan["rounds"]:
                     if entry["round"] == 4:
                         continue
-                    self.assertEqual(
-                        entry["plan"]["chunks"], 1, f"round {entry['round']}"
-                    )
+                    questions = entry["questions"]
+                    if entry["round"] == 3:
+                        questions = {
+                            k: q for k, q in questions.items() if not k.startswith("redundant:")
+                        }
+                    chunks, _dropped = jev.plan_chunks(questions, budget)
+                    self.assertEqual(len(chunks), 1, f"round {entry['round']}")
                 self.assertEqual(
                     plan["budget"]["state_tokens"], jev.estimate_tokens(source)
                 )
@@ -1769,7 +1867,9 @@ class ContextPreservationTest(unittest.TestCase):
                     answers[key] = {"choice": jev.NEW}
                 elif key.startswith("tier:"):
                     answers[key] = {"choice": "context" if key.endswith("u1") else "essential"}
-                elif key.startswith("redundant:") or key.startswith("more:"):
+                elif key.startswith("redundant:"):
+                    answers[key] = {"choice": jev.REDUNDANCY_NONE}
+                elif key.startswith("more:"):
                     answers[key] = {"noul": 0.0}
                 elif key.startswith("needs:"):
                     answers[key] = {"noul": 0.8}

@@ -91,7 +91,7 @@ Phase 1 Range Attribution / 2 Range Decoration / 3 Render Mapping 強化 /
 `AnalyzeResponse` が `version` と `units` しか持たないこと
 （`confidence` / `probabilities` というフィールドはこの crate のどこにも
 無い）。`examples/semantic/jev-annotate.py` が各 Unit の `jev` フィールドへ
-`tier_confidence` / `redundancy_noul` を書いていること。
+`tier_confidence` / `redundancy_confidence` を書いていること。
 `docs/design/jev.md` に未解決として記録済みであること。
 
 ### 4. 同一 Tier 内の rule の逐次性 — `context preservation`（**解決済み。2026-09-21**）

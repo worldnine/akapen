@@ -24,7 +24,7 @@ Tier の question は Unit について聞くものだが、Unit は境界判定
                  → Unit を確定
     ラウンド2  state=文書全文, questions={ Unit ごとの Tier(Choice) }
                  → 誰に redundancy を聞くか / 誰の核を聞くかが確定
-    ラウンド3  state=文書全文, questions={ SUPPORTING 以上の redundancy(Noul)
+    ラウンド3  state=文書全文, questions={ SUPPORTING 以上の redundancy(Choice)
                                             と、ESSENTIAL な Unit の核(Choice) }
                  → **MARKED になりうる Unit**が確定
     ラウンド4+ state=文書全文, context preservation の前提を波で辿る
@@ -126,12 +126,6 @@ API_PATH = "/v1/systemone"
 #: （[`http_error_message`]）。そこは 400 で即座に返るので、ここを延ばしても
 #: 何も救われない。
 DEFAULT_TIMEOUT = 20.0
-
-#: Noul がこの値以上なら REDUNDANT_WITH を付ける。
-#:
-#: **実測 2 点から置いた暫定値で、掃引していない。** demo.md の 1 回の実行で、
-#: 言い直しの u9 が 0.92、結論の u3 が 0.36 だった。その間を取っている。
-REDUNDANCY_THRESHOLD = 0.7
 
 #: Reading Tier の criteria。設計書 `docs/design/semantic-reading-layer.md` の
 #: 「Reading Tier」の定義の逐語。**言い換えないこと** — ここが判定品質を支配する。
@@ -305,13 +299,6 @@ STANDALONE_KINDS = frozenset({"code_block", "table"})
 #: 見出し・コードブロック・テーブルは「1 か所だけ読むならどこか」の答えに
 #: ならない（[`core_candidates`]）。
 PROSE_KINDS = frozenset({"sentence", "list_item"})
-
-#: redundancy の参照先を選ぶときに無視する、内容を持たない語
-#: （`annotate-doc.py` の同名定数と同じ）。
-STOP_WORDS = frozenset(
-    "の は が を に へ と で も や か ね よ です ます である だ する した"
-    " こと もの ため よう この その あの the a an is are of to and or in on".split()
-)
 
 
 class JevError(Exception):
@@ -606,82 +593,135 @@ def unit_questions(atoms: list[dict], units: list[list[int]]) -> dict:
 REDUNDANCY_TIERS = frozenset({"essential", "supporting"})
 
 
+#: redundancy の Choice で「該当なし」を表す選択肢のキー。
+#:
+#: **これが閾値の代わりである。** 以前は Noul（「言い直しか」）を 0.7 で切り、
+#: 相手は語の重なりが最大の先行 Unit をローカルに選んでいた。閾値は demo.md の
+#: 2 点から置いた暫定値で掃引しておらず、業務議事録では 0.70〜0.71 の Unit が
+#: 1 ランだけ閾値の上に乗って揺れ、相手は 7 件中 3 件が誤りだった（見出しだけの
+#: Unit を指す、別の節を指す）。Choice は候補を突き合わせて 1 つ返すので、
+#: 「どれの言い直しか」は Jev が答え、「どれでもない」はこの選択肢が受ける。
+#: 値で倒す場所はどこにも無い。
+REDUNDANCY_NONE = "none"
+
+#: 「該当なし」の選択肢の本文。他の選択肢は先行 Unit の本文の引用なので、
+#: ここだけが判定基準の文になる。
+REDUNDANCY_NONE_TEXT = (
+    "該当なし。対象は、これより前のどの箇所の言い直しでもなく、新しい情報を加えている。"
+)
+
+#: 言い直しの**元**として選択肢に並べる先行 Unit の Tier。
+#:
+#: context preservation（[`CONTEXT_TIERS`]）と同じ絞り方で、**DETAIL だけ
+#: 落とす**。DETAIL は Jev 自身が「重要でない」と言ったものなので、それを
+#: 言い直した Unit が SUPPORTING 以上になることは考えにくい。CONTEXT は
+#: 「背景」で、前置きを結論部で言い直す形はありうるので残す。
+#:
+#: 「SUPPORTING 以上だけ」も測った（`examples/semantic/measurements/redundancy.md`）。
+#: 選ぶ側の Tier（[`REDUNDANCY_TIERS`]）とは別の集合なので混ぜないこと。
+REDUNDANCY_SOURCE_TIERS = frozenset({"essential", "supporting", "context"})
+
+#: redundancy の Choice の文面。選択肢は前の Unit の本文そのもの（キーは
+#: `u:<添字>`）と「該当なし」（[`REDUNDANCY_NONE`]）。
+#:
+#: **方向は文面で指定する。** 「これより**前**の箇所」であって、対称に
+#: 「重複しているか」ではない。対称に聞くと結論まで拾う（Noul 時代の実測で
+#: 結論の Unit が 0.71 を出し、方向ありに直すと 0.36 へ落ちた）。設計書が
+#: 「**既読内容との** redundancy」と書き、Duggan & Payne の satisficing が
+#: 逐次的なモデルであることと整合する。選択肢を `range(target)` に限っているので
+#: 文面と構造の両方で後ろ向きになる。
+#:
+#: 「同じ話題に触れているだけ・関連しているだけの箇所は当てはまらない」は
+#: [`CONTEXT_CHOICE`] と同じ一文で、Noul 時代の誤判定（同じ案件の別の文を
+#: 0.72〜0.76 で言い直しとした）を狙っている。
+REDUNDANCY_CHOICE = (
+    "「対象」はこの文書の後ろの方にある次の一続きである。\n\n"
+    "――― 対象 ―――\n{target}\n―――――――――\n\n"
+    "選択肢は、対象より**前**にある各部分の本文である。対象が**すでに述べられた"
+    "内容を言い直しているだけで、新しい情報を加えていない**とき、その言い直しの"
+    "元になっている箇所はどれか。\n"
+    "同じ話題に触れているだけ・関連しているだけの箇所は当てはまらない。"
+    "対象がどの箇所の言い直しでもなく新しい情報を加えているなら"
+    "「該当なし」を選ぶこと。"
+)
+
+
+def redundancy_candidates(tiers: list[str], bodies: list[str], target: int) -> list[int]:
+    """`target`（0 始まり）より前で、言い直しの元になれる Unit の添字。
+
+    **語彙で絞らない。** 以前の `redundancy_target` は 2 文字 bigram の重なりの
+    argmax で相手を選んでいたが、候補の多い前方に構造的に寄り、内容を持たない
+    見出しだけの Unit も指した。絞るのは Jev 自身が付けた Tier だけ
+    （[`REDUNDANCY_SOURCE_TIERS`]。[`context_candidates`] と同じ線）。
+    """
+    return [
+        position
+        for position in range(target)
+        if bodies[position].strip() and tiers[position] in REDUNDANCY_SOURCE_TIERS
+    ]
+
+
+def redundancy_choice(
+    bodies: list[str], target: int, pool: list[int], budget: RequestBudget
+) -> tuple[dict, list[int]]:
+    """Choice 1 つ。**予算を超えたら位置が遠い順に落とす。**
+
+    返すのは `(question, 実際に載せた候補)`。[`context_choice`] と同じで、
+    個数ではなくトークンで切る。「該当なし」は常に載る。
+
+    遠い順に落とすのは「近い方が言い直しの元になりやすい」という仮定では
+    **ない** — 業務議事録の言い直しは文書末尾の決定事項リストが本文節を指す
+    ので、遠い相手もある。予算に当たった回数は報告に載せる（`trim`）。
+    """
+    instructions = REDUNDANCY_CHOICE.format(target=bodies[target])
+    kept = list(pool)
+    while kept:
+        criteria = {REDUNDANCY_NONE: REDUNDANCY_NONE_TEXT}
+        criteria.update({f"u:{position}": bodies[position] for position in kept})
+        question = {"type": "choice", "instructions": instructions, "criteria": criteria}
+        if question_tokens(question) <= budget.pair:
+            return question, kept
+        kept.pop(0)
+    return {}, []
+
+
 def redundancy_questions(
-    atoms: list[dict], units: list[list[int]], tiers: list[str]
-) -> dict:
-    """ラウンド 3 の questions のうち redundancy の分。
+    atoms: list[dict], units: list[list[int]], tiers: list[str], budget: RequestBudget
+) -> tuple[dict, dict]:
+    """ラウンド 3 の questions のうち redundancy の分と、絞り込みの記録。
 
-    redundancy は**方向を必ず指定する**。「これより前の箇所ですでに述べられた
-    内容を言い直しているだけか」であって、対称に「重複しているか」と聞いては
-    ならない。実測では対称な文面だと結論の u3 が 0.71 を出し（結論は文書中で
-    何度も触れられるので「重複」に見える）、方向ありへ直すと u3 は 0.36 に落ち、
-    本当の言い直しである u9 が 0.92 になった。
+    SUPPORTING 以上の Unit ごとに **Choice 1 つ**。「この部分が言い直している
+    既出の箇所はどれか」を、先行 Unit の本文と「該当なし」から選ばせる。
+    「該当なし」が選ばれれば冗長ではない — **閾値は無い**（[`REDUNDANCY_NONE`]）。
 
-    これは設計書の「研究的背景」と整合する。Duggan & Payne の satisficing は
-    「読み進めて information gain が落ちたら次へ移る」という**逐次的**なモデル
-    で、設計書も「**既読内容との** redundancy」と書いている。redundancy は
-    既読との相対で決まるので、方向が本質である。
+    `Presupposes`（[`trace_prerequisites`] の段階 2）と同じ形である。あちらも
+    対の Noul が依存ではなく「関連」を測って対称に「はい」を出したのを、Choice
+    で解決した。Noul は孤立した真偽で比較をしないが、Choice は候補を
+    突き合わせて 1 つ返す。
 
     先頭の Unit には聞かない —「これより前」が存在せず、REDUNDANT_WITH の
-    参照先も作れない。
+    参照先も作れない。候補が 0 件の Unit にも聞かない（言い直せる相手が無い
+    ので冗長にはなれない）。
     """
-    questions = {}
-    for number, indices in enumerate(units, start=1):
-        if number == 1 or tiers[number - 1] not in REDUNDANCY_TIERS:
+    bodies = [unit_body(atoms, indices) for indices in units]
+    questions: dict = {}
+    trim = {"asked": 0, "by_budget": 0, "no_candidate": 0}
+    for position, tier in enumerate(tiers):
+        if position == 0 or tier not in REDUNDANCY_TIERS:
             continue
-        questions[f"redundant:u{number}"] = {
-            "type": "noul",
-            "instructions": (
-                "次の部分は、これより**前**の箇所ですでに述べられた内容を"
-                "言い直しているだけで、新しい情報を加えていない。\n\n"
-                f"――― 対象 ―――\n{unit_body(atoms, indices)}\n―――――――――"
-            ),
-        }
-    return questions
-
-
-def words(text: str) -> set[str]:
-    """redundancy の**参照先**を選ぶための語の集合（`annotate-doc.py` と同じ）。
-
-    日本語には分かち書きが無いので 2 文字の連続を語の代わりに使う。
-    """
-    cleaned = "".join(c if c.isalnum() else " " for c in text)
-    tokens = [t for t in cleaned.split() if t not in STOP_WORDS]
-    bag: set[str] = set()
-    for token in tokens:
-        if token.isascii():
-            bag.add(token.lower())
-        else:
-            bag.update(token[i : i + 2] for i in range(max(len(token) - 1, 1)))
-    return bag
-
-
-def overlap(a: set[str], b: set[str]) -> float:
-    """2 つの語集合の重なり（小さい方に対する割合）。"""
-    if not a or not b:
-        return 0.0
-    return len(a & b) / min(len(a), len(b))
-
-
-def redundancy_target(bodies: list[str], number: int) -> str | None:
-    """`number` 番目（1 始まり）の Unit が言い直している**先**を選ぶ。
-
-    Jev の Noul が答えるのは「前に述べられたことの言い直しか」までで、
-    **どの Unit かは答えない**。参照先は語の重なりがいちばん大きい先行 Unit を
-    ローカルに選ぶ。
-
-    設計書の分担で言えば、これは Jev の判断ではなくローカル rule である。
-    なお現在の `policy::keep_order` が見ているのは `is_redundant()`
-    （relations が空でないか）だけで、**参照先の id は実在検査以外に使われて
-    いない** — 選び方が表示に効くようになるのは relation の使い道が増えてから。
-    """
-    bag = words(bodies[number - 1])
-    best_score, best = 0.0, None
-    for earlier in range(1, number):
-        score = overlap(bag, words(bodies[earlier - 1]))
-        if score > best_score:
-            best_score, best = score, f"u{earlier}"
-    return best
+        pool = redundancy_candidates(tiers, bodies, position)
+        if not pool:
+            trim["no_candidate"] += 1
+            continue
+        question, kept = redundancy_choice(bodies, position, pool, budget)
+        if not kept:
+            trim["no_candidate"] += 1
+            continue
+        if len(kept) < len(pool):
+            trim["by_budget"] += 1
+        trim["asked"] += 1
+        questions[f"redundant:u{position + 1}"] = question
+    return questions, trim
 
 
 # ---------------------------------------------------------------------------
@@ -731,22 +771,27 @@ def noul_of(answers: dict, key: str) -> float:
 
 
 def build_units(
-    atoms: list[dict], units: list[list[int]], tiers: list[str], answers: dict
+    atoms: list[dict],
+    units: list[list[int]],
+    tiers: list[str],
+    answers: dict,
+    questions: dict | None = None,
 ) -> list[dict]:
     """ラウンド 2・3 の答えから、プロトコルの `units` を組む。
 
-    `confidence` と `noul` は**捨てず**、各 Unit の `jev` フィールドに記録する
-    （プロトコルは未知のフィールドを拒否しないので akapen 側は無視する）。
-    閾値で判定を倒すことは redundancy 以外では**していない** — 実測で閾値が
-    値の真上に乗り、実行ごとに答えが揺れたため。
+    `questions` はラウンド 3 の question（redundancy の Choice の `criteria` を
+    答えの検査に使う）。`confidence` は**捨てず**、各 Unit の `jev` フィールドに
+    記録する（プロトコルは未知のフィールドを拒否しないので akapen 側は無視
+    する）。**閾値で判定を倒す場所はもう無い** — redundancy も Choice になり、
+    「該当なし」（[`REDUNDANCY_NONE`]）が閾値の代わりをする。
 
-    redundancy を聞いていない Unit（CONTEXT / DETAIL と先頭）は、そもそも
-    REDUNDANT になりえないので、ここを出る時点では `relations` が空になる。
-    **空のまま終わるとは限らない** — context preservation の前提
-    （`PRESUPPOSES`）は核まで決まったあとに [`trace_prerequisites`] が
-    同じ配列へ足す。
+    redundancy を聞いていない Unit（CONTEXT / DETAIL と先頭、候補が無かった
+    もの、予算で送れなかったもの）は、そもそも REDUNDANT になりえないので、
+    ここを出る時点では `relations` が空になる。**空のまま終わるとは限らない** —
+    context preservation の前提（`PRESUPPOSES`）は核まで決まったあとに
+    [`trace_prerequisites`] が同じ配列へ足す。
     """
-    bodies = [unit_body(atoms, indices) for indices in units]
+    questions = questions or {}
     out = []
     for number, indices in enumerate(units, start=1):
         uid = f"u{number}"
@@ -755,14 +800,24 @@ def build_units(
             "tier_confidence": confidence_of(answers, f"tier:{uid}"),
         }
         relations: list[dict] = []
-        if f"redundant:{uid}" in answers:
-            noul = noul_of(answers, f"redundant:{uid}")
-            record["redundancy_noul"] = noul
-            if noul >= REDUNDANCY_THRESHOLD:
-                target = redundancy_target(bodies, number)
+        question = questions.get(f"redundant:{uid}")
+        if question is not None:
+            key = f"redundant:{uid}"
+            choice = choice_of(answers, key, question["criteria"])
+            record["redundancy_choice"] = choice
+            record["redundancy_confidence"] = confidence_of(answers, key)
+            record["redundancy_candidates"] = len(question["criteria"]) - 1
+            probabilities = answer_of(answers, key).get("probabilities")
+            if isinstance(probabilities, dict):
+                got = probabilities.get(REDUNDANCY_NONE)
+                if isinstance(got, (int, float)):
+                    record["redundancy_none_probability"] = float(got)
+            if choice == REDUNDANCY_NONE:
+                record["redundant_with"] = None
+            else:
+                target = f"u{int(choice.split(':')[1]) + 1}"
                 record["redundant_with"] = target
-                if target is not None:
-                    relations.append({"redundant_with": target})
+                relations.append({"redundant_with": target})
         out.append(
             {
                 "id": uid,
@@ -1846,6 +1901,10 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     # ここで送れなかった question は、どちらも**聞かなかった場合と同じ**に
     # 倒れる。redundancy を聞かなければ REDUNDANT にならず、核を聞かなければ
     # Unit 全体が MARKED になる — どちらも既存の安全側の振る舞いである。
+    #
+    # redundancy の Choice は先行 Unit の本文を全部並べるので、context
+    # preservation の段階 2 と同じく文書のどの question よりも大きくなりうる。
+    # 予算に当たったら遠い候補から落とす（[`redundancy_choice`]）。
     provisional = [
         {
             "id": f"u{n}",
@@ -1860,7 +1919,7 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
     # Unit ごとに聞く。
     runs = unit_runs(units, plan)
     run_questions, fixed, scope, handled = plan_run_cores(atoms, provisional, runs, budget)
-    questions = redundancy_questions(atoms, units, tiers)
+    questions, redundancy_trim = redundancy_questions(atoms, units, tiers, budget)
     questions.update(run_questions)
     questions.update(core_questions(atoms, provisional, budget, handled))
     if questions:
@@ -1871,7 +1930,7 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
             scope.pop(key, None)
         answers.update(third)
 
-    built = build_units(atoms, units, tiers, answers)
+    built = build_units(atoms, units, tiers, answers, questions)
     # 節の見出しは構造だけで決まる。Jev は出てこない（[`assign_sections`]）。
     assign_sections(atoms, units, built)
     bodies = [unit_body(atoms, indices) for indices in units]
@@ -1911,6 +1970,7 @@ def annotate(request: dict, model: str, timeout: float) -> dict:
         "rounds": rounds,
         "boundaries": plan,
         "budget": budget.record(),
+        "redundancy": redundancy_trim,
         "context": context_report,
     }
     if unsent:
@@ -1968,7 +2028,7 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
     run_questions, _fixed, _scope, handled = plan_run_cores(
         atoms, as_essential, unit_runs(units, plan), budget
     )
-    third = redundancy_questions(atoms, units, tiers)
+    third, _trim = redundancy_questions(atoms, units, tiers, budget)
     third.update(run_questions)
     third.update(core_questions(atoms, as_essential, budget, handled))
     # ラウンド 4（最初の波だけ）。段階 1 は全 seed に、段階 2 は段階 1 が

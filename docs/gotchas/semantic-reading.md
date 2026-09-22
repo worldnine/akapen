@@ -651,6 +651,37 @@ parsing」）。**似た規則が 2 つあると読まないこと** — `bounda
 
 ---
 
+### Choice に「該当なし」を置いても、Jev は「無い」と言わない — redundancy を Choice 単独にすると冗長が 20 倍になる
+
+`REDUNDANT_WITH` の相手を Jev に選ばせるために、redundancy を「先行 Unit の
+本文＋**該当なし**」の Choice に替えました（2026-09-22。`jev-annotate.py` の
+`redundancy_questions` / `REDUNDANCY_NONE`）。相手の正否は直ります — 業務議事録
+で 7 件中 3 件誤っていた相手が、Choice では文書末尾の決定事項リストが本文節を
+指す形で正しく出ます。
+
+**しかし「該当なし」は閾値の代わりになりませんでした。** 5 文書 × 4 ランで、
+冗長は demo 0 → 2〜3、記事 0 → 6〜8、設計書 0〜1 → 24〜30、議事録 4〜5 →
+22〜24 件。設計書と記事で増えたぶんは中身を見るとほぼ「同じ話題」で、言い直し
+ではありません。`context-preservation.md` 第 2 版が「**Choice は『無い』と言え
+ない**」と書いたのと同じ性質で、選択肢に「無い」を文字で置いても変わりません —
+選択肢が多いほど「該当なし」は個々の候補との一騎打ちになり、どれか 1 つの
+「関連する箇所」に負けます（偽陽性の `p_none` は 0.2〜0.45、真の言い直しは
+0.01〜0.15）。
+
+**閾値を消したいなら primitive を替えるだけでは足りず、「無い」を Noul に
+聞かせる段が要ります。** context preservation が段階 1 の Noul を残している
+のはそのためです。選ばれた対に「前を読んだ人にとって後は新しい情報を加えない
+か」の Noul を 1 つ足すと、偽陽性 123 件のうち 0.5 に届くのは 2 件（最大 0.51）
+になり、真の言い直しは 0.5〜0.9 に残ります（ただし 0.5 の真上に乗るものが
+十数件あります）。数字は
+`examples/semantic/measurements/redundancy.md`。**実装は判断待ちで、いまの
+アダプタは Choice 単独です** — マージ前にここを読むこと。
+
+**確認したこと**: `~/.local/share/akapen/evidence/runs/2026-09-22-redundancy-choice/`
+の `ans/*.after.*.json` で `jev.redundancy_choice` と
+`redundancy_none_probability` を数えたこと。同 `noulgate/*.json` に対の Noul の
+4 ラン。`docs/design/jev.md`「redundancy の question は方向を持つ」。
+
 ### Budget の下限は「数字の約束」であって「集合の約束」ではない
 
 `policy::floor` は一段目（核とその閉包）のバイト数 ÷ 全体を**切り上げた**
