@@ -120,7 +120,9 @@ fn main() -> Result<()> {
                  \x20                   Exclusive with --semantic. The first press of\n\
                  \x20                   a READ key starts the analysis (opening a file\n\
                  \x20                   does not), and answers are cached per document\n\
-                 \x20                   under $XDG_CACHE_HOME/akapen/semantic\n\
+                 \x20                   under $XDG_CACHE_HOME/akapen/semantic.\n\
+                 \x20                   $AKAPEN_SEMANTIC_CMD is the default when\n\
+                 \x20                   this flag is absent (the flag wins)\n\
                  \x20 --semantic-mode <m>  marks|budget (default marks). `marks`\n\
                  \x20                   drops DIM entirely: pick a question (m/M, or\n\
                  \x20                   / to type one) and the passages that answer\n\

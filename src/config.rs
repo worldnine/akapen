@@ -183,6 +183,12 @@ pub struct Config {
     /// document is not a configuration, it is a question about which
     /// one wins.
     ///
+    /// フラグが無いときは環境変数 [`SEMANTIC_CMD_ENV`] を既定にする
+    /// （[`Config::parse_with_env`]）。**排他はそのまま効く** —— 環境変数で
+    /// 設定していることを忘れて `--semantic <fixture>` を渡したときに
+    /// 黙ってどちらかが勝つのは、フラグ 2 つのときと同じで「どちらが勝つか」
+    /// という問いであり、設定ではない。
+    ///
     /// The command is NOT run at startup — it runs once a document is
     /// on screen, on its own thread, because a process launch plus a
     /// network round trip does not return within a frame (see
@@ -277,13 +283,39 @@ fn parse_decorations(json: &str) -> Result<Vec<Decoration>> {
         .collect()
 }
 
+/// `--semantic-cmd` を省いたときの既定を持つ環境変数。
+///
+/// `~/.zshrc` に 1 行書けば `akapen foo.md` が**どこからでも** marks で開く。
+/// 意味層はフラグを書いたときだけ生えるようになっていて、それは「文書の種類を
+/// 推定しない」（[`Config::semantic_mode`]）の裏返しだったが、**判定器を選ぶ
+/// のは文書ごとの判断ではなく環境の設定**なので、環境変数の方が形に合う。
+pub const SEMANTIC_CMD_ENV: &str = "AKAPEN_SEMANTIC_CMD";
+
 impl Config {
-    /// Parse the process arguments (after argv[0]).
+    /// 引数だけで解釈する（**環境は読まない**）。テスト用。
+    ///
+    /// 環境変数の既定が要るのは [`Config::from_env`] の側だけである。
+    /// ここが `std::env::var` を読むと、`AKAPEN_SEMANTIC_CMD` を export して
+    /// いる開発者のシェルでだけテストが落ちる（`set_var` がテスト間に漏れる
+    /// のと同じ穴の、入口が違うだけのもの）。
+    #[cfg(test)]
+    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Action> {
+        Self::parse_with_env(args, |_| None)
+    }
+
+    /// Parse the process arguments (after argv[0]) with an environment.
     ///
     /// All non-flag tokens are files; `--send-cmd`/`--theme`/`--ime` take a
     /// value; `-h`/`--help` and `-V`/`--version` short-circuit. At least
     /// one file is required.
-    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Action> {
+    ///
+    /// `env` は環境変数 1 つを引く関数である。**実環境を読むのは
+    /// [`Config::from_env`] だけ**で、テストは好きな値を注入できる。
+    pub fn parse_with_env<I, F>(args: I, env: F) -> Result<Action>
+    where
+        I: IntoIterator<Item = String>,
+        F: Fn(&str) -> Option<String>,
+    {
         let mut files: Vec<PathBuf> = Vec::new();
         let mut send_cmd: Option<String> = None;
         let mut send_agent = false;
@@ -359,6 +391,17 @@ impl Config {
                 _ => {} // unknown flags ignored, like reviewr
             }
         }
+        // `--semantic-cmd` を書いていなければ環境変数を既定にする。
+        // **フラグが勝つ。** 空・空白だけは「設定していない」と同じに扱う
+        // （`export AKAPEN_SEMANTIC_CMD=` で一時的に外せる）。
+        let mut semantic_cmd_from_env = false;
+        if semantic_cmd.is_none()
+            && let Some(v) = env(SEMANTIC_CMD_ENV)
+            && !v.trim().is_empty()
+        {
+            semantic_cmd = Some(v);
+            semantic_cmd_from_env = true;
+        }
         if files.is_empty() {
             bail!(
                 "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>] [--semantic-mode <marks|budget>]"
@@ -371,6 +414,14 @@ impl Config {
         // fixture and the command would each claim the same Atom list,
         // and whichever lost would still be what the user asked for.
         if semantic.is_some() && semantic_cmd.is_some() {
+            // 出どころを添える。環境変数由来のときは、打った覚えのない
+            // `--semantic-cmd` を名指しされることになるので、どこで設定した
+            // のかが言えないとユーザーは自分の shell を疑うところから始める。
+            if semantic_cmd_from_env {
+                bail!(
+                    "--semantic and --semantic-cmd are mutually exclusive (--semantic-cmd from {SEMANTIC_CMD_ENV})"
+                );
+            }
             bail!("--semantic and --semantic-cmd are mutually exclusive");
         }
         // A mode without a layer is a flag that does nothing. Say so
@@ -412,9 +463,9 @@ impl Config {
         })))
     }
 
-    /// Parse from the real process arguments.
+    /// Parse from the real process arguments **and the real environment**.
     pub fn from_env() -> Result<Action> {
-        Self::parse(std::env::args().skip(1))
+        Self::parse_with_env(std::env::args().skip(1), |name| std::env::var(name).ok())
     }
 }
 
@@ -658,6 +709,95 @@ mod tests {
         .is_ok());
         assert!(
             Config::parse(["x.md", "--semantic", "d.json"].iter().map(|s| s.to_string())).is_ok()
+        );
+    }
+
+    /// 環境変数 1 つだけを持つ `env` を作る。
+    fn one_var(name: &'static str, value: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |asked| (asked == name).then(|| value.to_string())
+    }
+
+    fn parse_with(args: &[&str], env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Action> {
+        Config::parse_with_env(args.iter().map(|s| (*s).to_string()), env)
+    }
+
+    #[test]
+    fn the_semantic_cmd_env_is_the_default_and_the_flag_wins() {
+        use super::SEMANTIC_CMD_ENV;
+        // 何も無ければ層は生えない —— `parse` は環境を読まないので、
+        // このテストは `AKAPEN_SEMANTIC_CMD` を export している端末でも
+        // 同じ答えを出す。
+        assert!(cfg(&parse(&["x.md"])).semantic_cmd.is_none());
+
+        // 環境変数が既定になる（`akapen foo.md` がそのまま marks で開く）。
+        let action = parse_with(&["x.md"], one_var(SEMANTIC_CMD_ENV, "jev-annotate")).unwrap();
+        assert_eq!(cfg(&action).semantic_cmd.as_deref(), Some("jev-annotate"));
+
+        // 書いてあるフラグが勝つ。
+        let action = parse_with(
+            &["x.md", "--semantic-cmd", "from-the-flag"],
+            one_var(SEMANTIC_CMD_ENV, "jev-annotate"),
+        )
+        .unwrap();
+        assert_eq!(cfg(&action).semantic_cmd.as_deref(), Some("from-the-flag"));
+
+        // 空・空白だけは「設定していない」と同じ（一時的に外せる）。
+        for blank in ["", "   "] {
+            let action =
+                Config::parse_with_env(["x.md"].iter().map(|s| (*s).to_string()), |asked| {
+                    (asked == SEMANTIC_CMD_ENV).then(|| blank.to_string())
+                })
+                .unwrap();
+            assert!(cfg(&action).semantic_cmd.is_none(), "{blank:?}");
+        }
+
+        // 他の環境変数には反応しない。
+        let action = parse_with(&["x.md"], one_var("AKAPEN_CACHE_DIR", "/tmp/x")).unwrap();
+        assert!(cfg(&action).semantic_cmd.is_none());
+    }
+
+    #[test]
+    fn the_env_default_still_collides_with_a_fixture_and_says_where_it_came_from() {
+        use super::SEMANTIC_CMD_ENV;
+        // 排他は環境変数由来でも効く。ただし打った覚えのない
+        // `--semantic-cmd` を名指しされる側なので、出どころを添える。
+        let err = match parse_with(
+            &["x.md", "--semantic", "d.json"],
+            one_var(SEMANTIC_CMD_ENV, "jev-annotate"),
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("環境変数由来でも併用はエラーであるべき"),
+        };
+        assert!(err.contains("mutually exclusive"), "{err}");
+        assert!(err.contains(SEMANTIC_CMD_ENV), "{err}");
+
+        // フラグで書いたときは出どころを言わない（言うことが無い）。
+        let err = match parse_with(
+            &["x.md", "--semantic", "d.json", "--semantic-cmd", "c"],
+            |_| None,
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("併用はエラーであるべき"),
+        };
+        assert!(!err.contains(SEMANTIC_CMD_ENV), "{err}");
+    }
+
+    #[test]
+    fn the_env_default_counts_as_a_layer_for_the_mode_and_questions_checks() {
+        use super::SEMANTIC_CMD_ENV;
+        // 「層が無いのにモードを書いた」の検査は、環境変数で層があるなら
+        // 通さなければならない。通さないと `--semantic-mode budget` が
+        // `~/.zshrc` の 1 行のせいでだけ落ちる。
+        assert!(
+            parse_with(
+                &["x.md", "--semantic-mode", "budget"],
+                one_var(SEMANTIC_CMD_ENV, "jev-annotate"),
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_with(&["x.md", "--semantic-mode", "budget"], |_| None).is_err(),
+            "層が無いままモードだけ書いたら今までどおり止まる"
         );
     }
 

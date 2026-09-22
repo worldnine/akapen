@@ -143,6 +143,24 @@ L1/42 · READ 100% · analyzing…
 
 `--semantic` と `--semantic-cmd` は排他である。
 
+### 毎回打たない（`AKAPEN_SEMANTIC_CMD`）
+
+`--semantic-cmd` を省いたときは、環境変数 `AKAPEN_SEMANTIC_CMD` が既定になる。
+
+```sh
+# ~/.zshrc に 1 行（パスは絶対で）
+export AKAPEN_SEMANTIC_CMD='python3 /abs/path/to/akapen/examples/semantic/jev-annotate.py'
+```
+
+これで `akapen foo.md` が**どこからでも** marks で開く。フラグを書けばフラグが
+勝つ。`--semantic <fixture>` と同時に指定すると今までどおり排他のエラーになり、
+そのときは `(--semantic-cmd from AKAPEN_SEMANTIC_CMD)` と出どころが添えられる。
+空にすれば（`export AKAPEN_SEMANTIC_CMD=`）一時的に外せる。
+
+**キャッシュはコマンド行ごとに分かれる。** 引き当てに使うのは
+`sha256(コマンド行そのもの)` なので、相対パスで測ったときのキャッシュは絶対パス
+では当たらない（`akapen --semantic-cache-clear` で消せる）。
+
 ### 自分のコマンドを書く
 
 stdin から 1 つの JSON を読み、stdout へ 1 つの JSON を書くだけでよい。
@@ -163,7 +181,7 @@ question を state に対して並列評価して構造化された値を返す�
 primitive と呼び出し方は `docs/design/jev.md` を参照。
 
 API キーの管理は akapen の責務ではない — コマンドが自分の環境で解決する
-（Jev なら `TYPESAFE_API_KEY`）。
+（Jev なら `TYPESAFE_API_KEY`、無ければ macOS のキーチェーン）。
 
 ## ファイル
 
@@ -204,27 +222,29 @@ fixture とは独立している。
 （TypeSafe の System One モデル。**LLM ではない** — `docs/jev.md`）へ委譲する。
 
 ```sh
-TYPESAFE_API_KEY="$(security find-generic-password -s typesafe-jev -w)" \
-  akapen examples/semantic/demo.md \
+akapen examples/semantic/demo.md \
   --semantic-cmd 'python3 examples/semantic/jev-annotate.py'
 ```
 
-### 鍵は環境変数 `TYPESAFE_API_KEY` だけ
+### 鍵は `TYPESAFE_API_KEY`、無ければ macOS のキーチェーン
 
-スクリプトはキーチェーンも `op` も見ない。**起動時に 1 回取り出して環境変数で
-渡す**のが正しい形である。理由は 2 つ。akapen は再解析のたびにこのコマンドを
-起動し直すので毎回 `security` や `op read` を叩くのは無駄（`op` なら生体認証が
-毎回出る）。そして akapen は OSS なので、macOS 固有の手段を埋めると他 OS で
-動かない。
-
-取り出し方はどれでもよい。
+macOS なら**一度保存するだけ**でよい。
 
 ```sh
-# macOS キーチェーン
-export TYPESAFE_API_KEY="$(security find-generic-password -s typesafe-jev -w)"
+security add-generic-password -a "$USER" -s typesafe-jev -w
+```
 
+（`-w` で鍵を聞かれる。履歴に残さないため、引数には書かない。）
+
+以後スクリプトは `TYPESAFE_API_KEY` を見て、無ければこの項目を読む。1 プロセス
+のあいだ鍵は 1 回だけ取り出す。
+
+**環境変数が先**で、そこが普遍の逃げ道である。mac 固有の読み方を埋めてよいのは
+そのためで、他 OS の人は今までどおり export すれば済む。
+
+```sh
 # 1Password（akapen のプロセスに限って渡す）
-op run --env-file=.env -- akapen doc.md --semantic-cmd '…'
+op run --env-file=.env -- akapen doc.md
 
 # pass
 export TYPESAFE_API_KEY="$(pass show typesafe/api-key)"
@@ -233,8 +253,8 @@ export TYPESAFE_API_KEY="$(pass show typesafe/api-key)"
 export TYPESAFE_API_KEY=sk-…
 ```
 
-未設定なら非ゼロ終了し、ステータス行に何をすればよいかが 1 行で出る。鍵は
-stdout にも stderr にも出さない。`TYPESAFE_BASE_URL` / `TYPESAFE_DEFAULT_MODEL`
+どちらも無ければ非ゼロ終了し、ステータス行に何をすればよいかが 1 行で出る
+（保存のコマンドもその 1 行に入る）。鍵は stdout にも stderr にも出さない。`TYPESAFE_BASE_URL` / `TYPESAFE_DEFAULT_MODEL`
 も SDK と同じ名前で効く（`--model` / `--timeout` でも指定できる）。
 
 ### 3 ラウンド構成
@@ -394,8 +414,8 @@ python3 -m unittest discover -s examples/semantic -p 'test_*.py'
 ```
 
 見ているのは構造ルール / フィクスチャからの Unit 組み立て / `--dry-run` が送る
-リクエストの形 / `TYPESAFE_API_KEY` 未設定時のエラー経路 / HTTP エラーの文面の
-5 つで、判定の質は [`measurements/`](measurements/) の実測の表で見る。
+リクエストの形 / 鍵の取り出し（環境変数 → キーチェーン → 停止）/ HTTP エラーの
+文面の 5 つで、判定の質は [`measurements/`](measurements/) の実測の表で見る。
 
 ### 自分で測る
 
@@ -406,7 +426,7 @@ python3 -m unittest discover -s examples/semantic -p 'test_*.py'
 
 ```sh
 cargo run -p semantic-reading --example dump-request -- doc.md > request.json
-TYPESAFE_API_KEY=... python3 examples/semantic/jev-annotate.py --timeout 120 \
+python3 examples/semantic/jev-annotate.py --timeout 120 \
   < request.json > answer.json
 jq '.jev.rounds' answer.json
 cargo run -p semantic-reading --example decorate-report -- doc.md answer.json
