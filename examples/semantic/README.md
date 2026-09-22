@@ -460,6 +460,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | `REDUNDANT_WITH` の相手を Jev に Choice で選ばせたとき — 議事録の相手の正否、他の 4 文書で冗長が**増えた**こと（第 1 版）と、**選ばれた対に Noul を 1 つ足して閾値を 0.7 から 0.5 へ置き換えた第 2 版**（5 文書 × 4 ラン） | [`measurements/redundancy.md`](measurements/redundancy.md) |
 | 冗長な対の負けを位置ではなく Tier と長さで決め、核は奪わないようにしたときの前後（5 文書 × 4 ラン × 前後 × 9 予算）。対ごとの勝敗、MARKED と下限の変化、(b) と (c) が打ち消し合う範囲まで | [`measurements/redundancy-loser.md`](measurements/redundancy-loser.md) |
 | 定型プロンプト 8 本（要点 / 判断が要る / 決まったこと / 決まっていないこと / 数字と日付 ＋ 自由入力 3）を Unit ごとの Noul で聞いたとき（5 文書 × 8 問 × 2 ラン、コードは変えていない）。妥当性・スコアの分布・既存 ESSENTIAL との一致・費用・正規表現との重なり・ラン間の揺れ | [`measurements/marks-presets.md`](measurements/marks-presets.md) |
+| `PROSE_KINDS` に `block_quote` を足したとき（核のラウンドだけ前後 2 ラン、5 文書、marks と DIM 版の両方）。引用を含む Unit の核、question が増えないこと、揺れの床、実機で光った引用の DarkNeon でのコントラスト | [`measurements/core-selection.md`](measurements/core-selection.md)「引用（`block_quote`）を核の候補に入れる」 |
 | **marks モードを実装して**実機の議事録で測ったとき（定型 4 本 ＋ 自由入力 1 本）。節ごとの妥当性が段 1 と小数第 2 位まで並ぶこと、つまみの本数、1 問 0.31 円・2.2 秒、境界のキャッシュが question を 30 % 減らすこと、DIM 版が従来どおりであること | [`measurements/marks-mode.md`](measurements/marks-mode.md) |
 
 **バイト数と Unit 数は分割前の値。** この README と `docs/gotchas.md` は
