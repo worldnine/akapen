@@ -27,18 +27,6 @@ impl Atom {
     pub fn new(range: Range<usize>, kind: AtomKind) -> Self {
         Self { range, kind }
     }
-
-    /// Atom が占める source のバイト数。「文書のどれだけが光っているか」を
-    /// 数えるときの単位である（`marks-report` の例）。
-    /// 範囲が逆転している場合は 0（validate 前の壊れた入力でも panic しない）。
-    pub fn len(&self) -> usize {
-        self.range.end.saturating_sub(self.range.start)
-    }
-
-    /// 長さ 0 の Atom か。
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 /// Atom の構文上の種別。
@@ -96,16 +84,6 @@ impl From<usize> for AtomIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn len_is_bytes_and_reversed_ranges_are_zero() {
-        assert_eq!(Atom::new(10..24, AtomKind::Sentence).len(), 14);
-        assert!(!Atom::new(10..24, AtomKind::Sentence).is_empty());
-        assert!(Atom::new(24..24, AtomKind::Sentence).is_empty());
-        // validate 前の壊れた入力（範囲の逆転）でも panic しない。
-        let reversed = std::ops::Range { start: 24, end: 10 };
-        assert_eq!(Atom::new(reversed, AtomKind::Sentence).len(), 0);
-    }
 
     #[test]
     fn atom_kind_round_trips_as_snake_case() {

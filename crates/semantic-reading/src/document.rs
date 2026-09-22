@@ -7,9 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::atom::{Atom, AtomIndex};
+use crate::atom::Atom;
 use crate::error::Error;
-use crate::unit::{SemanticUnit, UnitId};
+use crate::unit::SemanticUnit;
 
 /// 1 つの文書についての semantic annotation 一式。
 ///
@@ -58,21 +58,6 @@ impl SemanticDocument {
     /// 当てられる」ではない。照合するかどうかはクライアントが決める。
     pub fn source_digest(&self) -> Option<&str> {
         self.source_sha256.as_deref()
-    }
-
-    /// 添字で Atom を引く。範囲外なら `None`。
-    pub fn atom(&self, index: AtomIndex) -> Option<&Atom> {
-        self.atoms.get(index.0)
-    }
-
-    /// 識別子で Unit を引く。
-    pub fn unit(&self, id: &UnitId) -> Option<&SemanticUnit> {
-        self.units.iter().find(|unit| &unit.id == id)
-    }
-
-    /// Atom も Unit も無いか。
-    pub fn is_empty(&self) -> bool {
-        self.atoms.is_empty() && self.units.is_empty()
     }
 
     /// 文書としての辻褄を検査する。
@@ -144,7 +129,8 @@ impl SemanticDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atom::AtomKind;
+    use crate::atom::{AtomIndex, AtomKind};
+    use crate::unit::UnitId;
 
     fn doc() -> SemanticDocument {
         SemanticDocument::new(
@@ -162,16 +148,6 @@ mod tests {
     #[test]
     fn a_well_formed_document_validates() {
         assert!(doc().validate().is_ok());
-        assert!(SemanticDocument::default().is_empty());
-    }
-
-    #[test]
-    fn lookups_go_through_index_and_id() {
-        let doc = doc();
-        assert_eq!(doc.atom(AtomIndex(1)).unwrap().kind, AtomKind::Sentence);
-        assert!(doc.atom(AtomIndex(9)).is_none());
-        assert_eq!(doc.unit(&UnitId::from("u2")).unwrap().atoms, [AtomIndex(1)]);
-        assert!(doc.unit(&UnitId::from("nope")).is_none());
     }
 
     #[test]
