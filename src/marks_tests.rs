@@ -896,6 +896,16 @@ fn the_readout_steps_aside_in_the_past() {
     let past = crate::chrome::footer_metrics(&app, 120);
     assert!(past.readout.is_none(), "過去の世代で読み出しが出ている");
     assert_eq!(past.flash_w, 0, "覆われた行で演出が走る");
+
+    // **立てた演出は 1 枚描いた時点で捨てられる。** 描かずに見送ると
+    // tachyonfx のタイマーが進まず、`done()` にならないまま
+    // `has_active_fx` が速いティックを掴み続ける（`crate::draw`）。
+    app.start_readout_flash();
+    assert!(app.readout_fx.is_some(), "演出が立っていない");
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    assert!(app.readout_fx.is_none(), "面の無い演出が残った");
     // マーカーは残る（`refresh_semantic_decorations` は通っていない）。
     assert!(!app.semantic_decorations.is_empty(), "マーカーまで消えた");
     // 余った幅はキー案内に回る。

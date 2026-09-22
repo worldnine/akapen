@@ -4184,10 +4184,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     //
     // timeline bar が出ている間は走らせない。バーがフッタを覆っている
     // ので、光らせても見えるのはバーの字である。
-    if app.config.fx
-        && !timeline_on
-        && app.readout_fx.as_ref().is_some_and(|fx| !fx.done())
-    {
+    if app.config.fx && app.readout_fx.as_ref().is_some_and(|fx| !fx.done()) {
         let m = crate::chrome::footer_metrics(app, f.area().width);
         let rect = Rect {
             x: m.flash_x,
@@ -4195,9 +4192,15 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
             width: m.flash_w,
             height: 1,
         };
-        if let Some(effect) = app.readout_fx.as_mut()
-            && rect.width > 0
-        {
+        if timeline_on || rect.width == 0 {
+            // **面が無いときは捨てる。描かないのではない。** tachyonfx の
+            // タイマーは `render_effect` の中でしか進まないので、描くのを
+            // 見送ると演出は永遠に `done()` にならない。すると下の後始末も
+            // 走らず、`App::has_active_fx` が旗を立てたままになって
+            // **イベントループが速いティックを掴み続ける**。NOW へ戻った
+            // 瞬間に何秒も前のフラッシュが再生される、というおまけも付く。
+            app.readout_fx = None;
+        } else if let Some(effect) = app.readout_fx.as_mut() {
             f.render_effect(effect, rect, last_tick);
         }
     }

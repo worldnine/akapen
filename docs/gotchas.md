@@ -41,6 +41,8 @@
 - カーソル行の MARKED は帯に隠れる — 「1 本だけ琥珀が乗らない」に見える
 - テーマの highlight scope 尊重は、一度やって落とした
 - `scope_style` はアルファを捨てる — DarkNeon の引用とインラインコードが読めない
+- 演出の立っている 1 枚目には琥珀が無い — テストが「マークが消えた」と言う
+- **名前付きの色を塗ったセルは tachyonfx の演出が素通りする** — `lerp_color` は RGB 同士でしか混ぜない
 
 ### [Semantic Reading Layer](gotchas/semantic-reading.md)
 
