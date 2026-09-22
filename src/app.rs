@@ -453,7 +453,7 @@ pub(crate) struct App {
     /// 定型を巡っている位置（`m` の環）。自由入力のあとも、ここから続く。
     pub(crate) marks_preset: usize,
     /// **つまみ** — 上から何 % の Unit を光らせるか（1..=100、既定 20）。
-    /// Reading Budget と同じく読む側の好みなので、文書をまたいで残る。
+    /// 読む側の好みなので、文書をまたいで残る。
     pub(crate) marks_share: u8,
     /// composer が**コメントではなく問いの入力**に使われているか（`/`）。
     ///

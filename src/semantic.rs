@@ -44,7 +44,7 @@
 //! # 同じ文書は二度解析しない
 //!
 //! [`crate::semantic_cache::SemanticCache`] が `--semantic-cmd` の答えを
-//! `source_sha256` で引ける形で残す。開き直し・再起動・READ の操作は 0 円で、
+//! `source_sha256` で引ける形で残す。開き直し・再起動・つまみの操作は 0 円で、
 //! 費用が発生するのは文書が変わったときだけになる。`--semantic` 経路は
 //! 通らない（そちらに費用が無い）。
 //!
@@ -238,21 +238,24 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 /// 置ける。
 ///
 /// ```text
-/// stdin   {"version":1,"source":"…","atoms":[{"index":0,…}]}
-/// stdout  {"version":1,"units":[{"id":"u1","atoms":[0,1],"reading_tier":"essential",
-///                                  "core_atoms":[1]}]}
+/// stdin   {"version":1,"source":"…","question":{"id":"essential",…},
+///          "atoms":[{"index":0,…}]}
+/// stdout  {"version":1,"question":"essential",
+///          "units":[{"id":"u1","atoms":[0,1],"score":0.94,"core_atoms":[1]}]}
 /// ```
+///
+/// `score` は「いまの問いにどれだけ答えているか」（0.0〜1.0）。持たない Unit は
+/// 光らない。
 ///
 /// `core_atoms` は任意で、「この Unit の中で、ここだけ読めば要点が取れる」
 /// と判定器が選んだ Atom である。MARKED をそこだけに絞るために
-/// [`policy::decorate`] が読む。**3 値である** — 省けば従来どおり Unit 全体が
-/// MARKED、`[]` なら「核を持たない」でその Unit は MARKED にならない、
-/// `[i]` なら `i` だけが MARKED（`protocol.rs` の「`core_atoms` は 3 値」）。
+/// [`marks::mark`] が読む。**3 値である** — 省けば Unit 全体が MARKED、
+/// `[]` なら「核を持たない」でその Unit は MARKED にならない、`[i]` なら
+/// `i` だけが MARKED（`protocol.rs` の「`core_atoms` は 3 値」）。
 ///
 /// `section_of` も任意で、その Unit が属する節の見出し Unit を指す。
-/// 節に中身が残っているのに見出しだけ沈む、を防ぐために
-/// [`policy::decorate`] が読む（`policy.rs` の「見出しは中身に付いてくる」）。
-/// **Jev の判定ではなく構文から決まる値**なので `relations` には入れない。
+/// **この層に読み手は居ない**（`crates/semantic-reading/src/unit.rs`）—
+/// 構文から決まる値をワイヤに載せているだけである。
 ///
 /// # コマンドは range を返さない
 ///
@@ -281,7 +284,7 @@ const RESPONSE_LIMIT: usize = 16 * 1024 * 1024;
 ///
 /// [`SemanticCache`] を持っていれば、コマンドを起こす前にディスクを引く。
 /// 当たれば**プロセスも起きず、ネットワークにも出ない** — 開き直し・再起動・
-/// READ の上げ下げは 0 円になる。費用が発生するのは文書が変わったときだけで
+/// つまみの上げ下げは 0 円になる。費用が発生するのは文書か問いが変わったときだけで
 /// ある（`docs/gotchas/open-questions.md` の 1 番が待っていた実測が
 /// 2026-09-22 に出た）。
 ///
@@ -312,8 +315,8 @@ impl CommandProvider {
         }
     }
 
-    /// marks モードの問いを載せる（`docs/design/marks-only-and-review-mode.md`
-    /// 0 節）。載っていなければ DIM 版の解析になる。
+    /// 問いを載せる。**載っていない要求は判定器が明確なエラーで断る**
+    /// （問いを持たない解析はこの層に無い）。
     ///
     /// **問いは provider の状態である。** `Provider::analyze` の引数は
     /// `source` だけなので、問いを渡す口がそこに無い — trait を変えると
@@ -366,9 +369,9 @@ impl Provider for CommandProvider {
         let key = asked.map(|q| q.text.as_str());
         if let Some(cache) = self.cache.as_ref()
             && let Some(document) = match key {
-                // marks モード: 問いも鍵の一部。
+                // 問いも鍵の一部である。
                 Some(question) => cache.get_asking(&self.cmd, source, Some(question)),
-                // DIM 版: **この経路は 1 ビットも変わっていない。**
+                // 問いの無い要求（`dump-request` 相当）。実運用では通らない。
                 None => cache.get(&self.cmd, source),
             }
         {
@@ -435,7 +438,7 @@ pub(crate) enum SemanticSource {
 /// [`crate::config::Config::parse`] が弾いている（ここへは来ない）。
 ///
 /// `Ok(None)` は「この層は存在しない」。そのとき akapen は改修前と
-/// **完全に同じ**挙動になる — READ の読み出しも、Budget のキーも、
+/// **完全に同じ**挙動になる — 読み出しも、つまみのキーも、
 /// `?` ヘルプの行も、警告の 1 つも出ない（[`App::semantic_enabled`]）。
 ///
 /// [`App::semantic_enabled`]: crate::app::App::semantic_enabled
@@ -634,7 +637,8 @@ mod tests {
         std::fs::read(counter).map(|bytes| bytes.len()).unwrap_or(0)
     }
 
-    const ONE_UNIT: &str = r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"}]}"#;
+    const ONE_UNIT: &str =
+        r#"{"version":1,"units":[{"id":"u1","atoms":[0],"score":0.9,"core_atoms":[0]}]}"#;
 
     fn demo() -> (String, SemanticDocument) {
         let source = std::fs::read_to_string(DEMO_MD).unwrap();
@@ -753,7 +757,7 @@ mod tests {
         assert!(document.validate().is_ok());
     }
 
-    /// demo.json が demo.md の今の中身を指していること。生成スクリプトを
+    /// fixture が demo.md の今の中身を指していること。生成スクリプトを
     /// 走らせ忘れたまま demo.md を触ると、ここで落ちる。
     #[test]
     fn the_demo_fixture_names_the_current_demo_md() {
@@ -763,7 +767,7 @@ mod tests {
         assert_eq!(
             document.source_digest(),
             Some(source_digest(&source).as_str()),
-            "demo.md を編集したら examples/semantic/build-demo-json.py を走らせ直すこと"
+            "demo.md を編集したら examples/semantic/build-demo-marks-json.py を走らせ直すこと"
         );
     }
 
@@ -901,7 +905,7 @@ mod tests {
     fn a_command_cannot_move_a_range_even_if_it_tries() {
         let source = "# 見出し\n\n本文です。\n";
         let document = echoing(
-            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential","range":{"start":9999,"end":99999}}]}"#,
+            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"score":0.9,"range":{"start":9999,"end":99999}}]}"#,
         )
         .analyze(source)
         .unwrap();
@@ -1120,7 +1124,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// **これが機能の全部である。** 同じ文書を 2 回解析しても、外部コマンドは
-    /// 1 回しか起きない。開き直し・再起動・READ の操作が 0 円になるのは
+    /// 1 回しか起きない。開き直し・再起動・つまみの操作が 0 円になるのは
     /// これによる。
     #[test]
     fn the_same_document_is_analysed_once() {

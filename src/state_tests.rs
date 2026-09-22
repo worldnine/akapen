@@ -58,9 +58,8 @@ use crate::comment::Selection;
 
     /// A fresh app over a temp file with `n` lines ("line1"..), in `mode`.
     ///
-    /// **`--semantic-mode budget` を明示する。** 既定は marks になったが
-    /// （2026-09-22）、この下のセマンティクスのテストは DIM 版の READ を
-    /// 見ている。marks のテストは `crate::marks_tests` の側にある。
+    /// 意味層のテストは `crate::marks_tests` の側にもある（あちらは
+    /// fixture から組み立てた App で投影そのものを見る）。
     fn make_app(n: usize, mode: Mode) -> App {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
@@ -6906,7 +6905,7 @@ fn a_slow_analysis_started_first_never_overwrites_a_newer_one() {
     // 応答は「Atom 0 番だけの Unit 1 つ」。id で、どちらの答えかが分かる。
     let cmd = "input=$(cat); \
         case \"$input\" in *SLOWDOWN*) sleep 1; id=slow ;; *) id=fast ;; esac; \
-        printf '{\"version\":1,\"units\":[{\"id\":\"%s\",\"atoms\":[0],\"reading_tier\":\"essential\"}]}' \"$id\"";
+        printf '{\"version\":1,\"units\":[{\"id\":\"%s\",\"atoms\":[0],\"score\":0.9}]}' \"$id\"";
     install_semantic_command(&mut app, cmd);
 
     // 文書 A（遅い方）。

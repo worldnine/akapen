@@ -671,7 +671,7 @@ class CoreBudgetTest(unittest.TestCase):
 
 
 class DryRunTest(unittest.TestCase):
-    """送るリクエストの形。実際の demo.md / demo.json を材料にする。"""
+    """送るリクエストの形。実際の demo.md / demo-marks.json を材料にする。"""
 
     @classmethod
     def setUpClass(cls):

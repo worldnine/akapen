@@ -786,13 +786,10 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
                 jump_review_mark(app, if bracket == ']' { 1 } else { -1 });
                 return;
             }
-            // `]m` / `[m`: 次・前のマーク行へ。**marks モードでだけ chord に
-            // なる**（`crate::keys::MARK_JUMP`）。budget モードや層の無い
-            // セッションでは下の `_` に落ちて、`]` の既定（ファイル切替）に
-            // なる — 使えない chord を黙って呑み込まないため。
+            // `]m` / `[m`: 次・前のマーク行へ（`crate::keys::MARK_JUMP`）。
             //
-            // 代償は marks モードにある: `]` のあとの `m` は「ファイル
-            // 切替 ＋ 問いの popup」ではなくジャンプになる。popup は `]` を
+            // 代償は `]` のあとの `m` が「ファイル切替 ＋ 問いの popup」では
+            // なくジャンプになること。popup は `]` を
             // 挟まずに `m` を打てば開く。
             KeyCode::Char(crate::keys::MARK_JUMP) if modifiers.is_empty() => {
                 app.pending_chord = None;
@@ -2599,8 +2596,8 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         KeyCode::F(7) => jump_review_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
-        // Reading Budget (only with `--semantic`): `-`/`+` move one
-        // point, `<`/`>` ten. `=` is the unshifted alias for `+`, the
+        // The knob (only with `--semantic`): `-`/`+` move one point,
+        // `<`/`>` ten. `=` is the unshifted alias for `+`, the
         // convention every zoom control uses. The four keys were free on
         // BOTH maps (view and source) before this — nothing else in
         // akapen binds a punctuation key except `]`/`[` and `?`.
@@ -2869,28 +2866,7 @@ fn active_review_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
     )
 }
 
-/// Move the Reading Budget (`-`/`+`, `<`/`>`, in both the rendered
-/// view and source mode — the decoration layer paints in both).
-///
-/// **The whole of the budget key path.** After the first press it
-/// reaches [`App::nudge_reading_budget`] and stops there: no parse, no
-/// render, no `Provider::analyze`. The new percentage is read off the
-/// status line rather than toasted — the point of a 1 % step is that you
-/// hold the key, and a toast per step would strobe.
-///
-/// **遅延の起点はここである。** `--semantic-cmd` のセッションでは、この
-/// キーの**最初の 1 打**が [`App::arm_semantic_layer`] を通って解析を
-/// 始める（`docs/design/semantic-reading-layer.md`「遅延」）。それまで
-/// 外部コマンドは 1 度も起きず、素で読むだけの文書に 1 回分の解析費用
-/// （業務議事録で約 5 円）を払わない。2 度目以降の文書は、変わっていなければ
-/// キャッシュに当たるので 0 円である。
-///
-/// その 1 打は Budget も動かす — 「押したのに数字が動かない」を避ける。
-/// まだ注釈が無いので下限は効かず、`-` なら 100 → 99 になる（既定の 100 %
-/// で `+` を押した場合は上限で止まり、動くのはステータス行の `analyzing…`
-/// だけ）。答えが届いた時点で `App::lift_budget_onto_floor` が下限まで
-/// 持ち上げ直す。
-/// Semantic Reading Layer のキー 1 打を捌く。**両モードの入口はここ 1 つ**で、
+/// Semantic Reading Layer のキー 1 打を捌く。**入口はここ 1 つ**で、
 /// 割り当ては [`crate::keys`] にある。
 fn on_semantic_key(app: &mut App, action: crate::keys::SemanticKey) {
     use crate::keys::SemanticKey;
@@ -2928,15 +2904,14 @@ fn press_focus(app: &mut App) {
     app.press_focus(Instant::now());
 }
 
-/// **marks モードのつまみ。** 上から何 % を光らせるかを `delta` ポイント動かす。
+/// **つまみ。** 上から何 % を光らせるかを `delta` ポイント動かす。
 ///
-/// budget 版（[`adjust_reading_budget`]）と違い、**ここに遅延の起点は無い**。
-/// marks の起点は問いを決めたとき（[`cycle_marks_question`] /
-/// [`open_marks_prompt`]）で、量のつまみではない — 問いの無い解析は
-/// この投影では使えないからである。
+/// **ここに遅延の起点は無い。** 起点は問いを決めたとき
+/// （[`cycle_marks_question`] / [`open_marks_prompt`]）で、量のつまみでは
+/// ない — 問いの無い解析はこの投影では使えないからである。
 ///
 /// だからこの関数は `Provider::analyze` へ到達しない。走るのは
-/// `marks::mark` 1 回だけで、新しい本数はステータス行に出る。
+/// `marks::mark` 1 回だけで、新しい本数は読み出しに出る。
 fn adjust_marks_share(app: &mut App, delta: i16) {
     // **注釈が無いあいだは動かさない。** 光っている箇所が 0 本なのに
     // % だけが動くと、読み出しの数字が画面と食い違う。断り方は 3 通りで、
@@ -3483,14 +3458,14 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         KeyCode::F(7) => jump_review_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
-        // Reading Budget — the same four keys, the same guard, and the
-        // same lack of a `modifiers.is_empty()` guard as the view map
-        // (see `on_view_key`). Bound here because source mode now paints
-        // the range decorations too: moving the budget visibly changes
-        // what is MARKED and DIM on THIS screen, not only on the other
-        // one. While the decoration layer was view-only these keys were
-        // deliberately left out — a key that moved `READ %` in the footer
-        // and changed nothing else would have been a lie.
+        // The layer's keys — the same guard, and the same lack of a
+        // `modifiers.is_empty()` guard as the view map (see
+        // `on_view_key`). Bound here because source mode paints the
+        // range decorations too: moving the knob visibly changes what is
+        // MARKED on THIS screen, not only on the other one. While the
+        // decoration layer was view-only these keys were deliberately
+        // left out — a key that moved a number in the footer and changed
+        // nothing else would have been a lie.
         // 割り当ては `crate::keys` の 1 か所にある。層の無いセッションは
         // `semantic_enabled()` で素通りする（使えないキーを呑み込まない）。
         KeyCode::Char(c)

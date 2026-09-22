@@ -583,10 +583,10 @@ mod tests {
             cfg(&parse(&["x.md"])).semantic.is_none(),
             "the Semantic Reading Layer is opt-in"
         );
-        let action = parse(&["x.md", "--semantic", "examples/semantic/demo.json"]);
+        let action = parse(&["x.md", "--semantic", "examples/semantic/demo-marks.json"]);
         assert_eq!(
             cfg(&action).semantic.as_deref(),
-            Some(std::path::Path::new("examples/semantic/demo.json"))
+            Some(std::path::Path::new("examples/semantic/demo-marks.json"))
         );
         // The fixture itself is read at startup, not here — a path that
         // does not exist is not a PARSE error.
@@ -621,8 +621,8 @@ mod tests {
         // Two annotations for one document is a question, not a
         // configuration — same shape as --send-cmd / --send-agent.
         for args in [
-            vec!["x.md", "--semantic", "demo.json", "--semantic-cmd", "annotate-doc"],
-            vec!["x.md", "--semantic-cmd", "annotate-doc", "--semantic", "demo.json"],
+            vec!["x.md", "--semantic", "d.json", "--semantic-cmd", "annotate-doc"],
+            vec!["x.md", "--semantic-cmd", "annotate-doc", "--semantic", "d.json"],
         ] {
             let err = match Config::parse(args.iter().map(|s| s.to_string())) {
                 Err(e) => e.to_string(),

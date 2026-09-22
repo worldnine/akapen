@@ -28,8 +28,8 @@ impl Atom {
         Self { range, kind }
     }
 
-    /// Atom が占める source のバイト数。Reading Policy が「この Atom を
-    /// 読むのにどれだけ attention を使うか」の見積もりに使う。
+    /// Atom が占める source のバイト数。「文書のどれだけが光っているか」を
+    /// 数えるときの単位である（`marks-report` の例）。
     /// 範囲が逆転している場合は 0（validate 前の壊れた入力でも panic しない）。
     pub fn len(&self) -> usize {
         self.range.end.saturating_sub(self.range.start)

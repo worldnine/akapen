@@ -1,15 +1,12 @@
-//! marks モードの end-to-end — **DIM 版とは別のファイルに置いてある。**
+//! 意味層の end-to-end — **投影そのものを fixture から見る。**
 //!
-//! `docs/design/marks-only-and-review-mode.md` 0 節。ここで固定するのは
-//! 5 つ:
+//! `docs/design/semantic-reading-layer.md`。ここで固定するのは 5 つ:
 //!
-//! 1. **モードの切り替え** — 同じ注釈でも投影が変わる
+//! 1. **投影** — スコアのある注釈が光り、つまみ以外は沈めない
 //! 2. **スコアの保持** — 応答の `score` が注釈に残り、つまみが読む
 //! 3. **つまみの単調性** — N を上げると光る集合は入れ子で広がる
 //! 4. **0 本の許容** — 該当の無い問いは 0 本で、理由が言える
-//! 5. **fixture 経路** — `--semantic <marks fixture>` で Jev を呼ばずに動く
-//!
-//! `state_tests.rs` には 1 行も足していない（DIM 版を触っていない証拠）。
+//! 5. **fixture 経路** — `--semantic <fixture>` で Jev を呼ばずに動く
 
 use crate::*;
 
@@ -439,7 +436,7 @@ fn a_different_question_is_a_different_cache_entry() {
     );
     assert!(
         cache.get("cmd", source).is_none(),
-        "DIM 版の項目とは混ざらない"
+        "問いを持たない項目とは混ざらない"
     );
 }
 
@@ -471,9 +468,6 @@ fn editing_a_preset_misses_the_cache_on_its_own() {
 
 #[test]
 fn the_default_marks_mode_binds_nothing_without_a_layer() {
-    // **既定が marks になった（2026-09-22）ことで開いた穴を塞ぐ。**
-    // `state_tests` 側の同じ趣旨のテストは `--semantic-mode budget` を
-    // 明示するようになったので、**出荷される既定を通るのはここだけ**である。
     //
     // `examples/semantic/README.md` が散文で約束していること —
     // 「`--semantic` を渡さなければ、これらのキーは束縛されない。読み出しも

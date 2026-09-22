@@ -33,7 +33,7 @@ pub trait Provider {
 
 /// あらかじめ用意した JSON を返すだけの provider。
 ///
-/// Jev を繋ぐ前に Reading Policy とクライアント側の描画を開発・テストする
+/// Jev を繋ぐ前に [`crate::marks`] とクライアント側の描画を開発・テストする
 /// ための足場。[`Provider::analyze`] は**渡された source を見ない** —
 /// fixture の範囲は fixture 作成時の source に対するものなので、別の
 /// テキストを渡しても中身は変わらない。
