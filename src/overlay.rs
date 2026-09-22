@@ -44,6 +44,18 @@ pub(crate) enum Overlay {
     /// することで、「何を光らせるか」以外に読みようが無くなる
     /// （2026-09-22 の読み手の指摘）。
     MarkFor,
+    /// **Review の候補の一覧**（`R`）。`docs/design/marks-only-and-review-mode.md`
+    /// 4 節。
+    ///
+    /// **`Comments` と同じ体裁**（70 % パネル・黄色いタイトル・`▸` の
+    /// カーソル・j/k と Enter・Esc で閉じる）である。新しい語彙を足して
+    /// いないのは `MarkFor` と同じ理由で、**既にある作法を覚えている人が
+    /// 何も覚え直さずに使える**ようにするためである。
+    ///
+    /// **`MarkFor` の隣ではない。** marks の popup は「何を光らせるか」を
+    /// 選ぶ箱で、こちらは「直す候補」の台帳である。共有しているのは
+    /// 判定器の一段の問いだけで、UI は別に持つ（読み手の決定、2026-09-22〜23）。
+    Review,
 }
 
 /// Open an overlay, resetting the double-click tracker: a click in a
@@ -94,6 +106,9 @@ pub(crate) fn overlay_rows(app: &App) -> Vec<Option<usize>> {
             rows
         }
         Some(Overlay::MarkFor) => (0..mark_for_entry_count(app)).map(Some).collect(),
+        // 候補は既に文書順に並んでいる（`App::review_candidates`）ので、
+        // 並べ替えも見出しの行も無い — 1 候補 = 1 行である。
+        Some(Overlay::Review) => (0..app.review_candidates.len()).map(Some).collect(),
         Some(Overlay::Timeline) => (0..app.history().map_or(0, |h| h.revisions.len()))
             .map(Some)
             .collect(),
@@ -109,6 +124,7 @@ pub(crate) fn overlay_entry_count(app: &App) -> usize {
         Some(Overlay::Comments) => app.comments.len(),
         Some(Overlay::Timeline) => app.history().map_or(0, |h| h.revisions.len()),
         Some(Overlay::MarkFor) => mark_for_entry_count(app),
+        Some(Overlay::Review) => app.review_candidates.len(),
         Some(Overlay::Help) | None => 0,
     }
 }
@@ -170,6 +186,7 @@ pub(crate) fn on_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyModifier
         Some(Overlay::MarkFor) => on_mark_for_overlay_key(app, key, modifiers),
         Some(Overlay::Files) => on_files_overlay_key(app, key, modifiers),
         Some(Overlay::Comments) => on_comments_overlay_key(app, key, modifiers),
+        Some(Overlay::Review) => on_review_overlay_key(app, key, modifiers),
         Some(Overlay::Timeline) => on_timeline_overlay_key(app, key, modifiers),
         Some(Overlay::Help) => on_help_overlay_key(app, key, modifiers),
         None => {}
@@ -368,6 +385,10 @@ pub(crate) fn activate_overlay_selection(app: &mut App) {
                 }
             }
         }
+        // **一覧は開いたまま。** Enter は本文の該当行へ飛ぶだけで、
+        // 候補を 1 本ずつ見比べる作業は一覧に戻ってこられないと進まない
+        // （Timeline が「箱の後ろで文書が動く」形の先例である）。
+        Some(Overlay::Review) => review_overlay_jump(app),
         // Timeline: the position is already live-scrubbed; Enter just
         // confirms it.
         Some(Overlay::Timeline) => app.overlay = None,
@@ -450,6 +471,7 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
         Some(Overlay::MarkFor) => draw_mark_for_overlay(f, app),
         Some(Overlay::Files) => draw_files_overlay(f, app),
         Some(Overlay::Comments) => draw_comments_overlay(f, app),
+        Some(Overlay::Review) => draw_review_overlay(f, app),
         Some(Overlay::Timeline) => draw_timeline_overlay(f, app),
         Some(Overlay::Help) => draw_help_overlay(f, app),
         None => {}
@@ -503,6 +525,9 @@ pub(crate) fn help_rows(
         // 問いを消す道。`f` の Esc（沈めるのを解く）とは別の段で、
         // 沈んでいれば先にそちらが取る（`crate::keys::MARKS_CLEAR_HINT`）。
         rows.push(("clear", crate::keys::MARKS_CLEAR_HINT));
+        // Review は marks の下、けれど同じ `--semantic` の段にある。
+        // **別機能だが、同じ層を使っている**ことがこの並びで読める。
+        rows.push(("review", crate::keys::REVIEW_HINT));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
@@ -690,6 +715,8 @@ pub(crate) fn overlay_entry_at(app: &App, row: u16) -> Option<usize> {
             // header row (not selectable) then one row per comment.
             overlay_rows(app).get(rel).copied().flatten()
         }
+        // 見出しの行が無いので、行はそのまま添字である。
+        Overlay::Review => (rel < app.review_candidates.len()).then_some(rel),
     }
 }
 
@@ -1029,6 +1056,209 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
         .border_style(dark_gray);
     f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
 }
+
+// ---- Review の候補の一覧（`R`） --------------------------------------
+//
+// `docs/design/marks-only-and-review-mode.md` 4 節。`Comments` の一覧の
+// 作法の写しである（70 % パネル・黄色いタイトル・`▸` のカーソル・
+// j/k と Enter・Esc で閉じる）。違うのは行の中身と、accept / dismiss の
+// 2 本のキーだけである。
+
+/// 一覧を開く（`R`）。**ここが Review の遅延の起点である。**
+///
+/// `--semantic <fixture>` では断る（[`App::review_enabled`]）— fixture は
+/// 1 つの問いへの固定の答えで、ルールの文面で聞き直す道が無い。
+pub(crate) fn open_review(app: &mut App) {
+    if !app.review_enabled() {
+        app.flash_err("review needs --semantic-cmd");
+        return;
+    }
+    app.arm_review();
+    open_overlay(app, Overlay::Review, 0);
+    keep_overlay_cursor_visible(app);
+}
+
+/// Enter — 本文の該当行へ飛ぶ。**一覧は開いたままである。**
+///
+/// 選択を作るのは `Comments` の Enter と同じ作法で、候補の行が丸ごと
+/// 光る。飛ぶ先は候補の**最後の行**（範囲の外に出ない位置）である。
+fn review_overlay_jump(app: &mut App) {
+    let Some(candidate) = app.review_candidates.get(app.overlay_cursor) else {
+        return;
+    };
+    let last = app.source.len().saturating_sub(1);
+    let start = (candidate.lines.0.saturating_sub(1) as usize).min(last);
+    let end = (candidate.lines.1.saturating_sub(1) as usize).min(last);
+    app.selection = Some(Selection { anchor: start, cursor: end });
+    if app.mode == Mode::View {
+        app.view.goto_source_line(end);
+        app.view.keep_cursor_visible(app.view_viewport_rows());
+    } else {
+        app.cursor = end;
+        app.keep_cursor_visible(app.source_viewport_rows() as u16);
+    }
+}
+
+/// Review の一覧のキー。
+///
+/// j/k（矢印も）で動き、Enter で本文へ飛び、`a` で accept、`x` で
+/// dismiss、`A` で Pending を全部 accept、Esc / q / `R` で閉じる。
+///
+/// **accept / dismiss でカーソルは動かさない。** 一覧の行は消えず印が
+/// 変わるだけなので（`✓` / `–`）、勝手に次へ送ると「いま何を見たか」が
+/// 分からなくなる。次へ行くのは j である。
+pub(crate) fn on_review_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
+    let total = app.review_candidates.len();
+    match key {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if total > 0 {
+                app.overlay_cursor = (app.overlay_cursor + 1).min(total - 1);
+                keep_overlay_cursor_visible(app);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.overlay_cursor = app.overlay_cursor.saturating_sub(1);
+            keep_overlay_cursor_visible(app);
+        }
+        KeyCode::Enter => activate_overlay_selection(app),
+        KeyCode::Char(crate::keys::REVIEW_ACCEPT) => {
+            if app.accept_candidate(app.overlay_cursor) {
+                // コメントが本文にカードとして出る（`l` の一覧にも載る）。
+                replace_view_preserving_cursor(app);
+            }
+        }
+        KeyCode::Char(crate::keys::REVIEW_DISMISS) => {
+            if app.dismiss_candidate(app.overlay_cursor) {
+                replace_view_preserving_cursor(app);
+            }
+        }
+        KeyCode::Char(crate::keys::REVIEW_ACCEPT_ALL) => {
+            let made = app.accept_all_pending();
+            if made > 0 {
+                replace_view_preserving_cursor(app);
+                app.flash(format!("{made} comments from review"));
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('q') => app.overlay = None,
+        KeyCode::Char(crate::keys::REVIEW_OPEN) => app.overlay = None,
+        _ => {}
+    }
+}
+
+/// 候補の一覧を描く。1 行 = `L42 · Filler 0.87 · <Unit の先頭>`。
+///
+/// **accept / dismiss した行も残る。** 印だけが変わる（`✓` / `–`）ので、
+/// 「9 本のうち 3 本を見た」が一覧の形そのものになる。Pending だけ残す
+/// 切替は作らない（読み手の決定、2026-09-23）。
+pub(crate) fn draw_review_overlay(f: &mut Frame, app: &App) {
+    use ratatui::widgets::Clear;
+    let area = f.area();
+    let panel = overlay_panel(area);
+    f.render_widget(Clear, panel);
+    let dark_gray = Style::default().fg(Color::DarkGray);
+    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let cyan = Style::default().fg(Color::Cyan);
+
+    let (accepted, total) = app.review_counts();
+    // タイトルは `comments (3)` と同じ形。`3/9` は accept 済み / 全候補で、
+    // フッタの読み出しと同じ数である（2 か所で数えない）。
+    let title_text = if app.review_inflight > 0 {
+        " review · analyzing… ".to_string()
+    } else {
+        format!(" review ({accepted}/{total}) ")
+    };
+    let title_fill =
+        "─".repeat(panel.width.saturating_sub(title_text.width() as u16 + 2) as usize);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(title_text, yellow),
+        Span::styled(title_fill, dark_gray),
+    ])];
+
+    if total == 0 {
+        lines.push(Line::from(""));
+        let message = if app.review_inflight > 0 {
+            " asking the analyser…"
+        } else {
+            " nothing to fix in this document"
+        };
+        lines.push(Line::from(Span::styled(message, dark_gray)));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(" Esc/q:close", dark_gray)));
+        let block = Block::default().borders(Borders::ALL).border_style(dark_gray);
+        f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
+        return;
+    }
+
+    let inner = panel.width.saturating_sub(2) as usize;
+    let rows = overlay_rows(app);
+    let visible = overlay_visible_rows();
+    let offset = app.overlay_offset.min(rows.len().saturating_sub(visible));
+    for row in rows.iter().skip(offset).take(visible) {
+        let Some(entry) = row else { continue };
+        let Some(candidate) = app.review_candidates.get(*entry) else {
+            continue;
+        };
+        let selected = *entry == app.overlay_cursor;
+        let label = app
+            .review_rules
+            .as_ref()
+            .and_then(|rules| rules.get(&candidate.rule))
+            .map(|rule| rule.label.clone())
+            .unwrap_or_else(|| candidate.rule.clone());
+        // `L42` は候補の先頭行。範囲の候補も先頭だけを出す — 飛び先が
+        // 分かればよく、桁が揃っている方が 9 本を上から読める。
+        let head = format!(
+            "{}{} L{} · {} {:.2} · ",
+            if selected { "▸ " } else { "  " },
+            candidate.mark(),
+            candidate.lines.0,
+            label,
+            candidate.score,
+        );
+        let body = crate::review::head_of(
+            &app.source.content,
+            candidate,
+            inner.saturating_sub(head.width()).min(REVIEW_HEAD_COLS),
+        );
+        // 見たものは沈める（`✓` も `–` も）。**残っているのは記録で
+        // あって作業ではない**ので、Pending と同じ明るさで並ぶと、
+        // どこまで進んだのかが読めない。
+        let done = !candidate.is_pending();
+        let head_style = if selected {
+            cyan.add_modifier(Modifier::BOLD)
+        } else if done {
+            dark_gray
+        } else {
+            yellow
+        };
+        let body_style = if selected {
+            Style::default().fg(Color::White)
+        } else if done {
+            dark_gray
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(head, head_style),
+            Span::styled(body, body_style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " j/k:move  Enter:jump  a:accept  x:dismiss  A:accept all  Esc/q:close",
+        dark_gray,
+    )));
+
+    let block = Block::default().borders(Borders::ALL).border_style(dark_gray);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
+}
+
+/// 一覧に出す Unit の先頭の桁数（読み手の注文、2026-09-23）。
+///
+/// 40 桁は「どの箇所か思い出せる」いちばん短い長さである。パネルが
+/// 狭ければそちらが勝つ。
+pub(crate) const REVIEW_HEAD_COLS: usize = 40;
 
 // ---- marks モードの問いの選択（`m`） ----------------------------------
 //

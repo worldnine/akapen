@@ -1221,6 +1221,7 @@ use crate::comment::Selection;
             &[],
             &[],
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
@@ -1952,11 +1953,7 @@ use crate::comment::Selection;
         // pad on each side (the title keeps its own leading space).
         let (text, gutter) = view.visible_text(
             10,
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
+            &[], &[], &[], &[], &[], None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
         );
@@ -2069,6 +2066,7 @@ use crate::comment::Selection;
         let (_, gutter) = view.visible_text(
             10,
             &[false; 6],
+            &[],
             &[],
             &[],
             &[],

@@ -759,6 +759,8 @@ impl ViewState {
         changed: &[bool],
         deleted: &[bool],
         emphasized: &[bool],
+        // Review の候補が乗っている行（Pending だけ）。`!` が出る。
+        review: &[bool],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
         border_style: Style,
@@ -770,6 +772,7 @@ impl ViewState {
             &[],
             deleted,
             emphasized,
+            review,
             selection,
             selected_bg,
             HISTORY_GLOW_BG_DARK,
@@ -796,6 +799,7 @@ impl ViewState {
             &[],
             &[],
             &[],
+            &[],
             selection,
             selected_bg,
             HISTORY_GLOW_BG_DARK,
@@ -813,6 +817,9 @@ impl ViewState {
         glowing: &[bool],
         deleted: &[bool],
         emphasized: &[bool],
+        // **Review の候補が乗っている行**（Pending だけ）。ガターに `!` が
+        // 出る（`docs/design/marks-only-and-review-mode.md` 4 節）。
+        review: &[bool],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
         glow_bg: Color,
@@ -866,6 +873,7 @@ impl ViewState {
         // Optional target emphasis only styles a mark that is already
         // selected; cursor, selection, and comment priority is untouched.
         let group_emphasized = group_or(emphasized);
+        let group_review = group_or(review);
         let end = (self.offset + viewport).min(self.rows.len());
         let mut start = self.cursor_row();
         let mut c_end = self.cursor_end_row() + 1;
@@ -930,6 +938,7 @@ impl ViewState {
             // keeps marking every member line; this restricts the RENDER
             // to the first row).
             let deleted_row = group_deleted[src] && abs == self.source_starts[src];
+            let review_row = group_review[src];
             // The selection is a LINE range; the row span is the rows
             // those lines render on (merged rows can share one). The exact
             // gray highlights a span exactly when its byte range
@@ -1018,6 +1027,18 @@ impl ViewState {
                 ("▌", Style::default().fg(Color::Cyan))
             } else if marked_row {
                 ("▌", Style::default().fg(Color::Yellow))
+            } else if review_row {
+                // **Review の候補**（`R`）。`!` は「ここを直せ」で、
+                // `▌` の並びとは形からして違う — コメント（黄色の `▌`）と
+                // 変更（緑の `▌`）は「ここに何かある」だが、候補は
+                // まだ人が承認していない**提案**である。
+                //
+                // **コメントより下。** accept した候補はコメントになるので、
+                // 同じ行で両方が立つのは「accept した瞬間」であり、そこは
+                // コメントの印に変わってほしい（4 節「コメント ＝ 人が
+                // 承認した印」）。削除・変更よりは上で、こちらは文書の
+                // 履歴であって校正ではない。
+                ("!", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
             } else if deleted_row {
                 // Deleted blocks are shown by POSITION only (3-1): the
                 // red `▌` marks "a block was deleted here". It uses the
@@ -1554,7 +1575,7 @@ mod tests {
     /// The concatenated text of `visible_text`'s row `i` (content only —
     /// the marker column is separate; see [`gutter_at`]).
     fn row_text(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> String {
-        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .0
             .lines[i]
             .spans
@@ -1566,7 +1587,7 @@ mod tests {
     /// The marker glyph of `visible_text`'s row `i` (the cell drawn over
     /// the frame's left border).
     fn gutter_at(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> &'static str {
-        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .1
             .get(i)
             .map(|c| c.glyph)
@@ -1576,7 +1597,7 @@ mod tests {
     /// The highlighted (selection-background) span contents of `visible_text`'s
     /// row `i`.
     fn bg_spans(view: &ViewState, sel: Option<(usize, usize)>, i: usize) -> Vec<String> {
-        view.visible_text(100, &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
+        view.visible_text(100, &[], &[], &[], &[], &[], sel, Color::Rgb(88, 91, 112), Style::default())
             .0
             .lines[i]
             .spans
@@ -1618,7 +1639,7 @@ mod tests {
         );
         // The layout is untouched: same number of rows either way.
         assert_eq!(
-            view.visible_text(100, &[], &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
+            view.visible_text(100, &[], &[], &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
                 .0
                 .lines
                 .len(),
@@ -1825,7 +1846,7 @@ mod tests {
         // Can't easily inspect styles through Text, so just ensure the rows
         // render without panicking and the cursor row stays in bounds.
         assert_eq!(
-            view.visible_text(10, &[], &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
+            view.visible_text(10, &[], &[], &[], &[], &[], None, Color::Rgb(88, 91, 112), Style::default())
                 .0
                 .lines
                 .len(),
@@ -1853,6 +1874,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -1877,11 +1899,7 @@ mod tests {
         };
         let (text, gutter) = view.visible_text(
             10,
-            &[],
-            &[],
-            &[],
-            &[],
-            Some((1, 3)),
+            &[], &[], &[], &[], &[], Some((1, 3)),
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
@@ -1898,11 +1916,7 @@ mod tests {
         // Without a selection the cursor row still shows `>`.
         let (_, gutter) = view.visible_text(
             10,
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
+            &[], &[], &[], &[], &[], None,
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
@@ -2294,6 +2308,7 @@ mod tests {
             &changed,
             &deleted,
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -2333,6 +2348,7 @@ mod tests {
             &[],
             &deleted,
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -2371,6 +2387,7 @@ mod tests {
             &changed,
             &deleted,
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -2391,6 +2408,7 @@ mod tests {
             &[],
             &changed,
             &deleted,
+            &[],
             &[],
             None,
             Color::Rgb(88, 91, 112),
@@ -2422,6 +2440,7 @@ mod tests {
             &changed,
             &[],
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -2442,6 +2461,7 @@ mod tests {
             &[],
             &[],
             &deleted,
+            &[],
             &[],
             None,
             Color::Rgb(88, 91, 112),
@@ -2464,6 +2484,7 @@ mod tests {
             &changed,
             &[],
             &[],
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -2484,6 +2505,7 @@ mod tests {
             &[],
             &[],
             &glowing,
+            &[],
             &[],
             &[],
             None,
@@ -2529,6 +2551,7 @@ mod tests {
             &changed,
             &deleted,
             &emphasized,
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -2556,6 +2579,7 @@ mod tests {
             &changed,
             &deleted,
             &emphasized,
+            &[],
             None,
             Color::Rgb(88, 91, 112),
             Style::default(),
@@ -2584,6 +2608,7 @@ mod tests {
         let (_, gutter) = view.visible_text(
             10,
             &marked,
+            &[],
             &[],
             &[],
             &[],

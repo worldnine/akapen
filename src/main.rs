@@ -411,6 +411,16 @@ fn run(config: Config) -> Result<()> {
     } else {
         None
     };
+    // Review のルールも同じ扱い — 壊れたルールのファイルは、`R` を押す
+    // まで黙っている TUI ではなく普通のコマンドラインエラーであるべき。
+    // **層が無ければ読まない**（marks の問いと同じ理由）。
+    let review_rules = if semantic_source.is_some() {
+        Some(crate::review_rules::Rules::discover(
+            config.review_rules.as_deref(),
+        )?)
+    } else {
+        None
+    };
 
     let mut terminal = NoBlinkBackend::init()?;
     // From here on the terminal is in raw mode + alternate screen; the
@@ -495,6 +505,10 @@ fn run(config: Config) -> Result<()> {
     app.snapshot_cache = snapshot_cache;
     app.file_states = file_states;
     app.marks_questions = marks_questions;
+    app.review_rules = review_rules;
+    // 捨てた候補の置き場。決められない環境（HOME も XDG も無い）は
+    // `None` で、セッション内だけ消えて記録は残らない。
+    app.review_dismissed_store = review::DismissedStore::discover();
     app.set_semantic_source(semantic_source);
     activate_first_file(&mut app);
     // The first document is on screen now: ask the provider about it.
@@ -780,6 +794,9 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
         // and never a frame. Placed before the draw so an answer that
         // landed this tick is painted this tick.
         app.poll_semantic_analysis();
+        // Review は別の線で答える（`crate::app::ReviewChannel`）。marks の
+        // 答えと混ざらないのは型の段でそうなっている。
+        app.poll_review_analysis();
         draw_frame(terminal, app)?;
         // The hardware cursor never becomes visible: the session runs on
         // [`NoBlinkBackend`], whose show_cursor is a no-op, so the
@@ -2703,6 +2720,13 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         KeyCode::Char('l') => {
             open_overlay(app, Overlay::Comments, 0);
         }
+        // **Review の一覧**（`R`）— 校正候補。`l` の隣に置いてあるのは、
+        // どちらも「台帳を開く」キーだからである（`crate::keys::REVIEW_OPEN`）。
+        // 層の無いセッションでは他のキーと同じく黙って落ちる — 使えない
+        // 機能の断りを見せない、という marks と同じ作法である。
+        KeyCode::Char(crate::keys::REVIEW_OPEN) if app.semantic_enabled() => {
+            open_review(app);
+        }
         KeyCode::Char('t') => {
             if app.config.reply {
                 app.flash_err("reply mode — history unavailable");
@@ -3561,6 +3585,13 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         // Ctrl+p opens the file picker; `?` opens the full key reference.
         KeyCode::Char('l') => {
             open_overlay(app, Overlay::Comments, 0);
+        }
+        // **Review の一覧**（`R`）— 校正候補。`l` の隣に置いてあるのは、
+        // どちらも「台帳を開く」キーだからである（`crate::keys::REVIEW_OPEN`）。
+        // 層の無いセッションでは他のキーと同じく黙って落ちる — 使えない
+        // 機能の断りを見せない、という marks と同じ作法である。
+        KeyCode::Char(crate::keys::REVIEW_OPEN) if app.semantic_enabled() => {
+            open_review(app);
         }
         KeyCode::Char('t') => {
             if app.config.reply {
