@@ -196,12 +196,10 @@
       "atoms": [
         0
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         0
       ],
-      "score": 0.94,
-      "relations": []
+      "score": 0.94
     },
     {
       "id": "u2",
@@ -209,12 +207,10 @@
         1,
         2
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         1
       ],
-      "score": 0.72,
-      "relations": []
+      "score": 0.72
     },
     {
       "id": "u3",
@@ -222,36 +218,30 @@
         3,
         4
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         4
       ],
-      "score": 0.55,
-      "relations": []
+      "score": 0.55
     },
     {
       "id": "u4",
       "atoms": [
         5
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         5
       ],
-      "score": 0.38,
-      "relations": []
+      "score": 0.38
     },
     {
       "id": "u5",
       "atoms": [
         6
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         6
       ],
-      "score": 0.31,
-      "relations": []
+      "score": 0.31
     },
     {
       "id": "u6",
@@ -261,12 +251,10 @@
         9,
         10
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         8
       ],
-      "score": 0.26,
-      "relations": []
+      "score": 0.26
     },
     {
       "id": "u7",
@@ -275,12 +263,10 @@
         12,
         13
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         12
       ],
-      "score": 0.22,
-      "relations": []
+      "score": 0.22
     },
     {
       "id": "u8",
@@ -289,12 +275,10 @@
         15,
         16
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         15
       ],
-      "score": 0.18,
-      "relations": []
+      "score": 0.18
     },
     {
       "id": "u9",
@@ -302,36 +286,30 @@
         17,
         18
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         18
       ],
-      "score": 0.12,
-      "relations": []
+      "score": 0.12
     },
     {
       "id": "u10",
       "atoms": [
         19
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         19
       ],
-      "score": 0.09,
-      "relations": []
+      "score": 0.09
     },
     {
       "id": "u11",
       "atoms": [
         20
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         20
       ],
-      "score": 0.06,
-      "relations": []
+      "score": 0.06
     },
     {
       "id": "u12",
@@ -341,12 +319,10 @@
         23,
         24
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         22
       ],
-      "score": 0.04,
-      "relations": []
+      "score": 0.04
     },
     {
       "id": "u13",
@@ -354,12 +330,10 @@
         25,
         26
       ],
-      "reading_tier": "detail",
       "core_atoms": [
         25
       ],
-      "score": 0.02,
-      "relations": []
+      "score": 0.02
     }
   ],
   "source_sha256": "07090d9efc97cda766361c465da3250ab3dfc38fcf63ee3fb74a60665e80c64f",

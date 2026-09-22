@@ -1018,7 +1018,7 @@ impl App {
         }
         if self.marks_has_scores() == Some(false) {
             return fits(&[
-                "no scores in this answer (try --semantic-mode budget)".to_string(),
+                "no scores in this answer — the analyser returned none".to_string(),
                 "no scores in this answer".to_string(),
                 "no scores".to_string(),
             ]);

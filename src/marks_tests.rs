@@ -90,6 +90,21 @@ fn app_without_a_layer() -> App {
     App::new(config, source, highlight, view, false)
 }
 
+/// **スコアを 1 つも持たない注釈。** 「スコアの無い答え」と「該当の無い
+/// 問い」は別のことで、akapen はそれを言い分ける（`App::marks_readout`）。
+///
+/// fixture をもう 1 つ置くのではなく、`demo-marks.json` から `score` を
+/// 落として作る — 2 つのファイルが同じ文書の同じ切り方を指していないと、
+/// 片方を直したときにもう片方が黙ってずれる。
+fn scoreless() -> semantic_reading::SemanticDocument {
+    let mut document: semantic_reading::SemanticDocument =
+        serde_json::from_str(&std::fs::read_to_string(demo("demo-marks.json")).unwrap()).unwrap();
+    for unit in &mut document.units {
+        unit.score = None;
+    }
+    document
+}
+
 /// 光っている（MARKED の）range の始まり。
 fn marked(app: &App) -> Vec<usize> {
     app.semantic_decorations
@@ -141,24 +156,22 @@ fn the_scores_survive_into_the_annotation() {
 }
 
 #[test]
-fn a_budget_fixture_in_marks_mode_says_why_it_is_empty() {
+fn a_scoreless_annotation_says_why_it_is_empty() {
     // **黙った 0 本にしない。** スコアの無い注釈と、該当の無い問いは
     // 別のことである。**読み出しの文字列まで見る** — 「光っていない」
     // だけを見ていると、理由を言わない実装でも通ってしまう。
-    //
-    // 読み出しは 2026-09-22 にフッタからタイトル行の右へ引っ越した。
-    // 文言は 1 字も変わっていない。
-    let app = app_with("demo.json");
+    let mut app = app_with("demo-marks.json");
+    app.semantic_doc = Some(scoreless());
+    app.refresh_semantic_decorations();
     assert_eq!(app.marks_has_scores(), Some(false));
     assert!(marked(&app).is_empty());
     let readout = app.marks_readout(200).expect("理由は必ず出る");
     assert!(readout.contains("no scores"), "理由が出ていない: {readout}");
-    // **逃げ道まで固定する。** 既定が marks になった（2026-09-22）ので、
-    // ここに来るのは「スコアの無い fixture を既定のまま開いた」人である。
-    // 理由だけ言って次の一手を言わないと、画面は光らないままになる。
+    // 誰のせいかまで言う。**逃げ道は無い** — DIM 版は消えたので、
+    // 直すのは判定器の側である。
     assert!(
-        readout.contains("--semantic-mode budget"),
-        "逃げ道が出ていない: {readout}"
+        readout.contains("the analyser returned none"),
+        "誰のせいかが出ていない: {readout}"
     );
     // フッタはもう読み出しを持たない（操作案内だけ）。
     let footer = crate::chrome::footer_hints(&app);
@@ -652,7 +665,10 @@ fn the_knob_and_the_question_still_work_while_focused() {
 /// 「他を沈める」ではない。
 #[test]
 fn focus_refuses_when_nothing_is_marked() {
-    let app = app_with("demo.json");
+    let mut app = app_with("demo-marks.json");
+    app.semantic_doc = Some(scoreless());
+    app.refresh_semantic_decorations();
+    let app = app;
     assert_eq!(app.marks_lit(), Some(0), "前提: 0 本");
     assert!(!app.can_focus());
 }
@@ -879,9 +895,7 @@ fn focus_can_always_be_turned_off_even_when_nothing_is_lit() {
     app.press_focus(std::time::Instant::now() - std::time::Duration::from_secs(1));
     assert!(app.focused());
     // 問いが変わって 0 本になった画面（スコアを持たない注釈で作る）。
-    app.semantic_doc = Some(
-        serde_json::from_str(&std::fs::read_to_string(demo("demo.json")).unwrap()).unwrap(),
-    );
+    app.semantic_doc = Some(scoreless());
     app.refresh_semantic_decorations();
     assert_eq!(app.marks_lit(), Some(0), "前提: 0 本");
     assert!(!app.can_focus(), "前提: 新しく沈めることはできない");
