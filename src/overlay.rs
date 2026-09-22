@@ -518,7 +518,16 @@ pub(crate) fn help_rows_in(
             // （2026-09-22 の実機）。ヘルプが切れるのは、いちばん読まれる
             // 場面で読めないということである。
             rows.push(("mark", "m what to mark · M previous · / ask your own"));
-            rows.push(("amount", "-/+ ±1 · </> ±10 (MARK % and count in the footer)"));
+            rows.push(("amount", "-/+ ±1 · </> ±10 (count and % in the title bar)"));
+            // **同じキーが端末で振る舞いを変えるので、そう書く。**
+            // kitty keyboard protocol の使える端末（Ghostty など）では
+            // 離したことが届くので押している間だけ沈み、届かない端末では
+            // 押しっぱなしにできないのでトグルになる（`crate::focus`）。
+            // 「hold or toggle」と並べてあるのは、読み手が自分の端末で
+            // どちらが起きたかを見て納得できるようにするためで、
+            // 端末の名前を出しても手元の端末が該当するかは分からない。
+            rows.push(("focus", "f hold to sink the rest (or tap to toggle) · Esc off"));
+            rows.push(("marks", "]m next mark · [m previous mark"));
         } else {
             rows.push(("read", "-/+ budget ±1 · </> ±10 (READ % in the footer; stops at the document's floor)"));
         }

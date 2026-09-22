@@ -666,6 +666,47 @@ const MARKS_PRE_SWEEP: f32 = 0.5;
 /// `amber` と `page` は `DecorationStyles`（テーマから解決済み）から
 /// 来る。`--light` でも `--theme DarkNeon` でも `--mark-blend` を動かしても
 /// 同じ演出が乗るのはそのためで、ここに色を書くと片方でしか合わなくなる。
+/// タイトル右の読み出しが**変化の瞬間だけ**明るくなる長さ。
+///
+/// 300 ms は「目の端で気づくが、読みに来る頃には戻っている」長さである。
+/// マーカーの演出（[`MARKS_REVEAL_MS`] = 700 ms）より短いのは、こちらが
+/// 「値が変わった」の合図で、あちらは「線が引かれる」という出来事だから。
+pub(crate) const READOUT_FLASH_MS: u32 = 300;
+
+/// **読み出しが一瞬明るくなる演出**（タイトル行の右）。
+///
+/// 問いを変えた・つまみを回した・答えが届いた、の 3 つで立つ。toast は
+/// 出さない — 読み手はもう値を見ているので、同じことを 2 か所で言う
+/// 必要が無い（読み手の注文、2026-09-22）。
+///
+/// # 面で掴む（色ではない）
+///
+/// マーカーの演出は琥珀の背景でセルを選ぶが、こちらは**タイトル行の
+/// 読み出しの矩形**を呼び出し側が渡す。読み出しは前景しか持たず、
+/// 同じ薄さ（`Color::DarkGray`）の要素が同じ行に並んでいる
+/// （`1/3 files` / `y copy`）ので、色で掴むとそちらまで光る。
+///
+/// 色は `DecorationStyles::mark_tick()`（テーマから解決済みの琥珀）を
+/// 受け取る。**焼き込まない。**
+pub(crate) fn readout_flash_effect(bright: Color) -> Effect {
+    fx::effect_fn_buf(
+        bright,
+        (READOUT_FLASH_MS, Interpolation::Linear),
+        move |bright, ctx, buf| {
+            let alpha = ctx.timer.alpha();
+            let area = ctx.area;
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    let cell = &mut buf[(x, y)];
+                    // 描かれたままの前景（薄い灰）へ向かって戻る。
+                    let painted = cell.style().fg.unwrap_or(*bright);
+                    cell.set_fg(lerp_color(*bright, painted, alpha.clamp(0.0, 1.0)));
+                }
+            }
+        },
+    )
+}
+
 pub(crate) fn marks_reveal_effect(amber: Color, page: Color) -> Effect {
     let fade = MARKS_FADE_MS as f32 / MARKS_REVEAL_MS as f32;
     let half = lerp_color(page, amber, MARKS_PRE_SWEEP);

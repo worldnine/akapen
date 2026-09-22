@@ -392,6 +392,35 @@ pub fn scroll_thumb(content_len: usize, viewport: usize, position: usize) -> Opt
     Some((start, thumb_len))
 }
 
+/// **スクロールバーの溝に打つ目盛りの行**（VS Code の overview ruler）。
+///
+/// `rows` はマーカーの乗っている**表示行**、`content_len` は文書全体の
+/// 表示行数、`track` は溝の高さ。戻り値は溝の中の行番号（昇順・重複なし）。
+///
+/// # 対応づけは溝の全長である（つまみの座標ではない）
+///
+/// つまみの位置は `pos * thumb_max / max_pos`（[`scroll_thumb`]）で、
+/// **溝より短い範囲に写す** — つまみ自身の長さのぶん動ける幅が狭いので、
+/// そうしないと最下部でつまみが溝からはみ出す。目盛りを同じ式で打つと
+/// 「同じマークが、上へスクロールするとつまみの中、下へスクロールすると
+/// 外」になる。目盛りは**文書の地図**であってつまみの座標ではないので、
+/// 文書の全長を溝の全長へ写す（読み手の決定、2026-09-22）。
+///
+/// 溝が無い（本文が収まっている）ときは呼ばれない — 呼び出し側が
+/// [`scroll_thumb`] の `None` で先に降りる。
+pub fn mark_ticks(rows: &[usize], content_len: usize, track: usize) -> Vec<usize> {
+    if track == 0 || content_len == 0 {
+        return Vec::new();
+    }
+    let mut ticks: Vec<usize> = rows
+        .iter()
+        .map(|&row| (row * track / content_len).min(track - 1))
+        .collect();
+    ticks.sort_unstable();
+    ticks.dedup();
+    ticks
+}
+
 /// The scroll offset a track click lands on: the thumb's start moves to
 /// the clicked row (clamped so the thumb stays on the track). `None` when
 /// the content fits.
@@ -1264,7 +1293,8 @@ pub(crate) fn is_table_delimiter_line(ghost: &[Option<String>], line: usize) -> 
 mod tests {
     use super::{
         Span, ViewState, history_border_color, history_glow_bg, is_table_delimiter_line,
-        lerp_color, perimeter_index, scroll_offset_at, scroll_offset_drag, scroll_thumb,
+        lerp_color, mark_ticks, perimeter_index, scroll_offset_at, scroll_offset_drag,
+        scroll_thumb,
         ease_out_cubic, rotation_period_ms, selected_bg, starfield_color, starfield_star_at,
         time_machine_color_at, time_machine_depth_shift, time_machine_palette,
         time_machine_rotation_fraction, warp_ring_color, warp_ring_rect, WARP_INNER_SCALE,
@@ -2041,6 +2071,39 @@ mod tests {
             source_starts: (0..rows).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn mark_ticks_map_the_document_onto_the_whole_track() {
+        // 文書 165 行を溝 32 行へ。先頭は 0、末尾は track-1 に収まる。
+        assert_eq!(mark_ticks(&[0], 165, 32), vec![0]);
+        assert_eq!(mark_ticks(&[164], 165, 32), vec![31]);
+        assert_eq!(mark_ticks(&[82], 165, 32), vec![15]);
+    }
+
+    #[test]
+    fn mark_ticks_never_leave_the_track() {
+        // 表示行が溝より多くても少なくても、はみ出さない。
+        for content in [1usize, 5, 33, 1000] {
+            for track in [1usize, 3, 32] {
+                for row in [0usize, content.saturating_sub(1), content * 2] {
+                    for tick in mark_ticks(&[row], content, track) {
+                        assert!(tick < track, "content {content} track {track} row {row}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mark_ticks_merge_when_two_marks_land_on_one_row() {
+        // 溝は 1 桁しかないので、近い 2 本は 1 つの点になる（それでよい —
+        // 点は本数ではなく「このあたりに何かある」を言っている）。
+        // 165 行を 32 に潰すので、5 行ぶんが 1 つの点になる。
+        assert_eq!(mark_ticks(&[0, 1, 2, 3, 4], 165, 32), vec![0]);
+        assert!(mark_ticks(&[], 165, 32).is_empty());
+        assert!(mark_ticks(&[3], 0, 32).is_empty(), "行が無ければ何も打たない");
+        assert!(mark_ticks(&[3], 165, 0).is_empty(), "溝が無ければ何も打たない");
     }
 
     #[test]

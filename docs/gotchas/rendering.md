@@ -326,3 +326,25 @@ markdown の scope に当たるのは **DarkNeon だけ**です
 直すなら `scope_style` で `theme.settings.background` へ合成する
 のが素直です。ただし**合成先が「紙」とは限らない**（インライン
 コードは本文の上に乗る）点は考えること。
+### 演出の立っている 1 枚目には琥珀が無い — テストが「マークが消えた」と言う
+
+**症状**: `TestBackend` で 1 フレーム描き、琥珀の背景 (`mark_bg()`) を
+数えると **0 セル**。`app.semantic_decorations` には MARKED が入っていて、
+実機では琥珀が見えている。
+
+**原因**: マーカーが引かれる演出（`effects::marks_reveal_effect`）が
+立っていました。段 1 は**ページ色から**琥珀へ上げるので、`alpha = 0` の
+1 枚目では琥珀のセルがちょうどページ色で塗られています。答えが
+`semantic_doc` に入った瞬間に立つので（`App::accept_analysis`）、
+**fixture 経路でも起動直後の 1 枚目は必ずこれに当たります。**
+
+**対処**: 画面のセルを見るテストは `app.config.fx = false` にし、
+`app.marks_fx` / `app.readout_fx` を `None` に落としてから描くこと
+（旗を折るだけでは、既に立っている演出が消えません）。静止した絵が
+見たいのであって、演出を見たいのではない場合です。
+
+**確認したこと**: `src/marks_tests.rs` の
+`focus_changes_what_is_painted_not_just_a_flag`。fx を止める前は
+「琥珀が画面に出ている」の前提で落ち、画面の bg の分布は
+`Reset` / ページ色 / 選択帯 の 3 つだけでした（琥珀のセルがページ色の
+側に混ざっていた）。

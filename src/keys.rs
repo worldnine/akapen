@@ -9,6 +9,8 @@
 //! ```text
 //! budget モード   -/+ ±1   </> ±10                       （READ %）
 //! marks  モード   -/+ ±1   </> ±10   m 選ぶ  M 前へ  / 自由入力（MARK %）
+//!                 f 沈める（短押し = トグル / 長押し = 押している間）
+//!                 ]m / [m 次・前のマーク行へ
 //! ```
 //!
 //! **`m` は 2026-09-22 に「次へ巡る」から「選ぶ（popup）」へ変わった。**
@@ -40,6 +42,22 @@ pub(crate) const MARKS_CYCLE_BACK: char = 'M';
 /// **将来ぶつかりうる唯一のキー**である（上のモジュールの注）。
 pub(crate) const MARKS_FREE: char = '/';
 
+/// **フォーカス**（marks モードのみ）— マーカーの無い Unit を沈める。
+///
+/// 短押しでトグル、押しっぱなしで押している間だけ沈む。**同じキーで
+/// 振る舞いが変わる**のは端末の都合で、`KeyEventKind::Release` の来る
+/// 端末（kitty keyboard protocol）でだけ hold になる
+/// （`crate::app::Focus`）。
+pub(crate) const MARKS_FOCUS: char = 'f';
+
+/// `]` / `[` に続けて打つと次・前のマーク行へ飛ぶ（marks モードのみ）。
+///
+/// **chord の 2 打目**であって単独のキーではない（`]c` のレビューマーク
+/// ジャンプと同じ体系。`crate::App::pending_chord`）。marks モードの
+/// ときだけ chord になり、それ以外では `]` の既定（ファイル切替）に
+/// 落ちる — 使えない chord を黙って呑み込まないため。
+pub(crate) const MARK_JUMP: char = 'm';
+
 /// このキーが Semantic Reading Layer で何を意味するか。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SemanticKey {
@@ -52,6 +70,8 @@ pub(crate) enum SemanticKey {
     PickQuestion,
     /// 自由入力のプロンプトを開く。
     FreeQuestion,
+    /// フォーカス（沈める）の押下。
+    Focus,
 }
 
 /// キーを [`SemanticKey`] に読む。層に関係のないキーは `None`。
@@ -69,6 +89,7 @@ pub(crate) fn semantic_key(c: char, marks: bool) -> Option<SemanticKey> {
         MARKS_PICK if marks => Some(SemanticKey::PickQuestion),
         MARKS_CYCLE_BACK if marks => Some(SemanticKey::CycleQuestion(-1)),
         MARKS_FREE if marks => Some(SemanticKey::FreeQuestion),
+        MARKS_FOCUS if marks => Some(SemanticKey::Focus),
         _ => None,
     }
 }
@@ -100,8 +121,16 @@ mod tests {
     }
 
     #[test]
+    fn focus_is_bound_only_in_marks_mode() {
+        // DIM 版には沈める機構が既にある（Reading Budget）。marks の
+        // フォーカスはその上に重ねない。
+        assert_eq!(semantic_key(MARKS_FOCUS, false), None);
+        assert_eq!(semantic_key(MARKS_FOCUS, true), Some(SemanticKey::Focus));
+    }
+
+    #[test]
     fn the_question_keys_are_bound_only_in_marks_mode() {
-        for c in [MARKS_PICK, MARKS_CYCLE_BACK, MARKS_FREE] {
+        for c in [MARKS_PICK, MARKS_CYCLE_BACK, MARKS_FREE, MARKS_FOCUS] {
             assert_eq!(semantic_key(c, false), None, "budget モードでは素通り: {c}");
             assert!(semantic_key(c, true).is_some(), "marks モードでは効く: {c}");
         }
