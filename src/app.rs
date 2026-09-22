@@ -13,6 +13,7 @@ use semantic_reading::{Provider, SemanticDocument};
 use crate::comment::{Comment, Selection};
 use crate::config::{Config, EscQuit};
 use crate::decoration::{Decoration, DecorationStyles};
+use crate::focus::Focus;
 use crate::highlight::{Highlighter, Span as HiSpan, TaggedLine, wrap_spans};
 use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
@@ -233,6 +234,9 @@ pub(crate) struct App {
     /// （他の演出が `view_active()` の中にいるのは、時間旅行の枠のように
     /// view にしか無いものを描いているからである）。`--no-fx` は尊重する。
     pub(crate) marks_fx: Option<tachyonfx::Effect>,
+    /// タイトル右の読み出しが一瞬明るくなる演出（問い・つまみ・答えの
+    /// 変化）。`crate::effects::readout_flash_effect`。
+    pub(crate) readout_fx: Option<tachyonfx::Effect>,
     /// Scatter-in effects for the blocks that appeared in the selected
     /// history revision: `(first display row, height, effect)` in
     /// view-relative coordinates, mapped to the screen at draw time.
@@ -466,6 +470,11 @@ pub(crate) struct App {
     /// 再編集・スナップショット）には触らない。確定と取り消しの 2 か所だけが
     /// この旗を見る。
     pub(crate) marks_prompt: bool,
+    /// **フォーカス**（`f`）— マーカーの無い Unit を沈めているか。
+    pub(crate) marks_focus: Focus,
+    /// マーカーの乗っているソース行（昇順）。**溝の目盛りと `]m` の
+    /// ジャンプが同じここを見る。** 装飾を作り直すたびに更新される。
+    pub(crate) marks_lines: Vec<usize>,
     /// [`App::semantic_doc`] projected onto the current budget: the
     /// decoration list the paint consumes, cached so a frame does no
     /// policy work. Recomputed by
@@ -556,6 +565,7 @@ impl App {
             timeline_restore: None,
             toast_fx: None,
             marks_fx: None,
+            readout_fx: None,
             appear_fx: Vec::new(),
             ghost_fx: Vec::new(),
             last_draw: None,
@@ -626,6 +636,8 @@ impl App {
             marks_preset: 0,
             marks_share: semantic_reading::marks::DEFAULT_SHARE,
             marks_prompt: false,
+            marks_focus: Focus::default(),
+            marks_lines: Vec::new(),
             semantic_decorations: Vec::new(),
             decoration_styles,
         }
@@ -833,6 +845,8 @@ impl App {
                     // 差分が要って、つまみ 1 打の費用（いまは `marks::mark`
                     // 1 回）が上がる。
                     self.start_marks_reveal();
+                    // 読み出しも同じ瞬間に変わる（`analyzing…` → 本数）。
+                    self.start_readout_flash();
                 }
                 None
             }
@@ -842,6 +856,21 @@ impl App {
         if let Some(message) = refusal {
             self.flash_err(message);
         }
+    }
+
+    /// **読み出しが一瞬明るくなる演出を立てる**（`--no-fx` では何もしない）。
+    ///
+    /// 立つのは 3 か所 — 問いを決めた（[`Self::ask_marks`]）、つまみが
+    /// 動いた（[`Self::nudge_marks_share`]）、答えが届いた
+    /// （[`Self::accept_analysis`]）。**どれも読み出しの字が変わる瞬間**で、
+    /// 変わらない操作（スクロール、選択）では立たない。
+    pub(crate) fn start_readout_flash(&mut self) {
+        if !self.config.fx || !self.marks_mode() {
+            return;
+        }
+        self.readout_fx = Some(crate::effects::readout_flash_effect(
+            self.decoration_styles.mark_tick(),
+        ));
     }
 
     /// マーカーが引かれる演出を立てる。`--no-fx` のセッションでは何もしない。
@@ -880,12 +909,21 @@ impl App {
     /// provider.
     pub(crate) fn refresh_semantic_decorations(&mut self) {
         self.semantic_decorations = match self.semantic_doc.as_ref() {
+            // フォーカス中だけ投影が変わる。答えもつまみも同じままで、
+            // **沈める分を足すだけ**である（`crate::semantic::focus_decorations_for`）。
+            Some(document) if self.semantic_mode.is_marks() && self.marks_focus.is_on() => {
+                crate::semantic::focus_decorations_for(document, self.marks_share)
+            }
             Some(document) if self.semantic_mode.is_marks() => {
                 crate::semantic::marks_decorations_for(document, self.marks_share)
             }
             Some(document) => crate::semantic::decorations_for(document, self.reading_budget),
             None => Vec::new(),
         };
+        // 行の台帳はここでだけ作る（装飾が変わった瞬間 = 目盛りとジャンプ先が
+        // 変わった瞬間）。フレームごとに数え直さない。
+        self.marks_lines =
+            crate::semantic::marked_lines(&self.source.content, &self.semantic_decorations);
     }
 
     // ---- marks モード ------------------------------------------------
@@ -918,6 +956,7 @@ impl App {
         }
         self.marks_share = next;
         self.refresh_semantic_decorations();
+        self.start_readout_flash();
         true
     }
 
@@ -970,6 +1009,91 @@ impl App {
             return Some(format!("Ask 「{}」", question.label));
         }
         self.marks_question_label().map(str::to_string)
+    }
+
+    // ---- フォーカス（`f`） -------------------------------------------
+
+    /// いま沈めているか（フッタの `FOCUS` バッジ）。
+    pub(crate) fn focused(&self) -> bool {
+        self.marks_focus.is_on()
+    }
+
+    /// 沈める先があるか — marks モードで、光っている箇所が 1 つ以上ある。
+    ///
+    /// 0 本のときに沈めると**画面全部が沈む**（正しい答えではあるが、
+    /// 読み手が頼んだのは「他を沈める」であって「全部沈める」ではない）。
+    pub(crate) fn can_focus(&self) -> bool {
+        self.marks_mode() && self.marks_lit().is_some_and(|lit| lit > 0)
+    }
+
+    /// `f` の押下。画面が変わったら `true`。
+    pub(crate) fn press_focus(&mut self, now: std::time::Instant) -> bool {
+        if !self.marks_focus.press(now) {
+            return false;
+        }
+        self.refresh_semantic_decorations();
+        true
+    }
+
+    /// `f` を離した（Release の来る端末だけ）。画面が変わったら `true`。
+    pub(crate) fn release_focus(&mut self, now: std::time::Instant) -> bool {
+        if !self.marks_focus.release(now) {
+            return false;
+        }
+        self.refresh_semantic_decorations();
+        true
+    }
+
+    /// フォーカスを解く（Esc）。解いたら `true`。
+    pub(crate) fn clear_focus(&mut self) -> bool {
+        if !self.marks_focus.clear() {
+            return false;
+        }
+        self.refresh_semantic_decorations();
+        true
+    }
+
+    /// **タイトル行の右に出す読み出し** — `Essential · 19 · 20%`。
+    ///
+    /// `max_cols` に収まる形まで**右から落とす**（読み手の決定、
+    /// 2026-09-22）: `20%` → 本数 → 最後まで残るのが問いの名前。名前が
+    /// 無いと「なぜここが光っているのか」が読めないためで、%と本数は
+    /// つまみを動かせば分かる。
+    ///
+    /// 分岐はフッタから引っ越してきたもので、**文言は 1 字も変えていない**
+    /// （`crate::chrome::footer_hints` の marks の節にあったもの）。
+    pub(crate) fn marks_readout(&self, max_cols: usize) -> Option<String> {
+        use unicode_width::UnicodeWidthStr;
+        let fits = |candidates: &[String]| -> Option<String> {
+            candidates
+                .iter()
+                .find(|text| UnicodeWidthStr::width(text.as_str()) <= max_cols)
+                .cloned()
+        };
+        if !self.marks_mode() {
+            return None;
+        }
+        let question = self.marks_question_display();
+        if self.semantic_inflight.is_some() {
+            // 解析中だけは**問いの名前から落とす**。まだ 1 本も光っていない
+            // ので「なぜ光っているか」は無く、要るのは「待っている」の方。
+            let asking = question.unwrap_or_else(|| "…".to_string());
+            return fits(&[format!("{asking} · analyzing…"), "analyzing…".to_string()]);
+        }
+        if self.marks_has_scores() == Some(false) {
+            return fits(&[
+                "no scores in this answer (try --semantic-mode budget)".to_string(),
+                "no scores in this answer".to_string(),
+                "no scores".to_string(),
+            ]);
+        }
+        let question = question?;
+        let lit = self.marks_lit()?;
+        fits(&[
+            format!("{question} · {lit} · {}%", self.marks_share),
+            format!("{question} · {lit}"),
+            question,
+        ])
     }
 
     /// **定型を次へ巡る**（`m`）。巡ったら `true`。
@@ -1061,6 +1185,8 @@ impl App {
     /// 問いを載せて解析を頼む。**ここが marks モードの起点である。**
     fn ask_marks(&mut self, question: Question) {
         self.marks_question = Some(question);
+        // 読み出しの字がここで変わる（問いの名前 → `analyzing…`）。
+        self.start_readout_flash();
         // 起点。budget モードの `arm_semantic_layer` に当たる。
         self.semantic_armed = true;
         self.reanalyze_semantics();
@@ -1566,6 +1692,7 @@ impl App {
             // 出ない経路（文書の再読み込みなど）で 700 ms が 100 ms の
             // 刻みに落ちて 7 枚の飛び飛びになる。
             || self.marks_fx.is_some()
+            || self.readout_fx.is_some()
             // The scrubber tooltip's exit dissolve is drawn by the bar
             // drawer itself (not a tachyonfx shader — hidden cells must
             // reveal the document, which a post-hoc shader cannot do),

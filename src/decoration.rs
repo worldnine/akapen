@@ -135,6 +135,14 @@ pub enum DecorationKind {
 /// rather than writing a color in — see [`mark_background`].
 const MARK_TINT: Color = Color::Rgb(0xff, 0xb0, 0x00);
 
+/// 目盛りと `FOCUS` バッジの琥珀が、紙から [`MARK_TINT`] へどれだけ寄るか。
+///
+/// マークの**背景**（[`DecorationStyles::mark_bg`] = [`MARK_BG_BLEND`]）は
+/// 地色として設計された値で、`rgb(90,69,33)` を**前景**として溝に 1 桁
+/// 置くとほとんど見えない。目盛りには別の明るさが要る — ただし色相は
+/// 同じ琥珀なので、マーカーと目盛りが同じものを指していることは読める。
+const TICK_BLEND: f32 = 0.75;
+
 /// The background of [`DecorationKind::SemanticMark`] for a theme that
 /// carries no background of its own. Split light/dark by the theme
 /// foreground's brightness.
@@ -285,6 +293,16 @@ impl DecorationStyles {
     /// place that decides.
     pub fn mark_bg(&self) -> Color {
         self.mark.bg.unwrap_or(MARK_BG_DARK)
+    }
+
+    /// **目盛りとバッジの琥珀** — スクロールバーの溝に打つ点と、フッタの
+    /// `FOCUS` バッジの地色。
+    ///
+    /// [`Self::mark_bg`] と同じ紙・同じ [`MARK_TINT`] から作るので、
+    /// テーマを変えても（`--light` / `--theme` / `--mark-blend`）
+    /// マーカーと同じ琥珀の系統で動く。**焼き込んだ色ではない。**
+    pub fn mark_tick(&self) -> Color {
+        crate::view::lerp_color(self.dim_target, MARK_TINT, TICK_BLEND)
     }
 
     /// The paper the mark was lifted FROM — where the reveal fades in

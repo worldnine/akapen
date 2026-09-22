@@ -16,6 +16,7 @@ mod config;
 mod decoration;
 mod effects;
 mod export;
+mod focus;
 mod highlight;
 mod history;
 mod ime;
@@ -261,7 +262,62 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(std::io::stdout(), Show);
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        // **kitty keyboard protocol を押したら必ず戻す。**
+        // `ratatui::restore()` はこの旗を知らないので、ここで pop しないと
+        // 終了後のシェルに kitty 符号のキーが流れ続ける（`f` の Release
+        // まで送ってくる端末に、それを読めないプログラムが座る形）。
+        // push していない場合の pop は端末が無視するので、条件を持たない。
+        if keyboard_enhancement_pushed() {
+            let _ = execute!(
+                std::io::stdout(),
+                ratatui::crossterm::event::PopKeyboardEnhancementFlags
+            );
+        }
         ratatui::restore();
+    }
+}
+
+/// この端末で kitty keyboard protocol を押したか。
+///
+/// 押せたかどうかは**プロセスに 1 つの事実**（旗はプロセスの端末に対して
+/// 押される）なので、App ではなくここに置く。`Ordering::SeqCst` で足りる —
+/// 起動時に 1 回書き、終了時に 1 回読むだけである。
+static KEYBOARD_ENHANCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn keyboard_enhancement_pushed() -> bool {
+    KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// **`f` の押しっぱなしを取れるようにする** — kitty keyboard protocol の
+/// `REPORT_EVENT_TYPES`（押下 / repeat / 離す、の区別）を要求する。
+///
+/// # 対応していない端末で壊れないこと
+///
+/// `supports_keyboard_enhancement()` は端末に問い合わせて返事を待つので、
+/// **返事が来ない端末では `Ok(false)` か `Err` になり、そのまま何も
+/// 押さない**。押さなければイベントは今までどおり押下だけが届き、
+/// `f` はトグルとして振る舞う（`crate::focus`）。ここが `Result` を
+/// 潰して `false` に倒しているのはそのためで、**問い合わせに失敗した
+/// ことは機能の不在であって、起動の失敗ではない。**
+///
+/// 要求するのは `REPORT_EVENT_TYPES` **1 つだけ**である。
+/// `DISAMBIGUATE_ESCAPE_CODES` は Esc と Enter の符号まで変えるので、
+/// この注文（`f` の hold）には要らないものを持ち込むことになる。
+fn push_keyboard_enhancement() {
+    use ratatui::crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+    let supported =
+        ratatui::crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if !supported {
+        return;
+    }
+    if execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    )
+    .is_ok()
+    {
+        KEYBOARD_ENHANCED.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -508,6 +564,9 @@ fn run(config: Config) -> Result<()> {
     // set_cursor_position.
     let _ = execute!(std::io::stdout(), Hide);
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    // 押しっぱなしを取れる端末では取る（`f` の hold）。取れない端末では
+    // 何も起きず、`f` はトグルのまま。TerminalGuard の Drop が pop する。
+    push_keyboard_enhancement();
     let res = event_loop(&mut terminal, &mut app);
     // The guard's Drop performs the whole shutdown (cursor, mouse capture,
     // raw mode, alternate screen). Drop it explicitly BEFORE spawning the
@@ -687,7 +746,14 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
                     // Releasing an arrow does not force an immediate render:
                     // the short settle window intentionally groups quick
                     // taps and holds into one A→D document transition.
-                    Event::Key(key) if key.kind == KeyEventKind::Release => {}
+                    //
+                    // **`f` だけは離したことに意味がある**（押している間
+                    // だけ沈む）。ここへ来るのは kitty keyboard protocol の
+                    // 使える端末だけで、来ない端末では `f` はトグルになる
+                    // （`crate::focus`）。
+                    Event::Key(key) if key.kind == KeyEventKind::Release => {
+                        on_key_release(app, key.code, key.modifiers);
+                    }
                     Event::Mouse(mouse) => {
                         render_pending_history(app, true);
                         on_mouse(app, mouse);
@@ -772,6 +838,28 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
     }
 }
 
+/// キーを離した（kitty keyboard protocol の使える端末だけ）。
+///
+/// **見るのは `f` 1 つだけである。** 他のキーの Release は今までどおり
+/// 何もしない — 離したことに意味のある操作が他に無いので、ここへ腕を
+/// 足すのは「その操作を離すと何が起きるか」を決めてからでよい。
+///
+/// **モードで門を作らない。** 押しっぱなしのまま `m` を打てば popup が
+/// 開き、`f` の Release はその overlay の上で届く — そこで捨てると
+/// 「離したのに沈んだまま」になり、hold の約束が切れる。
+/// composer で `f` を文字として打った場合の Release は、押下を
+/// 記録していない以上 [`crate::focus::Focus::release`] が素通りさせる
+/// （状態機械の側が既に安全なので、ここに二重の門が要らない）。
+fn on_key_release(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
+    if !modifiers.is_empty() {
+        return;
+    }
+    if key != KeyCode::Char(crate::keys::MARKS_FOCUS) {
+        return;
+    }
+    app.release_focus(Instant::now());
+}
+
 fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut AppTerminal>) {
     // Overlay intercepts its own keys first.
     if app.overlay.is_some() {
@@ -787,6 +875,21 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
             KeyCode::Char('c') if modifiers.is_empty() => {
                 app.pending_chord = None;
                 jump_review_mark(app, if bracket == ']' { 1 } else { -1 });
+                return;
+            }
+            // `]m` / `[m`: 次・前のマーク行へ。**marks モードでだけ chord に
+            // なる**（`crate::keys::MARK_JUMP`）。budget モードや層の無い
+            // セッションでは下の `_` に落ちて、`]` の既定（ファイル切替）に
+            // なる — 使えない chord を黙って呑み込まないため。
+            //
+            // 代償は marks モードにある: `]` のあとの `m` は「ファイル
+            // 切替 ＋ 問いの popup」ではなくジャンプになる。popup は `]` を
+            // 挟まずに `m` を打てば開く。
+            KeyCode::Char(crate::keys::MARK_JUMP)
+                if modifiers.is_empty() && app.marks_mode() =>
+            {
+                app.pending_chord = None;
+                jump_mark(app, if bracket == ']' { 1 } else { -1 });
                 return;
             }
             KeyCode::Char(']') | KeyCode::Char('[') if modifiers.is_empty() => {
@@ -2651,6 +2754,11 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
                 }
             } else if app.selection.take().is_some() {
                 app.flash("selection cancelled");
+            } else if app.clear_focus() {
+                // フォーカスは選択の下、終了の上。選択のほうが
+                // transient なので先に引き取り、沈めたままの画面で
+                // Esc を押した人が終了させられるのは事故なので手前で受ける。
+                app.flash("focus off");
             } else if app.esc_quit_enabled() {
                 request_quit(app);
             }
@@ -2887,7 +2995,33 @@ fn on_semantic_key(app: &mut App, action: crate::keys::SemanticKey) {
         SemanticKey::CycleQuestion(step) => cycle_marks_question(app, step),
         SemanticKey::PickQuestion => open_marks_picker(app),
         SemanticKey::FreeQuestion => open_marks_prompt(app),
+        SemanticKey::Focus => press_focus(app),
     }
+}
+
+/// **`f`（フォーカス）を押した。**
+///
+/// 押している間だけ沈む端末と、押すたびに切り替わる端末の両方を、
+/// [`crate::focus::Focus`] の 1 つの状態機械が出す（そちらのモジュール注）。
+/// ここがするのは「押した」を渡すことと、沈める先が無いときに理由を
+/// 言うことだけである。
+///
+/// 沈めても**つまみ（`-`/`+`/`<`/`>`）と問い（`m`/`M`/`/`）は効いたまま**で
+/// ある — 沈んだ状態のまま問いを変えられるのが、この機能のいちばんの
+/// 使い道だからで、そのために必要な行はここに 1 行も無い（投影が
+/// 切り替わるだけで、キーの経路は元のまま）。
+fn press_focus(app: &mut App) {
+    // **沈んでいる間は必ず戻せる。** 断りは「沈める先が無いのに沈めよう
+    // とした」ときだけで、沈んだあとに問いを変えて 0 本になった画面
+    // （見出しだけが残って他は全部沈んでいる）から `f` で出られなく
+    // なるのは事故である — そこで断ると Esc しか出口が無くなる。
+    if !app.focused() && !app.can_focus() {
+        // 0 本のときに沈めると画面が全部沈む。頼まれたのは「他を沈める」
+        // であって「全部沈める」ではないので、断って理由を言う。
+        app.flash("nothing marked yet — m to pick a question");
+        return;
+    }
+    app.press_focus(Instant::now());
 }
 
 /// **marks モードのつまみ。** 上から何 % を光らせるかを `delta` ポイント動かす。
@@ -3122,6 +3256,54 @@ fn jump_review_mark(app: &mut App, dir: isize) {
     }
 }
 
+/// **`]m` / `[m`: 次・前のマーク行へ。**
+///
+/// 飛び先の台帳は `App::marks_lines`（装飾を作り直すたびに更新される
+/// 1 本のリスト）で、**スクロールバーの溝に打つ目盛りと同じもの**である
+/// — 2 か所で数えると「点の無いところへ飛ぶ」が起きる。
+///
+/// 環である（最後の次は最初）。`]c` のレビューマークと同じ作法で、
+/// 行き止まりを作らない。選択は作らない — マーカーは offer であって
+/// 「ここを直せ」ではないので、赤入れのジャンプのように範囲を掴まない。
+fn jump_mark(app: &mut App, dir: isize) {
+    let targets = app.marks_lines.clone();
+    if targets.is_empty() {
+        app.flash("no marks — m to pick a question");
+        return;
+    }
+    let line = if app.mode == Mode::View {
+        app.view.cursor
+    } else {
+        app.cursor
+    };
+    let target = if dir > 0 {
+        targets.iter().position(|&l| l > line).unwrap_or(0)
+    } else {
+        targets
+            .iter()
+            .rposition(|&l| l < line)
+            .unwrap_or(targets.len() - 1)
+    };
+    let destination = targets[target];
+    app.cursor = destination;
+    app.view.goto_source_line(destination);
+    // **飛び先が画面に入ること。** view は行が折り返すので、行番号では
+    // なく表示行で寄せる必要がある（`center_source_range` は両モードが
+    // 持っている同じ約束である）。
+    if app.mode == Mode::View {
+        app.view
+            .center_source_range(destination, destination, app.view_viewport_rows());
+    } else {
+        app.center_source_range(destination, destination, app.source_viewport_rows() as u16);
+    }
+    app.flash(format!(
+        "mark {}/{} · L{}",
+        target + 1,
+        targets.len(),
+        destination + 1
+    ));
+}
+
 pub(crate) fn acknowledge_review(app: &mut App, announce: bool) -> bool {
     if app.config.reply {
         return false;
@@ -3346,6 +3528,9 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
             } else if app.deletion_focus().is_some() {
                 app.focused_deletion = None;
                 app.flash("deletion focus cancelled");
+            } else if app.clear_focus() {
+                // view と同じ順（選択 → フォーカス → 終了）。
+                app.flash("focus off");
             } else if app.esc_quit_enabled() {
                 request_quit(app);
             }
@@ -4122,6 +4307,27 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     if app.marks_fx.as_ref().is_some_and(|fx| fx.done()) || !app.config.fx {
         app.marks_fx = None;
     }
+    // 読み出しの 300 ms。**面で掴む**ので、タイトル行の読み出しが実際に
+    // 占めている矩形を `title_metrics` からもらう（描画と同じ計算なので、
+    // 光る場所と書いてある場所がずれようがない）。読み出しが出ていない
+    // ときは矩形が幅 0 になり、演出は空振りして消える。
+    if app.config.fx && app.readout_fx.as_ref().is_some_and(|fx| !fx.done()) {
+        let m = crate::chrome::title_metrics(app, f.area().width);
+        let rect = Rect {
+            x: m.readout_x,
+            y: 0,
+            width: m.readout_w,
+            height: 1,
+        };
+        if let Some(effect) = app.readout_fx.as_mut()
+            && rect.width > 0
+        {
+            f.render_effect(effect, rect, last_tick);
+        }
+    }
+    if app.readout_fx.as_ref().is_some_and(|fx| fx.done()) || !app.config.fx {
+        app.readout_fx = None;
+    }
     // Keep the completed frame for the wide-char residue pass: the next
     // draw's wrapper compares it against the freshly drawn frame to blank
     // the right halves of wide characters the diff skipped (see
@@ -4672,13 +4878,35 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     {
         let thumb_fg = app.ui_scrollbar;
         let right = frame.x + frame.width - 2;
+        // **溝の目盛り** — マーカーの位置を文書の地図として先に打ち、
+        // つまみをその上から描く。溝が無いとき（`scroll_thumb` が `None`）は
+        // ここへ来ないので、収まっている文書に点は出ない。
+        let ticks = marks_tick_rows(app, inner.height as usize);
+        let tick_fg = app.decoration_styles.mark_tick();
+        for row in &ticks {
+            if let Some(c) = buf.cell_mut((right, inner.y + *row as u16)) {
+                let bg = c.style().bg;
+                c.set_symbol("·");
+                let mut style = Style::default().fg(tick_fg);
+                if let Some(bg) = bg {
+                    style = style.bg(bg);
+                }
+                c.set_style(style);
+            }
+        }
         for i in start..start + len {
             if let Some(c) = buf.cell_mut((right, inner.y + i as u16)) {
                 // Preserve the cell's current bg (the right pad's bg on
                 // selected/cursor rows) so the band runs unbroken.
                 let bg = c.style().bg;
                 c.set_symbol("▐");
-                let mut style = Style::default().fg(thumb_fg);
+                // **つまみが勝つ**（読み手の決定、2026-09-22）。ただし
+                // 目盛りの乗っていた行では**つまみ自身が琥珀になる** —
+                // 形はつまみのまま（スクロール位置が読める）で、色が
+                // 「ここにマークがある」を言う。溝は 1 桁しかないので、
+                // 点でつまみを切ると位置のほうが読めなくなる。
+                let fg = if ticks.contains(&i) { tick_fg } else { thumb_fg };
+                let mut style = Style::default().fg(fg);
                 if let Some(bg) = bg {
                     style = style.bg(bg);
                 }
@@ -4686,6 +4914,23 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
             }
         }
     }
+}
+
+/// **溝の目盛りの行**（view モード）。
+///
+/// `App::marks_lines`（ソース行）を表示行へ写し、[`crate::view::mark_ticks`]
+/// で溝へ落とす。**ソース行 → 表示行の写像は `view.source_starts`** で、
+/// 折り返しやコメントの吹き出しで行が伸びても点がずれない。
+fn marks_tick_rows(app: &App, track: usize) -> Vec<usize> {
+    if app.marks_lines.is_empty() {
+        return Vec::new();
+    }
+    let rows: Vec<usize> = app
+        .marks_lines
+        .iter()
+        .filter_map(|&line| app.view.source_starts.get(line).copied())
+        .collect();
+    crate::view::mark_ticks(&rows, app.view.rows.len(), track)
 }
 
 
@@ -4757,14 +5002,31 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
     ) {
         let thumb_fg = app.ui_scrollbar;
         let right = area.x + area.width - 1;
+        // 目盛りは view と同じ約束で source にも出る（装飾はどちらのモードでも
+        // 塗られるので、地図が片方にしか無いほうが不自然である）。違うのは
+        // 行の数え方だけ — こちらは `line_rows` の累積が表示行になる。
+        let ticks = source_tick_rows(app, inner.height as usize);
+        let tick_fg = app.decoration_styles.mark_tick();
         let buf = f.buffer_mut();
+        for row in &ticks {
+            if let Some(c) = buf.cell_mut((right, inner.y + *row as u16)) {
+                let bg = c.style().bg;
+                c.set_symbol("·");
+                let mut style = Style::default().fg(tick_fg);
+                if let Some(bg) = bg {
+                    style = style.bg(bg);
+                }
+                c.set_style(style);
+            }
+        }
         for i in start..start + len {
             if let Some(c) = buf.cell_mut((right, inner.y + i as u16)) {
                 // Preserve the cell's current bg (the gutter's bg on
                 // selected/cursor rows) so the band runs unbroken.
                 let bg = c.style().bg;
                 c.set_symbol("▐");
-                let mut style = Style::default().fg(thumb_fg);
+                let fg = if ticks.contains(&i) { tick_fg } else { thumb_fg };
+                let mut style = Style::default().fg(fg);
                 if let Some(bg) = bg {
                     style = style.bg(bg);
                 }
@@ -4785,6 +5047,23 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
             y: inner.y + row,
         });
     }
+}
+
+/// **溝の目盛りの行**（source モード）。
+///
+/// view 版（[`marks_tick_rows`]）との違いは行の数え方だけ: ソース行 →
+/// 表示行は `line_rows` の累積（折返しのぶん伸びる）である。
+fn source_tick_rows(app: &App, track: usize) -> Vec<usize> {
+    if app.marks_lines.is_empty() || app.line_rows.is_empty() {
+        return Vec::new();
+    }
+    let rows: Vec<usize> = app
+        .marks_lines
+        .iter()
+        .filter(|&&line| line < app.line_rows.len())
+        .map(|&line| app.line_rows[..line].iter().sum())
+        .collect();
+    crate::view::mark_ticks(&rows, app.line_rows.iter().sum(), track)
 }
 
 /// Build the visible source-mode rows: `[status][number] ` + content, each

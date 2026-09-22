@@ -171,6 +171,11 @@ pub(crate) struct TitleMetrics {
     pub(crate) file_count: String,
     pub(crate) file_count_x: u16,
     pub(crate) file_count_w: u16,
+    /// **marks の読み出し**（`Essential · 19 · 20%`）と its x/width。
+    /// 薄く常駐し、幅が足りなければ自分から縮む（path には触らせない）。
+    pub(crate) readout: String,
+    pub(crate) readout_x: u16,
+    pub(crate) readout_w: u16,
     /// The y/s hint (not clickable) and its x/width.
     pub(crate) ys: String,
     pub(crate) ys_x: u16,
@@ -226,7 +231,7 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
     let cluster_w = indicator_w + ys_w + esc_close_w + 1;
     let ys_x = width.saturating_sub(cluster_w);
     let show_ys = ys_w > 0 && ys_x >= 16;
-    let path_area_end = if show_ys {
+    let cluster_end = if show_ys {
         ys_x
     } else {
         width.saturating_sub(indicator_w + esc_close_w)
@@ -273,7 +278,36 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         String::new()
     };
     let file_count_w = UnicodeWidthStr::width(file_count.as_str()) as u16;
-    let path_max = path_area_end.saturating_sub(change_w + file_count_w + 1);
+    // **path を先に測り、読み出しは余りに座る。**
+    //
+    // 読み手の決定（2026-09-22）: path は文書の身元で、読み出しは薄い
+    // 読み物である。だから狭くなったときに縮むのは読み出しの側で、
+    // 順に `20%` → 本数 → 問いの名前と落ち、それも入らなければ
+    // **丸ごと引き下がる**（`App::marks_readout`）。
+    //
+    // 測ってから配るので、`READOUT_MIN_PATH` のような「path の取り分」の
+    // 定数は要らない — 取り分を決め打つと、短い path のときに読み出しが
+    // 取れるはずの幅を捨てることになる。
+    let path_budget = cluster_end.saturating_sub(change_w + file_count_w + 1);
+    let path_needs = if app.config.reply {
+        UnicodeWidthStr::width("reply") as u16
+    } else {
+        UnicodeWidthStr::width(truncate_path(app.current_file_path(), path_budget as usize).as_str())
+            as u16
+    };
+    // 読み出しの前後に 1 桁ずつ空ける（path と地続きに見えないように）。
+    // **その 2 桁も予算から引く** — 引き忘れると、収まったつもりの
+    // 読み出しが 2 桁ぶん path を押し出す（`~` 表記へ落ちる形で出る）。
+    let readout_budget = cluster_end
+        .saturating_sub(change_w + 1 + path_needs + file_count_w + 1)
+        .saturating_sub(2);
+    let readout = app
+        .marks_readout(readout_budget as usize)
+        .map(|text| format!(" {text} "))
+        .unwrap_or_default();
+    let readout_w = UnicodeWidthStr::width(readout.as_str()) as u16;
+    let readout_x = cluster_end.saturating_sub(readout_w);
+    let path_max = readout_x.saturating_sub(change_w + file_count_w + 1);
     let path = if app.config.reply {
         // Reply mode: the doc is a temp copy of the agent's message — the
         // path is noise; the label says what this pane is for.
@@ -290,6 +324,9 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         file_count_x: change_w + 1 + path_w,
         file_count,
         file_count_w,
+        readout,
+        readout_x,
+        readout_w,
         ys_x,
         ys,
         ys_w,
@@ -365,6 +402,23 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
                 x: area.x + m.file_count_x,
                 y: area.y,
                 width: m.file_count_w,
+                height: 1,
+            },
+        );
+    }
+    // marks の読み出し。**薄く常駐**（`1/3 files` や `y copy` と同じ
+    // 薄さ）で、変化の瞬間だけ `crate::effects::readout_flash_effect` が
+    // ここを明るくする。
+    if m.readout_w > 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                m.readout,
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Rect {
+                x: area.x + m.readout_x,
+                y: area.y,
+                width: m.readout_w,
                 height: 1,
             },
         );
@@ -462,55 +516,18 @@ pub(crate) fn footer_hints(app: &App) -> String {
     // (`policy::floor`). The number is the floor itself, so what the
     // footer says and what the screen shows agree — READ 43% (floor)
     // means 43 % is on screen and no less can be asked for.
-    // marks モードは `MARK n% · k · <問い>` を同じ場所に出す
-    // （`docs/design/marks-only-and-review-mode.md` 0 節）。3 つとも
-    // 読み出しであって制御ではない:
+    // **marks の読み出しはここから引っ越した**（2026-09-22。読み手の注文）。
+    // `MARK n% · k · <問い>` はタイトル行の右で薄く常駐する
+    // （`title_metrics` の `readout`、文言は `App::marks_readout`）。
+    // フッタは操作案内だけに戻り、marks 導入前の姿になっている。
     //
-    // - `n%` — つまみの位置（上から何 % の Unit を見ているか）
-    // - `k` — **実際に光っている Unit の数**。`0` は「この問いに
-    //   答えている箇所が無い」であって、壊れているのではない。狭い問いで
-    //   そう出るのが正しい
-    // - 問いの名前 — いま何を聞いているか。DIM 版に無いもので、これが
-    //   無いと「なぜここが光っているのか」が読めない
-    //
-    // **単位の「本」は 2026-09-22 に落とした。** UI の言葉は全部英語で、
-    // ここだけ日本語が残っていた（読み手の注文 1）。`marks` の文脈で裸の
-    // 数を置けば本数以外に読みようが無いので、`marks` や `lit` のような
-    // 語も足していない。
-    //
-    // 問いをまだ選んでいない間は何も出さない。READ が注釈の無い間だまって
-    // いるのと同じ作法で、そこが marks モードの遅延の起点である。
-    let marks = |p: String| {
-        let question = app.marks_question_display();
-        if app.semantic_inflight.is_some() {
-            let asking = question.unwrap_or_else(|| "…".to_string());
-            return format!("{p} · MARK {}% · {asking} · analyzing…", app.marks_share);
-        }
-        // **スコアを 1 つも持たない注釈は、問いの名前より先に言う。**
-        // DIM 版の判定器や budget 用の fixture を marks モードで開いた場合で、
-        // そこには問いの名前が無い（誰も聞いていない）。名前を先に要求すると
-        // このまま黙った空白になる — いちばん理由の要る場面で何も言わない。
-        //
-        // **逃げ道まで言う。** marks が既定になった（2026-09-22）ので、
-        // ここに来るのは「スコアの無い fixture を既定のまま開いた」人が
-        // いちばん多い。理由だけ言って次の一手を言わないと、画面は光らない
-        // ままである。黙って budget へ落とさないのはそのためで、落とすと
-        // 「marks のつもりで DIM を見ている」を画面で見分けられない
-        // （`crate::config::SemanticMode::parse` と同じ判断）。
-        if app.marks_has_scores() == Some(false) {
-            return format!("{p} · MARK · no scores in this answer (try --semantic-mode budget)");
-        }
-        let Some(question) = question else {
-            return p;
-        };
-        match app.marks_lit() {
-            Some(lit) => format!("{p} · MARK {}% · {lit} · {question}", app.marks_share),
-            None => p,
-        }
-    };
+    // 分けた理由は 2 つある。フッタは**打てるキーの一覧**で、読み出しは
+    // 押しても何も起きない値だったこと。そして読み出しが伸びるほど
+    // 右の `? help` が押し出されて、いちばん要る案内が先に落ちていたこと。
     let read = |p: String| {
         if app.marks_mode() {
-            return marks(p);
+            // 読み出しはタイトル行にある。ここは位置だけ。
+            return p;
         }
         let floor = if app.at_reading_floor() { " (floor)" } else { "" };
         match (&app.semantic_doc, app.semantic_inflight) {
@@ -540,7 +557,12 @@ pub(crate) fn footer_hints(app: &App) -> String {
                     let (a, b) = sel.range();
                     format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
-                None => format!("{p} · j/k scroll · v select · c comment · ? help"),
+                None => {
+                    // `f` は marks モードでだけ束縛されている（`crate::keys`）。
+                    // 使えないキーを案内しない、という同じ作法。
+                    let focus = if app.can_focus() { " · f focus" } else { "" };
+                    format!("{p} · j/k scroll · v select · c comment{focus} · ? help")
+                }
             }
         }
         Mode::Source => {
@@ -603,6 +625,18 @@ pub(crate) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Mode::View | Mode::Source if app.selection.is_some() => (
             format!("{:^8}", "SELECT"),
             Style::default().fg(Color::Black).bg(Color::LightMagenta),
+        ),
+        // フォーカス（`f`）。**`SELECT` の下、`VIEW` / `SOURCE` の上**に
+        // 置く — 選択は Esc が先に引き取る transient な状態なので、
+        // 重なったら選択を名乗るほうが操作の順と合う（Esc の順も
+        // 終了確認 → 選択 → フォーカス、と同じ並びである）。
+        // 色は琥珀（マーカーと同じ系統）。モードの色（灰 / 青 / シアン /
+        // マゼンタ）とぶつからない唯一の空きでもある。
+        Mode::View | Mode::Source if app.focused() => (
+            format!("{:^8}", "FOCUS"),
+            Style::default()
+                .fg(Color::Black)
+                .bg(app.decoration_styles.mark_tick()),
         ),
         Mode::View => (
             format!("{:^8}", "VIEW"),

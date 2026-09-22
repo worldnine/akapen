@@ -76,8 +76,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use semantic_reading::{
-    AnalyzeRequest, AnalyzeResponse, DisplayState, Error as SemanticError, FixtureProvider,
-    Provider, RequestQuestion, SemanticDocument, atomize, marks, policy,
+    AnalyzeRequest, AnalyzeResponse, AtomKind, DisplayState, Error as SemanticError,
+    FixtureProvider, Provider, RequestQuestion, SemanticDocument, atomize, marks, policy,
 };
 use sha2::{Digest, Sha256};
 
@@ -505,6 +505,104 @@ pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> V
             decoration_kind(state).map(|kind| Decoration { range, kind })
         })
         .collect()
+}
+
+/// **フォーカスの** decoration 列（`f`）。
+///
+/// marks の投影（[`marks::mark`]）の上に、akapen 側で沈める分を足しただけの
+/// ものである。**`marks.rs` にも `policy.rs` にも 1 行も入れていない** —
+/// フォーカスは読み手の操作であって判定ではないので、判定器の語彙を
+/// 増やす理由が無い。
+///
+/// # 何を沈め、何を沈めないか（読み手の決定、2026-09-22）
+///
+/// | | どうなるか | なぜ |
+/// | --- | --- | --- |
+/// | 光った Unit の核 | 琥珀のまま | マーカーそのもの |
+/// | **光った Unit の、核でない文** | **沈めない** | 核だけ浮くと段落が割れて読めない。光っている箇所は丸ごと残す |
+/// | **見出し** | **沈めない** | 沈んだ本文の中で現在地を読むのに要る |
+/// | それ以外の Unit の Atom | 沈む（[`DecorationKind::Dim`]） | フォーカスの本体 |
+/// | どの Unit にも属さない Atom | 沈む | 上と同じ扱い（見出しは上で除いてある） |
+///
+/// **DIM の描画をそのまま使う。** 判決（`--semantic-mode budget`）ではなく
+/// 読み手が自分で押した結果なので、外れても誰も傷つかない — 沈める機構を
+/// 2 つ目作る理由が無い（`docs/design/marks-only-and-review-mode.md` 1 節
+/// 「判決」）。
+///
+/// `marks_decorations_for` と同じく、**この関数から `Provider::analyze` へ
+/// 到達する経路は無い**。
+pub(crate) fn focus_decorations_for(document: &SemanticDocument, share: u8) -> Vec<Decoration> {
+    let states = marks::mark(document, share);
+    // 光った Unit の Atom（核もそれ以外も）を集める。`marks::mark` は
+    // 核にしか MARKED を付けないので、Unit が光ったかどうかは
+    // 「その Unit の Atom に MARKED が 1 つでもあるか」で読める。
+    let mut spared = vec![false; states.len()];
+    for unit in &document.units {
+        let lit = unit
+            .atoms
+            .iter()
+            .any(|atom| matches!(states.get(atom.0), Some((_, DisplayState::Marked))));
+        if !lit {
+            continue;
+        }
+        for atom in &unit.atoms {
+            if let Some(slot) = spared.get_mut(atom.0) {
+                *slot = true;
+            }
+        }
+    }
+    states
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (range, state))| {
+            if state == DisplayState::Marked {
+                return Some(Decoration {
+                    range,
+                    kind: DecorationKind::SemanticMark,
+                });
+            }
+            if spared[index] {
+                return None;
+            }
+            if document
+                .atoms
+                .get(index)
+                .is_some_and(|atom| atom.kind == AtomKind::Heading)
+            {
+                return None;
+            }
+            Some(Decoration {
+                range,
+                kind: DecorationKind::Dim,
+            })
+        })
+        .collect()
+}
+
+/// マーカーの乗っている**ソース行**（昇順・重複なし）。
+///
+/// スクロールバーの目盛り（`crate::draw_view`）と `]m` / `[m` のジャンプ
+/// （`crate::jump_mark`）が、どちらもこの 1 本のリストを見る — 2 か所で
+/// 数えると「点が無いところへ飛ぶ」が起きる。
+///
+/// 装飾はバイト範囲なので、ここが行の語彙への唯一の橋である
+/// （`crate::render::line_of` と同じ [`tui_markdown::line_at`] を使う）。
+pub(crate) fn marked_lines(source: &str, decorations: &[Decoration]) -> Vec<usize> {
+    let starts = tui_markdown::line_starts(source);
+    let mut lines: Vec<usize> = decorations
+        .iter()
+        .filter(|decoration| decoration.kind == DecorationKind::SemanticMark)
+        .flat_map(|decoration| {
+            let first = tui_markdown::line_at(&starts, decoration.range.start);
+            // 範囲の終端は排他。1 バイト戻して「最後に触っている行」を取る
+            // （終端がちょうど行頭だと、触っていない次の行を指してしまう）。
+            let last = tui_markdown::line_at(&starts, decoration.range.end.saturating_sub(1));
+            first..=last.max(first)
+        })
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
 }
 
 /// Reading Budget の下限（[`policy::floor`]）。`decorations_for` と同じ
