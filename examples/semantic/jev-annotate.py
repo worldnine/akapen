@@ -310,6 +310,10 @@ PROBE_QUESTION = {
 
 #: 単独の Unit にする Atom 種別。中身は散文ではないので、隣の散文と読む優先度を
 #: 共有しない。
+#:
+#: **`table` は表のヘッダ行**（＋区切り行）である。表の入口は必ずヘッダなので、
+#: これが規則 3 に当たることで表は周囲から切れる。データ行（`table_row`）は
+#: ここに入れない — 入れると表が行ごとに割れる（[`boundary_rule`] の規則 3）。
 STANDALONE_KINDS = frozenset({"code_block", "table"})
 
 #: 核（ラウンド 3 の選択肢）になれる Atom の種別 — **散文だけ**。
@@ -320,7 +324,10 @@ STANDALONE_KINDS = frozenset({"code_block", "table"})
 #: 外す理由（要点の言い換えではない）はコードと表の話で、引用には当たらない。
 #: 引用だらけの文書では、引用を含む Unit の核が空になり**一度も光らなかった**
 #: （marks では核の無い Unit は光らない）。
-PROSE_KINDS = frozenset({"sentence", "list_item", "block_quote"})
+#: **表のデータ行（`table_row`）も入る**（2026-09-22）。表は 1 つの Unit の
+#: ままだが、核はその中の 1 行まで下りる。ヘッダ行（`table`）は入れない —
+#: 列の名前を挙げても中身を言ったことにならないので、見出しと同じ扱いである。
+PROSE_KINDS = frozenset({"sentence", "list_item", "block_quote", "table_row"})
 
 
 class JevError(Exception):
@@ -415,6 +422,7 @@ def boundary_rule(
     1. 次が heading         -> NEW  見出しは必ず新しいまとまりを始める
     2. 現在が heading       -> SAME 見出しは直後の内容に付く
     3. どちらかが code_block / table -> NEW  単独の Unit にする
+       （ただし**次が table_row なら SAME** — 表は行へ割れても 1 Unit）
     4. どちらも list_item   -> 別項目なら NEW / 同じ項目の中なら SAME
     5. どちらも sentence    -> None Jev に聞く
     6. それ以外             -> NEW  既定（引用と散文の間など）
@@ -441,6 +449,27 @@ def boundary_rule(
     実行するのは `policy::decorate` である（「節の中の Unit が 1 つでも残るなら
     見出しも残す」）。**規則 2 とそれは 1 つのことである** — 似た規則が 2 つ
     あると読んで、片方だけ直したり統合したりしないこと。
+
+    ## 規則 3 — 表は行へ割れても 1 つの Unit のまま
+
+    `atomize` は 2026-09-22 から表を行ごとの Atom へ割る（ヘッダ行 ＋ 区切り行
+    が `table`、データ行が `table_row`）。**それでも表は 1 つの Unit である。**
+    表は 1 つのまとまりで、行に下りるのは核だけ（[`core_candidates`]）である。
+
+    そのために「**次が `table_row` なら SAME**」を規則 3 の先に置く。表の入口は
+    必ずヘッダ行（`table`）なので、表の手前の境界は規則 3 の standalone に当たって
+    NEW になり、表の中だけがつながる。
+
+        本文。           ← ここで NEW（次が table = standalone）
+        | 列 a | 列 b |  ← 表の枕
+        | --- | --- |
+        | 値 1 | 値 2 |  ← SAME（次が table_row）
+        | 値 3 | 値 4 |  ← SAME
+        後文。           ← ここで NEW（規則 6 の既定）
+
+    **「両方が表の種別なら SAME」と書いてはいけない。** 空行だけを挟んで表が
+    2 つ並ぶと、後ろの表のヘッダも「表の種別」なので 2 つの表が 1 Unit へ融合する。
+    見るのは**次**だけである。
 
     ## 規則 4 — 箇条書きは項目ごとに割る。ただし**トップレベルだけ**
 
@@ -473,6 +502,8 @@ def boundary_rule(
         return NEW, "rule:next_is_heading"
     if current_kind == "heading":
         return SAME, "rule:current_is_heading"
+    if next_kind == "table_row":
+        return SAME, "rule:same_table"
     if current_kind in STANDALONE_KINDS or next_kind in STANDALONE_KINDS:
         return NEW, "rule:standalone_block"
     if current_kind == "list_item" and next_kind == "list_item":
@@ -2029,6 +2060,35 @@ MARKS_TIER = "detail"
 BOUNDARY_CACHE_VERSION = 1
 
 
+def atoms_fingerprint(atoms: list[dict]) -> str:
+    """Atom 列の指紋 — `(kind, start, end)` の並びの sha256。
+
+    **境界のキャッシュは Atom の添字で持っている。** `atomize` が変われば
+    添字は全部ずれるので、文書が同じでも古い判定を当ててはいけない。当てると
+    節の切れ目が 1 つずつずれた、**それらしく見えて間違った注釈**になる。
+
+    件数の一致（[`load_boundaries`]）だけでは足りない。`atomize` の変更が
+    その文書で Atom 数を変えないことがある（2026-09-22 の表の行割りでも、
+    データ行が 1 行の表は 1 → 1 のままである）。そのとき長さは合い、位置だけが
+    ずれる。
+
+    **鍵ではなく payload に入れて照合する。** 版のディレクトリを手で上げる方式に
+    しなかったのは、次に `atomize` を触る人が上げ忘れたら同じ事故が戻るからで、
+    指紋なら誰も憶えていなくても自動で外れる。指紋を持たない古い項目は
+    [`load_boundaries`] が外す。
+
+    **本文は入れない。** 種別とバイト位置だけである（キャッシュの中身の約束を
+    変えない）。`range` は形を決め打ちせず JSON のまま混ぜる — ワイヤの形は
+    `{"start": …, "end": …}` だが、ここで読み違えても外れが増えるだけで済む
+    ようにしておく。
+    """
+    material = "\n".join(
+        f"{atom.get('kind')}:{json.dumps(atom.get('range'), sort_keys=True)}"
+        for atom in atoms
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def cache_root() -> pathlib.Path | None:
     """解析キャッシュの根。akapen（`src/semantic_cache.rs`）と同じ規則。"""
     for name in ("AKAPEN_CACHE_DIR", "XDG_CACHE_HOME"):
@@ -2054,12 +2114,13 @@ def boundary_cache_path(source: str) -> pathlib.Path | None:
     )
 
 
-def load_boundaries(source: str, plan: list[dict]) -> bool:
+def load_boundaries(source: str, plan: list[dict], atoms: list[dict]) -> bool:
     """キャッシュした境界を `plan` へ流し込む。当たれば `True`。
 
     **読めない項目は「外れ」である**（akapen 側のキャッシュと同じ作法）。
-    Atom の数が合わない項目も外れにする — 別の文書の境界を当てるよりは、
-    もう一度聞くほうが安い。
+    Atom の数が合わない項目も、**Atom 列の指紋が合わない項目も**外れにする —
+    別の割り方の境界を当てるよりは、もう一度聞くほうが安い
+    （[`atoms_fingerprint`]）。指紋を持たない古い項目もここで落ちる。
     """
     path = boundary_cache_path(source)
     if path is None:
@@ -2067,6 +2128,8 @@ def load_boundaries(source: str, plan: list[dict]) -> bool:
     try:
         cached = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return False
+    if cached.get("atoms") != atoms_fingerprint(atoms):
         return False
     decisions = cached.get("decisions")
     if not isinstance(decisions, list) or len(decisions) != len(plan):
@@ -2079,7 +2142,7 @@ def load_boundaries(source: str, plan: list[dict]) -> bool:
     return True
 
 
-def save_boundaries(source: str, plan: list[dict]) -> None:
+def save_boundaries(source: str, plan: list[dict], atoms: list[dict]) -> None:
     """境界の判定を残す。書けなくても解析は続ける（次にもう一度払うだけ）。"""
     path = boundary_cache_path(source)
     if path is None:
@@ -2089,6 +2152,7 @@ def save_boundaries(source: str, plan: list[dict]) -> None:
         temp = path.with_suffix(f".tmp-{os.getpid()}")
         payload = {
             "version": BOUNDARY_CACHE_VERSION,
+            "atoms": atoms_fingerprint(atoms),
             "decisions": [entry["decision"] for entry in plan],
         }
         # 0600 で作ってから rename。一瞬でも 0644 のファイルを作らない。
@@ -2159,7 +2223,7 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
 
     # --- ラウンド 1: 境界（キャッシュに当たれば 0 問）-------------------
     plan = plan_boundaries(atoms, state)
-    cached = load_boundaries(state, plan)
+    cached = load_boundaries(state, plan, atoms)
     if not cached:
         questions = boundary_questions(atoms, plan)
         if questions:
@@ -2169,7 +2233,7 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
                 if entry["decision"] is None and key not in answers:
                     entry["decision"], entry["by"] = NEW, "rule:question_too_large"
             apply_boundary_answers(plan, answers)
-        save_boundaries(state, plan)
+        save_boundaries(state, plan, atoms)
     units = group_units(atoms, plan)
 
     # --- ラウンド 2: 問いへのスコア（Unit ごとに Noul 1 問）-------------

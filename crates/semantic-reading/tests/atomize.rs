@@ -112,6 +112,37 @@ fn a_real_design_document_holds_every_invariant() {
 }
 
 #[test]
+fn a_table_splits_into_rows_and_leaves_no_gap_inside_itself() {
+    // 表の中だけは隙間を作らない。区切り行がどの Atom にも属さないと、
+    // 行が沈んだときにそこだけ NORMAL で光り残る。
+    let source = "前文。\n\n| 列 a | 列 b |\n| --- | --- |\n| 値 1 | 値 2 |\n| 値 3 | 値 4 |\n\n後文。\n";
+    let atoms = atomize(source);
+    assert_invariants(source, &atoms);
+
+    let kinds: Vec<AtomKind> = atoms.iter().map(|atom| atom.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            AtomKind::Sentence,
+            AtomKind::Table,
+            AtomKind::TableRow,
+            AtomKind::TableRow,
+            AtomKind::Sentence,
+        ]
+    );
+
+    // 表の範囲（枕の先頭から最後の行の末尾まで）に、改行以外の隙間が無い。
+    let table = &atoms[1..4];
+    for pair in table.windows(2) {
+        let gap = &source[pair[0].range.end..pair[1].range.start];
+        assert!(
+            gap.chars().all(char::is_whitespace),
+            "表の行のあいだに本文が残っています: {gap:?}"
+        );
+    }
+}
+
+#[test]
 fn atoms_need_not_tile_the_document() {
     // 敷き詰めないのは意図的。空行や `---` はどの Atom にも属さず、
     // `policy::decorate` の扱いでそのまま NORMAL の地の文として残る。

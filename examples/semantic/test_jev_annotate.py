@@ -92,6 +92,21 @@ class BoundaryRuleTest(unittest.TestCase):
             self.assertEqual(self.decide(kind, "sentence"), NEW, kind)
             self.assertEqual(self.decide(kind, kind), NEW, kind)
 
+    def test_a_table_stays_one_unit_even_though_it_splits_into_rows(self):
+        # 表は 1 つのまとまり。行に下りるのは核だけである。
+        self.assertEqual(self.decide("table", "table_row"), SAME)
+        self.assertEqual(self.decide("table_row", "table_row"), SAME)
+        # 表の手前と後ろでは切れる。
+        self.assertEqual(self.decide("sentence", "table"), NEW)
+        self.assertEqual(self.decide("table_row", "sentence"), NEW)
+        self.assertEqual(self.decide("table_row", "heading"), NEW)
+
+    def test_two_adjacent_tables_do_not_merge(self):
+        # 「どちらも表の種別なら SAME」と書くと、空行で隣り合う 2 つの表が
+        # 1 Unit へ融合する。見るのは**次**だけである。
+        self.assertEqual(self.decide("table_row", "table"), NEW)
+        self.assertEqual(self.decide("table", "table"), NEW)
+
     def test_a_new_top_level_list_item_starts_a_new_unit(self):
         # 別項目どうしは NEW。箇条書きが丸ごと 1 Unit だと、10 個の決定事項が
         # 全部同じ Tier になってしまう。
@@ -132,6 +147,10 @@ class BoundaryRuleTest(unittest.TestCase):
         )
         self.assertEqual(
             jev.boundary_rule("list_item", "list_item", None)[1], "rule:same_list_item"
+        )
+        self.assertEqual(jev.boundary_rule("table", "table_row")[1], "rule:same_table")
+        self.assertEqual(
+            jev.boundary_rule("table_row", "table")[1], "rule:standalone_block"
         )
 
 
@@ -652,15 +671,40 @@ class CoreQuestionTest(unittest.TestCase):
             },
         )
 
-    def test_code_blocks_and_tables_are_not_core_candidates(self):
+    def test_code_blocks_and_table_headers_are_not_core_candidates(self):
+        # `table` は表の**ヘッダ行**（＋区切り行）である。列の名前を挙げても
+        # 中身を言ったことにならないので、見出しと同じく候補から外す。
         atoms = [
             atom(0, "sentence", "設定はこうする。"),
             atom(1, "code_block", "```\nkey: value\n```"),
-            atom(2, "table", "| a | b |"),
+            atom(2, "table", "| a | b |\n| - | - |"),
         ]
         unit = {"id": "u1", "atoms": [0, 1, 2], "reading_tier": "essential",
                 "relations": [], "jev": {}}
         self.assertEqual(set(jev.core_candidates(atoms, unit)), {"atom:0"})
+
+    def test_table_rows_are_core_candidates_but_the_header_is_not(self):
+        # 表の中身が一度も光らなかったのを直した分（2026-09-22）。候補は
+        # データ行だけで、そこから「1 行だけ読むならどれか」を聞く。
+        atoms = [
+            atom(0, "table", "| 項目 | 値 |\n| --- | --- |"),
+            atom(1, "table_row", "| 応答 | 1.2 秒 |"),
+            atom(2, "table_row", "| 費用 | 5 円 |"),
+        ]
+        unit = {"id": "u1", "atoms": [0, 1, 2], "reading_tier": "essential",
+                "relations": [], "jev": {}}
+        self.assertEqual(set(jev.core_candidates(atoms, unit)), {"atom:1", "atom:2"})
+
+    def test_a_table_with_one_row_gets_its_core_without_asking(self):
+        atoms = [
+            atom(0, "table", "| 項目 | 値 |\n| --- | --- |"),
+            atom(1, "table_row", "| 応答 | 1.2 秒 |"),
+        ]
+        unit = {"id": "u1", "atoms": [0, 1], "reading_tier": "essential",
+                "relations": [], "jev": {}}
+        self.assertEqual(jev.core_questions(atoms, [unit], "| 項目 | 値 |"), {})
+        jev.assign_lone_cores(atoms, [unit])
+        self.assertEqual(unit["core_atoms"], [1])
 
     def test_a_unit_with_no_prose_is_not_asked(self):
         atoms = [atom(0, "heading", "## 設定例"), atom(1, "code_block", "```\nx\n```")]
@@ -2275,6 +2319,45 @@ class MarksModeTest(unittest.TestCase):
         for fragment in ("決まった", "見出し", "段落"):
             self.assertNotIn(fragment, raw, raw)
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_a_different_atom_split_misses_the_boundary_cache(self):
+        """**`atomize` が変わったら境界は取り直す。**
+
+        境界のキャッシュは Atom の**添字**で持っている。同じ文書でも割り方が
+        変われば添字はずれるので、当ててはいけない — 当たれば節の切れ目が
+        ずれた、それらしく見えて間違った注釈になる。件数の一致だけでは足り
+        ないので、`(kind, range)` の指紋を照合する。
+        """
+        with_fake_ask(
+            self.fake([0.9, 0.9, 0.9, 0.9]),
+            lambda: jev.annotate(self.request(), "m", 1.0),
+        )
+        plan = [{"decision": None, "by": ""} for _ in range(3)]
+        atoms = self.request()["atoms"]
+        self.assertTrue(jev.load_boundaries(self.SOURCE, plan, atoms))
+
+        # 件数はそのまま、種別だけが変わった割り方（`atomize` の変更）。
+        moved = [dict(a) for a in atoms]
+        moved[1] = dict(moved[1], kind="table_row")
+        plan = [{"decision": None, "by": ""} for _ in range(3)]
+        self.assertFalse(
+            jev.load_boundaries(self.SOURCE, plan, moved),
+            "割り方が変わったのに古い境界が当たりました",
+        )
+        self.assertTrue(all(entry["decision"] is None for entry in plan))
+
+    def test_a_boundary_cache_entry_without_a_fingerprint_misses(self):
+        """指紋を持たない古い項目（2026-09-22 より前）は当たらない。"""
+        path = jev.boundary_cache_path(self.SOURCE)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(
+            json.dumps({"version": 1, "decisions": [jev.NEW, jev.NEW, jev.NEW]}),
+            encoding="utf-8",
+        )
+        plan = [{"decision": None, "by": ""} for _ in range(3)]
+        self.assertFalse(
+            jev.load_boundaries(self.SOURCE, plan, self.request()["atoms"])
+        )
 
     def test_a_question_without_text_is_refused(self):
         request = self.request()

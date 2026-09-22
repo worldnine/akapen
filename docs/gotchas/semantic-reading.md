@@ -811,6 +811,46 @@ mtime を見る案も、シェル文字列の中からパスを推測するこ�
 `editing_a_preset_misses_the_cache_on_its_own`。逃げ道は `src/config.rs` の
 `Action::ClearSemanticCache`。
 
+### `atomize` を変えたら境界キャッシュ — あちらは Atom の**添字**で持っている
+
+2026-09-22、表を行ごとの Atom へ割るときに気づきました。キャッシュは 2 か所に
+あり、**`atomize` の変更に強いのは片方だけ**です。
+
+| | 中身 | `atomize` が変わると |
+| --- | --- | --- |
+| akapen 側（`~/.cache/akapen/semantic/…json`） | `SemanticDocument`（**byte range** と Atom 列を持つ） | 自己完結しているので**影響なし**。`src/semantic_cache.rs` の冒頭がその理由を書いています |
+| 判定器側（`~/.cache/akapen/semantic/boundaries/v1/…json`） | 境界の判定を **Atom の添字の列**で持つ | 添字が全部ずれる。**黙って当たると節の切れ目がずれます** |
+
+ずれた境界は「それらしく見えて間違った注釈」です。注釈が付かないのとは違って、
+**間違っていることが画面から分かりません**。
+
+読み込みは元々「件数が合わなければ外れ」でしたが、**件数は合うことがあります**。
+表の行割りでも、データ行が 1 行の表は 1 Atom → 1 Atom のままです。そこで
+`(kind, range)` の列の sha256 を項目に書き、合わなければ外すようにしました
+（`atoms_fingerprint` / `load_boundaries`）。指紋を持たない古い項目も外れます。
+
+**版のディレクトリ（`v1`）は上げていません。** 上げる方式にすると、次に
+`atomize` を触る人が上げ忘れた日に同じ事故が戻ります。指紋なら誰も憶えて
+いなくても自動で外れます。
+
+**手で消すなら 2 か所とも消えます** — `akapen --semantic-cache-clear` は
+`~/.cache/akapen/semantic/` を丸ごと消すので、`boundaries/` も一緒に消えます。
+
+**そして、消すまでは新しい割り方が画面に出ません。** akapen 側の項目は
+`atomize` の変更で**壊れません**が、当たり続けます。鍵は（コマンド行 × 文書 ×
+問い）で、`atomize` はどこにも入っていないからです。中の `SemanticDocument` は
+**古い割り方の Atom 列をそのまま持っている**ので、`get_asking` はそれを返します。
+表の行割りで言えば、既に開いたことのある文書は**変更後も表が光りません**。
+`akapen --semantic-cache-clear` を 1 回打つまでです。
+
+**これは「壊れている」とは別の話です。** 古い項目は自己完結していて位置も
+正しく、出てくるのは**変更前の正しい表示**です。上の「判定器のプロンプトだけ
+変えると、古いキャッシュが当たる」と同じ形で、逃げ道も同じ 1 つです。
+
+**確認したこと**: `examples/semantic/jev-annotate.py` の `atoms_fingerprint` と、
+テスト `test_a_different_atom_split_misses_the_boundary_cache` /
+`test_a_boundary_cache_entry_without_a_fingerprint_misses`。
+
 ### Noul の主張は `instructions` に置く — `claim` だと HTTP 400 で落ちる
 
 2026-09-22、marks モードの実装で踏みました。Jev の Noul question は
