@@ -1,4 +1,4 @@
-//! marks モードの**問い** — 定型 4 本と、自由入力の型。
+//! marks モードの**問い** — 定型 5 本と、自由入力の型。
 //!
 //! 設計書 `docs/design/marks-only-and-review-mode.md` 0 節「定型プロンプトは
 //! 綺麗なセットが欲しい」が言うとおり、**問いが外に出ると定型の質がそのまま
@@ -27,13 +27,26 @@
 //! 数字は根拠でなくなる。キャッシュの方は自動で外れる（鍵に文面の sha が
 //! 入っている。[`crate::semantic_cache`]）。
 //!
-//! # 「判断が要る」が入っていない理由
+//! # `decide`（「判断が要る」）を入れてある — ただし独立は測れていない
 //!
-//! 段 1 で**独立した定型にならなかった**（議事録で 0.5 を超えた 19 Unit が
+//! 段 1 では**独立した定型にならなかった**（議事録で 0.5 を超えた 19 Unit が
 //! すべて「決まっていないこと」でも 0.5 超、相関 0.88）。順序は付くが集合が
 //! 分かれない。測定対象に「AI が書いた下書き」が無かったので、設計書 2 節が
-//! Jev を使う理由とした「書き手の迷い」を測れていない。**下書きの実物で
-//! 測ってから**入れる。
+//! Jev を使う理由とした「書き手の迷い」は測れていない。
+//!
+//! **それでも 2026-09-22 に入れた**（読み手の判断）。他の 4 本はどれも
+//! 文書の側の性質を聞いていて、**読み手に向けられているか**を聞く軸は
+//! これしかないからである。文面は設計書 0 節の定型 2 の逐語なので、
+//! 測り直しは要らない — **測れていないのは「`unsettled` と別の集合に
+//! なるか」だけ**である。同じ場所が光ったら、それは壊れているのではなく
+//! 段 1 の相関 0.88 がそのまま出ている。
+//!
+//! # `hint` は popup にだけ出る英語の 1 行
+//!
+//! `text`（Jev へ送る日本語）は popup に出さない。長すぎるし、UI の言葉は
+//! 全部英語だからである（2026-09-22 の読み手の注文）。`hint` を持たない
+//! ファイル（読み手が前の版のまま置いているもの）は、popup に label だけが
+//! 並ぶ — 版を上げるほどのことではない。
 
 use std::path::{Path, PathBuf};
 
@@ -55,8 +68,11 @@ const USER_FILE: &str = "akapen/marks-questions.json";
 pub(crate) struct Question {
     /// 識別子。要求に載り、応答が echo し、キャッシュの照合に使う。
     pub(crate) id: String,
-    /// ステータス行に出る短い名前。
+    /// ステータス行と popup に出る短い名前。**英語である**
+    /// （UI の言葉は全部英語で、日本語は `text` だけ）。
     pub(crate) label: String,
+    /// popup に label と並べて出す英語の 1 行。無ければ空。
+    pub(crate) hint: String,
     /// Jev へ渡す文面（自由入力は `{q}` を埋めたあと）。
     pub(crate) text: String,
 }
@@ -65,6 +81,7 @@ pub(crate) struct Question {
 #[derive(Clone, Debug)]
 pub(crate) struct Questions {
     presets: Vec<Question>,
+    free_hint: String,
     free_template: String,
 }
 
@@ -79,16 +96,22 @@ struct File {
 struct Preset {
     id: String,
     label: String,
+    /// 古いファイルには無い（[`Questions`] のモジュール注）。
+    #[serde(default)]
+    hint: String,
     text: String,
 }
 
 /// 自由入力の型。
 ///
-/// データファイルの `free.label`（「自由入力」）は**人が読むためだけ**に
+/// データファイルの `free.label`（`Ask`）は**人が読むためだけ**に
 /// あるので、ここでは読まない — ステータス行に出る名前は読み手が打った
-/// 入力そのものである。
+/// 入力そのものである（`Ask 「…」` の枠は [`crate::app`] が付ける）。
 #[derive(Deserialize)]
 struct Free {
+    /// popup の最下段（`/ Ask...`）に出る英語の 1 行。
+    #[serde(default)]
+    hint: String,
     template: String,
 }
 
@@ -141,16 +164,23 @@ impl Questions {
                 .map(|p| Question {
                     id: p.id,
                     label: p.label,
+                    hint: p.hint,
                     text: p.text,
                 })
                 .collect(),
+            free_hint: file.free.hint,
             free_template: file.free.template,
         })
     }
 
-    /// 定型（巡る順）。
+    /// 定型（巡る順・popup の並び順）。
     pub(crate) fn presets(&self) -> &[Question] {
         &self.presets
+    }
+
+    /// popup の最下段（`/ Ask...`）に出す英語の 1 行。
+    pub(crate) fn free_hint(&self) -> &str {
+        &self.free_hint
     }
 
     /// 自由入力の型に `input` を埋めた問い。
@@ -165,6 +195,7 @@ impl Questions {
         Question {
             id: "free".to_string(),
             label: input.to_string(),
+            hint: self.free_hint.clone(),
             text: self.free_template.replace("{q}", input),
         }
     }
@@ -187,16 +218,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_built_in_set_is_the_four_presets_and_a_free_template() {
+    fn the_built_in_set_is_the_five_presets_and_a_free_template() {
         let questions = Questions::built_in().expect("焼き込んだ既定が読めること");
         let ids: Vec<&str> = questions
             .presets()
             .iter()
             .map(|q| q.id.as_str())
             .collect();
-        assert_eq!(ids, ["essential", "settled", "unsettled", "numbers"]);
-        // 「判断が要る」は段 1 で独立しなかったので入れていない。
-        assert!(!ids.contains(&"decision"));
+        assert_eq!(ids, ["essential", "settled", "unsettled", "decide", "numbers"]);
+    }
+
+    #[test]
+    fn every_built_in_label_and_hint_is_ascii() {
+        // UI の言葉は全部英語。日本語は `text`（Jev へ送る文面）だけで、
+        // ここが崩れると 2026-09-22 の「日本語が混ざった」に戻る。
+        let questions = Questions::built_in().unwrap();
+        for q in questions.presets() {
+            assert!(q.label.is_ascii(), "label が英語でない: {}", q.label);
+            assert!(q.hint.is_ascii(), "hint が英語でない: {}", q.hint);
+            assert!(!q.text.is_ascii(), "text は日本語のまま: {}", q.id);
+        }
+        assert!(questions.free_hint().is_ascii());
+    }
+
+    #[test]
+    fn the_decide_preset_carries_the_design_documents_wording_verbatim() {
+        // 設計書 0 節の定型 2 の逐語。段 1 で独立しなかったことは
+        // モジュールの注に書いてあるが、文面そのものは測ったものである。
+        let questions = Questions::built_in().unwrap();
+        let decide = questions
+            .presets()
+            .iter()
+            .find(|q| q.id == "decide")
+            .expect("decide が居ること");
+        assert!(
+            decide.text.starts_with(
+                "下の「対象」は、読み手に判断・確認・選択を求めている箇所である。"
+            ),
+            "{}",
+            decide.text
+        );
+    }
+
+    #[test]
+    fn a_file_without_hints_still_parses() {
+        // 読み手が前の版のまま置いているファイル。popup には label だけが
+        // 並ぶ（版は上げない — モジュールの注）。
+        let json = r#"{"version":1,"presets":[{"id":"a","label":"A","text":"…"}],
+                       "free":{"template":"{q}"}}"#;
+        let questions = Questions::parse(json).expect("hint 無しでも読めること");
+        assert_eq!(questions.presets()[0].hint, "");
+        assert_eq!(questions.free_hint(), "");
     }
 
     #[test]

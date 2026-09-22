@@ -628,6 +628,93 @@ pub(crate) fn ghost_effect() -> Effect {
     )
 }
 
+// ---- marks モードのマーカーが引かれる演出 ------------------------------
+
+/// 薄く乗るまで（ミリ秒）。答えが届いた瞬間に、光る箇所が**全部同時に**
+/// ページ色から琥珀の半分まで上がる。「どこが光るのか」がまず一望できる。
+pub(crate) const MARKS_FADE_MS: u32 = 250;
+/// 線が引かれるまで（ミリ秒）。左→右のスイープで、半分の琥珀が満ちる。
+pub(crate) const MARKS_SWEEP_MS: u32 = 450;
+/// 演出の全長。**1 秒以内**（2026-09-22 の読み手の注文 3）。判定の到着は
+/// 数秒かかるが、演出はそれとは別物で、待たせるためのものではない。
+pub(crate) const MARKS_REVEAL_MS: u32 = MARKS_FADE_MS + MARKS_SWEEP_MS;
+
+/// スイープが通る前の濃さ（琥珀への blend の割合）。
+const MARKS_PRE_SWEEP: f32 = 0.5;
+
+/// **マーカーが引かれる演出。** 2 段:
+///
+/// ```text
+/// 0 ─────────── 250 ms ─────────── 700 ms
+///   薄く全箇所に乗る    線が左→右に引かれる
+/// ```
+///
+/// # どのセルを掴むか — 背景色そのもの
+///
+/// toast が [`CellFilter::BgColor`] でバナーのセルだけを掴んでいるのと
+/// 同じ手で、**琥珀の背景色でフィルタする**。光っているセルは琥珀の背景を
+/// 持っている（`DecorationKind::SemanticMark` は背景しか書かない）ので、
+/// 「今回どこが光ったか」の台帳を別に持たなくてよい。
+///
+/// 副作用として**カーソル行は演出に入らない**。帯が行全体の背景を塗って
+/// マークより優先するので（`docs/gotchas/rendering.md`「カーソル行の
+/// MARKED は帯に隠れる」）、その行のセルは琥珀ではない。静止画で琥珀が
+/// 乗らない行は、動いても乗らない — 見え方が一貫する。
+///
+/// # 色は焼き込まない
+///
+/// `amber` と `page` は `DecorationStyles`（テーマから解決済み）から
+/// 来る。`--light` でも `--theme DarkNeon` でも `--mark-blend` を動かしても
+/// 同じ演出が乗るのはそのためで、ここに色を書くと片方でしか合わなくなる。
+pub(crate) fn marks_reveal_effect(amber: Color, page: Color) -> Effect {
+    let fade = MARKS_FADE_MS as f32 / MARKS_REVEAL_MS as f32;
+    let half = lerp_color(page, amber, MARKS_PRE_SWEEP);
+    let mut effect = fx::effect_fn_buf(
+        (amber, page, half),
+        (MARKS_REVEAL_MS, Interpolation::Linear),
+        move |(amber, page, half), ctx, buf| {
+            let alpha = ctx.timer.alpha();
+            let area = ctx.area;
+            if area.width == 0 {
+                return;
+            }
+            // 段 2 のスイープが「いまどこまで来ているか」（画面の桁）。
+            let sweep = if alpha <= fade {
+                None
+            } else {
+                let p = (alpha - fade) / (1.0 - fade);
+                Some(area.x as f32 + p * area.width as f32)
+            };
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    let cell = &mut buf[(x, y)];
+                    // 琥珀のセルだけ。帯の下の行も、素の本文も触らない。
+                    if cell.style().bg != Some(*amber) {
+                        continue;
+                    }
+                    match sweep {
+                        // 段 1: ページ色から半分の琥珀まで、全箇所同時に。
+                        None => {
+                            let t = (alpha / fade).clamp(0.0, 1.0) * MARKS_PRE_SWEEP;
+                            cell.set_bg(lerp_color(*page, *amber, t));
+                        }
+                        // 段 2: 通過済みは琥珀のまま（何もしない）、
+                        // これからの所は半分で待つ。
+                        Some(sweep) if (x as f32) > sweep => {
+                            cell.set_bg(*half);
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        },
+    );
+    // 掴むのは琥珀のセルだけ。`effect_fn_buf` の中でも見ているが、
+    // フィルタを掛けておくと tachyonfx 側が走らせるセルも絞れる。
+    effect.filter(CellFilter::BgColor(amber));
+    effect
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

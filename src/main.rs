@@ -843,12 +843,12 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let (w, h) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-                let panel = overlay_panel(Rect {
-                    x: 0,
-                    y: 0,
-                    width: w,
-                    height: h,
-                });
+                // 開いている overlay 自身の枠。`m` の popup は小さい箱
+                // なので、70 % パネルで測ると箱の外を押しても行が選ばれる。
+                let panel = crate::overlay::active_overlay_panel(
+                    app,
+                    Rect { x: 0, y: 0, width: w, height: h },
+                );
                 if mouse.row < panel.y
                     || mouse.row >= panel.y + panel.height
                     || mouse.column < panel.x
@@ -2883,6 +2883,7 @@ fn on_semantic_key(app: &mut App, action: crate::keys::SemanticKey) {
         SemanticKey::Amount(delta) if app.marks_mode() => adjust_marks_share(app, delta),
         SemanticKey::Amount(delta) => adjust_reading_budget(app, delta),
         SemanticKey::CycleQuestion(step) => cycle_marks_question(app, step),
+        SemanticKey::PickQuestion => open_marks_picker(app),
         SemanticKey::FreeQuestion => open_marks_prompt(app),
     }
 }
@@ -2924,6 +2925,23 @@ fn cycle_marks_question(app: &mut App, step: i16) {
     }
 }
 
+/// **定型の選択（popup）を開く**（`m`）。
+///
+/// 開くだけで、ここでは何も聞かない — 解析が走るのは popup の中で選んだ
+/// 瞬間である（`overlay::activate_overlay_selection`）。巡る形が 1 打ごとに
+/// Jev を呼んでいたのに対して、popup は**選んだ 1 本だけ**を呼ぶ。
+///
+/// カーソルはいま聞いている定型に置く。`m` を押して Enter を打てば
+/// 「何も変わらない」が既定になるので、覗くのが安全になる。
+fn open_marks_picker(app: &mut App) {
+    if app.marks_questions.is_none() || app.marks_question_is_fixed() {
+        refuse_marks_question(app);
+        return;
+    }
+    let cursor = app.marks_preset;
+    open_overlay(app, Overlay::MarkFor, cursor);
+}
+
 /// 自由入力のプロンプトを閉じて元のモードへ戻す。
 fn close_marks_prompt(app: &mut App) {
     app.marks_prompt = false;
@@ -2934,7 +2952,7 @@ fn close_marks_prompt(app: &mut App) {
 }
 
 /// 問いを変えられない経路で `m` / `/` を押したときの断り。
-fn refuse_marks_question(app: &mut App) {
+pub(crate) fn refuse_marks_question(app: &mut App) {
     if matches!(
         app.semantic_source,
         Some(crate::semantic::SemanticSource::Inline(_))
@@ -2947,12 +2965,20 @@ fn refuse_marks_question(app: &mut App) {
     }
 }
 
-/// **自由入力のプロンプトを開く**（`/`）。
+/// **自由入力のプロンプトを開く**（`/`、または popup の最下段）。
 ///
-/// composer（コメントの入力欄）をそのまま借りる — IME の扱いも、カーソルも、
-/// Esc の取り消しも既にそこにある。違いは確定したときだけで、コメントを
-/// 足す代わりに問いとして聞く（[`App::ask_marks_free`]）。
-fn open_marks_prompt(app: &mut App) {
+/// 借りるのは `Mode::Input`（打鍵の経路・IME・Esc の取り消し）**だけ**で、
+/// **見た目は composer ではない** — 描くのはメッセージ行の 1 行プロンプト
+/// である（[`crate::chrome::draw_ask_prompt`]）。
+///
+/// **2026-09-22 に composer の借用をやめた。** 借りていたときは吹き出しが
+/// `comment · 1` と名乗り（バッジだけが `ASK` に変わる）、1 行の問いのために
+/// 3 行を文書へ割り込ませていた。問いは 1 行なので 1 行で足りる。
+///
+/// `input_start` / `input_end` は**アンカーとしては使わない**が、カーソル
+/// 行を入れておく — コメントの経路と同じ形にしておけば、`Esc` の後始末
+/// （[`cancel_composer`]）が marks の旗を見るだけで済む。
+pub(crate) fn open_marks_prompt(app: &mut App) {
     if app.marks_questions.is_none() || app.marks_question_is_fixed() {
         refuse_marks_question(app);
         return;
@@ -3570,6 +3596,15 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
             app.ime_guard = None;
         }
         KeyCode::Esc => cancel_composer(app),
+        // 改行はコメントだけのもの。**問いは 1 行である**（1 行プロンプト
+        // には 2 行めを置く場所が無く、Jev へ送る文面にも改行は要らない）。
+        // 黙って呑まずに理由を言う — `?` ヘルプが marks の行に
+        // `^j newline` を出していないのと揃う。
+        KeyCode::Char(c)
+            if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' && app.marks_prompt =>
+        {
+            app.flash_err("a question is one line");
+        }
         KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' => {
             app.input.insert(app.input_cursor, '\n');
             app.input_cursor += 1;
@@ -3913,6 +3948,20 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     // transient toast: an action that demands the user must not be
     // hidden behind a message that will expire on its own.
     draw_message(f, app);
+    // 問いの 1 行プロンプトの IME アンカー。composer と同じ理屈で、
+    // ハードウェアカーソルは隠したまま**位置だけ**を毎フレーム publish
+    // する（`--no-cursor-anchor` で止まるのも同じ）。プロンプトは
+    // `draw_message` が描いた行に乗っているので、行の算段はそちらと共有
+    // する。
+    if app.marks_prompt && app.mode == Mode::Input && app.config.cursor_anchor {
+        let row = if crate::timeline::timeline_active(app) {
+            f.area().height.saturating_sub(3)
+        } else {
+            f.area().height.saturating_sub(2)
+        };
+        let (x, y) = crate::chrome::ask_prompt_cursor(app, f.area(), row);
+        f.set_cursor_position(Position { x, y });
+    }
     // tachyonfx effects repaint after the static UI: the time-machine
     // frame (view mode, browsing the past, `--fx` on, outside the
     // render-complete flash), the appear/ghost scatter effects of the
@@ -3975,7 +4024,13 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         // way when the comment bar opened freezes until Enter/Esc
         // returns to the view. The border rotation keeps flying (it
         // lives in the frame's own cells, never over the text).
-        let composing = app.mode == Mode::Input && app.composer_return == Mode::View;
+        //
+        // **問いの 1 行プロンプト（`/`）はここに入らない。** あれは本文の
+        // 列を 1 行も占めないので、下の演出を止める理由が無い — 止めると
+        // 問いを打っているあいだ時間旅行の演出が凍る。
+        let composing = app.mode == Mode::Input
+            && app.composer_return == Mode::View
+            && !app.marks_prompt;
         if !composing {
             // Changed blocks that have scrolled off-screen drop their
             // effects rather than hold them: left un-rendered their
@@ -4048,6 +4103,22 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
             height: 1,
         };
         f.render_effect(effect, row, last_tick);
+    }
+    // マーカーが引かれる演出は **view / source の両方**で走る。琥珀は
+    // 両方で塗られるので、演出だけ view 限定だと「source では効かない
+    // 機能」になる。だから上の `view_active()` の塊の外にいる。
+    //
+    // 面は本文の領域そのもので、どのセルを動かすかは背景色のフィルタが
+    // 決める（`effects::marks_reveal_effect`）。overlay や timeline bar が
+    // 上に出ていても、それらの背景は琥珀ではないので巻き添えにならない。
+    if app.config.fx
+        && let Some(effect) = app.marks_fx.as_mut()
+        && !effect.done()
+    {
+        f.render_effect(effect, body, last_tick);
+    }
+    if app.marks_fx.as_ref().is_some_and(|fx| fx.done()) || !app.config.fx {
+        app.marks_fx = None;
     }
     // Keep the completed frame for the wide-char residue pass: the next
     // draw's wrapper compares it against the freshly drawn frame to blank
@@ -4472,7 +4543,11 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // otherwise clamp the scroll at the document's last row and hide the
     // bar — and it grows as you type. Input mode has no scroll keys, so a
     // per-frame nudge cannot fight the user.
-    let composing = app.mode == Mode::Input && app.composer_return == Mode::View;
+    // 問いの入力（`/`）は composer を使わない — メッセージ行の 1 行
+    // プロンプトが受ける（[`crate::chrome::draw_ask_prompt`]）。文書に
+    // 3 行（上罫・本文・下罫）を割り込ませないので、ここで弾く。
+    let composing =
+        app.mode == Mode::Input && app.composer_return == Mode::View && !app.marks_prompt;
     if composing {
         app.keep_composer_visible_view(inner.height as usize);
     }
@@ -5006,7 +5081,7 @@ fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'static>, Opt
             out.extend(comment_bar_lines(c, full_width));
         }
         // The composer bar while typing, under the target range's last line.
-        if app.mode == Mode::Input && app.input_end == idx {
+        if app.mode == Mode::Input && !app.marks_prompt && app.input_end == idx {
             let start_row = out.len();
             out.extend(composer_lines(
                 &app.input,
@@ -5205,7 +5280,7 @@ fn composer_body_rows(text: &str, full_width: usize) -> Vec<String> {
 /// so the insertion point — and the IME anchor — exactly tracks the drawn
 /// glyph without reflowing the wrapped rows. A prefix that ends flush at
 /// the width boundary puts the cursor at the start of the next row.
-fn composer_cursor_pos(text: &str, cursor: usize, full_width: usize) -> (usize, usize) {
+pub(crate) fn composer_cursor_pos(text: &str, cursor: usize, full_width: usize) -> (usize, usize) {
     let cursor = cursor.min(text.len());
     // Guard: `cursor` must be on a char boundary to slice the prefix.
     let cursor = (0..=cursor)
@@ -5270,7 +5345,7 @@ fn composer_body_with_caret(
 /// disconnected). A background block on the existing character needs no
 /// glyph: nothing can render as a stray space, nothing shifts, and the
 /// caret is unmistakable.
-fn cursor_caret_line(row: &str, col: usize) -> Line<'static> {
+pub(crate) fn cursor_caret_line(row: &str, col: usize) -> Line<'static> {
     // Composer cyan on black type: the block caret inverts the char under
     // it, readable in dark and light themes alike.
     let caret = Style::default().fg(Color::Black).bg(Color::Cyan);

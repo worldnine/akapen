@@ -181,7 +181,9 @@ fn the_footer_counts_what_is_on_screen() {
         let footer = crate::chrome::footer_hints(&app);
         let lit = app.marks_lit().unwrap();
         assert!(footer.contains(&format!("MARK {share}%")), "{footer}");
-        assert!(footer.contains(&format!("{lit}本")), "{footer}");
+        // 単位の「本」は 2026-09-22 に落とした（UI の言葉は全部英語）。
+        // 区切りごと見て、`MARK 20%` の `20` を拾ってしまわないようにする。
+        assert!(footer.contains(&format!("· {lit} ·")), "{footer}");
         assert!(footer.contains("settled"), "問いの名前が出ている: {footer}");
         // 画面の本数と一致する（footer の数字が嘘をつかない）。
         assert_eq!(lit, marked(&app).len());
@@ -359,7 +361,7 @@ fn cycling_forward_walks_the_ring_in_order() {
 fn the_question_keys_do_nothing_in_budget_mode() {
     // budget モードのセッションで `m` `/` は層に触らない（`crate::keys`）。
     for c in [
-        crate::keys::MARKS_CYCLE,
+        crate::keys::MARKS_PICK,
         crate::keys::MARKS_CYCLE_BACK,
         crate::keys::MARKS_FREE,
     ] {
@@ -480,4 +482,79 @@ fn the_default_marks_mode_binds_nothing_without_a_layer() {
         );
     }
     assert!(!app.semantic_enabled(), "その門番が閉じている");
+}
+
+// ---- 問いの入力は composer を借りない -----------------------------------
+
+/// **画面のセルを見る。** 「composer を弾いた」を旗の値で確かめると、
+/// `composing` の定義が 2 か所ある（`draw` の演出の門と `draw_view` の
+/// 描画）ので、片方だけ直して通ってしまう — **実際にそれを踏んだ**
+/// （2026-09-22。1 行プロンプトと `comment · 53` の吹き出しが同時に出て
+/// いるのを実機の GIF で見つけた）。`docs/gotchas/rendering.md`
+/// 「片方だけを見て『直った』と判断しないこと」。
+#[test]
+fn the_question_prompt_does_not_open_the_comment_composer() {
+    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    app.marks_questions = Some(Questions::built_in().unwrap());
+    // `/` を押した状態を作る（fixture 経路は問いを固定するので、旗と
+    // モードだけを直に置く — ここで見たいのは描画である）。
+    app.mode = Mode::Input;
+    app.composer_return = Mode::View;
+    app.marks_prompt = true;
+    app.input = "費用".to_string();
+    app.input_cursor = app.input.len();
+
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    let screen = buffer_text(terminal.backend().buffer());
+
+    assert!(
+        !screen.contains("comment ·"),
+        "コメントの吹き出しが出ている（1 行プロンプトのはず）:\n{screen}"
+    );
+    // 全角は 2 セルを占め、後ろ半分は空白のセルになる。字面ではなく
+    // **空白を落とした形**で見る。
+    let packed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        packed.contains("ASK▸費用"),
+        "1 行プロンプトが出ていない:\n{screen}"
+    );
+    assert!(
+        screen.contains("Enter ask"),
+        "フッタが問いの入力のヒントになっていない:\n{screen}"
+    );
+}
+
+/// コメントの composer の方は**今までどおり**吹き出しで出る（`c`）。
+/// 上のテストだけだと「composer が壊れた」でも通ってしまう。
+#[test]
+fn the_comment_composer_still_opens_its_bubble() {
+    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    app.mode = Mode::Input;
+    app.composer_return = Mode::View;
+    app.marks_prompt = false;
+    app.input = "ここ".to_string();
+    app.input_cursor = app.input.len();
+
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    let screen = buffer_text(terminal.backend().buffer());
+
+    assert!(screen.contains("comment ·"), "吹き出しが消えた:\n{screen}");
+    assert!(!screen.contains("ASK ▸"), "問いのプロンプトが出ている:\n{screen}");
+}
+
+/// TestBackend のセルを行ごとの文字列にする。
+fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+    let area = buf.area();
+    let mut out = String::new();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
 }
