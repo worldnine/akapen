@@ -596,10 +596,14 @@ pub(crate) fn clear_wide_char_residue_to<W: std::io::Write>(
     use ratatui::backend::IntoCrossterm;
     use unicode_width::UnicodeWidthStr;
 
-    let area = prev.area;
+    // A resize replaces ratatui's frame buffer with the terminal's new
+    // dimensions. Only compare cells that exist in both frames: columns
+    // clipped by a horizontal shrink no longer exist on the terminal and
+    // need no afterimage repair.
+    let area = prev.area.intersection(curr.area);
     let mut wrote = false;
-    for y in 0..area.height {
-        for x in 0..area.width.saturating_sub(1) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right().saturating_sub(1) {
             // A column that no longer begins a wide character, whose next
             // cell is blank (the diff skipped it), where the previous
             // frame HAD a wide character covering x..x+1.
@@ -4756,7 +4760,7 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         scroll_thumb(app.view.rows.len(), inner.height as usize, app.view.offset)
     {
         let thumb_fg = app.ui_scrollbar;
-        let right = frame.x + frame.width - 2;
+        let right = frame.x + frame.width.saturating_sub(2);
         // **溝の目盛り** — マーカーの位置を文書の地図として先に打ち、
         // つまみをその上から描く。溝が無いとき（`scroll_thumb` が `None`）は
         // ここへ来ないので、収まっている文書に点は出ない。
@@ -4880,7 +4884,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App) {
         app.offset,
     ) {
         let thumb_fg = app.ui_scrollbar;
-        let right = area.x + area.width - 1;
+        let right = area.x + area.width.saturating_sub(1);
         // 目盛りは view と同じ約束で source にも出る（装飾はどちらのモードでも
         // 塗られるので、地図が片方にしか無いほうが不自然である）。違うのは
         // 行の数え方だけ — こちらは `line_rows` の累積が表示行になる。

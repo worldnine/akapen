@@ -5825,6 +5825,44 @@ fn wide_char_residue_is_blanked_by_the_afterimage_pass() {
 }
 
 #[test]
+fn wide_char_residue_only_compares_the_shared_resize_area() {
+    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+
+    let mut prev = Buffer::empty(Rect::new(0, 0, 120, 3));
+    prev.set_string(10, 1, "あ", Style::default());
+    prev.set_string(80, 1, "い", Style::default());
+    let curr = Buffer::empty(Rect::new(0, 0, 40, 3));
+
+    let mut out = Vec::new();
+    crate::clear_wide_char_residue_to(&prev, &curr, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("\x1b[2;12H"),
+        "the in-bounds wide character is repaired: {out:?}"
+    );
+    assert!(
+        !out.contains("\x1b[2;82H"),
+        "the clipped columns are outside the current frame: {out:?}"
+    );
+}
+
+#[test]
+fn draw_survives_horizontal_resizes_down_to_zero() {
+    let widths = [120, 40, 20, 8, 120, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 120];
+    for mut app in [make_app(1000, Mode::View), make_app(1000, Mode::Source)] {
+        let mode = app.mode;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        for width in widths {
+            terminal.backend_mut().resize(width, 24);
+            terminal
+                .draw(|frame| draw(frame, &mut app))
+                .unwrap_or_else(|error| panic!("{mode:?} draw failed at width {width}: {error}"));
+        }
+    }
+}
+
+#[test]
 fn afterimage_repair_keeps_the_cells_background() {
     // Regression: the repair pass printed a bare space with whatever SGR
     // state the terminal was left in. When the repaired cell sits on a
