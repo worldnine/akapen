@@ -5,7 +5,7 @@
 //! 使わず、同じ入力からは必ず同じ Atom 列が出る。API キーを持たない
 //! ユーザーにも、この層までは値が届く。
 //!
-//! 生成するのは [`AtomKind`] の各種別だけで、[`crate::ReadingTier`] も
+//! 生成するのは [`AtomKind`] の各種別だけで、[`crate::SemanticUnit`] も
 //! [`crate::SemanticUnit`] も付けない。意味の境界は Jev の仕事である。
 //!
 //! # 範囲の取り方
@@ -54,7 +54,7 @@
 //!
 //! Atom 列は文書を隙間なく覆わない。空行、`---`、リストの入れ子の
 //! インデントなど、どの Atom にも属さない領域があってよい。
-//! [`crate::policy::decorate`] は「どの Unit にも属さない Atom は NORMAL」と
+//! [`crate::marks::mark`] は「どの Unit にも属さない Atom は NORMAL」と
 //! 扱うので、隙間はそのまま NORMAL の地の文として残る。
 
 use std::ops::Range;

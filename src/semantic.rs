@@ -688,7 +688,7 @@ mod tests {
     fn a_fixture_without_a_digest_is_not_checked() {
         let document = SemanticDocument::new(
             vec![Atom::new(0..3, AtomKind::Sentence)],
-            vec![SemanticUnit::new("u1", [AtomIndex(0)], semantic_reading::ReadingTier::Essential)],
+            vec![SemanticUnit::new("u1", [AtomIndex(0)])],
         );
         assert!(document.source_digest().is_none());
         let provider = DigestChecked::new(FixtureProvider::from_document(document).unwrap());
@@ -920,15 +920,15 @@ mod tests {
         let source = "# 見出し\n\n本文です。\n";
         let cases = [
             // 範囲外の atom index
-            (r#"{"version":1,"units":[{"id":"u1","atoms":[99],"reading_tier":"essential"}]}"#, "out of range"),
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[99]}]}"#, "out of range"),
             // id の重複
-            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"},{"id":"u1","atoms":[1],"reading_tier":"detail"}]}"#, "duplicate"),
-            // 未知の tier
-            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"urgent"}]}"#, "JSON"),
-            // 存在しない relation 先
-            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"detail","relations":[{"redundant_with":"u9"}]}]}"#, "unknown"),
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[0]},{"id":"u1","atoms":[1]}]}"#, "duplicate"),
+            // 自分の atom でない核
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"core_atoms":[1]}]}"#, "core atom 1"),
+            // 存在しない節の見出し
+            (r#"{"version":1,"units":[{"id":"u1","atoms":[0],"section_of":"u9"}]}"#, "unknown section head"),
             // version 不一致
-            (r#"{"version":7,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"}]}"#, "version 7"),
+            (r#"{"version":7,"units":[{"id":"u1","atoms":[0]}]}"#, "version 7"),
             // JSON ですらない
             ("not json", "JSON"),
         ];

@@ -4,20 +4,22 @@
 //!
 //! この crate は文書を要約も書き換えもしない。文書内の意味的なまとまり
 //! （[`SemanticUnit`]）と、それを構成する機械的な位置単位（[`Atom`]）を
-//! 受け取り、Reading Budget に応じて
+//! 受け取り、
 //!
 //! ```text
 //! どの source range が
 //! どの semantic state か
 //! ```
 //!
-//! だけを返す。
+//! だけを返す。**機構は 1 つだけである** — 問いを当て、Unit ごとのスコアを
+//! 受け取り、上位 N % の核を光らせる（[`marks`]。設計は
+//! `docs/design/semantic-reading-layer.md`）。
 //!
 //! # 判断単位は Unit、表示単位は Atom
 //!
-//! Reading Tier や redundancy といった意味情報は [`SemanticUnit`] に付く。
-//! しかし表示はもっと細かい [`Atom`] 単位で行う。[`policy::decorate`] は
-//! Unit に付いた判断を、その Unit を構成する Atom へ投影して出力する。
+//! スコアと核という意味情報は [`SemanticUnit`] に付く。しかし表示はもっと
+//! 細かい [`Atom`] 単位で行う。[`marks::mark`] は Unit に付いた判断を、
+//! その Unit を構成する Atom へ投影して出力する。
 //!
 //! ```text
 //! 意味判断  ->  Semantic Unit
@@ -42,10 +44,14 @@
 //! DisplayState      ->   色 / background / modifier
 //! ```
 //!
+//! **[`marks::mark`] は [`DisplayState::Dim`] を 1 つも返さない。** DIM は
+//! クライアント側のフォーカス（`f`）が使う描画プリミティブで、この層の
+//! 判定ではない。
+//!
 //! # Atom 生成に Jev は要らない
 //!
 //! [`atomize`] は source を Markdown として解析し、[`Atom`] 列だけを返す。
-//! Tier も Unit も付けない。Jev を呼ばずネットワークも使わない、完全に
+//! スコアも Unit も付けない。Jev を呼ばずネットワークも使わない、完全に
 //! 決定論的な処理なので、API キーを持たないユーザーにもこの層までは
 //! 値が届く。意味の境界（どの Atom が同じ Unit か）は Jev の仕事である。
 //!
@@ -55,17 +61,17 @@
 //!              -> Semantic Units
 //! ```
 //!
-//! # Budget 変更では Jev を呼ばない
+//! # つまみの操作では Jev を呼ばない
 //!
 //! Jev（意味判断を行う System One モデル。**LLM ではない** —
 //! `docs/design/jev.md`）が関わるのは [`Provider`] の内側だけで、
-//! 一度 [`SemanticDocument`] が得られたあとの `100% -> 70% -> 30%` という
-//! Budget 操作は [`policy::decorate`] だけで完結する純粋ローカル計算である。
+//! 一度 [`SemanticDocument`] が得られたあとの `20% -> 50% -> 100%` という
+//! つまみの操作は [`marks::mark`] だけで完結する純粋ローカル計算である。
 //! この crate 自体は Jev を呼ばない（[`FixtureProvider`] のみ）。
 //!
 //! ```text
 //! Jev analysis -> SemanticDocument   (遅い / 非決定的 / Provider の内側)
-//!              -> Reading Policy     (速い / 決定論的 / 純粋関数)
+//!              -> marks::mark        (速い / 決定論的 / 純粋関数)
 //!              -> Atom Decorations
 //! ```
 //!
@@ -76,7 +82,7 @@
 //! # 使い方
 //!
 //! ```
-//! use semantic_reading::{DisplayState, FixtureProvider, Provider, policy};
+//! use semantic_reading::{DisplayState, FixtureProvider, Provider, marks};
 //!
 //! let json = r#"{
 //!   "atoms": [
@@ -84,22 +90,20 @@
 //!     { "range": { "start": 9, "end": 40 }, "kind": "sentence" }
 //!   ],
 //!   "units": [
-//!     { "id": "u1", "atoms": [0], "reading_tier": "essential", "relations": [] },
-//!     { "id": "u2", "atoms": [1], "reading_tier": "detail", "relations": [] }
+//!     { "id": "u1", "atoms": [0], "score": 0.94 },
+//!     { "id": "u2", "atoms": [1], "score": 0.05 }
 //!   ]
 //! }"#;
 //!
 //! let provider = FixtureProvider::from_json(json)?;
 //! let doc = provider.analyze("# Title\n\n...")?;
 //!
-//! // Budget 100% なら誰も DIM にならず、ESSENTIAL だけが MARKED。
-//! let full = policy::decorate(&doc, 100);
-//! assert_eq!(full[0].1, DisplayState::Marked);
-//! assert_eq!(full[1].1, DisplayState::Normal);
-//!
-//! // Budget を絞ると DETAIL から落ちる。
-//! let thin = policy::decorate(&doc, 20);
-//! assert_eq!(thin[1].1, DisplayState::Dim);
+//! // つまみを上げても、足切り未満の Unit は光らない。
+//! let all = marks::mark(&doc, 100);
+//! assert_eq!(all[0].1, DisplayState::Marked);
+//! assert_eq!(all[1].1, DisplayState::Normal);
+//! // DIM は 1 つも出ない。
+//! assert!(all.iter().all(|(_, state)| *state != DisplayState::Dim));
 //! # Ok::<(), semantic_reading::Error>(())
 //! ```
 
@@ -111,7 +115,6 @@ mod display;
 mod document;
 mod error;
 pub mod marks;
-pub mod policy;
 pub mod protocol;
 mod provider;
 mod unit;
@@ -123,7 +126,7 @@ pub use document::SemanticDocument;
 pub use error::Error;
 pub use protocol::{AnalyzeRequest, AnalyzeResponse, RequestQuestion};
 pub use provider::{FixtureProvider, Provider};
-pub use unit::{ReadingTier, Relation, SemanticUnit, UnitId};
+pub use unit::{SemanticUnit, UnitId};
 
 /// この crate の [`std::result::Result`]。エラーは [`Error`] に寄せる。
 pub type Result<T> = std::result::Result<T, Error>;

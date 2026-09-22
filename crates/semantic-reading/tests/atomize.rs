@@ -145,7 +145,7 @@ fn a_table_splits_into_rows_and_leaves_no_gap_inside_itself() {
 #[test]
 fn atoms_need_not_tile_the_document() {
     // 敷き詰めないのは意図的。空行や `---` はどの Atom にも属さず、
-    // `policy::decorate` の扱いでそのまま NORMAL の地の文として残る。
+    // `marks::mark` の扱いでそのまま NORMAL の地の文として残る。
     let source = "# 見出し\n\n---\n\n本文。\n";
     let atoms = atomize(source);
     let covered: usize = atoms.iter().map(|atom| atom.len()).sum();

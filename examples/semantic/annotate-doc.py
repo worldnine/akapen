@@ -13,8 +13,7 @@ stdin から
 を受け取り、stdout へ
 
     {"version": 1, "question": "essential",
-     "units": [{"id": "u1", "atoms": [0], "reading_tier": "detail",
-                "score": 0.9, "core_atoms": [0]}]}
+     "units": [{"id": "u1", "atoms": [0], "score": 0.9, "core_atoms": [0]}]}
 
 を返す。**range は返さない** — 返すのは Atom の index だけで、位置の
 管理は akapen 側に残る。これがこのプロトコルの安全性の芯で、外部コマンド
@@ -147,12 +146,8 @@ def annotate(request: dict) -> dict:
             {
                 "id": f"u{index + 1}",
                 "atoms": [index],
-                # `reading_tier` は wire の必須フィールドとして残っている
-                # だけで、誰も読まない（DIM 版は 2026-09-22 に削除）。
-                "reading_tier": "detail",
                 "score": round(score, 2),
                 "core_atoms": core,
-                "relations": [],
             }
         )
         previous.append(bag)

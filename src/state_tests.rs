@@ -6468,7 +6468,6 @@ fn the_provider_is_re_asked_when_the_document_itself_changes() {
                     let mut unit = semantic_reading::SemanticUnit::new(
                         "u1",
                         [semantic_reading::AtomIndex(0)],
-                        semantic_reading::ReadingTier::Essential,
                     );
                     // スコアが無い Unit は光らないので、装飾が出ない。
                     unit.score = Some(0.9);
@@ -6843,7 +6842,7 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
 /// メッセージを直接流し込み、ポンプに通す。
 #[test]
 fn an_answer_from_an_older_generation_is_thrown_away() {
-    use semantic_reading::{Atom, AtomIndex, AtomKind, ReadingTier, SemanticDocument, SemanticUnit};
+    use semantic_reading::{Atom, AtomIndex, AtomKind, SemanticDocument, SemanticUnit};
 
     let mut app = make_app(3, Mode::View);
     // 走らせないコマンド（このテストで子プロセスは 1 つも起動しない）。
@@ -6854,7 +6853,7 @@ fn an_answer_from_an_older_generation_is_thrown_away() {
     let document_a = |text: &str| {
         let mut doc = SemanticDocument::new(
             vec![Atom::new(0..text.len().min(5), AtomKind::Sentence)],
-            vec![SemanticUnit::new("old", [AtomIndex(0)], ReadingTier::Essential)],
+            vec![SemanticUnit::new("old", [AtomIndex(0)])],
         );
         doc.source_sha256 = Some(crate::semantic::source_digest(text));
         doc

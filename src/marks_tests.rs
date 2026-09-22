@@ -408,7 +408,6 @@ fn a_different_question_is_a_different_cache_entry() {
         vec![semantic_reading::SemanticUnit::new(
             "u1",
             [semantic_reading::AtomIndex(0)],
-            semantic_reading::ReadingTier::Detail,
         )],
     );
     document.source_sha256 = Some(crate::semantic::source_digest(source));

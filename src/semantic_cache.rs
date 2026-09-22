@@ -357,11 +357,37 @@ mod tests {
     fn document() -> SemanticDocument {
         let json = format!(
             r#"{{"atoms":[{{"range":{{"start":0,"end":13}},"kind":"heading"}}],
-                 "units":[{{"id":"u1","atoms":[0],"reading_tier":"essential"}}],
+                 "units":[{{"id":"u1","atoms":[0],"score":0.94,"core_atoms":[0]}}],
                  "source_sha256":"{}"}}"#,
             source_digest(SOURCE)
         );
         serde_json::from_str(&json).unwrap()
+    }
+
+    /// **DIM 版が書いたキャッシュを捨てない。**
+    ///
+    /// `~/.cache/akapen/semantic/` には 2026-09-22 より前に書かれた答えが
+    /// 残っていて、その Unit は `reading_tier` と `relations` を持っている。
+    /// 読めなくなると `get` が黙って外れ、当たっていた文書が払い直しに
+    /// なる（議事録で約 5 円）。**serde が未知のフィールドとして読み飛ばす**
+    /// ことをここで固定する — `akapen --semantic-cache-clear` は要らない。
+    #[test]
+    fn an_entry_written_by_the_dim_version_still_loads() {
+        let (_dir, cache) = cache();
+        let json = format!(
+            r#"{{"atoms":[{{"range":{{"start":0,"end":13}},"kind":"heading"}}],
+                 "units":[{{"id":"u1","atoms":[0],"reading_tier":"essential",
+                            "relations":[],"score":0.94,"core_atoms":[0]}}],
+                 "source_sha256":"{}"}}"#,
+            source_digest(SOURCE)
+        );
+        let old: SemanticDocument = serde_json::from_str(&json).unwrap();
+        // 置いたのは古い形のまま（`put` は serde で書き直すので、ここは
+        // 「読めること」だけを見ている）。
+        cache.put(CMD, SOURCE, &old).unwrap();
+        let back = cache.get(CMD, SOURCE).expect("古い形でも引ける");
+        assert_eq!(back.units[0].score, Some(0.94));
+        assert_eq!(back.units[0].core_atoms, Some(vec![semantic_reading::AtomIndex(0)]));
     }
 
     fn cache() -> (tempfile::TempDir, SemanticCache) {

@@ -1,15 +1,15 @@
 //! Semantic Document — Atom 列 + Semantic Unit 列。
 //!
 //! 文書そのもの（source テキスト）はここには入らない。この crate が扱うのは
-//! あくまで「source のどの範囲が、どの意味的まとまりに属し、どの Tier か」
-//! までで、テキストの所有はクライアント側の責務である。
+//! あくまで「source のどの範囲が、どの意味的まとまりに属し、いまの問いに
+//! どれだけ答えているか」までで、テキストの所有はクライアント側の責務である。
 
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::atom::{Atom, AtomIndex};
 use crate::error::Error;
-use crate::unit::{Relation, SemanticUnit, UnitId};
+use crate::unit::{SemanticUnit, UnitId};
 
 /// 1 つの文書についての semantic annotation 一式。
 ///
@@ -32,13 +32,12 @@ pub struct SemanticDocument {
     /// ハッシュ実装を持たない）、`validate` は**形だけ**を検査する。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_sha256: Option<String>,
-    /// **この annotation が答えている問いの id**（marks モード。
-    /// `docs/design/marks-only-and-review-mode.md` 0 節）。
+    /// **この annotation が答えている問いの id**
+    /// （`docs/design/semantic-reading-layer.md`）。
     ///
-    /// DIM 版の annotation は問いを持たないので `None` である。marks の
-    /// 答えは判定器が echo した id をここに載せ、キャッシュの読み戻しで
+    /// 判定器が echo した id をここに載せ、キャッシュの読み戻しで
     /// 「別の問いの答え」を撥ねるために使う（`crate::semantic_cache` は
-    /// akapen 側）。
+    /// akapen 側）。問いを名乗らない古い注釈は `None` になる。
     ///
     /// **文面ではなく id を持つ。** 文面は akapen 側の正本（定型のデータ
     /// ファイル）にあり、こちらに写しを置くと 2 つがずれうる。文面が
@@ -78,45 +77,33 @@ impl SemanticDocument {
 
     /// 文書としての辻褄を検査する。
     ///
-    /// [`crate::policy::decorate`] は壊れた入力でも panic しない作りだが、
+    /// [`crate::marks::mark`] は壊れた入力でも panic しない作りだが、
     /// provider が外から受け取った JSON はここで一度弾いておく。検査するのは
     ///
     /// - Atom の範囲が逆転していないこと
     /// - Unit の Atom 添字が範囲内であること
     /// - Unit の `core_atoms` がその Unit の `atoms` の部分集合であること
     /// - Unit の識別子が重複していないこと
-    /// - relation（`RedundantWith` / `Presupposes`）の参照先が実在し、
-    ///   自分自身でないこと
     /// - `section_of` の参照先が実在し、自分自身でないこと
     /// - `source_sha256` があるなら hex 64 桁であること
     ///
-    /// の 7 点。Atom がどの Unit にも属さないことは**エラーにしない**
+    /// の 6 点。Atom がどの Unit にも属さないことは**エラーにしない**
     /// （未判断の Atom は NORMAL のまま表示されればよい）。
     ///
     /// `section_of` の参照先が**見出しを含む Unit かどうかは見ない**。
     /// この crate は節の作り方を知らないし、知る必要もない
-    /// （[`crate::SemanticUnit::section_of`]）。見るのは relation と同じ
-    /// 2 点、実在と自己参照だけである。
+    /// （[`crate::SemanticUnit::section_of`]）。見るのは実在と自己参照の
+    /// 2 点だけである。
     ///
-    /// # `Presupposes` の向きと循環は検査しない
+    /// # `section_of` の向きと循環は検査しない
     ///
-    /// 判定器は「自分より前の Unit」しか選択肢にしないので、辺は後ろ向きに
-    /// しか立たず循環は構造上できない
-    /// （`examples/semantic/measurements/context-preservation.md` 結論 1）。
-    /// それでも**前向きの辺や循環をここで拒否しない**。理由は 2 つある。
-    ///
-    /// - [`crate::policy`] の閉包は訪問済み集合で辿るので、循環があっても
-    ///   必ず止まる
-    /// - 単調性の証明は辺の構造をまったく使っていない（[`crate::policy`] の
-    ///   「単調性は何に支えられているか」）。壊れた辺で壊れるのは
-    ///   **その注釈の妥当性**であって、この層の不変量ではない
+    /// 節の見出しは自分より前にあるので辺は後ろ向きにしか立たず、循環は
+    /// 構造上できない。それでも**前向きの辺や循環をここで拒否しない** —
+    /// この crate にこのフィールドの読み手が居ないので、壊れた辺で壊れるのは
+    /// **その注釈の妥当性**であって、この層の不変量ではない。
     ///
     /// 「構造上ありえないものを弾く検査」は、通らない道のぶんだけ嘘を
     /// 言いやすい。実在と自己参照だけを見る。
-    ///
-    /// **`section_of` も同じ扱い**である。節の見出しは自分より前にあるので
-    /// 辺は後ろ向きにしか立たないが、それを検査しない。[`crate::policy`] の
-    /// 復帰は訪問済み集合で辿るので、前向きの辺や循環があっても止まる。
     ///
     /// `source_sha256` は**形だけ**を見る。実際の source と一致するかは
     /// クライアントの仕事で、ここには source そのものが無い。
@@ -178,24 +165,6 @@ impl SemanticDocument {
                     )));
                 }
             }
-            for relation in &unit.relations {
-                let (target, what) = match relation {
-                    Relation::RedundantWith(target) => (target, "redundant with"),
-                    Relation::Presupposes(target) => (target, "presupposing"),
-                };
-                if target == &unit.id {
-                    return Err(Error::Invalid(format!(
-                        "unit `{}` is marked {what} itself",
-                        unit.id
-                    )));
-                }
-                if self.unit(target).is_none() {
-                    return Err(Error::Invalid(format!(
-                        "unit `{}` refers to unknown unit `{target}`",
-                        unit.id
-                    )));
-                }
-            }
         }
 
         Ok(())
@@ -206,7 +175,6 @@ impl SemanticDocument {
 mod tests {
     use super::*;
     use crate::atom::AtomKind;
-    use crate::unit::ReadingTier;
 
     fn doc() -> SemanticDocument {
         SemanticDocument::new(
@@ -215,8 +183,8 @@ mod tests {
                 Atom::new(12..40, AtomKind::Sentence),
             ],
             vec![
-                SemanticUnit::new("u1", [AtomIndex(0)], ReadingTier::Essential),
-                SemanticUnit::new("u2", [AtomIndex(1)], ReadingTier::Detail),
+                SemanticUnit::new("u1", [AtomIndex(0)]),
+                SemanticUnit::new("u2", [AtomIndex(1)]),
             ],
         )
     }
@@ -232,10 +200,7 @@ mod tests {
         let doc = doc();
         assert_eq!(doc.atom(AtomIndex(1)).unwrap().kind, AtomKind::Sentence);
         assert!(doc.atom(AtomIndex(9)).is_none());
-        assert_eq!(
-            doc.unit(&UnitId::from("u2")).unwrap().reading_tier,
-            ReadingTier::Detail
-        );
+        assert_eq!(doc.unit(&UnitId::from("u2")).unwrap().atoms, [AtomIndex(1)]);
         assert!(doc.unit(&UnitId::from("nope")).is_none());
     }
 
@@ -341,85 +306,6 @@ mod tests {
         doc.units[1].id = UnitId::from("u1");
         let err = doc.validate().unwrap_err().to_string();
         assert!(err.contains("duplicate unit id"), "{err}");
-    }
-
-    #[test]
-    fn validate_rejects_a_dangling_redundancy_target() {
-        let mut broken = doc();
-        broken.units[1]
-            .relations
-            .push(Relation::RedundantWith("u9".into()));
-        assert!(
-            broken
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("unknown unit")
-        );
-    }
-
-    #[test]
-    fn validate_rejects_self_redundancy() {
-        let mut broken = doc();
-        broken.units[1]
-            .relations
-            .push(Relation::RedundantWith("u2".into()));
-        assert!(
-            broken
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("redundant with itself")
-        );
-    }
-
-    #[test]
-    fn validate_rejects_a_dangling_prerequisite() {
-        let mut broken = doc();
-        broken.units[1]
-            .relations
-            .push(Relation::Presupposes("u9".into()));
-        assert!(
-            broken
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("unknown unit")
-        );
-    }
-
-    #[test]
-    fn validate_rejects_a_unit_that_presupposes_itself() {
-        let mut broken = doc();
-        broken.units[1]
-            .relations
-            .push(Relation::Presupposes("u2".into()));
-        assert!(
-            broken
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("presupposing itself"),
-            "{:?}",
-            broken.validate()
-        );
-    }
-
-    /// 前向きの辺（後ろの Unit を前提にする）は**通す**。構造上は起こらない
-    /// が、起きても policy 側が止まるので、ここで拒否する理由が無い。
-    #[test]
-    fn validate_allows_a_forward_prerequisite_and_a_cycle() {
-        let mut forward = doc();
-        // u1 が、自分より後ろの u2 を前提にする。
-        forward.units[0]
-            .relations
-            .push(Relation::Presupposes("u2".into()));
-        assert!(forward.validate().is_ok());
-        // そのまま循環にしても通る。
-        forward.units[1]
-            .relations
-            .push(Relation::Presupposes("u1".into()));
-        assert!(forward.validate().is_ok());
     }
 
     #[test]

@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// Atom 1 つの表示状態。
 ///
-/// MVP はこの 3 値のみ。DIM は「今の Budget では優先度が低い」であって
-/// 削除ではない — 文書は変化しない。
+/// この 3 値のみ。DIM は「読み手が他を沈めた」であって削除ではない —
+/// 文書は変化しない。**[`crate::marks::mark`] はこれを返さない**;
+/// 返すのはクライアント側のフォーカス（akapen の `f`）だけである。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayState {
@@ -16,7 +17,7 @@ pub enum DisplayState {
     Marked,
     /// 通常表示。
     Normal,
-    /// 今の Budget では優先度が低い。文書からは消さない。
+    /// 読み手が他を沈めた（akapen の `f`）。文書からは消さない。
     Dim,
 }
 
