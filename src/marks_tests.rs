@@ -181,7 +181,9 @@ fn the_footer_counts_what_is_on_screen() {
         let footer = crate::chrome::footer_hints(&app);
         let lit = app.marks_lit().unwrap();
         assert!(footer.contains(&format!("MARK {share}%")), "{footer}");
-        assert!(footer.contains(&format!("{lit}本")), "{footer}");
+        // 単位の「本」は 2026-09-22 に落とした（UI の言葉は全部英語）。
+        // 区切りごと見て、`MARK 20%` の `20` を拾ってしまわないようにする。
+        assert!(footer.contains(&format!("· {lit} ·")), "{footer}");
         assert!(footer.contains("settled"), "問いの名前が出ている: {footer}");
         // 画面の本数と一致する（footer の数字が嘘をつかない）。
         assert_eq!(lit, marked(&app).len());
@@ -359,7 +361,7 @@ fn cycling_forward_walks_the_ring_in_order() {
 fn the_question_keys_do_nothing_in_budget_mode() {
     // budget モードのセッションで `m` `/` は層に触らない（`crate::keys`）。
     for c in [
-        crate::keys::MARKS_CYCLE,
+        crate::keys::MARKS_PICK,
         crate::keys::MARKS_CYCLE_BACK,
         crate::keys::MARKS_FREE,
     ] {

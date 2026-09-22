@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Mode};
 use crate::clip_if_needed;
@@ -462,21 +462,26 @@ pub(crate) fn footer_hints(app: &App) -> String {
     // (`policy::floor`). The number is the floor itself, so what the
     // footer says and what the screen shows agree — READ 43% (floor)
     // means 43 % is on screen and no less can be asked for.
-    // marks モードは `MARK n% · k本 · <問い>` を同じ場所に出す
+    // marks モードは `MARK n% · k · <問い>` を同じ場所に出す
     // （`docs/design/marks-only-and-review-mode.md` 0 節）。3 つとも
     // 読み出しであって制御ではない:
     //
     // - `n%` — つまみの位置（上から何 % の Unit を見ているか）
-    // - `k本` — **実際に光っている Unit の数**。`0本` は「この問いに
+    // - `k` — **実際に光っている Unit の数**。`0` は「この問いに
     //   答えている箇所が無い」であって、壊れているのではない。狭い問いで
-    //   そう出るのが正しい（段 1 の `demo` に「判断が要る」）
+    //   そう出るのが正しい
     // - 問いの名前 — いま何を聞いているか。DIM 版に無いもので、これが
     //   無いと「なぜここが光っているのか」が読めない
+    //
+    // **単位の「本」は 2026-09-22 に落とした。** UI の言葉は全部英語で、
+    // ここだけ日本語が残っていた（読み手の注文 1）。`marks` の文脈で裸の
+    // 数を置けば本数以外に読みようが無いので、`marks` や `lit` のような
+    // 語も足していない。
     //
     // 問いをまだ選んでいない間は何も出さない。READ が注釈の無い間だまって
     // いるのと同じ作法で、そこが marks モードの遅延の起点である。
     let marks = |p: String| {
-        let question = app.marks_question_label().map(str::to_string);
+        let question = app.marks_question_display();
         if app.semantic_inflight.is_some() {
             let asking = question.unwrap_or_else(|| "…".to_string());
             return format!("{p} · MARK {}% · {asking} · analyzing…", app.marks_share);
@@ -499,7 +504,7 @@ pub(crate) fn footer_hints(app: &App) -> String {
             return p;
         };
         match app.marks_lit() {
-            Some(lit) => format!("{p} · MARK {}% · {lit}本 · {question}", app.marks_share),
+            Some(lit) => format!("{p} · MARK {}% · {lit} · {question}", app.marks_share),
             None => p,
         }
     };
@@ -517,6 +522,8 @@ pub(crate) fn footer_hints(app: &App) -> String {
         }
     };
     let hints = match app.mode {
+        // 問いの 1 行プロンプト（`/`）。改行は無いので `^j newline` を
+        // 出さない — composer のヒントを借りると、打てない操作を勧める。
         Mode::Input if app.marks_prompt => {
             "Enter ask · ←→ move · Esc cancel".to_string()
         }
@@ -678,6 +685,13 @@ pub(crate) fn draw_message(f: &mut Frame, app: &App) {
     } else {
         f.area().height.saturating_sub(2)
     };
+    // 問いの 1 行プロンプトはこの行を**丸ごと**使う。打っている最中の
+    // 入力欄なので、中央のバナー（確認・toast）より優先する — 入力中に
+    // toast が上に乗ると、打った字が見えなくなる。
+    if app.marks_prompt && app.mode == Mode::Input {
+        draw_ask_prompt(f, app, row);
+        return;
+    }
     if let Some(msg) = prompt_message(app) {
         draw_banner(f, f.area(), row, &msg, false);
     } else if let Some((msg, _, is_error)) = &app.status {
@@ -868,4 +882,100 @@ mod footer_tests {
         );
         assert!(hints.contains("newer →"));
     }
+}
+
+// ---- marks モードの問いの 1 行プロンプト（`/`） ------------------------
+
+/// `ASK ▸ ` の見出し。`▸` は file picker のカーソルと同じ記号で、
+/// 「ここから先があなたの入力」を指す。
+const ASK_LEAD: &str = " ASK ▸ ";
+
+/// 表示幅で `s` を `[start, start + cols)` に切る。返すのは切った文字列と、
+/// 実際に切れた開始桁（全角の途中では切れないので、要求より左に寄ることが
+/// ある）。
+fn slice_cols(s: &str, start: usize, cols: usize) -> (String, usize) {
+    let mut out = String::new();
+    let mut at = 0usize;
+    let mut began = None;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if at >= start {
+            if began.is_none() {
+                began = Some(at);
+            }
+            if out.width() + w > cols {
+                break;
+            }
+            out.push(ch);
+        }
+        at += w;
+    }
+    (out, began.unwrap_or(at.min(start)))
+}
+
+/// **問いの 1 行プロンプト。** メッセージ行（フッタのすぐ上、view モード
+/// では枠の下辺）を丸ごと使う。
+///
+/// **composer（コメントの入力欄）を借りるのをやめた理由**が 2 つある
+/// （2026-09-22 の実機、読み手の注文 2）:
+///
+/// - 吹き出しが `comment · 1` と名乗っていた。バッジだけが `ASK` に
+///   変わるので、枠の中は「コメントを書いている」と言ったままだった
+/// - 1 行の問いのために 3 行（上罫・本文・下罫）を**文書の中に割り込ませ**、
+///   行がずれていた。問いは 1 行なので、1 行で足りる
+///
+/// キャレットとカーソル位置は composer と**同じ関数**を使う
+/// （[`crate::cursor_caret_line`] / [`crate::composer_cursor_pos`]）。
+/// 日本語・全角・IME の扱いを 2 つ目実装しないためで、ここが分かれると
+/// 片方だけ直す事故になる。
+///
+/// 入力が行幅を超えたら**左へ流す**（キャレットが常に見える窓）。1 行に
+/// 収める以上どこかが隠れるので、隠すのは打ち終わった左側にする。
+pub(crate) fn draw_ask_prompt(f: &mut Frame, app: &App, row: u16) {
+    use ratatui::widgets::Clear;
+    let area = f.area();
+    let rect = Rect {
+        x: area.x,
+        y: area.y + row,
+        width: area.width,
+        height: 1,
+    };
+    f.render_widget(Clear, rect);
+    let cyan = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let lead_cols = UnicodeWidthStr::width(ASK_LEAD);
+    let room = (rect.width as usize).saturating_sub(lead_cols);
+    // 改行はプロンプトに入らないので、本文は常に 1 行である。
+    let (_, caret_col) = crate::composer_cursor_pos(&app.input, app.input_cursor, usize::MAX);
+    // キャレットの 1 桁ぶんを残した窓。
+    let avail = room.saturating_sub(1);
+    let start = caret_col.saturating_sub(avail);
+    let (visible, began) = slice_cols(&app.input, start, avail);
+    let mut spans = vec![Span::styled(ASK_LEAD, cyan)];
+    let caret = crate::cursor_caret_line(&visible, caret_col.saturating_sub(began));
+    let used: usize = caret.spans.iter().map(|s| s.content.width()).sum();
+    spans.extend(caret.spans);
+    // 罫を右端まで伸ばす。composer の「罫が両端まで走る」作法を 1 行に
+    // 畳んだもので、入力欄がどこまでかが見える。
+    let fill = room.saturating_sub(used);
+    if fill > 0 {
+        spans.push(Span::styled(
+            "─".repeat(fill),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
+/// プロンプトのキャレットが乗る画面位置（IME の変換窓のアンカー）。
+/// [`draw_ask_prompt`] と同じ窓の計算を通すので、描いたキャレットから
+/// ずれない。
+pub(crate) fn ask_prompt_cursor(app: &App, area: Rect, row: u16) -> (u16, u16) {
+    let lead_cols = UnicodeWidthStr::width(ASK_LEAD);
+    let room = (area.width as usize).saturating_sub(lead_cols);
+    let (_, caret_col) = crate::composer_cursor_pos(&app.input, app.input_cursor, usize::MAX);
+    let avail = room.saturating_sub(1);
+    let start = caret_col.saturating_sub(avail);
+    let (_, began) = slice_cols(&app.input, start, avail);
+    let col = lead_cols + caret_col.saturating_sub(began);
+    (area.x + col as u16, area.y + row)
 }

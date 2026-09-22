@@ -7,9 +7,15 @@
 //! ファイルの 1 行**を変えれば済む。
 //!
 //! ```text
-//! budget モード   -/+ ±1   </> ±10                 （READ %）
-//! marks  モード   -/+ ±1   </> ±10   m/M 問い   / 自由入力   （MARK %）
+//! budget モード   -/+ ±1   </> ±10                       （READ %）
+//! marks  モード   -/+ ±1   </> ±10   m 選ぶ  M 前へ  / 自由入力（MARK %）
 //! ```
+//!
+//! **`m` は 2026-09-22 に「次へ巡る」から「選ぶ（popup）」へ変わった。**
+//! 巡る形は 1 打ごとに Jev を呼ぶので、4 本めを見るのに 4 回呼んでいた
+//! （`crate::app::App::ask_marks_preset`）。`M`（前へ巡る）は**残して
+//! ある** — popup を開かずに 1 つ前へ戻る速い道で、割り当てを減らす話は
+//! 注文に無い。
 //!
 //! 量のつまみ 4 本は**両モードで同じキー**である。どちらでも「量のつまみ」
 //! という同じ意味で、モードは起動時に決まるので取り違えようがない。
@@ -25,8 +31,8 @@ pub(crate) const AMOUNT_DOWN_FAR: char = '<';
 /// 量を 10 ポイント上げる。
 pub(crate) const AMOUNT_UP_FAR: char = '>';
 
-/// 定型を次へ巡る（marks モードのみ）。
-pub(crate) const MARKS_CYCLE: char = 'm';
+/// 定型の選択（popup）を開く（marks モードのみ）。
+pub(crate) const MARKS_PICK: char = 'm';
 /// 定型を前へ巡る（marks モードのみ）。
 pub(crate) const MARKS_CYCLE_BACK: char = 'M';
 /// 自由入力のプロンプトを開く（marks モードのみ）。
@@ -39,8 +45,11 @@ pub(crate) const MARKS_FREE: char = '/';
 pub(crate) enum SemanticKey {
     /// 量のつまみを動かす（READ % / MARK %）。
     Amount(i16),
-    /// 定型を巡る。`+1` が次、`-1` が前。
+    /// 定型を巡る。`+1` が次、`-1` が前。いまキーが割り当たっているのは
+    /// `-1`（`M`）だけで、`+1` は popup が置き換えた。
     CycleQuestion(i16),
+    /// 定型の選択（popup）を開く。
+    PickQuestion,
     /// 自由入力のプロンプトを開く。
     FreeQuestion,
 }
@@ -57,7 +66,7 @@ pub(crate) fn semantic_key(c: char, marks: bool) -> Option<SemanticKey> {
         AMOUNT_UP | AMOUNT_UP_ALT => Some(SemanticKey::Amount(1)),
         AMOUNT_DOWN_FAR => Some(SemanticKey::Amount(-10)),
         AMOUNT_UP_FAR => Some(SemanticKey::Amount(10)),
-        MARKS_CYCLE if marks => Some(SemanticKey::CycleQuestion(1)),
+        MARKS_PICK if marks => Some(SemanticKey::PickQuestion),
         MARKS_CYCLE_BACK if marks => Some(SemanticKey::CycleQuestion(-1)),
         MARKS_FREE if marks => Some(SemanticKey::FreeQuestion),
         _ => None,
@@ -80,8 +89,19 @@ mod tests {
     }
 
     #[test]
+    fn m_opens_the_picker_and_shift_m_still_cycles_back() {
+        // 巡る形は 1 打ごとに Jev を呼ぶので `m` は popup になった。
+        // `M` は残してある（popup を開かずに 1 つ前へ戻る道）。
+        assert_eq!(semantic_key(MARKS_PICK, true), Some(SemanticKey::PickQuestion));
+        assert_eq!(
+            semantic_key(MARKS_CYCLE_BACK, true),
+            Some(SemanticKey::CycleQuestion(-1))
+        );
+    }
+
+    #[test]
     fn the_question_keys_are_bound_only_in_marks_mode() {
-        for c in [MARKS_CYCLE, MARKS_CYCLE_BACK, MARKS_FREE] {
+        for c in [MARKS_PICK, MARKS_CYCLE_BACK, MARKS_FREE] {
             assert_eq!(semantic_key(c, false), None, "budget モードでは素通り: {c}");
             assert!(semantic_key(c, true).is_some(), "marks モードでは効く: {c}");
         }

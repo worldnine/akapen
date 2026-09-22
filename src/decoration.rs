@@ -275,6 +275,24 @@ impl DecorationStyles {
         self.mark
     }
 
+    /// The mark's background color on its own — the amber the paint
+    /// actually writes.
+    ///
+    /// The marks reveal animation filters the frame by exactly this
+    /// color (`crate::effects::marks_reveal_effect`), which is why it is
+    /// read from here instead of being written into the effect: a theme,
+    /// `--light` and `--mark-blend` all move it, and there must be one
+    /// place that decides.
+    pub fn mark_bg(&self) -> Color {
+        self.mark.bg.unwrap_or(MARK_BG_DARK)
+    }
+
+    /// The paper the mark was lifted FROM — where the reveal fades in
+    /// from.
+    pub fn page_bg(&self) -> Color {
+        self.dim_target
+    }
+
     /// The foreground a span whose own foreground is `base` renders with
     /// once dimmed.
     ///

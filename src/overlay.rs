@@ -1,6 +1,7 @@
 //! The overlay stack: the files picker (Ctrl+p), the comments
-//! list (`l`), and the help reference (`?`) — their key handling, the
-//! shared panel/cursor/scroll math, and their drawers.
+//! list (`l`), the help reference (`?`), and the marks mode's question
+//! picker (`m`) — their key handling, the shared panel/cursor/scroll
+//! math, and their drawers.
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,7 @@ use crate::replace_view_preserving_cursor;
 use crate::export_all;
 
 /// The kind of overlay currently open (Ctrl+p = files, `l` = comments,
-/// `t` = timeline, `?` = help).
+/// `t` = timeline, `?` = help, `m` = what to mark for).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Overlay {
     /// File picker: switch to another file in the session.
@@ -33,6 +34,16 @@ pub(crate) enum Overlay {
     Timeline,
     /// The full key reference (`?`).
     Help,
+    /// **marks モードの問いの選択**（`m`）。定型を並べ、最下段に自由入力
+    /// （`/`）を置く。`docs/design/marks-only-and-review-mode.md` 0 節。
+    ///
+    /// **`questions` ではなく `mark for` と名乗る。** marks モードでは
+    /// 「question」が**文書の中にある問い**とも読める（`Unsettled` や
+    /// `Decide` がまさにそれを光らせる）ので、こちらが持っている問いと
+    /// 同じ語になってしまう。ステータス行の `MARK n%` と地続きの言い方に
+    /// することで、「何を光らせるか」以外に読みようが無くなる
+    /// （2026-09-22 の読み手の指摘）。
+    MarkFor,
 }
 
 /// Open an overlay, resetting the double-click tracker: a click in a
@@ -82,6 +93,7 @@ pub(crate) fn overlay_rows(app: &App) -> Vec<Option<usize>> {
             }
             rows
         }
+        Some(Overlay::MarkFor) => (0..mark_for_entry_count(app)).map(Some).collect(),
         Some(Overlay::Timeline) => (0..app.history().map_or(0, |h| h.revisions.len()))
             .map(Some)
             .collect(),
@@ -96,6 +108,7 @@ pub(crate) fn overlay_entry_count(app: &App) -> usize {
         Some(Overlay::Files) => app.files.len(),
         Some(Overlay::Comments) => app.comments.len(),
         Some(Overlay::Timeline) => app.history().map_or(0, |h| h.revisions.len()),
+        Some(Overlay::MarkFor) => mark_for_entry_count(app),
         Some(Overlay::Help) | None => 0,
     }
 }
@@ -154,6 +167,7 @@ pub(crate) fn keep_overlay_cursor_visible(app: &mut App) {
 /// Handle keys while an overlay (files, comments, or help) is open.
 pub(crate) fn on_overlay_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match app.overlay {
+        Some(Overlay::MarkFor) => on_mark_for_overlay_key(app, key, modifiers),
         Some(Overlay::Files) => on_files_overlay_key(app, key, modifiers),
         Some(Overlay::Comments) => on_comments_overlay_key(app, key, modifiers),
         Some(Overlay::Timeline) => on_timeline_overlay_key(app, key, modifiers),
@@ -253,6 +267,24 @@ pub(crate) fn on_help_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyMo
 /// key and a double-click (see on_mouse).
 pub(crate) fn activate_overlay_selection(app: &mut App) {
     match app.overlay {
+        // 問いを選ぶ。**ここが marks モードの遅延の起点の 1 つ**で、
+        // 開いただけでは何も走らず、選んだ 1 本だけが Jev に届く。
+        // 最下段は自由入力なので、popup を閉じて 1 行プロンプトへ渡す。
+        Some(Overlay::MarkFor) => {
+            let free_row = mark_for_entry_count(app).saturating_sub(1);
+            let index = app.overlay_cursor;
+            app.overlay = None;
+            if index >= free_row {
+                crate::open_marks_prompt(app);
+            } else if app.ask_marks_preset(index) {
+                if let Some(label) = app.marks_question_label() {
+                    let asking = format!("asking: {label}");
+                    app.flash(asking);
+                }
+            } else {
+                crate::refuse_marks_question(app);
+            }
+        }
         Some(Overlay::Files) => {
             if app.overlay_cursor < app.files.len() {
                 app.overlay = None;
@@ -416,6 +448,7 @@ pub(crate) fn on_comments_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
 /// Draw the all-comments overlay (`l`). Centered panel with sorted comment list.
 pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
     match app.overlay {
+        Some(Overlay::MarkFor) => draw_mark_for_overlay(f, app),
         Some(Overlay::Files) => draw_files_overlay(f, app),
         Some(Overlay::Comments) => draw_comments_overlay(f, app),
         Some(Overlay::Timeline) => draw_timeline_overlay(f, app),
@@ -480,10 +513,12 @@ pub(crate) fn help_rows_in(
         // marks モードは別の行を出す。同じ 4 本のキーが別のものを動かす
         // ので、budget の行をそのまま出すと嘘になる（下限も READ % も無い）。
         if marks {
-            rows.push((
-                "mark",
-                "m/M question · / type one · -/+ amount ±1 · </> ±10 (MARK % and 本数 in the footer)",
-            ));
+            // **2 行に割ってある。** 1 行に 4 キーと括弧書きを詰めていた
+            // ときは、panel（幅 70 %）の右端で `… (MARK` と切れていた
+            // （2026-09-22 の実機）。ヘルプが切れるのは、いちばん読まれる
+            // 場面で読めないということである。
+            rows.push(("mark", "m what to mark · M previous · / ask your own"));
+            rows.push(("amount", "-/+ ±1 · </> ±10 (MARK % and count in the footer)"));
         } else {
             rows.push(("read", "-/+ budget ±1 · </> ±10 (READ % in the footer; stops at the document's floor)"));
         }
@@ -620,6 +655,16 @@ pub(crate) fn overlay_panel(area: Rect) -> Rect {
     }
 }
 
+/// いま開いている overlay の枠。`MarkFor` だけが小さい箱で、他は 70 %
+/// パネルである。**クリックで閉じる境目**（[`crate::on_mouse`]）と当たり
+/// 判定がここ 1 か所を見るので、箱の形と「外」の定義がずれない。
+pub(crate) fn active_overlay_panel(app: &App, area: Rect) -> Rect {
+    match app.overlay {
+        Some(Overlay::MarkFor) => mark_for_panel(area, &mark_for_rows(app)),
+        _ => overlay_panel(area),
+    }
+}
+
 /// Map a screen row to the overlay entry under it (the cursor index), or
 /// None for the title, group headers, gaps, or outside the panel.
 /// Mirrors draw_overlay's layout (border at panel.y, title at +1, entries
@@ -647,6 +692,19 @@ pub(crate) fn overlay_entry_at(app: &App, row: u16) -> Option<usize> {
             (rel < app.history().map_or(0, |h| h.revisions.len())).then_some(rel)
         }
         Overlay::Help => None,
+        // **小さい popup は自前で測る。** 他の overlay の 70 % パネルを
+        // 当たり判定に使い回すと、箱の外（文書が見えている所）を押しても
+        // 行が選ばれる — 7 行の箱で 70 % の当たり判定は事故のもとである。
+        Overlay::MarkFor => {
+            let rows = mark_for_rows(app);
+            let panel = mark_for_panel(
+                Rect { x: 0, y: 0, width: w, height: h },
+                &rows,
+            );
+            let first = panel.y + 2; // 枠 + タイトル
+            let index = row.checked_sub(first)? as usize;
+            (index < rows.len()).then_some(index)
+        }
         Overlay::Comments => {
             // Same grouped layout as draw_comments_overlay: per file a
             // header row (not selectable) then one row per comment.
@@ -983,6 +1041,170 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " j/k:move  Enter:jump  d:delete  Esc/q:close",
+        dark_gray,
+    )));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(dark_gray);
+    f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
+}
+
+// ---- marks モードの問いの選択（`m`） ----------------------------------
+//
+// `docs/design/marks-only-and-review-mode.md` 0 節。file picker と `?`
+// ヘルプの作法の写しである（枠・黄色いタイトル・`▸` のカーソル・j/k と
+// Enter・Esc で閉じる）。新しい語彙を足していないのは、**既にある作法を
+// 覚えている人が何も覚え直さずに使えるようにする**ためで、ここだけ違う
+// 操作にする理由が無い。
+
+/// popup の行数 — 定型 ＋ 自由入力の 1 行。
+///
+/// 自由入力を**行として置く**のが要点である。`/` は今までどこにも書いて
+/// おらず（`?` ヘルプにしか無かった）、「自由入力があること」自体が
+/// 隠れていた。
+pub(crate) fn mark_for_entry_count(app: &App) -> usize {
+    app.marks_questions
+        .as_ref()
+        .map_or(0, |questions| questions.presets().len() + 1)
+}
+
+/// popup の中身 1 行ぶん: (先頭のキー, 名前, 英語の 1 行)。
+///
+/// 最後の 1 行が自由入力で、キーは `/`、名前は `Ask...` である。
+fn mark_for_rows(app: &App) -> Vec<(String, String, String)> {
+    let Some(questions) = app.marks_questions.as_ref() else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(String, String, String)> = questions
+        .presets()
+        .iter()
+        .enumerate()
+        .map(|(i, q)| ((i + 1).to_string(), q.label.clone(), q.hint.clone()))
+        .collect();
+    rows.push((
+        "/".to_string(),
+        "Ask...".to_string(),
+        questions.free_hint().to_string(),
+    ));
+    rows
+}
+
+/// popup の枠。**他の overlay の 70 % パネルではない** — 中身が 6〜7 行
+/// しか無いので、70 % の箱に入れると下 2/3 が空白になる。幅は中身に
+/// 合わせて測り、端末が狭ければ縮む。
+///
+/// 位置は**中央やや上**（`overlay_panel` と同じ横中央、縦は 1/4）。
+/// 文書の上に短い箱が落ちてくる形で、下に文書が残るので「いま光って
+/// いるもの」を見ながら次の問いを選べる。
+pub(crate) fn mark_for_panel(area: Rect, rows: &[(String, String, String)]) -> Rect {
+    let title = " mark for ".width() as u16;
+    let body = rows
+        .iter()
+        .map(|(key, label, hint)| {
+            // `  1 Essential   what you would misread…`
+            let name = MARK_FOR_LABEL_COLS.max(label.width());
+            (2 + key.width() + 1 + name + hint.width() + 1) as u16
+        })
+        .max()
+        .unwrap_or(0);
+    let hintline = " j/k:move  Enter:ask  Esc:close ".width() as u16;
+    let inner = body.max(title).max(hintline);
+    let w = (inner + 2).min(area.width);
+    // 枠 2 行 ＋ タイトル 1 行 ＋ 中身 ＋ キーの案内 1 行。
+    let h = (rows.len() as u16 + 4).min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + area.height.saturating_sub(h) / 4,
+        width: w,
+        height: h,
+    }
+}
+
+/// 名前の欄の幅。`Unsettled` が 9 桁なので、英語の 1 行はここから始まる。
+const MARK_FOR_LABEL_COLS: usize = 12;
+
+/// popup のキー: j/k で動き、Enter で聞く。`1`〜`9` は直接、`/` は自由
+/// 入力。Esc / q / `m` で閉じる。
+///
+/// **開いただけでは 1 円もかからない。** 解析が走るのは Enter（または
+/// 数字キー）を打った瞬間だけで、そこが巡る形との違いである。
+pub(crate) fn on_mark_for_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
+    let count = mark_for_entry_count(app);
+    let free_row = count.saturating_sub(1);
+    match key {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if count > 0 {
+                app.overlay_cursor = (app.overlay_cursor + 1).min(count - 1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.overlay_cursor = app.overlay_cursor.saturating_sub(1);
+        }
+        KeyCode::Enter => activate_overlay_selection(app),
+        // 数字で直接。`5` までしか無くても `6` を押して何も起きないのは
+        // 正しい（無い行を選べない）。
+        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+            let index = c as usize - '1' as usize;
+            if index < free_row {
+                app.overlay_cursor = index;
+                activate_overlay_selection(app);
+            }
+        }
+        KeyCode::Char('/') => {
+            app.overlay_cursor = free_row;
+            activate_overlay_selection(app);
+        }
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => app.overlay = None,
+        _ => {}
+    }
+}
+
+/// popup を描く。file picker と同じ作法（黄色いタイトル ＋ 罫、`▸` の
+/// カーソル、下段にキーの案内）。
+///
+/// **いま聞いている問いは黄色**で、file picker が「いま開いているファイル」
+/// を黄色にするのと同じ意味である。
+pub(crate) fn draw_mark_for_overlay(f: &mut Frame, app: &App) {
+    use ratatui::widgets::Clear;
+    let rows = mark_for_rows(app);
+    let panel = mark_for_panel(f.area(), &rows);
+    f.render_widget(Clear, panel);
+    let dark_gray = Style::default().fg(Color::DarkGray);
+    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let cyan = Style::default().fg(Color::Cyan);
+
+    let title_text = " mark for ".to_string();
+    let title_fill =
+        "─".repeat(panel.width.saturating_sub(title_text.width() as u16 + 2) as usize);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(title_text, yellow),
+        Span::styled(title_fill, dark_gray),
+    ])];
+
+    let current = app.marks_question_label();
+    let inner = panel.width.saturating_sub(2) as usize;
+    for (i, (key, label, hint)) in rows.iter().enumerate() {
+        let selected = i == app.overlay_cursor;
+        let asking = current.is_some_and(|c| c == label);
+        let name_style = if selected {
+            cyan.add_modifier(Modifier::BOLD)
+        } else if asking {
+            yellow
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let cursor_mark = if selected { "▸" } else { " " };
+        let name = format!("{label:<MARK_FOR_LABEL_COLS$}");
+        let head = format!("{cursor_mark} {key} {name}");
+        let room = inner.saturating_sub(head.width());
+        lines.push(Line::from(vec![
+            Span::styled(head, name_style),
+            Span::styled(clip_if_needed(hint, room), dark_gray),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        " j/k:move  Enter:ask  Esc:close",
         dark_gray,
     )));
 

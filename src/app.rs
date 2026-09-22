@@ -225,6 +225,14 @@ pub(crate) struct App {
     /// expires. Rendered on the message row only while the toast is the
     /// top message (a prompt suppresses it).
     pub(crate) toast_fx: Option<tachyonfx::Effect>,
+    /// **マーカーが引かれる演出**（marks モード）。答えが届いた瞬間に
+    /// 立ち、700 ms で終わる（[`crate::effects::marks_reveal_effect`]）。
+    ///
+    /// **view モードにも source モードにも乗る。** 琥珀は両方で塗られる
+    /// ので、演出だけ view 限定だと「source では効かない機能」になる
+    /// （他の演出が `view_active()` の中にいるのは、時間旅行の枠のように
+    /// view にしか無いものを描いているからである）。`--no-fx` は尊重する。
+    pub(crate) marks_fx: Option<tachyonfx::Effect>,
     /// Scatter-in effects for the blocks that appeared in the selected
     /// history revision: `(first display row, height, effect)` in
     /// view-relative coordinates, mapped to the screen at draw time.
@@ -547,6 +555,7 @@ impl App {
             timeline_exit_ms: Duration::from_millis(crate::effects::TIMELINE_SLIDE_MS as u64),
             timeline_restore: None,
             toast_fx: None,
+            marks_fx: None,
             appear_fx: Vec::new(),
             ghost_fx: Vec::new(),
             last_draw: None,
@@ -812,6 +821,18 @@ impl App {
                 // 下限は Reading Budget のもの。marks モードに下限は無い。
                 if !self.marks_mode() {
                     self.lift_budget_onto_floor();
+                } else {
+                    // **演出の起点はここ 1 つ**である。新しい問いも、
+                    // キャッシュに当たった答えも、文書を開き直したときも、
+                    // 答えが `semantic_doc` に入るのはこの行だけなので、
+                    // 「マーカーが引かれる」は必ず 1 回だけ走る。
+                    //
+                    // つまみ（`-` `+` `<` `>`）はここを通らない — 意図的で
+                    // ある。頻繁に打つ操作に 700 ms の演出を付けると邪魔に
+                    // なるし、「今回新しく光った箇所」を出すには装飾集合の
+                    // 差分が要って、つまみ 1 打の費用（いまは `marks::mark`
+                    // 1 回）が上がる。
+                    self.start_marks_reveal();
                 }
                 None
             }
@@ -821,6 +842,17 @@ impl App {
         if let Some(message) = refusal {
             self.flash_err(message);
         }
+    }
+
+    /// マーカーが引かれる演出を立てる。`--no-fx` のセッションでは何もしない。
+    fn start_marks_reveal(&mut self) {
+        if !self.config.fx {
+            return;
+        }
+        self.marks_fx = Some(crate::effects::marks_reveal_effect(
+            self.decoration_styles.mark_bg(),
+            self.decoration_styles.page_bg(),
+        ));
     }
 
     /// Collect whatever the worker threads have finished. Called once per
@@ -908,7 +940,9 @@ impl App {
     ///
     /// 自分で選んだ問いがあればその label。無くても、fixture が問いを
     /// 名乗っていればその id を出す（`--semantic <marks fixture>` の経路は
-    /// 問いを選ばずに答えが手元にある）。
+    /// 問いを選ばずに答えが手元にある）。**定型の label は id を大文字で
+    /// 始めたものなので、両方の経路がほぼ同じ字面になる**（`Essential` と
+    /// `essential`）。
     pub(crate) fn marks_question_label(&self) -> Option<&str> {
         if let Some(question) = self.marks_question.as_ref() {
             return Some(&question.label);
@@ -916,6 +950,26 @@ impl App {
         self.semantic_doc
             .as_ref()
             .and_then(|document| document.question.as_deref())
+    }
+
+    /// ステータス行に出す**表示用の**問いの名前。
+    ///
+    /// 定型はその label をそのまま（英語）。**自由入力だけは違う** —
+    /// そこに入っているのは読み手が打った文字そのもの（たいてい日本語）で、
+    /// ラベルではない。英語の並びに生で混ざると「また日本語が混ざった」に
+    /// 見えるので、`Ask 「…」` の枠に入れて**`Ask` の引数**として読ませる。
+    ///
+    /// 枠を付けるのがここなのは、[`crate::marks_questions::Questions::free`]
+    /// が作る `label` が**要求にも載る値**だからである（`Ask 「…」` を
+    /// Jev 側へ送る理由は無い）。
+    pub(crate) fn marks_question_display(&self) -> Option<String> {
+        let question = self.marks_question.as_ref();
+        if let Some(question) = question
+            && question.id == "free"
+        {
+            return Some(format!("Ask 「{}」", question.label));
+        }
+        self.marks_question_label().map(str::to_string)
     }
 
     /// **定型を次へ巡る**（`m`）。巡ったら `true`。
@@ -960,6 +1014,30 @@ impl App {
         } as usize;
         self.marks_preset = next;
         self.ask_marks(presets[next].clone());
+        true
+    }
+
+    /// **定型を番号で聞く**（popup の Enter / `1`〜`9`）。聞いたら `true`。
+    ///
+    /// 巡る（[`Self::cycle_marks_question`]）との違いは**解析の回数**で
+    /// ある。環を回ると 1 打ごとに Jev を呼ぶので、4 本めを見るのに 4 回
+    /// 呼ぶ。popup は選んだ 1 本しか呼ばない（議事録で 0.2 円 × 3 の差）。
+    ///
+    /// 巡る位置（`marks_preset`）も動かす — popup で選んでから `M` を
+    /// 押したら、その隣へ戻るのが素直である。
+    pub(crate) fn ask_marks_preset(&mut self, index: usize) -> bool {
+        if !self.marks_mode() || self.marks_question_is_fixed() {
+            return false;
+        }
+        let Some(question) = self
+            .marks_questions
+            .as_ref()
+            .and_then(|questions| questions.presets().get(index).cloned())
+        else {
+            return false;
+        };
+        self.marks_preset = index;
+        self.ask_marks(question);
         true
     }
 
