@@ -388,7 +388,12 @@ fn run(config: Config) -> Result<()> {
     // marks モードの問い。**ここで読む** — 壊れた問いのファイルは、
     // 何も光らない TUI ではなく普通のコマンドラインエラーであるべきで、
     // fixture を起動前に読むのと同じ理由である。
-    let marks_questions = if config.semantic_mode.is_marks() {
+    //
+    // **層が無ければ読まない。** marks が既定になった（2026-09-22）ので、
+    // ここを `is_marks()` だけで判定すると、`$XDG_CONFIG_HOME` の問いの
+    // ファイルが壊れている人は `akapen foo.md` すら開けなくなる。問いは
+    // 層が無ければ 1 度も使われないので、読む理由も無い。
+    let marks_questions = if config.semantic_mode.is_marks() && semantic_source.is_some() {
         Some(crate::marks_questions::Questions::discover(
             config.marks_questions.as_deref(),
         )?)
