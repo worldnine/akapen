@@ -94,11 +94,15 @@ pub enum Action {
     Version,
     /// `--semantic-cache-clear`: wipe the analysis cache and exit 0.
     ///
-    /// **判定器のプロンプトを変えたときの唯一の逃げ道**である。キャッシュの
+    /// **判定器のプロンプトを変えたときの逃げ道**である。キャッシュの
     /// キーは文書の sha とコマンド行の sha なので、同じコマンド行のまま
     /// プロンプトだけ変えると古い項目が当たる
     /// （`docs/gotchas/semantic-reading.md`）。ファイル引数を取らないので、
     /// `--help` と同じく短絡する。
+    ///
+    /// **marks モードの「問い」だけはこれを待たない** — 問いの文面が鍵に
+    /// 入っているので、定型を直せば自動で外れる（`crate::semantic_cache`）。
+    /// 判定器の中の文面はどちらのモードでもここが唯一の逃げ道である。
     ClearSemanticCache,
 }
 

@@ -2904,19 +2904,9 @@ fn adjust_marks_share(app: &mut App, delta: i16) {
 /// 同じ (文書, 問い) は二度 Jev を呼ばない（キャッシュ）ので、環を一周して
 /// 戻るのは 0 円である。
 fn cycle_marks_question(app: &mut App, step: i16) {
-    if step < 0 {
-        // 逆回りは「残り全部ぶん進む」。環なので同じことになり、
-        // 巡回の実装は App 側の 1 本で済む。
-        let presets = app
-            .marks_questions
-            .as_ref()
-            .map_or(0, |questions| questions.presets().len());
-        for _ in 0..presets.saturating_sub(1) {
-            if !app.cycle_marks_question() {
-                break;
-            }
-        }
-    } else if !app.cycle_marks_question() {
+    // **解析は 1 度だけ。** 逆回りを「残り全部ぶん進む」で書くと、1 打で
+    // Jev を定型の数だけ呼ぶ（[`App::cycle_marks_question`]）。
+    if !app.cycle_marks_question(step as isize) {
         refuse_marks_question(app);
         return;
     }

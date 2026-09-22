@@ -925,7 +925,13 @@ impl App {
     /// fixture 経路では**断る**（`false`）。fixture の答えは 1 つの問いに
     /// 対するもので、問いを変えても答えは変わらない — 変わったふりを
     /// するより、変わらないと言うほうが正しい。
-    pub(crate) fn cycle_marks_question(&mut self) -> bool {
+    /// **`step` は環の上の移動量である**（`+1` が次、`-1` が前）。
+    ///
+    /// 逆回りを「残り全部ぶん進む」で実装してはならない — 1 打ごとに
+    /// [`Self::ask_marks`] が走り、**Jev を定型の数だけ呼ぶ**ことになる
+    /// （議事録で 0.3 円が 0.9 円になり、スレッドが 3 本競合する）。
+    /// 位置を先に決めて、解析は 1 度だけ頼む。
+    pub(crate) fn cycle_marks_question(&mut self, step: isize) -> bool {
         if !self.marks_mode() || self.marks_question_is_fixed() {
             return false;
         }
@@ -936,14 +942,19 @@ impl App {
         if presets.is_empty() {
             return false;
         }
-        // いま定型を見ているなら次へ。自由入力のあと（または最初）は
-        // いまの位置から。
-        let next = match self.marks_question.as_ref() {
-            Some(question) if presets.iter().any(|p| p.id == question.id) => {
-                (self.marks_preset + 1) % presets.len()
-            }
-            _ => self.marks_preset % presets.len(),
-        };
+        let len = presets.len() as isize;
+        // いま定型を見ているなら `step` ぶん動く。自由入力のあと（または
+        // 最初）は、いまの位置から始める。
+        let on_a_preset = self
+            .marks_question
+            .as_ref()
+            .is_some_and(|question| presets.iter().any(|p| p.id == question.id));
+        let from = self.marks_preset as isize;
+        let next = if on_a_preset {
+            (from + step).rem_euclid(len)
+        } else {
+            from.rem_euclid(len)
+        } as usize;
         self.marks_preset = next;
         self.ask_marks(presets[next].clone());
         true

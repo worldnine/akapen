@@ -36,9 +36,14 @@
 //! - **`v1`** — [`semantic_reading::protocol::VERSION`]。[`SemanticDocument`]
 //!   の形が変わった日に、古い項目が黙って当たらないようにする
 //!
-//! **同じコマンド行のままプロンプトだけ変えると当たる。** これは仕様で、
-//! 逃げ道は `--semantic-cache-clear` の 1 つだけである（理由と、他の手を
-//! 採らなかった理由は `docs/gotchas/semantic-reading.md`）。
+//! **DIM 版では、同じコマンド行のままプロンプトだけ変えると当たる。**
+//! これは仕様で、逃げ道は `--semantic-cache-clear` の 1 つだけである
+//! （理由と、他の手を採らなかった理由は `docs/gotchas/semantic-reading.md`）。
+//!
+//! **marks モードはこれが当たらない。** 問いの文面が鍵に入っているので
+//! （[`SemanticCache::entry_path_asking`]）、定型を直せば自動で外れる。
+//! 塞がっているのは問いの文面だけで、判定器の中の文面（Tier の criteria や
+//! 核の問い）は marks でも DIM 版と同じく当たり続ける。
 //!
 //! # 機密度
 //!

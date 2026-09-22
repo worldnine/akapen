@@ -124,10 +124,32 @@ fn the_scores_survive_into_the_annotation() {
 #[test]
 fn a_budget_fixture_in_marks_mode_says_why_it_is_empty() {
     // **黙った 0 本にしない。** スコアの無い注釈と、該当の無い問いは
-    // 別のことである。
+    // 別のことである。**ステータス行の文字列まで見る** — 「光っていない」
+    // だけを見ていると、理由を言わない実装でも通ってしまう。
     let app = app_with("demo.json", SemanticMode::Marks);
     assert_eq!(app.marks_has_scores(), Some(false));
     assert!(marked(&app).is_empty());
+    let footer = crate::chrome::footer_hints(&app);
+    assert!(
+        footer.contains("no scores"),
+        "理由がステータス行に出ていない: {footer}"
+    );
+}
+
+#[test]
+fn the_footer_counts_what_is_on_screen() {
+    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    for share in [1, 20, 50, 100] {
+        app.marks_share = share;
+        app.refresh_semantic_decorations();
+        let footer = crate::chrome::footer_hints(&app);
+        let lit = app.marks_lit().unwrap();
+        assert!(footer.contains(&format!("MARK {share}%")), "{footer}");
+        assert!(footer.contains(&format!("{lit}本")), "{footer}");
+        assert!(footer.contains("settled"), "問いの名前が出ている: {footer}");
+        // 画面の本数と一致する（footer の数字が嘘をつかない）。
+        assert_eq!(lit, marked(&app).len());
+    }
 }
 
 // ---- 3. つまみの単調性 --------------------------------------------------
@@ -213,7 +235,8 @@ fn a_question_nothing_answers_lights_nothing_at_any_knob() {
 fn the_fixture_path_refuses_to_change_the_question() {
     let mut app = app_with("demo-marks.json", SemanticMode::Marks);
     assert!(app.marks_question_is_fixed());
-    assert!(!app.cycle_marks_question(), "fixture では巡らない");
+    assert!(!app.cycle_marks_question(1), "fixture では巡らない");
+    assert!(!app.cycle_marks_question(-1), "逆回りも断る");
     assert!(!app.ask_marks_free("費用の話"), "自由入力も受けない");
     // 問いの名前は fixture が名乗っているものが出る。
     assert_eq!(app.marks_question_label(), Some("settled"));
@@ -227,6 +250,71 @@ fn only_the_core_of_a_unit_lights() {
     // 光った Unit の数と一致する = 核だけが光っている。
     assert_eq!(marked(&app).len(), app.marks_lit().unwrap());
     assert!(doc.units.iter().all(|u| u.core_atoms.as_ref().unwrap().len() == 1));
+}
+
+#[test]
+fn cycling_backwards_asks_jev_exactly_once() {
+    // **1 打 = 解析 1 回。** 逆回りを「残り全部ぶん進む」で書くと、
+    // 定型 4 本なら 1 打で Jev を 3 回呼ぶ（議事録で 0.3 円が 0.9 円）。
+    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    // fixture は問いを固定するので、巡回を見るために外部コマンドへ差し替える。
+    // `true` は黙って終わるので Jev もネットワークも出てこないが、
+    // **解析を頼んだ回数は世代に出る**。
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
+        crate::semantic::CommandProvider::new("true"),
+    )));
+    app.semantic_mode = SemanticMode::Marks;
+    let presets = app.marks_questions.as_ref().unwrap().presets().len();
+    assert!(presets >= 2);
+
+    // 最初の 1 打は向きによらず「いまの位置」を選ぶ（まだ問いが無い）。
+    assert!(app.cycle_marks_question(-1));
+    assert_eq!(app.marks_preset, 0);
+    let after_first = app.semantic_generation;
+
+    // そこからの 1 打で、環の反対側へ**1 つだけ**動く。
+    assert!(app.cycle_marks_question(-1));
+    assert_eq!(app.marks_preset, presets - 1, "環の反対側へ 1 つだけ動く");
+    assert_eq!(
+        app.marks_question.as_ref().map(|q| q.id.as_str()),
+        Some("numbers")
+    );
+    // **解析を頼んだのは 1 回だけ。** 3 回なら世代が 3 つ上がる。
+    assert_eq!(
+        app.semantic_generation,
+        after_first + 1,
+        "1 打で解析 1 回（定型の数だけ呼んでいない）"
+    );
+
+    // 次へ 1 つで先頭へ戻る。
+    assert!(app.cycle_marks_question(1));
+    assert_eq!(app.marks_preset, 0);
+}
+
+#[test]
+fn cycling_forward_walks_the_ring_in_order() {
+    let mut app = app_with("demo-marks.json", SemanticMode::Marks);
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
+        crate::semantic::CommandProvider::new("true"),
+    )));
+    app.semantic_mode = SemanticMode::Marks;
+    let ids: Vec<String> = app
+        .marks_questions
+        .as_ref()
+        .unwrap()
+        .presets()
+        .iter()
+        .map(|q| q.id.clone())
+        .collect();
+    // 最初の 1 打はいまの位置（先頭）、以降は 1 つずつ進む。
+    let mut seen = Vec::new();
+    for _ in 0..ids.len() + 1 {
+        assert!(app.cycle_marks_question(1));
+        seen.push(app.marks_question.as_ref().unwrap().id.clone());
+    }
+    let mut expected = ids.clone();
+    expected.push(ids[0].clone());
+    assert_eq!(seen, expected, "環を 1 周して戻る");
 }
 
 // ---- キーの割り当て ------------------------------------------------------

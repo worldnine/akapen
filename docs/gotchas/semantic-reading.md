@@ -797,8 +797,38 @@ mtime を見る案も、シェル文字列の中からパスを推測するこ�
 （`examples/semantic/README.md`）、TUI のキャッシュを通りません。刺さるのは
 **akapen で開いて確かめている**ときだけです。
 
+**marks モードの「問い」だけは踏みません**（2026-09-22）。
+`--semantic-mode marks` の項目は `<sha(source)>.q<sha(問いの文面)>.json` と
+いう名前なので、**定型の文面を直せば自動で外れます**
+（`assets/marks-questions.json`、`SemanticCache::entry_path_asking`）。
+外れないのは判定器の中の文面（核の Choice など）の方で、そちらはどちらの
+モードでも上の逃げ道が要ります。
+
 **確認したこと**: `src/semantic_cache.rs` の `analyzer_dir`（キーが
 `sha256(コマンド行)` のディレクトリであること）と、テスト
 `a_different_analyser_does_not_hit_the_cache` /
-`the_same_document_is_analysed_once`。逃げ道は `src/config.rs` の
+`the_same_document_is_analysed_once` /
+`editing_a_preset_misses_the_cache_on_its_own`。逃げ道は `src/config.rs` の
 `Action::ClearSemanticCache`。
+
+### Noul の主張は `instructions` に置く — `claim` だと HTTP 400 で落ちる
+
+2026-09-22、marks モードの実装で踏みました。Jev の Noul question は
+**主張を `instructions` に置きます**（`PROBE_QUESTION` /
+`REDUNDANCY_PAIR` / `CONTEXT_STAGE1` がどれもそう書いています）。
+`{"type": "noul", "claim": …}` のように別の名前で送ると、
+
+```text
+Jev returned HTTP 400: {"detail":"Noul question must have criteria or
+instructions: marks:u1"}
+```
+
+で**ラウンドごと落ちます**。Choice の `criteria` と対になる名前として
+`claim` を選びたくなりますが、ありません。
+
+**気づきにくいのは、落ちるのが 2 ラウンド目だから**です。境界（Choice）は
+通るので、進捗行は「48 questions in 1.40s」と出てから 400 になります。
+**新しい question の型を足したら、まず 1 問だけ投げて形を確かめること。**
+
+**確認したこと**: `examples/semantic/jev-annotate.py` の `marks_questions`
+と、テスト `test_the_question_text_reaches_jev_verbatim`。

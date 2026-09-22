@@ -481,14 +481,16 @@ pub(crate) fn footer_hints(app: &App) -> String {
             let asking = question.unwrap_or_else(|| "…".to_string());
             return format!("{p} · MARK {}% · {asking} · analyzing…", app.marks_share);
         }
-        let Some(question) = question else {
-            return p;
-        };
-        // スコアを 1 つも持たない注釈（DIM 版の判定器・budget 用の fixture）。
-        // 黙った 0 本にはしない — 理由が言えるなら言う。
+        // **スコアを 1 つも持たない注釈は、問いの名前より先に言う。**
+        // DIM 版の判定器や budget 用の fixture を marks モードで開いた場合で、
+        // そこには問いの名前が無い（誰も聞いていない）。名前を先に要求すると
+        // このまま黙った空白になる — いちばん理由の要る場面で何も言わない。
         if app.marks_has_scores() == Some(false) {
             return format!("{p} · MARK · no scores in this answer");
         }
+        let Some(question) = question else {
+            return p;
+        };
         match app.marks_lit() {
             Some(lit) => format!("{p} · MARK {}% · {lit}本 · {question}", app.marks_share),
             None => p,
