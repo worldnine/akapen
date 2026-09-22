@@ -225,7 +225,13 @@ pub(crate) fn on_timeline_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
 /// only when it overflows the panel (content that fits never scrolls).
 /// Esc / q / `?` close it.
 pub(crate) fn on_help_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
-    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled())
+    let max = help_rows_in(
+        app.esc_quit_enabled(),
+        app.config.reply,
+        false,
+        app.semantic_enabled(),
+        app.marks_mode(),
+    )
         .len()
         .saturating_sub(overlay_visible_rows());
     match key {
@@ -425,8 +431,27 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
 pub(crate) fn help_rows(
     esc_quit: bool,
     reply: bool,
+    in_git: bool,
+    semantic: bool,
+) -> Vec<(&'static str, &'static str)> {
+    help_rows_in(esc_quit, reply, in_git, semantic, false)
+}
+
+/// [`help_rows`] にモードを添えたもの。
+///
+/// marks モードでは同じ 4 本のキーが別のものを動かすので、行そのものを
+/// 差し替える（budget の行をそのまま出すと、下限も `READ %` も無いのに
+/// あると言うことになる）。
+///
+/// **引数を増やさずに包んである**のは、`help_rows` を呼んでいる既存の
+/// テストに手を入れないためである（DIM 版を触っていない、を機械的に
+/// 言えるようにしておく）。
+pub(crate) fn help_rows_in(
+    esc_quit: bool,
+    reply: bool,
     _in_git: bool,
     semantic: bool,
+    marks: bool,
 ) -> Vec<(&'static str, &'static str)> {
     let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
@@ -451,7 +476,17 @@ pub(crate) fn help_rows(
     if semantic {
         // Only with `--semantic`: without an annotation these keys refuse,
         // and the help must not offer what the session cannot do.
-        rows.push(("read", "-/+ budget ±1 · </> ±10 (READ % in the footer; stops at the document's floor)"));
+        //
+        // marks モードは別の行を出す。同じ 4 本のキーが別のものを動かす
+        // ので、budget の行をそのまま出すと嘘になる（下限も READ % も無い）。
+        if marks {
+            rows.push((
+                "mark",
+                "m/M question · / type one · -/+ amount ±1 · </> ±10 (MARK % and 本数 in the footer)",
+            ));
+        } else {
+            rows.push(("read", "-/+ budget ±1 · </> ±10 (READ % in the footer; stops at the document's floor)"));
+        }
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
@@ -471,7 +506,13 @@ pub(crate) fn draw_help_overlay(f: &mut Frame, app: &App) {
         .fg(Color::LightBlue)
         .add_modifier(Modifier::BOLD);
 
-    let rows = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled());
+    let rows = help_rows_in(
+        app.esc_quit_enabled(),
+        app.config.reply,
+        false,
+        app.semantic_enabled(),
+        app.marks_mode(),
+    );
     let visible = overlay_visible_rows();
     // Scroll only when the reference overflows the panel; a reference
     // that fits stays put (j/k are no-ops there).

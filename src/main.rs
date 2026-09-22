@@ -19,6 +19,8 @@ mod export;
 mod highlight;
 mod history;
 mod ime;
+mod keys;
+mod marks_questions;
 mod overlay;
 mod reload;
 mod render;
@@ -117,6 +119,15 @@ fn main() -> Result<()> {
                  \x20                   a READ key starts the analysis (opening a file\n\
                  \x20                   does not), and answers are cached per document\n\
                  \x20                   under $XDG_CACHE_HOME/akapen/semantic\n\
+                 \x20 --semantic-mode <m>  marks|budget (default budget). `marks`\n\
+                 \x20                   drops DIM entirely: pick a question (m/M, or\n\
+                 \x20                   / to type one) and the passages that answer\n\
+                 \x20                   it light up; -/+ and </> then move HOW MANY\n\
+                 \x20                   (MARK % in the footer). 0 marks is a real\n\
+                 \x20                   answer — nothing here answers that question\n\
+                 \x20 --marks-questions <file>  read the marks questions from this\n\
+                 \x20                   JSON instead of the built-in four (also\n\
+                 \x20                   $XDG_CONFIG_HOME/akapen/marks-questions.json)\n\
                  \x20 --semantic-cache-clear  wipe that cache and exit (needed after\n\
                  \x20                   changing an analyser's prompts without\n\
                  \x20                   changing its command line)\n\
@@ -162,7 +173,7 @@ fn main() -> Result<()> {
             println!("cleared {removed} cached analyses ({root})");
             Ok(())
         }
-        Action::Run(config) => run(config),
+        Action::Run(config) => run(*config),
     }
 }
 
@@ -369,6 +380,16 @@ fn run(config: Config) -> Result<()> {
     // `--semantic-cmd` is NOT run here — it runs once a document is on
     // screen, from its own thread.
     let semantic_source = crate::semantic::source_from_config(&config)?;
+    // marks モードの問い。**ここで読む** — 壊れた問いのファイルは、
+    // 何も光らない TUI ではなく普通のコマンドラインエラーであるべきで、
+    // fixture を起動前に読むのと同じ理由である。
+    let marks_questions = if config.semantic_mode.is_marks() {
+        Some(crate::marks_questions::Questions::discover(
+            config.marks_questions.as_deref(),
+        )?)
+    } else {
+        None
+    };
 
     let mut terminal = NoBlinkBackend::init()?;
     // From here on the terminal is in raw mode + alternate screen; the
@@ -452,6 +473,8 @@ fn run(config: Config) -> Result<()> {
     app.histories = histories;
     app.snapshot_cache = snapshot_cache;
     app.file_states = file_states;
+    app.semantic_mode = app.config.semantic_mode;
+    app.marks_questions = marks_questions;
     app.set_semantic_source(semantic_source);
     activate_first_file(&mut app);
     // The first document is on screen now: ask the provider about it.
@@ -2573,12 +2596,17 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // も `<` も `>` も、この層が存在しなかったときと 1 バイトも違わない
         // 動きをする。「使えない機能があります」という UI を見せないため、
         // 断りの toast すら出さない。
-        KeyCode::Char('-') if app.semantic_enabled() => adjust_reading_budget(app, -1),
-        KeyCode::Char('+') | KeyCode::Char('=') if app.semantic_enabled() => {
-            adjust_reading_budget(app, 1)
+        // 割り当ては `crate::keys` の 1 か所にある。marks モードでない
+        // セッションで `m` / `M` / `/` は `None` を返すので、ここは素通り
+        // する（使えないキーを呑み込まない）。
+        KeyCode::Char(c)
+            if app.semantic_enabled()
+                && crate::keys::semantic_key(c, app.marks_mode()).is_some() =>
+        {
+            if let Some(action) = crate::keys::semantic_key(c, app.marks_mode()) {
+                on_semantic_key(app, action);
+            }
         }
-        KeyCode::Char('<') if app.semantic_enabled() => adjust_reading_budget(app, -10),
-        KeyCode::Char('>') if app.semantic_enabled() => adjust_reading_budget(app, 10),
         // `l` opens the all-comments list; `t` the document timeline;
         // Ctrl+p opens the file picker; `?` opens the full key reference.
         KeyCode::Char('l') => {
@@ -2838,6 +2866,115 @@ fn active_review_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
 /// で `+` を押した場合は上限で止まり、動くのはステータス行の `analyzing…`
 /// だけ）。答えが届いた時点で `App::lift_budget_onto_floor` が下限まで
 /// 持ち上げ直す。
+/// Semantic Reading Layer のキー 1 打を捌く。**両モードの入口はここ 1 つ**で、
+/// 割り当ては [`crate::keys`] にある。
+fn on_semantic_key(app: &mut App, action: crate::keys::SemanticKey) {
+    use crate::keys::SemanticKey;
+    match action {
+        SemanticKey::Amount(delta) if app.marks_mode() => adjust_marks_share(app, delta),
+        SemanticKey::Amount(delta) => adjust_reading_budget(app, delta),
+        SemanticKey::CycleQuestion(step) => cycle_marks_question(app, step),
+        SemanticKey::FreeQuestion => open_marks_prompt(app),
+    }
+}
+
+/// **marks モードのつまみ。** 上から何 % を光らせるかを `delta` ポイント動かす。
+///
+/// budget 版（[`adjust_reading_budget`]）と違い、**ここに遅延の起点は無い**。
+/// marks の起点は問いを決めたとき（[`cycle_marks_question`] /
+/// [`open_marks_prompt`]）で、量のつまみではない — 問いの無い解析は
+/// この投影では使えないからである。
+///
+/// だからこの関数は `Provider::analyze` へ到達しない。走るのは
+/// `marks::mark` 1 回だけで、新しい本数はステータス行に出る。
+fn adjust_marks_share(app: &mut App, delta: i16) {
+    if app.marks_question.is_none() && app.semantic_doc.is_none() {
+        if app.semantic_inflight.is_some() {
+            app.flash("analyzing…");
+        } else {
+            app.flash("no question yet — m to pick one, / to type one");
+        }
+        return;
+    }
+    app.nudge_marks_share(delta);
+}
+
+/// **定型を巡る**（`m` / `M`）。marks モードの遅延の起点の 1 つ。
+///
+/// 同じ (文書, 問い) は二度 Jev を呼ばない（キャッシュ）ので、環を一周して
+/// 戻るのは 0 円である。
+fn cycle_marks_question(app: &mut App, step: i16) {
+    if step < 0 {
+        // 逆回りは「残り全部ぶん進む」。環なので同じことになり、
+        // 巡回の実装は App 側の 1 本で済む。
+        let presets = app
+            .marks_questions
+            .as_ref()
+            .map_or(0, |questions| questions.presets().len());
+        for _ in 0..presets.saturating_sub(1) {
+            if !app.cycle_marks_question() {
+                break;
+            }
+        }
+    } else if !app.cycle_marks_question() {
+        refuse_marks_question(app);
+        return;
+    }
+    if let Some(label) = app.marks_question_label() {
+        app.flash(format!("asking: {label}"));
+    }
+}
+
+/// 自由入力のプロンプトを閉じて元のモードへ戻す。
+fn close_marks_prompt(app: &mut App) {
+    app.marks_prompt = false;
+    app.input.clear();
+    app.input_cursor = 0;
+    app.mode = app.composer_return;
+    app.ime_guard = None;
+}
+
+/// 問いを変えられない経路で `m` / `/` を押したときの断り。
+fn refuse_marks_question(app: &mut App) {
+    if matches!(
+        app.semantic_source,
+        Some(crate::semantic::SemanticSource::Inline(_))
+    ) {
+        // fixture は 1 つの問いへの答えを固定で持っている。変わった
+        // ふりをするより、変わらないと言うほうが正しい。
+        app.flash_err("fixture: the question is fixed");
+    } else {
+        app.flash_err("marks questions unavailable");
+    }
+}
+
+/// **自由入力のプロンプトを開く**（`/`）。
+///
+/// composer（コメントの入力欄）をそのまま借りる — IME の扱いも、カーソルも、
+/// Esc の取り消しも既にそこにある。違いは確定したときだけで、コメントを
+/// 足す代わりに問いとして聞く（[`App::ask_marks_free`]）。
+fn open_marks_prompt(app: &mut App) {
+    if app.marks_questions.is_none() || app.marks_question_is_fixed() {
+        refuse_marks_question(app);
+        return;
+    }
+    let line = if app.mode == Mode::View {
+        app.view.cursor
+    } else {
+        app.cursor
+    };
+    app.marks_prompt = true;
+    app.editing_comment = None;
+    app.input.clear();
+    app.input_cursor = 0;
+    app.input_start = line;
+    app.input_end = line;
+    app.composer_return = app.mode;
+    app.mode = Mode::Input;
+    app.ime_guard = Some(ime::ImeGuard::enter(app.config.ime));
+    app.cursor = line;
+}
+
 fn adjust_reading_budget(app: &mut App, delta: i16) {
     if app.arm_semantic_layer() {
         app.nudge_reading_budget(delta);
@@ -3253,12 +3390,17 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         // one. While the decoration layer was view-only these keys were
         // deliberately left out — a key that moved `READ %` in the footer
         // and changed nothing else would have been a lie.
-        KeyCode::Char('-') if app.semantic_enabled() => adjust_reading_budget(app, -1),
-        KeyCode::Char('+') | KeyCode::Char('=') if app.semantic_enabled() => {
-            adjust_reading_budget(app, 1)
+        // 割り当ては `crate::keys` の 1 か所にある。marks モードでない
+        // セッションで `m` / `M` / `/` は `None` を返すので、ここは素通り
+        // する（使えないキーを呑み込まない）。
+        KeyCode::Char(c)
+            if app.semantic_enabled()
+                && crate::keys::semantic_key(c, app.marks_mode()).is_some() =>
+        {
+            if let Some(action) = crate::keys::semantic_key(c, app.marks_mode()) {
+                on_semantic_key(app, action);
+            }
         }
-        KeyCode::Char('<') if app.semantic_enabled() => adjust_reading_budget(app, -10),
-        KeyCode::Char('>') if app.semantic_enabled() => adjust_reading_budget(app, 10),
         // `l` opens the all-comments list; `t` the document timeline;
         // Ctrl+p opens the file picker; `?` opens the full key reference.
         KeyCode::Char('l') => {
@@ -3333,6 +3475,13 @@ fn input_move_line(s: &str, cursor: usize, dir: isize) -> usize {
 /// into the draft: raw mode delivers Ctrl+C as a key event, so without
 /// this arm the IME-safe catch-all below would insert a `c` instead.
 fn cancel_composer(app: &mut App) {
+    // marks の自由入力は composer を借りているだけ。コメントの後始末
+    // （再編集の復帰・「comment cancelled」）はどれも当たらない。
+    if app.marks_prompt {
+        close_marks_prompt(app);
+        app.flash("question cancelled");
+        return;
+    }
     app.input.clear();
     app.input_cursor = 0;
     app.mode = app.composer_return;
@@ -3360,6 +3509,20 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match key {
         KeyCode::Enter => {
             let text = app.input.trim().to_string();
+            // marks モードの自由入力。composer を借りているだけなので、
+            // コメントの経路（アンカー・スナップショット・再編集）には
+            // 1 行も入らない。
+            if app.marks_prompt {
+                if text.is_empty() {
+                    app.flash_err("empty question — not asked (Esc to cancel)");
+                    return;
+                }
+                close_marks_prompt(app);
+                if app.ask_marks_free(&text) {
+                    app.flash(format!("asking: {text}"));
+                }
+                return;
+            }
             if text.is_empty() {
                 app.flash_err("empty comment — not added (Esc to cancel)");
                 return;
@@ -5471,6 +5634,9 @@ mod bar_tests {
 mod state_tests;
 
 #[cfg(test)]
+mod marks_tests;
+
+#[cfg(test)]
 mod mouse_tests {
     use super::*;
     use crate::comment::Comment;
@@ -5506,6 +5672,8 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5557,6 +5725,8 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5622,6 +5792,8 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5770,6 +5942,8 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5813,6 +5987,8 @@ mod mouse_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -5952,6 +6128,8 @@ mod mouse_view_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6246,6 +6424,8 @@ mod source_decoration_tests {
             fx: false,
             semantic: None,
             semantic_cmd: None,
+            semantic_mode: Default::default(),
+            marks_questions: None,
             decoration_blend: Default::default(),
             decorations,
         };

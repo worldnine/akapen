@@ -17,6 +17,8 @@ use crate::highlight::{Highlighter, Span as HiSpan, TaggedLine, wrap_spans};
 use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
 use crate::overlay::Overlay;
+use crate::config::SemanticMode;
+use crate::marks_questions::{Question, Questions};
 use crate::semantic::SemanticSource;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
@@ -434,6 +436,28 @@ pub(crate) struct App {
     /// document", 1..=100 %, default 100. A pure reading preference, so
     /// it is NOT per-file state — switching files keeps it.
     pub(crate) reading_budget: u8,
+    // ---- marks モード (docs/design/marks-only-and-review-mode.md 0 節) ----
+    /// どちらの投影を使うか。`--semantic-mode` で起動時に決まり、走っている
+    /// あいだ変わらない（**文書の種類の推定はしない**）。
+    pub(crate) semantic_mode: SemanticMode,
+    /// marks モードの問いの一式（定型 4 本 ＋ 自由入力の型）。
+    /// budget モードのセッションは読まないので `None` のまま。
+    pub(crate) marks_questions: Option<Questions>,
+    /// **いま聞いている問い。** `None` は「まだ何も聞いていない」で、
+    /// marks モードの遅延の起点がここである — 問いが決まるまで判定器は
+    /// 1 度も起きない（`m` / `/` の最初の 1 打。`crate::keys`）。
+    pub(crate) marks_question: Option<Question>,
+    /// 定型を巡っている位置（`m` の環）。自由入力のあとも、ここから続く。
+    pub(crate) marks_preset: usize,
+    /// **つまみ** — 上から何 % の Unit を光らせるか（1..=100、既定 20）。
+    /// Reading Budget と同じく読む側の好みなので、文書をまたいで残る。
+    pub(crate) marks_share: u8,
+    /// composer が**コメントではなく問いの入力**に使われているか（`/`）。
+    ///
+    /// `Mode::Input` を借りているだけなので、コメントの経路（アンカー・
+    /// 再編集・スナップショット）には触らない。確定と取り消しの 2 か所だけが
+    /// この旗を見る。
+    pub(crate) marks_prompt: bool,
     /// [`App::semantic_doc`] projected onto the current budget: the
     /// decoration list the paint consumes, cached so a frame does no
     /// policy work. Recomputed by
@@ -584,6 +608,12 @@ impl App {
             semantic_results: None,
             semantic_armed: false,
             reading_budget: crate::semantic::DEFAULT_BUDGET,
+            semantic_mode: SemanticMode::Budget,
+            marks_questions: None,
+            marks_question: None,
+            marks_preset: 0,
+            marks_share: semantic_reading::marks::DEFAULT_SHARE,
+            marks_prompt: false,
             semantic_decorations: Vec::new(),
             decoration_styles,
         }
@@ -651,6 +681,14 @@ impl App {
         {
             return;
         }
+        // marks モードは**問いが無ければ何も聞かない**。問いの無い解析は
+        // DIM 版の答え（Tier）を連れてくるだけで、この投影では使えない。
+        if self.marks_mode()
+            && self.marks_question.is_none()
+            && matches!(self.semantic_source, Some(SemanticSource::Command(_)))
+        {
+            return;
+        }
         // Whatever happens next, the annotation in hand is only still
         // valid if it describes the text now on screen. An annotation
         // that names ANOTHER document is dropped here — before the new
@@ -680,7 +718,12 @@ impl App {
                     self.flash_err("--semantic-cmd: no channel to receive the answer");
                     return;
                 };
-                let provider = provider.clone();
+                // 問いは provider の状態として渡す（`Provider::analyze` の
+                // 引数は source だけ）。budget モードでは常に `None` で、
+                // 要求に `question` が載らない = 従来どおりの解析になる。
+                let provider = provider
+                    .clone()
+                    .asking(self.marks_mode().then(|| self.marks_question.clone()).flatten());
                 let tx = channel.tx.clone();
                 let source = self.source.content.clone();
                 self.semantic_inflight = Some(generation);
@@ -763,7 +806,10 @@ impl App {
         let refusal = match message.result {
             Ok(document) => {
                 self.semantic_doc = Some(document);
-                self.lift_budget_onto_floor();
+                // 下限は Reading Budget のもの。marks モードに下限は無い。
+                if !self.marks_mode() {
+                    self.lift_budget_onto_floor();
+                }
                 None
             }
             Err(e) => Some(e),
@@ -799,9 +845,140 @@ impl App {
     /// provider.
     pub(crate) fn refresh_semantic_decorations(&mut self) {
         self.semantic_decorations = match self.semantic_doc.as_ref() {
+            Some(document) if self.semantic_mode.is_marks() => {
+                crate::semantic::marks_decorations_for(document, self.marks_share)
+            }
             Some(document) => crate::semantic::decorations_for(document, self.reading_budget),
             None => Vec::new(),
         };
+    }
+
+    // ---- marks モード ------------------------------------------------
+    //
+    // `docs/design/marks-only-and-review-mode.md` 0 節。DIM 版の腕
+    // （`nudge_reading_budget` / `reading_floor` / `lift_budget_onto_floor`）
+    // はこの下に 1 行も入っていない — 2 つの投影は App の上で並んでいる
+    // だけで、互いを呼ばない。
+
+    /// marks モードか。
+    pub(crate) fn marks_mode(&self) -> bool {
+        self.semantic_mode.is_marks()
+    }
+
+    /// **つまみを `delta` ポイント動かす**（1..=100 に丸める）。動いたら `true`。
+    ///
+    /// Reading Budget の [`App::nudge_reading_budget`] と同じ形だが、
+    /// **下限は無い**。marks モードに `policy::floor` は無く、0 本は
+    /// 足切り（`marks::SCORE_FLOOR`）だけが作る。
+    ///
+    /// ここから `Provider::analyze` へ到達する経路は無い。つまみを動かす
+    /// 費用は [`semantic_reading::marks::mark`] 1 回だけである。
+    pub(crate) fn nudge_marks_share(&mut self, delta: i16) -> bool {
+        let next = (self.marks_share as i16 + delta).clamp(
+            semantic_reading::marks::MIN_SHARE as i16,
+            semantic_reading::marks::MAX_SHARE as i16,
+        ) as u8;
+        if next == self.marks_share {
+            return false;
+        }
+        self.marks_share = next;
+        self.refresh_semantic_decorations();
+        true
+    }
+
+    /// いま光っている Unit の数。注釈がなければ `None`。
+    pub(crate) fn marks_lit(&self) -> Option<usize> {
+        self.semantic_doc
+            .as_ref()
+            .map(|document| semantic_reading::marks::lit(document, self.marks_share))
+    }
+
+    /// 手元の注釈がスコアを持っているか。`Some(false)` は
+    /// 「marks モードで開いたが、判定器がスコアを返していない」。
+    pub(crate) fn marks_has_scores(&self) -> Option<bool> {
+        self.semantic_doc
+            .as_ref()
+            .map(semantic_reading::marks::has_scores)
+    }
+
+    /// ステータス行に出す問いの名前。
+    ///
+    /// 自分で選んだ問いがあればその label。無くても、fixture が問いを
+    /// 名乗っていればその id を出す（`--semantic <marks fixture>` の経路は
+    /// 問いを選ばずに答えが手元にある）。
+    pub(crate) fn marks_question_label(&self) -> Option<&str> {
+        if let Some(question) = self.marks_question.as_ref() {
+            return Some(&question.label);
+        }
+        self.semantic_doc
+            .as_ref()
+            .and_then(|document| document.question.as_deref())
+    }
+
+    /// **定型を次へ巡る**（`m`）。巡ったら `true`。
+    ///
+    /// marks モードの**遅延の起点**でもある。問いが決まった瞬間に、いま
+    /// 開いている文書の解析が始まる（キャッシュに当たれば外部プロセスは
+    /// 起きない。同じ (文書, 問い) は二度呼ばないので、環を一周して戻れば
+    /// 0 円である）。
+    ///
+    /// fixture 経路では**断る**（`false`）。fixture の答えは 1 つの問いに
+    /// 対するもので、問いを変えても答えは変わらない — 変わったふりを
+    /// するより、変わらないと言うほうが正しい。
+    pub(crate) fn cycle_marks_question(&mut self) -> bool {
+        if !self.marks_mode() || self.marks_question_is_fixed() {
+            return false;
+        }
+        let Some(questions) = self.marks_questions.as_ref() else {
+            return false;
+        };
+        let presets = questions.presets();
+        if presets.is_empty() {
+            return false;
+        }
+        // いま定型を見ているなら次へ。自由入力のあと（または最初）は
+        // いまの位置から。
+        let next = match self.marks_question.as_ref() {
+            Some(question) if presets.iter().any(|p| p.id == question.id) => {
+                (self.marks_preset + 1) % presets.len()
+            }
+            _ => self.marks_preset % presets.len(),
+        };
+        self.marks_preset = next;
+        self.ask_marks(presets[next].clone());
+        true
+    }
+
+    /// **自由入力で聞く**（`/` の確定）。聞いたら `true`。
+    ///
+    /// 入力をそのまま Jev へ渡さない — 「日程」は主張ではないので Noul が
+    /// 評価できない。「『<入力>』について述べている箇所である」の型に
+    /// 差し込む（[`crate::marks_questions::Questions::free`]）。
+    pub(crate) fn ask_marks_free(&mut self, input: &str) -> bool {
+        let input = input.trim();
+        if !self.marks_mode() || input.is_empty() || self.marks_question_is_fixed() {
+            return false;
+        }
+        let Some(question) = self.marks_questions.as_ref().map(|q| q.free(input)) else {
+            return false;
+        };
+        self.ask_marks(question);
+        true
+    }
+
+    /// 問いを載せて解析を頼む。**ここが marks モードの起点である。**
+    fn ask_marks(&mut self, question: Question) {
+        self.marks_question = Some(question);
+        // 起点。budget モードの `arm_semantic_layer` に当たる。
+        self.semantic_armed = true;
+        self.reanalyze_semantics();
+    }
+
+    /// fixture の答えを見ているか — 問いを変えられない経路か。
+    ///
+    /// `--semantic <fixture.json>` は 1 つの問いへの答えを固定で持っている。
+    pub(crate) fn marks_question_is_fixed(&self) -> bool {
+        matches!(self.semantic_source, Some(SemanticSource::Inline(_)))
     }
 
     /// Move the Reading Budget by `delta` percentage points, clamped to

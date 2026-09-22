@@ -462,7 +462,42 @@ pub(crate) fn footer_hints(app: &App) -> String {
     // (`policy::floor`). The number is the floor itself, so what the
     // footer says and what the screen shows agree — READ 43% (floor)
     // means 43 % is on screen and no less can be asked for.
+    // marks モードは `MARK n% · k本 · <問い>` を同じ場所に出す
+    // （`docs/design/marks-only-and-review-mode.md` 0 節）。3 つとも
+    // 読み出しであって制御ではない:
+    //
+    // - `n%` — つまみの位置（上から何 % の Unit を見ているか）
+    // - `k本` — **実際に光っている Unit の数**。`0本` は「この問いに
+    //   答えている箇所が無い」であって、壊れているのではない。狭い問いで
+    //   そう出るのが正しい（段 1 の `demo` に「判断が要る」）
+    // - 問いの名前 — いま何を聞いているか。DIM 版に無いもので、これが
+    //   無いと「なぜここが光っているのか」が読めない
+    //
+    // 問いをまだ選んでいない間は何も出さない。READ が注釈の無い間だまって
+    // いるのと同じ作法で、そこが marks モードの遅延の起点である。
+    let marks = |p: String| {
+        let question = app.marks_question_label().map(str::to_string);
+        if app.semantic_inflight.is_some() {
+            let asking = question.unwrap_or_else(|| "…".to_string());
+            return format!("{p} · MARK {}% · {asking} · analyzing…", app.marks_share);
+        }
+        let Some(question) = question else {
+            return p;
+        };
+        // スコアを 1 つも持たない注釈（DIM 版の判定器・budget 用の fixture）。
+        // 黙った 0 本にはしない — 理由が言えるなら言う。
+        if app.marks_has_scores() == Some(false) {
+            return format!("{p} · MARK · no scores in this answer");
+        }
+        match app.marks_lit() {
+            Some(lit) => format!("{p} · MARK {}% · {lit}本 · {question}", app.marks_share),
+            None => p,
+        }
+    };
     let read = |p: String| {
+        if app.marks_mode() {
+            return marks(p);
+        }
         let floor = if app.at_reading_floor() { " (floor)" } else { "" };
         match (&app.semantic_doc, app.semantic_inflight) {
             (_, Some(_)) => {
@@ -473,6 +508,9 @@ pub(crate) fn footer_hints(app: &App) -> String {
         }
     };
     let hints = match app.mode {
+        Mode::Input if app.marks_prompt => {
+            "Enter ask · ←→ move · Esc cancel".to_string()
+        }
         Mode::Input => "Enter confirm · ^j newline · ←→↑↓ move · Esc cancel".to_string(),
         Mode::View => {
             let p = read(pos(app.view.cursor, app.source.len()));
@@ -536,6 +574,12 @@ pub(crate) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     // indicator). All badges are width 8, so the hints never shift when
     // the mode changes.
     let (badge, badge_style) = match app.mode {
+        // 問いの入力は COMMENT ではない。同じ composer を借りているので、
+        // バッジが「COMMENT」のままだと打った文字がコメントになると読める。
+        Mode::Input if app.marks_prompt => (
+            format!("{:^8}", "ASK"),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ),
         Mode::Input => (
             format!("{:^8}", "COMMENT"),
             Style::default().fg(Color::Black).bg(Color::Cyan),
@@ -780,6 +824,8 @@ mod footer_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
+        semantic_mode: Default::default(),
+        marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
