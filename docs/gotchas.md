@@ -68,6 +68,10 @@
 - Noul の主張は `instructions` に置く — `claim` だと HTTP 400、しかも落ちるのは 2 ラウンド目
 - `atomize` を変えたら境界キャッシュ — 判定器側は Atom の添字で持っている（指紋で外すようにした）
 
+### [端末とキー入力](gotchas/terminal-keys.md)
+
+- `f` はトグル。hold は試して捨てた — kitty protocol を有効にすると auto-repeat が `Repeat` kind になり、既存のキー経路が崩れた
+
 ### [公開リポジトリとしての約束](gotchas/public-repo.md)
 
 - 業務文書の本文はこのリポジトリに書かない

@@ -262,62 +262,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(std::io::stdout(), Show);
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        // **kitty keyboard protocol を押したら必ず戻す。**
-        // `ratatui::restore()` はこの旗を知らないので、ここで pop しないと
-        // 終了後のシェルに kitty 符号のキーが流れ続ける（`f` の Release
-        // まで送ってくる端末に、それを読めないプログラムが座る形）。
-        // push していない場合の pop は端末が無視するので、条件を持たない。
-        if keyboard_enhancement_pushed() {
-            let _ = execute!(
-                std::io::stdout(),
-                ratatui::crossterm::event::PopKeyboardEnhancementFlags
-            );
-        }
         ratatui::restore();
-    }
-}
-
-/// この端末で kitty keyboard protocol を押したか。
-///
-/// 押せたかどうかは**プロセスに 1 つの事実**（旗はプロセスの端末に対して
-/// 押される）なので、App ではなくここに置く。`Ordering::SeqCst` で足りる —
-/// 起動時に 1 回書き、終了時に 1 回読むだけである。
-static KEYBOARD_ENHANCED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-fn keyboard_enhancement_pushed() -> bool {
-    KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// **`f` の押しっぱなしを取れるようにする** — kitty keyboard protocol の
-/// `REPORT_EVENT_TYPES`（押下 / repeat / 離す、の区別）を要求する。
-///
-/// # 対応していない端末で壊れないこと
-///
-/// `supports_keyboard_enhancement()` は端末に問い合わせて返事を待つので、
-/// **返事が来ない端末では `Ok(false)` か `Err` になり、そのまま何も
-/// 押さない**。押さなければイベントは今までどおり押下だけが届き、
-/// `f` はトグルとして振る舞う（`crate::focus`）。ここが `Result` を
-/// 潰して `false` に倒しているのはそのためで、**問い合わせに失敗した
-/// ことは機能の不在であって、起動の失敗ではない。**
-///
-/// 要求するのは `REPORT_EVENT_TYPES` **1 つだけ**である。
-/// `DISAMBIGUATE_ESCAPE_CODES` は Esc と Enter の符号まで変えるので、
-/// この注文（`f` の hold）には要らないものを持ち込むことになる。
-fn push_keyboard_enhancement() {
-    use ratatui::crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
-    let supported =
-        ratatui::crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-    if !supported {
-        return;
-    }
-    if execute!(
-        std::io::stdout(),
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
-    )
-    .is_ok()
-    {
-        KEYBOARD_ENHANCED.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -564,9 +509,9 @@ fn run(config: Config) -> Result<()> {
     // set_cursor_position.
     let _ = execute!(std::io::stdout(), Hide);
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    // 押しっぱなしを取れる端末では取る（`f` の hold）。取れない端末では
-    // 何も起きず、`f` はトグルのまま。TerminalGuard の Drop が pop する。
-    push_keyboard_enhancement();
+    // **kitty keyboard protocol は押さない。** 押すと端末の auto-repeat が
+    // `KeyEventKind::Repeat` に変わり、矢印の押しっぱなしが効かなくなる
+    // （`docs/gotchas/terminal-keys.md`）。`f` はトグルなので要らない。
     let res = event_loop(&mut terminal, &mut app);
     // The guard's Drop performs the whole shutdown (cursor, mouse capture,
     // raw mode, alternate screen). Drop it explicitly BEFORE spawning the
@@ -732,27 +677,22 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
                     break;
                 }
                 match event::read()? {
+                    // **`Repeat` は `Press` と同じに扱う。** いまの
+                    // akapen は kitty keyboard protocol を押さないので
+                    // repeat は押下の連打として届き、この腕には `Press`
+                    // しか来ない。旗を押す端末（あるいは将来また押した
+                    // とき）に矢印の押しっぱなしが 1 回で止まらないための
+                    // 保険である（`docs/gotchas/terminal-keys.md`）。
                     Event::Key(key)
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                     {
                         let history_direction = history_key_direction(app, key.code, key.modifiers);
                         if let Some(direction) = history_direction {
                             select_history(app, direction);
-                        } else if key.kind == KeyEventKind::Press {
+                        } else {
                             render_pending_history(app, true);
                             on_key(app, key.code, key.modifiers, Some(terminal));
                         }
-                    }
-                    // Releasing an arrow does not force an immediate render:
-                    // the short settle window intentionally groups quick
-                    // taps and holds into one A→D document transition.
-                    //
-                    // **`f` だけは離したことに意味がある**（押している間
-                    // だけ沈む）。ここへ来るのは kitty keyboard protocol の
-                    // 使える端末だけで、来ない端末では `f` はトグルになる
-                    // （`crate::focus`）。
-                    Event::Key(key) if key.kind == KeyEventKind::Release => {
-                        on_key_release(app, key.code, key.modifiers);
                     }
                     Event::Mouse(mouse) => {
                         render_pending_history(app, true);
@@ -836,28 +776,6 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
             return Ok(());
         }
     }
-}
-
-/// キーを離した（kitty keyboard protocol の使える端末だけ）。
-///
-/// **見るのは `f` 1 つだけである。** 他のキーの Release は今までどおり
-/// 何もしない — 離したことに意味のある操作が他に無いので、ここへ腕を
-/// 足すのは「その操作を離すと何が起きるか」を決めてからでよい。
-///
-/// **モードで門を作らない。** 押しっぱなしのまま `m` を打てば popup が
-/// 開き、`f` の Release はその overlay の上で届く — そこで捨てると
-/// 「離したのに沈んだまま」になり、hold の約束が切れる。
-/// composer で `f` を文字として打った場合の Release は、押下を
-/// 記録していない以上 [`crate::focus::Focus::release`] が素通りさせる
-/// （状態機械の側が既に安全なので、ここに二重の門が要らない）。
-fn on_key_release(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    if !modifiers.is_empty() {
-        return;
-    }
-    if key != KeyCode::Char(crate::keys::MARKS_FOCUS) {
-        return;
-    }
-    app.release_focus(Instant::now());
 }
 
 fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut AppTerminal>) {

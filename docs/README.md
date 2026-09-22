@@ -24,6 +24,7 @@
 |---|---|
 | [`gotchas/rendering.md`](gotchas/rendering.md) | 描画と attribution |
 | [`gotchas/semantic-reading.md`](gotchas/semantic-reading.md) | Semantic Reading Layer（いちばん大きい） |
+| [`gotchas/terminal-keys.md`](gotchas/terminal-keys.md) | 端末とキー入力（kitty protocol と押しっぱなし） |
 | [`gotchas/public-repo.md`](gotchas/public-repo.md) | 公開リポジトリとしての約束 |
 | [`gotchas/external-processes.md`](gotchas/external-processes.md) | 外部プロセス |
 | [`gotchas/vendoring-ci.md`](gotchas/vendoring-ci.md) | ベンダリングと CI |

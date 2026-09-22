@@ -1035,15 +1035,6 @@ impl App {
         true
     }
 
-    /// `f` を離した（Release の来る端末だけ）。画面が変わったら `true`。
-    pub(crate) fn release_focus(&mut self, now: std::time::Instant) -> bool {
-        if !self.marks_focus.release(now) {
-            return false;
-        }
-        self.refresh_semantic_decorations();
-        true
-    }
-
     /// フォーカスを解く（Esc）。解いたら `true`。
     pub(crate) fn clear_focus(&mut self) -> bool {
         if !self.marks_focus.clear() {
