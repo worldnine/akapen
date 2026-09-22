@@ -245,6 +245,7 @@ impl DismissedStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

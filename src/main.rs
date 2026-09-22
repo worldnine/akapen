@@ -4070,6 +4070,9 @@ mod state_tests;
 mod marks_tests;
 
 #[cfg(test)]
+mod review_tests;
+
+#[cfg(test)]
 mod mouse_tests;
 
 #[cfg(test)]

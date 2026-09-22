@@ -1343,12 +1343,7 @@ impl App {
             return;
         }
         // 捨てた記録はここで 1 度だけ読む（文書 1 つにつき 1 回）。
-        let sha = crate::semantic::source_digest(&self.source.content);
-        self.review_dismissed = self
-            .review_dismissed_store
-            .as_ref()
-            .map(|store| store.load(&sha))
-            .unwrap_or_default();
+        self.load_dismissed();
         let generation = self.review_generation;
         self.review_inflight = rules.len();
         let Some(channel) = self.review_results.as_ref() else {
@@ -1370,6 +1365,19 @@ impl App {
                 });
             });
         }
+    }
+
+    /// いま画面にある文書について捨てられた候補を読み直す。
+    ///
+    /// **文書 1 つにつき 1 回**（[`Self::reanalyze_review`] の先頭）。
+    /// 毎回 JSONL を舐めると、候補が届くたびにファイルを読むことになる。
+    pub(crate) fn load_dismissed(&mut self) {
+        let sha = crate::semantic::source_digest(&self.source.content);
+        self.review_dismissed = self
+            .review_dismissed_store
+            .as_ref()
+            .map(|store| store.load(&sha))
+            .unwrap_or_default();
     }
 
     /// Review のワーカーが終えたぶんを引き取る。イベントループから 1 tick
