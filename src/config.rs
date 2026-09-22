@@ -166,6 +166,21 @@ pub struct Config {
     /// never read the real user's questions — the same care
     /// [`crate::semantic_cache`] takes with `~/.cache`.
     pub marks_questions: Option<PathBuf>,
+    /// `--review-rules <path>`: read the Review mode's rules from this
+    /// file instead of the built-in three (and instead of
+    /// `$XDG_CONFIG_HOME/akapen/review-rules.json`).
+    ///
+    /// **marks の問いとは別のファイルである** — Review は別機能で、
+    /// 定型の環にも入らない（`docs/design/marks-only-and-review-mode.md`
+    /// 4 節、[`crate::review_rules`]）。
+    pub review_rules: Option<PathBuf>,
+    /// `--review-json`: TUI を立てず、有効なルールの候補を JSON で
+    /// stdout に出して終わる。
+    ///
+    /// **段階 2 と LSP の入口である。** 本文は 1 バイトも出ない
+    /// （[`crate::review::to_json`]）。`--semantic-cmd` が要る
+    /// （fixture は 1 つの問いにしか答えられない）。
+    pub review_json: bool,
     /// `--mark-blend <0.0..1.0>` / `--dim-blend <0.0..1.0>`: how strong
     /// the two range-decoration kinds are. `mark` lifts the mark
     /// background off the page toward the text color; `dim` moves a
@@ -285,6 +300,8 @@ impl Config {
         let mut semantic: Option<PathBuf> = None;
         let mut semantic_cmd: Option<String> = None;
         let mut marks_questions: Option<PathBuf> = None;
+        let mut review_rules: Option<PathBuf> = None;
+        let mut review_json = false;
         let mut decoration_blend = DecorationBlend::default();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -314,6 +331,8 @@ impl Config {
                 "--semantic" => semantic = it.next().map(PathBuf::from),
                 "--semantic-cmd" => semantic_cmd = it.next(),
                 "--marks-questions" => marks_questions = it.next().map(PathBuf::from),
+                "--review-rules" => review_rules = it.next().map(PathBuf::from),
+                "--review-json" => review_json = true,
                 "--mark-blend" => {
                     if let Some(v) = it.next() {
                         decoration_blend.mark = parse_blend("--mark-blend", &v)?;
@@ -374,6 +393,21 @@ impl Config {
         if marks_questions.is_some() && no_layer {
             bail!("--marks-questions needs --semantic or --semantic-cmd");
         }
+        // Review も同じ。層が無ければルールは 1 度も使われない。
+        if review_rules.is_some() && no_layer {
+            bail!("--review-rules needs --semantic or --semantic-cmd");
+        }
+        // `--review-json` は判定器を**必ず**呼ぶ（有効なルール 1 本ごとに
+        // 1 往復）。fixture は 1 つの問いへの固定の答えなので、ルールの
+        // 文面で聞き直す道が無い — 黙って 1 本ぶんだけ出すより、断る。
+        if review_json {
+            if semantic.is_some() {
+                bail!("--review-json needs --semantic-cmd (a fixture answers only one question)");
+            }
+            if semantic_cmd.is_none() {
+                bail!("--review-json needs --semantic-cmd (or {SEMANTIC_CMD_ENV})");
+            }
+        }
         Ok(Action::Run(Box::new(Config {
             files,
             send_cmd,
@@ -389,6 +423,8 @@ impl Config {
             semantic,
             semantic_cmd,
             marks_questions,
+            review_rules,
+            review_json,
             decoration_blend,
             decorations,
         })))
@@ -402,7 +438,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Config, EscQuit};
+    use super::{Action, Config, EscQuit, SEMANTIC_CMD_ENV};
+    use std::path::Path;
     use crate::decoration::{Decoration, DecorationBlend, DecorationKind};
 
     fn parse(args: &[&str]) -> Action {
@@ -840,5 +877,60 @@ mod tests {
                 "{bad:?} should be rejected"
             );
         }
+    }
+
+    // ---- Review（`R` / `--review-json`） -----------------------------
+
+    /// 断りの文面。`Action` は `Debug` を持たないので `unwrap_err` は
+    /// 使えない — 環境変数も空にして、フラグだけで断られることを見る。
+    fn refusal(args: &[&str]) -> String {
+        match Config::parse_with_env(args.iter().map(|s| (*s).to_string()), |_| None) {
+            Ok(_) => panic!("{args:?} が通ってしまった"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn review_rules_needs_the_layer() {
+        // 「書いたのに効かない」を黙って通さない（`--marks-questions` と
+        // 同じ判断）。
+        assert!(
+            Config::parse(["x.md", "--review-rules", "r.json"].iter().map(|s| s.to_string()))
+                .is_err()
+        );
+        let action = parse(&["x.md", "--semantic-cmd", "cat", "--review-rules", "r.json"]);
+        assert_eq!(cfg(&action).review_rules.as_deref(), Some(Path::new("r.json")));
+    }
+
+    #[test]
+    fn review_json_refuses_a_session_that_cannot_ask_the_analyser() {
+        // ルール 1 本ごとに判定器を 1 往復するので、コマンドが要る。
+        let err = refusal(&["x.md", "--review-json"]);
+        assert!(err.contains("--review-json needs --semantic-cmd"), "{err}");
+
+        // fixture は 1 つの問いへの固定の答えで、ルールの文面で聞き直す
+        // 道が無い。黙って 1 本ぶんだけ出すより断る。
+        let err = refusal(&["x.md", "--semantic", "f.json", "--review-json"]);
+        assert!(err.contains("a fixture answers only one question"), "{err}");
+    }
+
+    #[test]
+    fn review_json_rides_the_environment_variable_like_the_tui_does() {
+        // `$AKAPEN_SEMANTIC_CMD` だけでも立つ（フラグを打っていない人が
+        // `--review-json` だけで使える）。
+        let action = Config::parse_with_env(
+            ["x.md", "--review-json"].iter().map(|s| s.to_string()),
+            |name| (name == SEMANTIC_CMD_ENV).then(|| "cat".to_string()),
+        )
+        .unwrap();
+        assert!(cfg(&action).review_json);
+        assert_eq!(cfg(&action).semantic_cmd.as_deref(), Some("cat"));
+    }
+
+    #[test]
+    fn review_json_is_off_unless_asked_for() {
+        let action = parse(&["x.md"]);
+        assert!(!cfg(&action).review_json);
+        assert!(cfg(&action).review_rules.is_none());
     }
 }

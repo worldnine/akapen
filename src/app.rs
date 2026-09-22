@@ -20,6 +20,8 @@ use crate::ime;
 use crate::overlay::Overlay;
 use crate::chrome::Readout;
 use crate::marks_questions::{Question, Questions};
+use crate::review::{Candidate, CandidateState, DismissedKey, DismissedStore};
+use crate::review_rules::Rules as ReviewRules;
 use crate::semantic::SemanticSource;
 use crate::snapshot::SnapshotCache;
 use crate::source::Source;
@@ -117,6 +119,35 @@ pub(crate) struct AnalysisChannel {
 }
 
 impl AnalysisChannel {
+    pub(crate) fn new() -> Self {
+        let (tx, rx) = channel();
+        Self { tx, rx }
+    }
+}
+
+/// Review の 1 ルール分の答え。
+///
+/// **marks の [`AnalysisMessage`] とは別の型・別の線である。** 同じ線に
+/// 相乗りさせると [`App::accept_analysis`] が Review の答えを
+/// `semantic_doc` に入れてしまい、`R` を押しただけでラインマーカーが
+/// 別の問いの答えに化ける。「Review 中に marks の状態が変わらない」は
+/// 型で担保する。
+pub(crate) struct ReviewMessage {
+    /// [`App::review_generation`] の値。これが古ければ捨てる。
+    pub(crate) generation: u64,
+    /// どのルールの答えか。**世代だけでは足りない** — 1 世代の中で有効な
+    /// ルールの数だけ答えが返ってくる。
+    pub(crate) rule: String,
+    pub(crate) result: Result<SemanticDocument, String>,
+}
+
+/// Review のワーカーが答える線。marks と同じく 1 セッション 1 本。
+pub(crate) struct ReviewChannel {
+    pub(crate) tx: Sender<ReviewMessage>,
+    pub(crate) rx: Receiver<ReviewMessage>,
+}
+
+impl ReviewChannel {
     pub(crate) fn new() -> Self {
         let (tx, rx) = channel();
         Self { tx, rx }
@@ -475,6 +506,36 @@ pub(crate) struct App {
     /// [`App::refresh_semantic_decorations`] — from the budget and the
     /// document only, never from the provider.
     pub(crate) semantic_decorations: Vec<Decoration>,
+    // ---- Review（docs/design/marks-only-and-review-mode.md 4 節） ----
+    //
+    // **marks の状態とは 1 つも共有していない。** `R` を押しても
+    // `marks_question` / `semantic_doc` / `semantic_generation` /
+    // `semantic_decorations` / `marks_lines` は 1 バイトも動かない
+    // （別機能だからで、テストがそれを押さえている）。
+    /// ルール一式。層の無いセッションは読まないので `None` のまま。
+    pub(crate) review_rules: Option<ReviewRules>,
+    /// いま画面に出ている候補（**文書順**）。
+    pub(crate) review_candidates: Vec<Candidate>,
+    /// 何度 Review の解析を頼んだか。答えはこの値を名乗るものだけ通す
+    /// （[`App::semantic_generation`] と同じ仕掛けで、番号は別に持つ）。
+    pub(crate) review_generation: u64,
+    /// いま走っているルールの本数。`Review · analyzing…` の出所である。
+    pub(crate) review_inflight: usize,
+    /// **遅延の起点を越えたか。** `R` の最初の 1 打が立てる。marks の
+    /// [`App::semantic_armed`] と同じ理由（開いただけの文書に解析費用を
+    /// 払わない）で、**別の旗である** — marks を使ったからといって
+    /// Review の費用まで払う筋合いは無い。
+    pub(crate) review_armed: bool,
+    /// ワーカーが答える線。`--semantic-cmd` のセッションだけ持つ。
+    pub(crate) review_results: Option<ReviewChannel>,
+    /// 候補の下線（[`crate::decoration::DecorationKind::ReviewCandidate`]）。
+    /// Pending の候補だけが入る。
+    pub(crate) review_decorations: Vec<Decoration>,
+    /// いまの文書について、過去に捨てられた (ルール, 範囲)。
+    pub(crate) review_dismissed: HashSet<DismissedKey>,
+    /// 捨てた候補の置き場。決められない環境では `None`（セッション内
+    /// だけ消えて、記録は残らない）。
+    pub(crate) review_dismissed_store: Option<DismissedStore>,
     /// The decoration styles resolved from the session's theme, for the
     /// SOURCE-mode paint. The rendered view carries its own copy on
     /// [`ViewState`]; source mode has no `ViewState` of its own to hang
@@ -621,6 +682,15 @@ impl App {
             semantic_results: None,
             semantic_armed: false,
             marks_questions: None,
+            review_rules: None,
+            review_candidates: Vec::new(),
+            review_generation: 0,
+            review_inflight: 0,
+            review_armed: false,
+            review_results: None,
+            review_decorations: Vec::new(),
+            review_dismissed: HashSet::new(),
+            review_dismissed_store: None,
             marks_question: None,
             marks_preset: 0,
             marks_share: semantic_reading::marks::DEFAULT_SHARE,
@@ -658,10 +728,17 @@ impl App {
         // as this session is concerned — otherwise the status line would
         // say analyzing… for the rest of the session.
         self.semantic_inflight = None;
+        self.review_inflight = 0;
         self.semantic_results = match source {
             // A session without `--semantic-cmd` never allocates a
             // channel — the layer stays exactly as cheap as before.
             Some(SemanticSource::Command(_)) => Some(AnalysisChannel::new()),
+            _ => None,
+        };
+        // Review も同じ扱い。fixture のセッションは `R` が断るので線を
+        // 張らない（[`App::review_enabled`]）。
+        self.review_results = match source {
+            Some(SemanticSource::Command(_)) => Some(ReviewChannel::new()),
             _ => None,
         };
         self.semantic_source = source;
@@ -684,6 +761,12 @@ impl App {
     /// （[`App::semantic_armed`]）。開いただけの文書に 1 回分の解析費用を
     /// 払わないためで、起点は [`App::ask_marks`] が立てる。
     pub(crate) fn reanalyze_semantics(&mut self) {
+        // **Review を先に蹴る。** この関数は文書が入れ替わるところ
+        // （起動・reload・タイムマシン・ファイル切替）すべてから呼ばれる
+        // が、下の早期 return は marks のための条件である。Review を
+        // その後ろに置くと、reload のあとも古い候補が残って**別の文書の
+        // バイト位置に下線が引かれる**。
+        self.reanalyze_review();
         if self.semantic_source.is_none() {
             return;
         }
@@ -1192,6 +1275,318 @@ impl App {
         matches!(self.semantic_source, Some(SemanticSource::Inline(_)))
     }
 
+    // ---- Review（`R`）— 校正候補 ----------------------------------
+    //
+    // `docs/design/marks-only-and-review-mode.md` 4 節。marks と共有して
+    // いるのは**判定器の一段の問い・Unit・境界・sha キャッシュ**だけで、
+    // ここから marks の状態へ書く経路は 1 本も無い。
+
+    /// `R` が使えるか — 外部コマンドとルールが揃っているか。
+    ///
+    /// `--semantic <fixture>` では使えない。fixture は 1 つの問いへの
+    /// 固定の答えで、ルールの文面で聞き直す道が無いからである
+    /// （[`Self::marks_question_is_fixed`] と同じ理由）。
+    pub(crate) fn review_enabled(&self) -> bool {
+        self.review_rules.is_some()
+            && matches!(self.semantic_source, Some(SemanticSource::Command(_)))
+    }
+
+    /// **`R` の押下。** 遅延の起点である。
+    ///
+    /// 初回は有効なルールの解析が走る（marks の遅延とまったく同じ理由で、
+    /// 開いただけの文書に費用を払わない）。2 度目からは同じ (文書, 文面)
+    /// がキャッシュに当たって 0 円で、marks が同じ文面を聞いていれば
+    /// その答えをそのまま使う。
+    pub(crate) fn arm_review(&mut self) {
+        if !self.review_enabled() {
+            return;
+        }
+        let first = !self.review_armed;
+        self.review_armed = true;
+        // 2 度目以降で候補が手元にあるなら、聞き直さない（答えは同じで、
+        // accept / dismiss の状態を捨てるだけになる）。
+        if first || (self.review_candidates.is_empty() && self.review_inflight == 0) {
+            self.reanalyze_review();
+        }
+    }
+
+    /// 有効なルールごとに、いま画面にある文書を判定器へ渡す。
+    ///
+    /// **起点を越えるまで走らない**（[`Self::review_armed`]）。走るときは
+    /// 候補も下線も一度空にする — 候補は前の文書のバイト位置を指している
+    /// ので、残すと別の本文に下線が乗る。
+    ///
+    /// `--semantic-cmd` は同じ問いを二度呼ばないので、一周して戻れば
+    /// 0 円である（キャッシュの鍵は (コマンド行, 文書, 文面)）。
+    pub(crate) fn reanalyze_review(&mut self) {
+        if !self.review_armed || !self.review_enabled() {
+            return;
+        }
+        // provider は clone して先に手放す（下で `&mut self` を取る）。
+        let Some(SemanticSource::Command(provider)) = self.semantic_source.as_ref() else {
+            return;
+        };
+        let provider = provider.clone();
+        if self.review_results.is_none() {
+            return;
+        }
+        let rules: Vec<crate::review_rules::Rule> = self
+            .review_rules
+            .as_ref()
+            .map(|rules| rules.enabled().cloned().collect())
+            .unwrap_or_default();
+        self.review_generation += 1;
+        self.review_candidates.clear();
+        self.review_inflight = 0;
+        self.refresh_review_decorations();
+        if rules.is_empty() {
+            return;
+        }
+        // 捨てた記録はここで 1 度だけ読む（文書 1 つにつき 1 回）。
+        self.load_dismissed();
+        let generation = self.review_generation;
+        self.review_inflight = rules.len();
+        let Some(channel) = self.review_results.as_ref() else {
+            return;
+        };
+        for rule in rules {
+            let provider = provider.clone();
+            let tx = channel.tx.clone();
+            let source = self.source.content.clone();
+            let question = rule.question();
+            std::thread::spawn(move || {
+                let result = provider
+                    .analyze(&source, &question)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(ReviewMessage {
+                    generation,
+                    rule: question.id,
+                    result,
+                });
+            });
+        }
+    }
+
+    /// いま画面にある文書について捨てられた候補を読み直す。
+    ///
+    /// **文書 1 つにつき 1 回**（[`Self::reanalyze_review`] の先頭）。
+    /// 毎回 JSONL を舐めると、候補が届くたびにファイルを読むことになる。
+    pub(crate) fn load_dismissed(&mut self) {
+        let sha = crate::semantic::source_digest(&self.source.content);
+        self.review_dismissed = self
+            .review_dismissed_store
+            .as_ref()
+            .map(|store| store.load(&sha))
+            .unwrap_or_default();
+    }
+
+    /// Review のワーカーが終えたぶんを引き取る。イベントループから 1 tick
+    /// に 1 度。`--semantic-cmd` の無いセッションでは何もしない。
+    pub(crate) fn poll_review_analysis(&mut self) {
+        loop {
+            let received = match self.review_results.as_ref() {
+                Some(channel) => channel.rx.try_recv(),
+                None => return,
+            };
+            match received {
+                Ok(message) => self.accept_review_analysis(message),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
+            }
+        }
+    }
+
+    /// 1 ルール分の答えを取る — **または古い世代として捨てる。**
+    ///
+    /// 捨てた候補（`dismissed.jsonl`）はここで落とす。画面に出さないもの
+    /// は数にも入れない（読み出しの `3/9` の分母が、見えている本数と
+    /// 合わなくなる）。
+    pub(crate) fn accept_review_analysis(&mut self, message: ReviewMessage) {
+        if message.generation != self.review_generation {
+            return; // 古い世代の答え。捨てる。
+        }
+        self.review_inflight = self.review_inflight.saturating_sub(1);
+        let rule = self
+            .review_rules
+            .as_ref()
+            .and_then(|rules| rules.get(&message.rule).cloned());
+        match (message.result, rule) {
+            (Ok(document), Some(rule)) => {
+                let dismissed = &self.review_dismissed;
+                let fresh: Vec<Candidate> =
+                    crate::review::candidates_for(&document, &rule, &self.source.content)
+                        .into_iter()
+                        .filter(|c| {
+                            !dismissed.contains(&(c.rule.clone(), c.range.start, c.range.end))
+                        })
+                        .collect();
+                self.review_candidates.extend(fresh);
+                // **文書順**に並べ直す。ルールは 1 本ずつ別のスレッドで
+                // 返ってくるので、届いた順に足すと順序が run ごとに変わる。
+                self.review_candidates.sort_by(|a, b| {
+                    a.range
+                        .start
+                        .cmp(&b.range.start)
+                        .then(a.range.end.cmp(&b.range.end))
+                        .then(a.rule.cmp(&b.rule))
+                });
+                self.refresh_review_decorations();
+                self.start_readout_flash();
+            }
+            (Err(e), _) => self.flash_err(e),
+            // ルールが消えている（読み直された）。答えの置き場が無い。
+            (Ok(_), None) => {}
+        }
+    }
+
+    /// 候補の下線を作り直す。**Pending だけが下線を持つ。**
+    ///
+    /// Accepted はコメントの印（黄色のバー）に変わり、Dismissed は本文
+    /// から消える。下線は「まだ見ていない」という意味なので、見たものに
+    /// 残っていると一覧を往復するたびに同じ場所を読み直すことになる。
+    pub(crate) fn refresh_review_decorations(&mut self) {
+        self.review_decorations = self
+            .review_candidates
+            .iter()
+            .filter(|c| c.is_pending())
+            .flat_map(|c| c.atoms.iter().cloned())
+            .map(|range| Decoration {
+                range,
+                kind: crate::decoration::DecorationKind::ReviewCandidate,
+            })
+            .collect();
+    }
+
+    /// 候補の乗っているソース行（0 始まり・昇順）— ガターの `!`。
+    ///
+    /// Pending だけを数える（下線と同じ理由）。
+    pub(crate) fn review_lines(&self) -> Vec<bool> {
+        let mut flags = vec![false; self.source.len()];
+        for candidate in self.review_candidates.iter().filter(|c| c.is_pending()) {
+            let start = (candidate.lines.0.saturating_sub(1)) as usize;
+            let end = (candidate.lines.1.saturating_sub(1)) as usize;
+            for flag in flags.iter_mut().take(end + 1).skip(start) {
+                *flag = true;
+            }
+        }
+        flags
+    }
+
+    /// **`a` — 候補をコメントにする。** 作ったら `true`。
+    ///
+    /// コメントは既存の [`Comment`] そのもので、以降は `l` の一覧・
+    /// `y copy`・`s send` にそのまま乗る。**コメント ＝ 人が承認した印**
+    /// である（4 節の流れの 3）。本文の形は
+    /// [`crate::review::comment_text`] の 1 か所にある。
+    pub(crate) fn accept_candidate(&mut self, index: usize) -> bool {
+        let Some(candidate) = self.review_candidates.get(index) else {
+            return false;
+        };
+        if candidate.state != CandidateState::Pending {
+            return false;
+        }
+        let (start, end) = candidate.lines;
+        let text = crate::review::comment_text(&candidate.rule, candidate.score);
+        // 本文は該当行そのもの（コメントの `lines` は常に本文の写しで、
+        // 候補の範囲ではない — 送り先が行で照合するため）。
+        let lines = self
+            .source
+            .content
+            .lines()
+            .skip(start.saturating_sub(1) as usize)
+            .take((end.saturating_sub(start) + 1) as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let comment = Comment {
+            file_path: self.current_file_path().to_path_buf(),
+            start,
+            end,
+            lines,
+            revision: self.current_revision_context(),
+            text,
+        };
+        self.comments.push(comment);
+        self.review_candidates[index].state = CandidateState::Accepted;
+        self.refresh_review_decorations();
+        true
+    }
+
+    /// **`x` — 候補を捨てる。** 捨てたら `true`。
+    ///
+    /// セッション内は印が変わるだけ（一覧からは消えない）で、本文からは
+    /// 下線が消える。加えて `dismissed.jsonl` に追記し、同じ文書を開いたら
+    /// 候補に出さない。**書けなくても捨てる** — ディスクが一杯でも画面の
+    /// 操作は通る（次に開くと戻ってくるだけ）。
+    pub(crate) fn dismiss_candidate(&mut self, index: usize) -> bool {
+        let Some(candidate) = self.review_candidates.get(index) else {
+            return false;
+        };
+        if candidate.state != CandidateState::Pending {
+            return false;
+        }
+        let sha = crate::semantic::source_digest(&self.source.content);
+        if let Some(store) = self.review_dismissed_store.as_ref() {
+            let _ = store.append(&sha, candidate);
+        }
+        let key = (
+            candidate.rule.clone(),
+            candidate.range.start,
+            candidate.range.end,
+        );
+        self.review_dismissed.insert(key);
+        self.review_candidates[index].state = CandidateState::Dismissed;
+        self.refresh_review_decorations();
+        true
+    }
+
+    /// **`A` — Pending を全部 accept する。** 作ったコメントの数を返す。
+    pub(crate) fn accept_all_pending(&mut self) -> usize {
+        let pending: Vec<usize> = self
+            .review_candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.is_pending())
+            .map(|(i, _)| i)
+            .collect();
+        let mut made = 0;
+        for index in pending {
+            if self.accept_candidate(index) {
+                made += 1;
+            }
+        }
+        made
+    }
+
+    /// accept 済みの本数と候補の総数（読み出しの `3/9`）。
+    pub(crate) fn review_counts(&self) -> (usize, usize) {
+        let accepted = self
+            .review_candidates
+            .iter()
+            .filter(|c| c.state == CandidateState::Accepted)
+            .count();
+        (accepted, self.review_candidates.len())
+    }
+
+    /// **フッタの読み出しの候補**（広い順）— marks の読み出しの**左**に
+    /// 出る。
+    ///
+    /// 縮む順は marks の後である（読み手の決定、2026-09-23）: 狭くなったら
+    /// **Review が先に引き下がる**。marks はいま光っている箇所の本数で、
+    /// 画面に見えているものの説明になっているが、Review は一覧を開けば
+    /// 同じ数が読める。
+    pub(crate) fn review_readouts(&self) -> Vec<String> {
+        if !self.review_armed {
+            return Vec::new();
+        }
+        if self.review_inflight > 0 {
+            return vec!["Review · analyzing…".to_string()];
+        }
+        let (accepted, total) = self.review_counts();
+        if total == 0 {
+            return Vec::new();
+        }
+        vec![format!("Review · {accepted}/{total}")]
+    }
+
     /// Set a transient footer message.
     /// Set a transient footer message (info: yellow).
     pub(crate) fn flash(&mut self, msg: impl Into<String>) {
@@ -1252,13 +1647,20 @@ impl App {
     /// decorate the same ranges, so they cannot disagree about which
     /// bytes are MARKED or DIM.
     pub(crate) fn active_decorations(&self) -> Vec<Decoration> {
-        if self.semantic_decorations.is_empty() {
-            crate::decoration::sanitize(&self.config.decorations, &self.source.content)
-        } else {
-            let mut both = self.config.decorations.clone();
-            both.extend_from_slice(&self.semantic_decorations);
-            crate::decoration::sanitize(&both, &self.source.content)
+        // **Review の下線は最後に足す。** 下線は前景も地色も書かないので
+        // （`crate::decoration::DecorationStyles::patch`）、marks の琥珀と
+        // 同じ range に乗っても打ち消し合わない — 後勝ちになるのは同じ
+        // ものを書く kind 同士だけである。Review と marks は同時に出る。
+        if self.semantic_decorations.is_empty()
+            && self.review_decorations.is_empty()
+            && self.config.decorations.is_empty()
+        {
+            return Vec::new();
         }
+        let mut all = self.config.decorations.clone();
+        all.extend_from_slice(&self.semantic_decorations);
+        all.extend_from_slice(&self.review_decorations);
+        crate::decoration::sanitize(&all, &self.source.content)
     }
 
     /// Recompute `base_rows` from the tokenized source spans.

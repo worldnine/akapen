@@ -90,7 +90,7 @@
 
 use std::ops::Range;
 
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use tui_markdown::Attr;
 
 use crate::highlight::{Highlighter, Span};
@@ -114,6 +114,15 @@ pub enum DecorationKind {
     SemanticMark,
     /// "This can be skimmed": the foreground moved toward the page.
     Dim,
+    /// **「ここを直せ」** — Review の候補（`R`）。細い下線だけを引く。
+    ///
+    /// marks の琥珀（[`DecorationKind::SemanticMark`]）と**別の機構**で
+    /// ある。地色でも前景でもなく**下線**なのは、Review と marks が同時に
+    /// 出るからで、候補の上に琥珀が乗っても両方読める必要がある
+    /// （地色を 2 つ重ねると後勝ちで片方が消える）。
+    ///
+    /// 色は [`REVIEW_TINT`]。
+    ReviewCandidate,
 }
 
 /// Where the mark background travels TO: a saturated amber, the color a
@@ -134,6 +143,32 @@ pub enum DecorationKind {
 /// property the previous version had and the reason to keep blending
 /// rather than writing a color in — see [`mark_background`].
 const MARK_TINT: Color = Color::Rgb(0xff, 0xb0, 0x00);
+
+/// **Review の下線が向かう先** — 冷たい青緑。
+///
+/// [`MARK_TINT`] の琥珀と**色相が最も遠い側**である。marks が「読め」で
+/// Review が「直せ」という別の意味を持つので、読み手が作る対応づけも
+/// 別でなければならない（`docs/design/reading-research.md` の Scim —
+/// 色は読み手が対応づけを作る道具である）。
+///
+/// **新しい色を作ってはいない。** 青緑は akapen が既に選択と composer に
+/// 使っている色相で（[`ratatui::style::Color::Cyan`]）、フッタの案内・
+/// 一覧のカーソル・選択の帯がずっとこの系統である。ここが足しているのは
+/// 「この色相を本文の下線にも使う」という 1 点だけである。
+///
+/// **紙から作る**のは琥珀とまったく同じ理由で、テーマ側が持っている色を
+/// 読まない（[`mark_background`]「ONE path, and it always runs」）。
+/// 暗いテーマでは暗い紙から、明るいテーマでは白い紙から、同じ式で寄せる
+/// ので、`--light` でも `--theme` を変えても下線は読める。
+const REVIEW_TINT: Color = Color::Rgb(0x00, 0xb4, 0xc8);
+
+/// 下線が紙から [`REVIEW_TINT`] へどれだけ寄るか。
+///
+/// 高いのは、**下線は 1 ピクセルの線だから**である。地色（
+/// [`MARK_BG_BLEND`] = 0.27）は面積が広いので薄くてよいが、線を同じ
+/// 薄さで引くと明るいテーマではほとんど見えない。[`TICK_BLEND`] と
+/// 同じ側の値で、あちらも 1 桁の点を打つための値である。
+const REVIEW_BLEND: f32 = 0.80;
 
 /// 目盛りと `FOCUS` バッジの琥珀が、紙から [`MARK_TINT`] へどれだけ寄るか。
 ///
@@ -305,6 +340,15 @@ impl DecorationStyles {
         crate::view::lerp_color(self.dim_target, MARK_TINT, TICK_BLEND)
     }
 
+    /// **Review の候補の下線の色**（`R`）。
+    ///
+    /// [`Self::mark_bg`] / [`Self::mark_tick`] と同じ紙から、別の
+    /// 色相（[`REVIEW_TINT`]）へ寄せたもの。**焼き込んだ色ではない**ので、
+    /// テーマを変えても marks の琥珀との距離が保たれる。
+    pub fn review_underline(&self) -> Color {
+        crate::view::lerp_color(self.dim_target, REVIEW_TINT, REVIEW_BLEND)
+    }
+
     /// The paper the mark was lifted FROM — where the reveal fades in
     /// from.
     pub fn page_bg(&self) -> Color {
@@ -341,6 +385,11 @@ impl DecorationStyles {
         match kind {
             DecorationKind::SemanticMark => base.patch(self.mark_style()),
             DecorationKind::Dim => base.fg(self.dim_fg(base.fg)),
+            // **下線だけ。** 前景も地色も触らないので、琥珀の上でも、
+            // 選択の帯の上でも、syntax highlight の上でも重なって読める。
+            DecorationKind::ReviewCandidate => base
+                .add_modifier(Modifier::UNDERLINED)
+                .underline_color(self.review_underline()),
         }
     }
 }
@@ -547,7 +596,6 @@ fn push_exact(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Modifier;
     use crate::render::{Rendered, render};
     use crate::source::Source;
 

@@ -38,6 +38,35 @@ pub(crate) const MARKS_CYCLE_BACK: char = 'M';
 /// **将来ぶつかりうる唯一のキー**である（上のモジュールの注）。
 pub(crate) const MARKS_FREE: char = '/';
 
+/// **Review の一覧を開く**（`R`）— 校正候補。
+///
+/// `docs/design/marks-only-and-review-mode.md` 4 節。**marks のキーでは
+/// ない**ので [`semantic_key`] の表には載らない — 載せると `-`/`+` や
+/// `m` と同じ扱いになり、「marks モードのキーが 1 本増えた」に読める。
+/// Review は別機能で、`l`（コメント一覧）や `t`（タイムライン）と同じ
+/// 段で受ける（`crate::on_view_key` / `crate::on_source_key`）。
+///
+/// **大文字である。** `r` は reload の先客で、これは触れない。view でも
+/// source でも `R` は空いていた（2026-09-23 に確認）。
+pub(crate) const REVIEW_OPEN: char = 'R';
+
+/// Review の一覧のキー。**一覧の中だけで効く**ので、ここにあるのは
+/// `?` ヘルプの行と、`crate::overlay::on_review_overlay_key` の写しの
+/// 元である。
+///
+/// `a` / `x` が accept / dismiss なのは、どちらも一覧の中でしか意味を
+/// 持たないからである（本文の `a` は acknowledge、`x` はどこにも無い）。
+pub(crate) const REVIEW_ACCEPT: char = 'a';
+/// 外れを捨てる。
+pub(crate) const REVIEW_DISMISS: char = 'x';
+/// Pending を全部 accept する。
+pub(crate) const REVIEW_ACCEPT_ALL: char = 'A';
+
+/// `?` ヘルプに出る Review の 1 行。文字列そのものが行になる
+/// （[`crate::overlay::help_rows`]）。
+pub(crate) const REVIEW_HINT: &str =
+    "R candidates to fix · in the list: a accept · x dismiss · A accept all";
+
 /// **フォーカス** — マーカーの無い Unit を沈める。
 ///
 /// **トグルである**（押すたびに沈む / 戻る）。押している間だけ沈む形は
@@ -124,6 +153,16 @@ mod tests {
     fn the_question_and_focus_keys_are_bound() {
         assert_eq!(semantic_key(MARKS_FREE), Some(SemanticKey::FreeQuestion));
         assert_eq!(semantic_key(MARKS_FOCUS), Some(SemanticKey::Focus));
+    }
+
+    #[test]
+    fn review_is_not_a_marks_key() {
+        // `R` は marks の環の外である（別機能）。`semantic_key` が拾うと
+        // `-`/`+`/`m` と同じ扱いになってしまう。
+        assert_eq!(semantic_key(REVIEW_OPEN), None);
+        assert_eq!(semantic_key(REVIEW_ACCEPT), None);
+        assert_eq!(semantic_key(REVIEW_DISMISS), None);
+        assert_eq!(semantic_key(REVIEW_ACCEPT_ALL), None);
     }
 
     #[test]

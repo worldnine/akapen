@@ -778,7 +778,37 @@ fn footer_readouts(app: &App) -> Vec<Readout> {
     if app.is_historical() {
         return Vec::new();
     }
-    app.marks_readouts()
+    let marks = app.marks_readouts();
+    let review = app.review_readouts();
+    let Some(review) = review.first() else {
+        return marks;
+    };
+    // **Review は marks の左に出て、先に引き下がる**（読み手の決定、
+    // 2026-09-23）。候補の列を交互に組むので、狭くなるにつれて
+    // `Review · 3/9 · Filler · 20% 13` → `Filler · 20% 13` →
+    // `Review · 3/9 · Filler 13` → `Filler 13` → … と落ちる。
+    //
+    // marks の本数（座布団）は最後まで残る。marks の読み出しはいま画面で
+    // 光っている箇所の説明だが、Review の `3/9` は一覧を開けば同じ数が
+    // 読める — どちらかを落とすならこちらである。
+    if marks.is_empty() {
+        return vec![Readout { dim: review.clone(), lit: None }];
+    }
+    let mut out = Vec::with_capacity(marks.len() * 2);
+    for readout in marks {
+        // marks が本数だけまで縮んだ段（`dim` が空）には中黒を付けない
+        // — 右に何も無いのに区切りだけが残る。末尾の空白 1 桁は
+        // `App::marks_readouts` の作法をそのまま引き継ぐ（座布団の琥珀と
+        // 字が地続きに見えないように薄い空白を挟む）。
+        let dim = if readout.dim.is_empty() {
+            format!("{review} ")
+        } else {
+            format!("{review} · {}", readout.dim)
+        };
+        out.push(Readout { dim, lit: readout.lit });
+        out.push(readout);
+    }
+    out
 }
 
 /// フッタの取り分を測る。`title_metrics` と同じ役回りで、描画と演出が
@@ -1275,6 +1305,8 @@ mod footer_tests {
             semantic: None,
             semantic_cmd: None,
         marks_questions: None,
+        review_rules: None,
+        review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

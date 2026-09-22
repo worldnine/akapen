@@ -41,7 +41,7 @@
 | [`design/range-attribution-plan.md`](design/range-attribution-plan.md) | 内部位置モデルを source byte range にする計画。**Phase 番号はこの文書が正典** | Phase 1・2 実装済み、Phase 3 以降は未着手 |
 | [`design/jev.md`](design/jev.md) | 意味判断を担う判定器 Jev（**LLM ではなく System One モデル**）の primitive と呼び出し方 | 参照資料。akapen からの接続はまだ（`--semantic-cmd` の口まで） |
 | [`design/reading-research.md`](design/reading-research.md) | **拾い読みの研究の保管庫。** 合図（signaling）・satisficing・核性・位置の効き方と、先行システム Scim。**採らなかった手とその理由**（TextTiling / 文書レベルの LEAD） | 参照資料。実装の指示ではない |
-| [`design/marks-only-and-review-mode.md`](design/marks-only-and-review-mode.md) | DIM を廃止してマーカーだけにする層（0 節）、読み手の判断が要る箇所を光らせる赤入れモード（2 節）、自然語で聞く意味の検索（3 節）。2026-09-22 の費用の実測つき | **0 節は実装済みで、2026-09-22 から唯一の機構**（機構の正典は設計書の側。ここに残るのは実測と判断）。1〜3 節は候補。DIM 版は同日に削除 |
+| [`design/marks-only-and-review-mode.md`](design/marks-only-and-review-mode.md) | DIM を廃止してマーカーだけにする層（0 節）、読み手の判断が要る箇所を光らせる赤入れモード（2 節）、自然語で聞く意味の検索（3 節）、**直すためのマーク = slop の除去（4 節、`R` の校正候補）**。2026-09-22 の費用と 2026-09-23 の候補の実測つき | **0 節（marks）と 4 節の段階 1（Review = 校正候補、`R`）は実装済み**（機構の正典は設計書の側。ここに残るのは実測と判断）。4 節の段階 2（LLM への送信と書き換え）と 1〜3 節は候補。DIM 版は 2026-09-22 に削除 |
 | [`design/local-snapshot-spec.md`](design/local-snapshot-spec.md) | LOCAL スナップショットと統合タイムラインの仕様 | 現行仕様（v0.1 の基本機能は実装済み） |
 | [`design/git-integration-spec.md`](design/git-integration-spec.md) | 旧 Git 連携仕様 | **akapen に関する記述は `local-snapshot-spec.md` で置換済み**（ashiato 側の 4 章が残っている） |
 | [`design/review-badge-design.md`](design/review-badge-design.md) | レビュー未確認件数バッジ（`! N`）のデザインと、別案へ戻すときの切り替え箇所 | 実装済み（文書の自己申告は 2026-08） |

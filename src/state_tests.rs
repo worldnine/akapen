@@ -82,6 +82,8 @@ use crate::comment::Selection;
             semantic: None,
             semantic_cmd: None,
             marks_questions: None,
+            review_rules: None,
+            review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -129,6 +131,8 @@ use crate::comment::Selection;
             semantic: None,
             semantic_cmd: None,
             marks_questions: None,
+            review_rules: None,
+            review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -831,6 +835,8 @@ use crate::comment::Selection;
             semantic: None,
             semantic_cmd: None,
             marks_questions: None,
+            review_rules: None,
+            review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -884,6 +890,8 @@ use crate::comment::Selection;
             semantic: None,
             semantic_cmd: None,
             marks_questions: None,
+            review_rules: None,
+            review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -924,6 +932,8 @@ use crate::comment::Selection;
             semantic: None,
             semantic_cmd: None,
             marks_questions: None,
+            review_rules: None,
+            review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -1208,6 +1218,7 @@ use crate::comment::Selection;
         let (_, gutter) = view.visible_text(
             10,
             &marked,
+            &[],
             &[],
             &[],
             &[],
@@ -1903,6 +1914,8 @@ use crate::comment::Selection;
             semantic: None,
             semantic_cmd: None,
             marks_questions: None,
+            review_rules: None,
+            review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -1940,11 +1953,7 @@ use crate::comment::Selection;
         // pad on each side (the title keeps its own leading space).
         let (text, gutter) = view.visible_text(
             10,
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
+            &[], &[], &[], &[], &[], None,
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
         );
@@ -2020,6 +2029,8 @@ use crate::comment::Selection;
             semantic: None,
             semantic_cmd: None,
             marks_questions: None,
+            review_rules: None,
+            review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2055,6 +2066,7 @@ use crate::comment::Selection;
         let (_, gutter) = view.visible_text(
             10,
             &[false; 6],
+            &[],
             &[],
             &[],
             &[],
@@ -2322,6 +2334,8 @@ use crate::comment::Selection;
             semantic: None,
             semantic_cmd: None,
             marks_questions: None,
+            review_rules: None,
+            review_json: false,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6029,6 +6043,8 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         semantic: None,
         semantic_cmd: None,
         marks_questions: None,
+        review_rules: None,
+        review_json: false,
         decoration_blend: Default::default(),
         decorations: vec![
             mark_at("重要", DecorationKind::SemanticMark),
@@ -6151,6 +6167,8 @@ fn a_dimmed_list_item_dims_its_marker_too() {
         semantic: None,
         semantic_cmd: None,
         marks_questions: None,
+        review_rules: None,
+        review_json: false,
         decoration_blend: Default::default(),
         decorations: vec![Decoration {
             range: first_item.range.clone(),
@@ -6227,6 +6245,8 @@ fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
         semantic: Some(fixture.clone()),
         semantic_cmd: None,
         marks_questions: None,
+        review_rules: None,
+        review_json: false,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -6332,6 +6352,8 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
         semantic: Some(fixture),
         semantic_cmd: None,
         marks_questions: None,
+        review_rules: None,
+        review_json: false,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -7193,6 +7215,8 @@ fn the_marks_projection_splits_one_source_line_into_two_styles() {
         semantic: Some(fixture),
         semantic_cmd: None,
         marks_questions: None,
+        review_rules: None,
+        review_json: false,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };

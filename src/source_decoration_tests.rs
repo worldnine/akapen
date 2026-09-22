@@ -30,6 +30,8 @@
             semantic: None,
             semantic_cmd: None,
                 marks_questions: None,
+                review_rules: None,
+                review_json: false,
             decoration_blend: Default::default(),
             decorations,
         };

@@ -672,6 +672,8 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     let changed = review_flags(&changed_set, n);
     let deleted = review_flags(&deleted_set, n);
     let emphasized = vec![false; n];
+    // Review の候補（Pending）の行。層の無いセッションでは全部 false。
+    let review = app.review_lines();
     // The composer opened from view mode (`c` in view) is drawn inline
     // right under the cursor line, so the comment can be typed without
     // leaving the rendered view. While it is open it is part of the
@@ -710,6 +712,7 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
              // the frame flash already mark what changed
         &deleted,
         &emphasized,
+        &review,
         sel,
         app.ui_selected_bg,
         app.ui_history_glow_bg,
@@ -1024,6 +1027,8 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
     // full-row background for the CHANGED band too (view mode marks
     // changes in the gutter only), so `changed_bg` counts as banded here
     // where view mode has no equivalent.
+    // Review の候補（Pending）の行。ガターの `!` がここを見る。
+    let review_lines = app.review_lines();
     let decorations = app.active_decorations();
     let undimmed: Vec<crate::decoration::Decoration> = decorations
         .iter()
@@ -1097,8 +1102,15 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         let added = scoped_added.contains(&idx);
         let is_cursor = idx == app.cursor && !deletion_focused;
         // `▌` marks a current changed line; deletions are their own rows.
+        // Review の候補（Pending）は `!` — view モードのガターと同じ
+        // 形である。accept した候補は Pending でなくなるので、この旗と
+        // コメントの印（source では行番号が黄色になる）が同じ行で
+        // 競合することは無い。
+        let review_line = review_lines.get(idx).copied().unwrap_or(false);
         let cursor_mark = if is_cursor {
             ">"
+        } else if review_line {
+            "!"
         } else if added {
             "▌"
         } else {
@@ -1159,6 +1171,10 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
             let fg = if added { Color::LightGreen } else { Color::LightCyan };
             let s = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
+        } else if review_line {
+            // view モードの `!` と同じ青緑。
+            let s = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+            if changed_bg { s.bg(app.ui_changed_bg) } else { s }
         } else if changed_bg {
             Style::default().fg(Color::Green).bg(app.ui_changed_bg)
         } else {
