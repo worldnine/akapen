@@ -4,7 +4,7 @@
 //! cargo run -p semantic-reading --example marks-report -- doc.md answer.json
 //! ```
 //!
-//! 隣の `decorate-report.rs` の marks 版である。akapen を起動せずに
+//! akapen を起動せずに
 //! [`marks::mark`] そのものを通すので、**測っているものは TUI が描くものと
 //! 同じ**（akapen 側は [`DisplayState`] を色へ写すだけ）。
 //!

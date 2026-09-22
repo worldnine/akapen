@@ -1,5 +1,7 @@
 # 見出しが無い文書の実測
 
+> **DIM 版（Reading Budget）は 2026-09-22 に削除済み。当時の記録です。**
+
 `examples/semantic/README.md` から分けた実測の記録です。索引は
 [`../README.md`](../README.md)「実測の索引」。**文中に測定対象として出てくる
 `examples/semantic/README.md` / `docs/gotchas.md` のバイト数・Unit 数は

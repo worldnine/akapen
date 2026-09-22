@@ -1,5 +1,7 @@
 # context preservation — 依存の閉包はどれだけ大きいかの実測
 
+> **DIM 版（Reading Budget）は 2026-09-22 に削除済み。当時の記録です。**
+
 `examples/semantic/README.md`「実測の索引」から来た人へ。動機は
 [`docs/gotchas/open-questions.md`](../../../docs/gotchas/open-questions.md)
 「4. 同一 Tier 内の rule の逐次性」、設計上の位置は

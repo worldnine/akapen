@@ -1,5 +1,7 @@
 # MARKED の分布の実測
 
+> **DIM 版（Reading Budget）は 2026-09-22 に削除済み。当時の記録です。**
+
 `examples/semantic/README.md`「実測の索引」から来た人へ。動機は
 [`docs/design/reading-research.md`](../../../docs/design/reading-research.md)
 「いちばん近い先行システム — Scim」、症状の初出は

@@ -18,7 +18,7 @@ use crate::unit::{SemanticUnit, UnitId};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SemanticDocument {
     /// 文書を機械的に分割した Atom 列。文書順に並んでいることを期待する
-    /// （[`crate::policy::decorate`] の出力順はこの並び順に従う）。
+    /// （[`crate::marks::mark`] の出力順はこの並び順に従う）。
     pub atoms: Vec<Atom>,
     /// Jev が知覚した意味的まとまり。
     pub units: Vec<SemanticUnit>,
