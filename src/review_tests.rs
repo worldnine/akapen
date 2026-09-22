@@ -73,8 +73,13 @@ fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
     app.marks_questions = Some(Questions::built_in().unwrap());
     app.review_rules = Some(rules);
     app.review_dismissed_store = Some(crate::review::DismissedStore::at(dir.join("store")));
-    let semantic = crate::semantic::source_from_config(&app.config).unwrap();
-    app.set_semantic_source(semantic);
+    // **`source_from_config` を通さない。** あれは実ユーザーの
+    // `~/.cache/akapen/semantic` を provider に付ける（読むだけだが、
+    // テストが実環境の置き場に触る理由が無い）。キャッシュ無しの
+    // `CommandProvider` は同じ経路を同じように通る。
+    app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
+        crate::semantic::CommandProvider::new("false"),
+    )));
     // **起点は立てるが解析は頼まない**（頼むとコマンドが走る）。
     app.review_armed = true;
     app.load_dismissed();
