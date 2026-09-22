@@ -120,8 +120,8 @@ pub enum DecorationKind {
 /// yellow highlighter leaves on paper.
 ///
 /// The mark used to be lifted toward the theme's own FOREGROUND, which
-/// produced a hueless gray (`rgb(68,70,89)` on Catppuccin Mocha). Read at
-/// READ 100 % that gray was reported as "nothing to catch on": a marked
+/// produced a hueless gray (`rgb(68,70,89)` on Catppuccin Mocha). With the
+/// whole document shown that gray was reported as "nothing to catch on": a marked
 /// passage and an unmarked one differed only in lightness, and lightness
 /// alone is what the selection band and the history glow already use.
 /// Hue is the channel nothing else in the UI spends, so the mark spends
@@ -165,8 +165,8 @@ const DIM_TARGET_LIGHT: Color = Color::Rgb(0xfd, 0xf6, 0xe3);
 /// toward [`MARK_TINT`].
 ///
 /// 0.14 toward the foreground was tried first and read as "nothing
-/// happened"; 0.22 shipped, and at READ 100 % still read as "not enough
-/// to catch on".
+/// happened"; 0.22 shipped, and with the whole document shown still read
+/// as "not enough to catch on".
 ///
 /// What the user picked on a real terminal, out of four hues, is the
 /// COLOR `#5a4520`. 0.27 is the blend that reproduces it from

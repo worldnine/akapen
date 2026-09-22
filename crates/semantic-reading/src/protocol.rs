@@ -1,6 +1,6 @@
 //! 外部コマンドとの wire protocol — **Atom を渡して Unit を受け取る**。
 //!
-//! 意味判断（Atom 間の境界・Reading Tier・redundancy）だけを外へ出し、
+//! 意味判断（Atom 間の境界・問いへのスコア・核）だけを外へ出し、
 //! 位置の管理はこちら側に残すための継ぎ目である。設計書「Jev に判断
 //! させないもの」に `Atom生成` と `source position管理` が並んでいるのが
 //! そのまま形になっている。
@@ -27,9 +27,9 @@
 //!
 //! # 一括で返させる
 //!
-//! 設計書は Jev への問いを 2 段階（境界判定 → Tier 付け）に分けているが、
+//! 設計書は Jev への問いを 3 ラウンド（境界 → スコア → 核）に分けているが、
 //! ワイヤ上は 1 往復（atoms in, units out）にしてある。外部コマンドが
-//! 内部で Jev を 2 回呼ぶのは自由で、こちらのプロトコルが判定器側の段取りを
+//! 内部で Jev を何回呼ぶのは自由で、こちらのプロトコルが判定器側の段取りを
 //! 規定すべきではない。継ぎ目は「Atom を渡して Unit を受け取る」だけ。
 //! 将来キャッシュのために段階を分ける必要が出たら `stage` を足せる
 //! （未知のフィールドは拒否していない。[`AnalyzeResponse`] 参照）。
@@ -66,26 +66,44 @@
 //! 読んで「絞り込み無し」に倒す — 表示は従来どおり Unit 全体が MARKED に
 //! なるだけで、位置を取り違えることはない。
 //!
-//! # `score` と `question` を足しても版は上げない — marks モードの分
+//! # `score` と `question` を足しても版は上げない
 //!
 //! [`crate::SemanticUnit::score`]（問いへの答えの強さ）と、要求側の
 //! [`RequestQuestion`]・応答側の [`AnalyzeResponse::question`]
-//! （2026-09-22。`docs/design/marks-only-and-review-mode.md`）も
-//! [`VERSION`] を 1 のままにしてある。どちらも**追加されたフィールド**なので、
-//! 上の `core_atoms` とまったく同じ表になる。
+//! （2026-09-22）も [`VERSION`] を 1 のままにしてある。どちらも
+//! **追加されたフィールド**なので、上の `core_atoms` とまったく同じ表になる。
 //!
 //! | 組み合わせ | 起きること |
 //! | ---------- | ---------- |
-//! | 新しい akapen（marks モード）+ 古い判定器 | 要求の `question` は未知フィールドとして無視され、DIM 版の答えが返る。`score` が 1 つも無いので **0 本**になり、akapen は「この判定器はスコアを返さない」とステータス行に出す（[`crate::marks::has_scores`]）。黙った空白にはならない |
-//! | 古い akapen + 新しい判定器 | `score` も `question` も未知のフィールドとして読み飛ばされる。marks の答えは `reading_tier` が全部 `detail` なので、DIM 版の投影では**何も光らない** |
+//! | 新しい akapen + 古い判定器 | 要求の `question` は未知フィールドとして無視される。`score` が 1 つも無いので **0 本**になり、akapen は「この判定器はスコアを返さない」と読み出しに出す（[`crate::marks::has_scores`]）。黙った空白にはならない |
+//! | 古い akapen + 新しい判定器 | `score` も `question` も未知のフィールドとして読み飛ばされる |
 //!
-//! どちらも「意味を取り違える」側へは倒れない。1 行目は理由を言い、
-//! 2 行目は安全側（光らせすぎない）へ倒れる。
+//! どちらも「意味を取り違える」側へは倒れない。1 行目は理由を言う。
 //!
-//! **`reading_tier` は必須のままにしてある。** marks の答えでは使われない
-//! ので `#[serde(default)]` を足したくなるが、足すと「Tier を書き忘れた
-//! DIM 版の判定器が黙って `detail` になる」— いまエラーとして見えている
-//! 誤りが見えなくなる。marks の判定器は `detail` を明示して書く。
+//! # `reading_tier` と `relations` を落としても版は上げない
+//!
+//! 2026-09-22 に DIM 版（Reading Budget）を削除した。`reading_tier`
+//! （必須だった 4 段の列挙）と `relations`（`redundant_with` /
+//! `presupposes`）は**ワイヤから消えた**が、[`VERSION`] は 1 のままである。
+//!
+//! | 組み合わせ | 起きること |
+//! | ---------- | ---------- |
+//! | 新しい akapen + 古い判定器 | `reading_tier` も `relations` も未知のフィールドとして読み飛ばされる。**`score` を返さない判定器なら 0 本**になり、akapen はその理由を言う |
+//! | 古い akapen + 新しい判定器 | `reading_tier` が無いので serde が `missing field` で落ち、応答が丸ごと捨てられる。`App::flash_err` がその一行を出す |
+//!
+//! 2 行目は退化ではなく失敗だが、版を上げても直らない — 版を 2 にすれば
+//! 古い akapen は「cannot read protocol version 2」で同じく応答を捨て、
+//! 変わるのはエラーの文面だけである。そして上げると、1 行目の**いま正しく
+//! 動いている組み合わせ**が壊れる。**両端ともこのリポジトリの中にしか
+//! 無く、版は公開されていない**ので、互換表を増やすほうが「消すはずの
+//! 複雑さ」を増やすことになる。
+//!
+//! **キャッシュの逆流だけは別経路にある。** `~/.cache/akapen/semantic/`
+//! には `reading_tier` と `relations` を持つ答えが残っているが、
+//! [`crate::SemanticUnit`] は未知のフィールドを拒まないので**そのまま
+//! 読める**（`unit.rs` の
+//! `a_unit_from_the_old_wire_still_loads_with_its_extra_fields_ignored`）。
+//! 消さずに済む。
 //!
 //! # `section_of` を足しても版は上げない — `core_atoms` と同じ話である
 //!
@@ -102,84 +120,24 @@
 //! 「中身が残っているのに見出しが沈む」という**もともとの状態**であって、
 //! 新しく壊れるものは無い。
 //!
-//! **なぜ [`crate::Relation`] の枝にしなかったか**も、この表がそのまま理由に
-//! なっている。枝にすれば古い akapen は `unknown variant` で応答を丸ごと
-//! 捨て、注釈が 1 つも付かなくなる（下の `PRESUPPOSES` の表の 2 行目）。
-//! フィールドなら読み飛ばされるだけで済む。出自を混ぜない理由のほうは
-//! [`crate::SemanticUnit::section_of`] にある。
-//!
-//! # `redundant_with` の意味が半歩ずれても版は上げない
-//!
-//! 2026-09-22 に [`crate::Relation::RedundantWith`] の読み方が変わった。
-//!
-//! | | 読み方 | 弱まるのは |
-//! | --- | --- | --- |
-//! | 〜2026-09-22 | 「**私は**冗長だ」 | 必ず持ち主 |
-//! | いま | 「**この 2 つは**冗長な対だ」 | Tier が低い方、同 Tier なら長い方 |
-//!
-//! **ワイヤの形は 1 ビットも変わらない。** フィールド名も、値（相手の id）も、
-//! 向き（持ち主から前の Unit へ）もそのままである。判定器が書くものは同じで、
-//! 変わったのは akapen 側の [`crate::policy`] がそれをどう使うかだけである。
-//!
-//! だから版を上げない。**版が守っているのは「同じフィールドを双方が違う
-//! 意味で読み書きする」事故**だが、ここで意味を持っているのは片側
-//! （akapen）だけで、判定器は「この 2 つは同じ内容だ」としか言っていない。
-//! 上げると、正しく動いている古い判定器が拒まれるだけになる。
-//!
-//! **`core_atoms` はこれに引きずられる。** 冗長な Unit も ESSENTIAL なら
-//! MARKED になるようになった（[`crate::policy`]「核は奪わない」）ので、
-//! 判定器は冗長な Unit にも核を選ぶべきである。選ばずにフィールドを省くと
-//! `None` = 絞り込み無しになり、**その Unit が丸ごと光る**。これは版の話
-//! ではなく判定器側の宿題で、上の 3 値の表の 1 行目がそのまま起きるだけ
-//! である（意味を取り違える側へは倒れない）。
-//!
-//! # `PRESUPPOSES` を足しても版は上げない — ただし理由の形が違う
-//!
-//! [`crate::Relation::Presupposes`]（context preservation の前提。2026-09-21）
-//! も [`VERSION`] を 1 のままにした。**ただし `core_atoms` と同じ話ではない。**
-//! あちらは追加された**フィールド**で、知らない側は読み飛ばせた。こちらは
-//! 追加された**列挙の枝**なので、知らない側は読み飛ばせない。
-//!
-//! | 組み合わせ | 起きること |
-//! | ---------- | ---------- |
-//! | 新しい akapen + 古い判定器 | `presupposes` が 1 つも来ない。閉包が空なので `decorate` の請求額は従来どおり Unit 1 つ分になり、**表示は 1 ビットも変わらない** |
-//! | 古い akapen + 新しい判定器 | serde が `unknown variant `presupposes`` で失敗し、**応答が丸ごと捨てられる**。注釈は付かず、`App::flash_err` がステータス行にその一行を出す |
-//!
-//! **2 行目は退化ではなく失敗である。** `core_atoms` の表が「どちらも従来の
-//! 表示」だったのと違って、こちらは片側が注釈を失う。それでも版を上げない
-//! 理由は 2 つある。
-//!
-//! 1. **上げても直らない。** 版を 2 にしたところで古い akapen は
-//!    「cannot read protocol version 2」で同じく応答を捨てる。変わるのは
-//!    エラーの文面だけで、注釈は戻らない
-//! 2. **上げると、いま動いている組み合わせが死ぬ。** 新しい akapen + 古い
-//!    判定器（1 行目）は完全に正しく動いているのに、版を 2 にすると
-//!    判定器が名乗る 1 を拒んで壊れる。**直らない側のために、壊れていない
-//!    側を壊すことになる**
-//!
-//! そして版が守っているものは、ここでも守られている。**どちらの向きにも
-//! 「それらしく見えるが間違っている注釈」は出ない** — 1 行目は前提を知らない
-//! だけで正しく、2 行目は何も出さずに理由を言う。版は「同じフィールドを双方が
-//! 違う意味で読み書きする」事故のためにあり、ここにその事故は無い。
-//!
-//! **失敗は静かではない。** `AnalyzeResponse::from_json` の `Err` は
-//! `CommandProvider::analyze` から `App::accept_analysis` へ上がり、
-//! `flash_err` でステータス行に出る（`src/app.rs`）。古い akapen に新しい
-//! 判定器を繋いだ人は、黙って注釈が消えるのではなく理由を読む。
+//! **列挙の枝ではなくフィールドにしてある**のも、この表がそのまま理由に
+//! なっている。枝にすれば知らない側は `unknown variant` で応答を丸ごと
+//! 捨て、注釈が 1 つも付かなくなる。フィールドなら読み飛ばされるだけで
+//! 済む。
 //!
 //! # [`AtomKind`] に値を足しても版は上げない — **向きが片道だからである**
 //!
 //! 2026-09-22 に [`crate::AtomKind::TableRow`] が増えた（`atomize` が表を行へ
 //! 割るようになった分）。これも [`VERSION`] は 1 のままである。
 //!
-//! 上の `PRESUPPOSES` と同じ「追加された**枝**」だが、**同じ話にならない**。
-//! `kind` が載るのは [`RequestAtom`]、つまり **akapen → 判定器の片道**だけで、
-//! 判定器から返ってくる応答に `kind` は 1 つも無い。枝を知らない側が
-//! 「読んで拒む」場面が、この向きには存在しない。
+//! 追加された**枝**だが、上の各節と**同じ話にならない**。`kind` が載るのは
+//! [`RequestAtom`]、つまり **akapen → 判定器の片道**だけで、判定器から
+//! 返ってくる応答に `kind` は 1 つも無い。枝を知らない側が「読んで拒む」
+//! 場面が、この向きには存在しない。
 //!
 //! | 組み合わせ | 起きること |
 //! | ---------- | ---------- |
-//! | 新しい akapen + 古い判定器 | `table_row` は判定器にとってただの未知の文字列。境界の既定（`rule:default`）で表の行が 1 行ずつ別の Unit になり、核の候補（`PROSE_KINDS`）にも入らないので、**表はこの変更を入れる前と同じく光らない**。位置を取り違える余地は無い |
+//! | 新しい akapen + 古い判定器 | `table_row` は判定器にとってただの未知の文字列。境界の既定（`rule:default`）で表の行が 1 行ずつ別の Unit になり、核の候補（`PROSE_KINDS`）にも入らないので、**表は光らない**。位置を取り違える余地は無い |
 //! | 古い akapen + 新しい判定器 | `kind` は応答に載らないので**1 ビットも変わらない** |
 //!
 //! **逆流はキャッシュの経路にだけある。** 新しい akapen が書いた
@@ -208,9 +166,9 @@
 //! assert!(request.contains(r#""index":0"#));
 //!
 //! // 2. コマンドは index だけを返す（range は返さない）。
-//! let answer = r#"{"version":1,"units":[
-//!   {"id":"u1","atoms":[0],"reading_tier":"essential"},
-//!   {"id":"u2","atoms":[1],"reading_tier":"detail"}
+//! let answer = r#"{"version":1,"question":"essential","units":[
+//!   {"id":"u1","atoms":[0],"score":0.9,"core_atoms":[]},
+//!   {"id":"u2","atoms":[1],"score":0.3,"core_atoms":[1]}
 //! ]}"#;
 //!
 //! // 3. 位置はこちらの Atom 列のまま文書になる。
@@ -251,10 +209,13 @@ pub struct AnalyzeRequest<'a> {
     pub source: &'a str,
     /// 文書を割った Atom 列。`index` の昇順に並ぶ。
     pub atoms: Vec<RequestAtom<'a>>,
-    /// **いま聞きたいこと**（marks モード）。無ければ DIM 版の解析。
+    /// **いま聞きたいこと。**
     ///
-    /// 「marks モードである」を表すフラグは**これ 1 つ**である。モードの
-    /// フラグと問いを別々に置くと食い違いうるので、置かない。
+    /// **必ず載る。** 問いを持たない解析はこの層に無い（2026-09-22 に
+    /// DIM 版を削除した）ので、`None` の要求を受け取った判定器は
+    /// **明確なエラーで終わる**のが正しい。`Option` のままなのは、
+    /// 問いを載せない [`AnalyzeRequest::new`] を境界だけの用途
+    /// （`dump-request` の例）に残してあるためである。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<RequestQuestion<'a>>,
 }
@@ -269,8 +230,8 @@ pub struct RequestQuestion<'a> {
     /// 問いの識別子（`essential` / `settled` / `free` など）。応答が
     /// そのまま echo し、キャッシュの読み戻しの照合に使われる。
     pub id: &'a str,
-    /// Jev へ渡す問いの文面。`docs/design/marks-only-and-review-mode.md`
-    /// 0 節の表の逐語（自由入力は `{q}` を埋めたもの）。
+    /// Jev へ渡す問いの文面。正本は akapen 側の
+    /// `assets/marks-questions.json`（自由入力は `{q}` を埋めたもの）。
     pub text: &'a str,
     /// **核をどの Unit に聞くか**の足切り。判定器はこの値を超えた Unit に
     /// だけ「核はどの一文か」を聞けばよい（越えない Unit は光らないので
@@ -324,9 +285,7 @@ impl<'a> AnalyzeRequest<'a> {
         }
     }
 
-    /// marks モードの問いを載せる。
-    ///
-    /// これが載っていない要求は DIM 版の解析になる（判定器の既定）。
+    /// 問いを載せる。
     pub fn asking(mut self, question: RequestQuestion<'a>) -> Self {
         self.question = Some(question);
         self
@@ -341,8 +300,8 @@ impl<'a> AnalyzeRequest<'a> {
 /// 外部コマンドの stdout から受け取る応答。
 ///
 /// `units` の要素は [`SemanticUnit`] そのままである — `id` / `atoms` /
-/// `reading_tier` / `core_atoms` / `section_of` / `relations` の 6 つで、
-/// wire 形と内部表現が 1 対 1 に対応する。別の DTO を挟まないのは、挟めば両者がずれうるからで、
+/// `core_atoms` / `section_of` / `score` の 5 つで、wire 形と内部表現が
+/// 1 対 1 に対応する。別の DTO を挟まないのは、挟めば両者がずれうるからで、
 /// ずれない形にしてあれば「wire では通るが内部では表現できない」値が
 /// 存在しなくなる。
 ///
@@ -357,12 +316,11 @@ pub struct AnalyzeResponse {
     /// 外部コマンドが知覚した意味的まとまり。
     #[serde(default)]
     pub units: Vec<SemanticUnit>,
-    /// **この応答が答えている問いの id**（marks モード）。判定器が要求の
+    /// **この応答が答えている問いの id**。判定器が要求の
     /// [`RequestQuestion::id`] をそのまま echo する。
     ///
     /// [`SemanticDocument::question`] へそのまま移り、キャッシュの
-    /// 読み戻しで「別の問いの答え」を撥ねるために使われる。DIM 版の
-    /// 応答は持たない。
+    /// 読み戻しで「別の問いの答え」を撥ねるために使われる。
     #[serde(default)]
     pub question: Option<String>,
 }
@@ -383,12 +341,10 @@ impl AnalyzeResponse {
     /// | 条件 | 見る場所 |
     /// | ---- | -------- |
     /// | `version` が一致する | ここ |
-    /// | `reading_tier` が 4 種のいずれか | serde（[`Self::from_json`]） |
-    /// | `relations` が既知の関係である | serde（[`Self::from_json`]） |
     /// | atom 添字が `atoms.len()` 未満 | [`SemanticDocument::validate`] |
     /// | `core_atoms` がその unit の `atoms` の部分集合 | [`SemanticDocument::validate`] |
     /// | unit の id が重複しない | [`SemanticDocument::validate`] |
-    /// | relation の参照先が実在し、自分自身でない | [`SemanticDocument::validate`] |
+    /// | `section_of` の参照先が実在し、自分自身でない | [`SemanticDocument::validate`] |
     ///
     /// **1 つでも失敗したら `Err` を返し、応答は丸ごと捨てられる。**
     /// 通った Unit だけ適用する、はしない。
@@ -401,14 +357,13 @@ impl AnalyzeResponse {
     /// コマンド側の取りこぼしであり、文書が壊れているわけではない。
     /// 先勝ちにするのは、
     ///
-    /// - [`crate::policy`] の attention コストが二重計上にならない
+    /// - 同じ Atom に 2 つの Unit のスコアが乗らない
     /// - 文書順に読んだときの最初の判断が残る（後から上書きされない）
     ///
     /// の 2 点による。**添字を全部落とされて空になった Unit は残す** —
-    /// [`crate::policy::decorate`] はコスト 0・装飾 0 として素通りさせる
-    /// だけだし、他の Unit の `redundant_with` の参照先として生きている
-    /// 可能性があるからである（消すと参照が宙に浮き、応答全体が捨てられる
-    /// ことになる）。
+    /// [`crate::marks::mark`] は装飾 0 として素通りさせるだけだし、
+    /// 他の Unit の `section_of` の参照先として生きている可能性がある
+    /// からである（消すと参照が宙に浮き、応答全体が捨てられることになる）。
     pub fn into_document(self, atoms: Vec<Atom>) -> Result<SemanticDocument> {
         if self.version != VERSION {
             return Err(Error::Invalid(format!(
@@ -472,7 +427,7 @@ impl AnalyzeResponse {
 mod tests {
     use super::*;
     use crate::atomize::atomize;
-    use crate::unit::{ReadingTier, Relation, UnitId};
+    use crate::unit::UnitId;
 
     const SOURCE: &str = "## 見出し\n\n本文です。二文目です。\n";
 
@@ -507,50 +462,28 @@ mod tests {
         );
     }
 
-    /// 前提が wire を通って relation になる。**`redundant_with` と取り違え
-    /// ない** — 効き方が逆で、`presupposes` は**指した先を引き上げる**
-    /// （持ち主が残るなら参照先も一緒に残す）。`redundant_with` のほうは
-    /// 対の負けた側を 1 段弱めるだけで、どちらの核も奪わない。
+    /// 問いは要求に載り、応答の id と対になる。
     #[test]
-    fn a_prerequisite_crosses_the_wire_as_its_own_relation() {
-        let document = response(
-            r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"context"},
-                {"id":"u2","atoms":[1,2],"reading_tier":"essential","relations":[{"presupposes":"u1"}]}
-            ]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            document.units[1].relations,
-            [Relation::Presupposes("u1".into())]
-        );
-        assert!(!document.units[1].is_redundant());
-        assert_eq!(document.units[1].redundant_with(), None);
-        assert_eq!(
-            document.units[1].presupposes().collect::<Vec<_>>(),
-            [&UnitId::from("u1")]
-        );
-    }
-
-    /// 参照先が居ない前提は、redundancy と同じで**応答ごと捨てる**。
-    #[test]
-    fn a_prerequisite_pointing_at_nobody_throws_the_whole_response_away() {
-        let err = response(
-            r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0,1,2],"reading_tier":"essential","relations":[{"presupposes":"u9"}]}
-            ]}"#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("unknown unit"), "{err}");
+    fn a_question_rides_on_the_request() {
+        let atoms = atomize("# A\n");
+        let json = AnalyzeRequest::new("# A\n", &atoms)
+            .asking(RequestQuestion {
+                id: "essential",
+                text: "問いの文面。",
+                core_floor: 0.2,
+            })
+            .to_json()
+            .unwrap();
+        assert!(json.contains(r#""question":{"id":"essential""#), "{json}");
+        assert!(json.contains(r#""core_floor":0.2"#), "{json}");
     }
 
     #[test]
     fn a_well_formed_response_becomes_a_document_over_our_own_atoms() {
         let document = response(
-            r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential","relations":[]},
-                {"id":"u2","atoms":[1,2],"reading_tier":"detail","relations":[{"redundant_with":"u1"}]}
+            r#"{"version":1,"question":"essential","units":[
+                {"id":"u1","atoms":[0],"score":0.9,"core_atoms":[]},
+                {"id":"u2","atoms":[1,2],"score":0.4,"core_atoms":[1]}
             ]}"#,
         )
         .unwrap();
@@ -558,19 +491,36 @@ mod tests {
         assert_eq!(document.atoms, atomize(SOURCE));
         assert_eq!(document.units.len(), 2);
         assert_eq!(document.units[1].atoms, [AtomIndex(1), AtomIndex(2)]);
-        assert_eq!(
-            document.units[1].redundant_with(),
-            Some(&UnitId::from("u1"))
-        );
-        assert_eq!(document.units[0].reading_tier, ReadingTier::Essential);
+        assert_eq!(document.units[0].score, Some(0.9));
+        assert_eq!(document.question.as_deref(), Some("essential"));
     }
 
     #[test]
-    fn relations_may_be_omitted() {
+    fn a_response_may_omit_the_score_and_the_core() {
         let document =
-            response(r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"context"}]}"#)
-                .unwrap();
-        assert!(document.units[0].relations.is_empty());
+            response(r#"{"version":1,"units":[{"id":"u1","atoms":[0]}]}"#).unwrap();
+        assert_eq!(document.units[0].score, None);
+        assert_eq!(document.units[0].core_atoms, None);
+        assert_eq!(document.question, None);
+    }
+
+    /// **DIM 版の応答も読める。** `reading_tier` と `relations` は未知の
+    /// フィールドとして読み飛ばされる — キャッシュに残っている答えを
+    /// 捨てずに済む（版の表「`reading_tier` と `relations` を落としても
+    /// 版は上げない」の 1 行目）。
+    #[test]
+    fn an_answer_from_the_old_wire_is_read_with_its_extra_fields_ignored() {
+        let document = response(
+            r#"{"version":1,"units":[
+                {"id":"u1","atoms":[0],"reading_tier":"essential","relations":[]},
+                {"id":"u2","atoms":[1,2],"reading_tier":"detail",
+                 "relations":[{"redundant_with":"u1"},{"presupposes":"u1"}],"score":0.5}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(document.units.len(), 2);
+        assert_eq!(document.units[0].score, None, "Tier は読まない");
+        assert_eq!(document.units[1].score, Some(0.5));
     }
 
     #[test]
@@ -588,8 +538,8 @@ mod tests {
         // 範囲外の atom 添字（2 つ目の unit が壊れていても 1 つ目は残らない）。
         let err = response(
             r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential"},
-                {"id":"u2","atoms":[9],"reading_tier":"detail"}
+                {"id":"u1","atoms":[0]},
+                {"id":"u2","atoms":[9]}
             ]}"#,
         )
         .unwrap_err();
@@ -598,44 +548,19 @@ mod tests {
         // unit id の重複。
         let err = response(
             r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential"},
-                {"id":"u1","atoms":[1],"reading_tier":"detail"}
+                {"id":"u1","atoms":[0]},
+                {"id":"u1","atoms":[1]}
             ]}"#,
         )
         .unwrap_err();
         assert!(err.to_string().contains("duplicate unit id"), "{err}");
 
-        // 存在しない unit への relation。
+        // 存在しない節の見出し。
         let err = response(
-            r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential","relations":[{"redundant_with":"u9"}]}
-            ]}"#,
+            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"section_of":"u9"}]}"#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("unknown unit"), "{err}");
-
-        // 自分自身との重複。
-        let err = response(
-            r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential","relations":[{"redundant_with":"u1"}]}
-            ]}"#,
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("redundant with itself"), "{err}");
-
-        // 未知の tier — ここは serde が落とす。
-        let err = response(
-            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"critical"}]}"#,
-        )
-        .unwrap_err();
-        assert!(matches!(err, Error::Json(_)), "{err}");
-
-        // 未知の relation。
-        let err = response(
-            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"detail","relations":[{"contradicts":"u2"}]}]}"#,
-        )
-        .unwrap_err();
-        assert!(matches!(err, Error::Json(_)), "{err}");
+        assert!(err.to_string().contains("unknown section head"), "{err}");
 
         // JSON ですらない。
         assert!(matches!(response("not json at all"), Err(Error::Json(_))));
@@ -643,10 +568,7 @@ mod tests {
 
     #[test]
     fn a_version_mismatch_is_refused_before_anything_else_is_read() {
-        let err = response(
-            r#"{"version":2,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential"}]}"#,
-        )
-        .unwrap_err();
+        let err = response(r#"{"version":2,"units":[{"id":"u1","atoms":[0]}]}"#).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("version 2"), "{message}");
         assert!(message.contains('1'), "このビルドの版も名乗る: {message}");
@@ -660,10 +582,7 @@ mod tests {
     #[test]
     fn version_is_required_not_assumed() {
         // 版を名乗らない応答は「版 1 のつもり」ではなく不正。
-        assert!(matches!(
-            response(r#"{"units":[]}"#),
-            Err(Error::Json(_))
-        ));
+        assert!(matches!(response(r#"{"units":[]}"#), Err(Error::Json(_))));
     }
 
     /// 同じ Atom を 2 つの Unit が主張したら先勝ち。
@@ -671,8 +590,8 @@ mod tests {
     fn the_first_unit_to_claim_an_atom_keeps_it() {
         let document = response(
             r#"{"version":1,"units":[
-                {"id":"first","atoms":[0,1],"reading_tier":"essential"},
-                {"id":"second","atoms":[1,2],"reading_tier":"detail"}
+                {"id":"first","atoms":[0,1]},
+                {"id":"second","atoms":[1,2]}
             ]}"#,
         )
         .unwrap();
@@ -684,32 +603,30 @@ mod tests {
         );
     }
 
-    /// 全部取られて空になった Unit は消さない — relation の参照先として
+    /// 全部取られて空になった Unit は消さない — `section_of` の参照先として
     /// 生きている。
     #[test]
-    fn a_unit_emptied_by_the_first_come_rule_survives_as_a_relation_target() {
+    fn a_unit_emptied_by_the_first_come_rule_survives_as_a_section_head() {
         let document = response(
             r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential"},
-                {"id":"u2","atoms":[0],"reading_tier":"detail"},
-                {"id":"u3","atoms":[1],"reading_tier":"detail","relations":[{"redundant_with":"u2"}]}
+                {"id":"u1","atoms":[0]},
+                {"id":"u2","atoms":[0]},
+                {"id":"u3","atoms":[1],"section_of":"u2"}
             ]}"#,
         )
         .unwrap();
         assert!(document.units[1].atoms.is_empty());
         assert_eq!(document.units.len(), 3, "空でも消さない");
-        // 空の Unit があっても policy は素通りする。
-        let states = crate::policy::decorate(&document, 100);
+        // 空の Unit があっても marks は素通りする。
+        let states = crate::marks::mark(&document, 100);
         assert_eq!(states.len(), document.atoms.len());
     }
 
     /// 同じ Unit が同じ Atom を 2 回並べても 1 回に潰れる。
     #[test]
     fn a_unit_repeating_an_atom_keeps_it_once() {
-        let document = response(
-            r#"{"version":1,"units":[{"id":"u1","atoms":[0,0,0],"reading_tier":"essential"}]}"#,
-        )
-        .unwrap();
+        let document =
+            response(r#"{"version":1,"units":[{"id":"u1","atoms":[0,0,0]}]}"#).unwrap();
         assert_eq!(document.units[0].atoms, [AtomIndex(0)]);
     }
 
@@ -718,8 +635,8 @@ mod tests {
     fn dedup_does_not_swallow_an_out_of_range_index() {
         let err = response(
             r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential"},
-                {"id":"u2","atoms":[0,42],"reading_tier":"detail"}
+                {"id":"u1","atoms":[0]},
+                {"id":"u2","atoms":[0,42]}
             ]}"#,
         )
         .unwrap_err();
@@ -731,13 +648,13 @@ mod tests {
     fn a_core_atom_rides_through_to_the_document() {
         let document = response(
             r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0,1,2],"reading_tier":"essential","core_atoms":[1]}
+                {"id":"u1","atoms":[0,1,2],"score":0.9,"core_atoms":[1]}
             ]}"#,
         )
         .unwrap();
         assert_eq!(document.units[0].core_atoms, Some(vec![AtomIndex(1)]));
         assert!(!document.units[0].is_core(AtomIndex(0)));
-        let states = crate::policy::decorate(&document, 100);
+        let states = crate::marks::mark(&document, 100);
         assert_eq!(
             states.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
             [
@@ -748,15 +665,14 @@ mod tests {
         );
     }
 
-    /// 核を名乗らない応答（従来の判定器）は、従来どおり Unit 全体が MARKED。
+    /// 核を名乗らない応答は、Unit 全体が MARKED になる。
     #[test]
-    fn a_response_without_core_atoms_keeps_marking_the_whole_unit() {
-        let document = response(
-            r#"{"version":1,"units":[{"id":"u1","atoms":[0,1],"reading_tier":"essential"}]}"#,
-        )
-        .unwrap();
+    fn a_response_without_core_atoms_marks_the_whole_unit() {
+        let document =
+            response(r#"{"version":1,"units":[{"id":"u1","atoms":[0,1],"score":0.9}]}"#)
+                .unwrap();
         assert_eq!(document.units[0].core_atoms, None);
-        let states = crate::policy::decorate(&document, 100);
+        let states = crate::marks::mark(&document, 100);
         assert!(
             states[..2]
                 .iter()
@@ -769,8 +685,8 @@ mod tests {
     fn a_core_atom_outside_its_own_unit_throws_the_response_away() {
         let err = response(
             r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential","core_atoms":[1]},
-                {"id":"u2","atoms":[1,2],"reading_tier":"detail"}
+                {"id":"u1","atoms":[0],"core_atoms":[1]},
+                {"id":"u2","atoms":[1,2]}
             ]}"#,
         )
         .unwrap_err();
@@ -778,26 +694,24 @@ mod tests {
 
         // 範囲外の核も同じ経路で落ちる（黙って捨てない）。
         let err = response(
-            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"reading_tier":"essential","core_atoms":[42]}]}"#,
+            r#"{"version":1,"units":[{"id":"u1","atoms":[0],"core_atoms":[42]}]}"#,
         )
         .unwrap_err();
         assert!(err.to_string().contains("core atom 42"), "{err}");
     }
 
-    /// 先勝ちで Atom を取られたら、その核も一緒に落ちる — 残りの核が
-    /// あればそれが効き、全部落ちれば絞り込み無しに戻る。
+    /// 先勝ちで Atom を取られたら、その核も一緒に落ちる。
     #[test]
     fn the_first_come_rule_takes_the_core_with_the_atom() {
         let document = response(
             r#"{"version":1,"units":[
-                {"id":"first","atoms":[0,1],"reading_tier":"detail"},
-                {"id":"second","atoms":[1,2],"reading_tier":"essential","core_atoms":[1,2]}
+                {"id":"first","atoms":[0,1]},
+                {"id":"second","atoms":[1,2],"core_atoms":[1,2]}
             ]}"#,
         )
         .unwrap();
         assert_eq!(document.units[1].atoms, [AtomIndex(2)]);
         assert_eq!(document.units[1].core_atoms, Some(vec![AtomIndex(2)]), "1 は取られた");
-
     }
 
     /// **核を全部取られた Unit は `Some([])` に倒す。`None` へは戻さない。**
@@ -817,8 +731,8 @@ mod tests {
     fn a_unit_that_loses_every_core_atom_keeps_an_empty_core_not_an_absent_one() {
         let document = response(
             r#"{"version":1,"units":[
-                {"id":"first","atoms":[1],"reading_tier":"detail"},
-                {"id":"second","atoms":[0,1,2],"reading_tier":"essential","core_atoms":[1]}
+                {"id":"first","atoms":[1]},
+                {"id":"second","atoms":[0,1,2],"core_atoms":[1]}
             ]}"#,
         )
         .unwrap();
@@ -838,8 +752,8 @@ mod tests {
     fn a_unit_that_loses_some_core_atoms_keeps_the_rest() {
         let document = response(
             r#"{"version":1,"units":[
-                {"id":"first","atoms":[1],"reading_tier":"detail"},
-                {"id":"second","atoms":[1,2],"reading_tier":"essential","core_atoms":[1,2]}
+                {"id":"first","atoms":[1]},
+                {"id":"second","atoms":[1,2],"core_atoms":[1,2]}
             ]}"#,
         )
         .unwrap();
@@ -852,7 +766,7 @@ mod tests {
     fn unknown_fields_ride_along_without_breaking_anything() {
         let document = response(
             r#"{"version":1,"stage":"boundaries","units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential","note":"見出し"}
+                {"id":"u1","atoms":[0],"note":"見出し"}
             ]}"#,
         )
         .unwrap();
@@ -867,22 +781,16 @@ mod tests {
         assert!(document.source_digest().is_none());
     }
 
-    /// relation の丸ごとの往復（要求 → 応答 → 文書）。
+    /// 節の見出しが wire を通って文書まで届く。
     #[test]
-    fn a_relation_survives_the_round_trip_as_the_same_value() {
+    fn a_section_head_survives_the_round_trip() {
         let document = response(
             r#"{"version":1,"units":[
-                {"id":"u1","atoms":[0],"reading_tier":"essential"},
-                {"id":"u2","atoms":[1],"reading_tier":"supporting","relations":[{"redundant_with":"u1"}]}
+                {"id":"u1","atoms":[0]},
+                {"id":"u2","atoms":[1],"section_of":"u1"}
             ]}"#,
         )
         .unwrap();
-        assert_eq!(
-            document.units[1].relations,
-            vec![Relation::RedundantWith(UnitId::from("u1"))]
-        );
-        assert!(document.units[1].is_redundant());
-        // Tier と redundancy は別軸のまま（設計書）。
-        assert_eq!(document.units[1].reading_tier, ReadingTier::Supporting);
+        assert_eq!(document.units[1].section_of, Some(UnitId::from("u1")));
     }
 }

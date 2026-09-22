@@ -4,6 +4,13 @@ Semantic Reading Layer の設計書（`semantic-reading-layer.md`）は Jev を�
 ものとして扱い、役割だけを定義している。このドキュメントは Jev 自体が何かを
 記録する。出典は <https://docs.typesafe.ai/>。
 
+> **DIM 版（Reading Tier / Reading Budget / redundancy / 前提の閉包）は
+> 2026-09-22 に削除した。** 以下でそれらに触れている節 —「実測」「Score を
+> 今は使っていない」「redundancy の question は方向を持つ」など — は**当時の
+> 記録**である。Jev の primitive と question の作法（損失ベース、方向、
+> 「無い」を Choice で聞かない）はそのまま生きている。削った理由は
+> [`../gotchas/semantic-reading.md`](../gotchas/semantic-reading.md) の冒頭。
+
 ---
 
 ## この層は何のためにあるか
@@ -18,9 +25,9 @@ Jev をどう使うかの前に、Jev に何をさせたいのかを置く。出
 > **限られた attention を、意味的な収穫が高い部分へ配分する**
 
 Semantic Reading Layer は要約器ではなく、**限られた attention を文書のどこへ
-配るかを決める層**である。配分そのものを決めるのは Reading Policy
-（`crates/semantic-reading/src/policy.rs`。根拠はそのモジュールドキュメント）
-で、そこでは Jev を呼ばない。Jev が担うのは、配分に必要な意味判断だけである。
+配るかを決める層**である。配分そのものを決めるのは
+`crates/semantic-reading/src/marks.rs` で、そこでは Jev を呼ばない。Jev が
+担うのは、配分に必要な意味判断だけである。
 
 この位置づけは question の設計に直接効く。設計書が挙げる判断の例は、
 **すべて関係的・損失ベースの疑問文**になっている。
@@ -136,24 +143,24 @@ SDK の定数（<https://docs.typesafe.ai/sdk/python/api/constants.md> で確認
 
 ```
 Atom 間の意味境界（SAME_UNIT / NEW_UNIT）  → Choice（2 択）
-Reading Tier（ESSENTIAL / SUPPORTING /
-              CONTEXT / DETAIL）            → Choice（4 択）
-semantic redundancy                          → Choice（先行 Unit + 該当なし）
-                                               ＋ 選んだ対の Noul
-Unit の核（MARKED を絞る先）                → Choice（Unit 内の Atom の数だけ）
+いまの問いへの答えの強さ                     → Noul（Unit ごとに 1 つ）
+Unit の核（MARKED を絞る先）                → Choice（Unit 内の散文 Atom の数だけ）
 ```
 
 最後の 1 つだけは設計書に直接の記述が無い。設計書が MARKED を **Atom** に
 対して定義していること（「読む価値の高い**Atom**」）と、判断単位が Unit で
 あることの差を埋めるための question である（下の「Unit の核」）。
 
+**2026-09-22 まではここに Reading Tier（4 択の Choice）と semantic
+redundancy（Choice ＋ 対の Noul）が並んでいた。** 削った理由は上の注記に。
+
 設計書が挙げる問いの例（上の「この層は何のためにあるか」）は、そのまま
 question の文面の出発点になる。ただし**疑問文であることと Noul であることは
 別**で、primitive は 1 つではない。「これは前に出た内容と実質同じ？」は
 **どれの言い直しか**を先行 Unit から選ばせる Choice（下の「redundancy の
-question は方向を持つ」）で、残り 3 つは Tier の段階（ESSENTIAL / SUPPORTING /
-CONTEXT）に対応していて、Choice の criteria になる（文面は
-`examples/semantic/jev-annotate.py` の `TIER_CRITERIA`）。
+question は方向を持つ」。2026-09-22 に削除）で、残り 3 つはかつて Tier の
+段階に対応していた。**いまはどれも定型の問いの文面になっている**（正本は
+akapen 側の `assets/marks-questions.json`）。
 
 **state は文書全文**。設計書の
 「単一ファイルかつ現実的なサイズである限り、全文を Jev の context へ渡す」
@@ -170,8 +177,7 @@ Noul の文面を対称に書いてはならない。「他の箇所で既に述
 これは偶然ではなく、satisficing の逐次性から出てくる。読み進める過程のモデル
 なのだから、redundancy は文書が単体で持つ性質ではなく**既読との相対**で決まる。
 設計書も「**既読内容との** redundancy」と書いている。`REDUNDANT_WITH` が方向を
-持つ関係なのも同じ理由で、Reading Policy 側の根拠は
-`crates/semantic-reading/src/policy.rs` のモジュールドキュメントにある。
+持つ関係なのも同じ理由だった（2026-09-22 に削除）。
 
 **2026-09-22 に Noul から Choice へ替えた。** Noul は「言い直しか」までしか
 答えず、**どれの**言い直しかは語の重なりの argmax でローカルに選んでいた。
@@ -300,12 +306,12 @@ Reading Policy 全体がここに乗っている。「粗い Tier × 細かい B
 
 ```
 syntax parsing / Atom 生成 / source position 管理 / ファイル変更検知
-debounce / cache / rate limit / Reading Budget / Reading Policy
+debounce / cache / rate limit / つまみ（上から何 %）/ 足切り
 表示状態への変換 / renderer
 ```
 
-とくに **Budget 変更では Jev を呼ばない**。`37% → 36%` は
-`policy::decorate` だけで完結する。
+とくに **つまみの操作では Jev を呼ばない**。`20% → 21%` は
+`marks::mark` だけで完結する。
 
 ---
 
@@ -352,7 +358,8 @@ syntax parsing」の実証である。
 
 ### 手書き fixture は正解ではない
 
-上の一致率は `examples/semantic/demo.json`（人が手で書いた注釈）との一致で
+上の一致率は当時の `examples/semantic/demo.json`（人が手で書いた注釈。
+2026-09-22 に削除）との一致で
 あって、正解との一致ではない。外れた 6 件のうち 3 件は、むしろ Jev の判断の方
 が妥当だった（コードブロックを別 Unit として切る、など）。fixture を基準にした
 計測は 20〜22/26 で頭打ちになる。**この数字を上げること自体を目標にしない。**

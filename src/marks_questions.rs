@@ -275,7 +275,8 @@ mod tests {
     fn the_essential_preset_carries_the_tier_criteria_verbatim() {
         let questions = Questions::built_in().unwrap();
         let essential = &questions.presets()[0];
-        // `TIER_CRITERIA["essential"]` の逐語。ここが動いたら段 1 の
+        // 旧 `TIER_CRITERIA["essential"]`（2026-09-22 に削除）の逐語。
+        // ここが動いたら段 1 の
         // 「要点 と既存 ESSENTIAL が AUC 0.81〜0.99 で一致」は根拠でなくなる。
         assert!(
             essential.text.contains(

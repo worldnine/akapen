@@ -1,7 +1,7 @@
 //! fixture 自体の健全性 — serde のラウンドトリップと、Atom 範囲が
 //! `sample.md` の実バイト位置と一致していること。
 
-use semantic_reading::{AtomKind, FixtureProvider, Provider, ReadingTier, SemanticDocument};
+use semantic_reading::{AtomKind, FixtureProvider, Provider, SemanticDocument};
 
 const FIXTURE_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.json");
 const FIXTURE_MD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.md");
@@ -48,16 +48,9 @@ fn the_fixture_shape_matches_the_design_vocabulary() {
         assert!(kinds.contains(&kind), "{kind:?} が fixture に無い");
     }
 
-    // 4 段階すべてと、REDUNDANT_WITH が 1 つ含まれていること。
-    for tier in [
-        ReadingTier::Essential,
-        ReadingTier::Supporting,
-        ReadingTier::Context,
-        ReadingTier::Detail,
-    ] {
-        assert!(doc.units.iter().any(|unit| unit.reading_tier == tier));
-    }
-    assert_eq!(doc.units.iter().filter(|u| u.is_redundant()).count(), 1);
+    // スコアと核が付いていること — marks の投影が効く形かどうか。
+    assert!(doc.units.iter().all(|unit| unit.score.is_some()));
+    assert!(doc.units.iter().all(|unit| unit.core_atoms.is_some()));
 }
 
 #[test]

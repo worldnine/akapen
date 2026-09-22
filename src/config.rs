@@ -45,42 +45,6 @@ impl EscQuit {
     }
 }
 
-/// Which projection the Semantic Reading Layer uses
-/// (`--semantic-mode <marks|budget>`).
-///
-/// **両方とも残る。既定が marks になった**（2026-09-22。それまでは
-/// `Budget`）。DIM 版は `--semantic-mode budget` で残っていて、測定も
-/// 続いている。設計書 `docs/design/marks-only-and-review-mode.md` の
-/// 「Jev 的なものが安くなったときに戻せるように」がこの enum である。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum SemanticMode {
-    /// Reading Budget と Tier で全 Unit に判決を下す（MARKED / NORMAL / DIM）。
-    /// `docs/design/semantic-reading-layer.md` の正典。
-    Budget,
-    /// 問いに答えている箇所だけを光らせる。DIM は出さない。
-    /// `docs/design/marks-only-and-review-mode.md` 0 節。**既定。**
-    #[default]
-    Marks,
-}
-
-impl SemanticMode {
-    /// **未知の値は既定に落とさずエラーにする。** `--esc-quit` と違って、
-    /// ここで黙って `budget` に落ちると「marks のつもりで DIM を見ている」
-    /// ことになり、画面を見ても気づけない（DIM 版も光りはする）。
-    pub fn parse(s: &str) -> Result<SemanticMode> {
-        match s {
-            "marks" => Ok(SemanticMode::Marks),
-            "budget" => Ok(SemanticMode::Budget),
-            other => bail!("--semantic-mode {other}: expected `marks` or `budget`"),
-        }
-    }
-
-    /// marks モードか。
-    pub fn is_marks(self) -> bool {
-        matches!(self, SemanticMode::Marks)
-    }
-}
-
 /// What the process should do, resolved from argv.
 pub enum Action {
     /// Run the TUI with the parsed configuration.
@@ -194,15 +158,6 @@ pub struct Config {
     /// network round trip does not return within a frame (see
     /// [`crate::app::App::reanalyze_semantics`]).
     pub semantic_cmd: Option<String>,
-    /// `--semantic-mode <marks|budget>`: which projection the Semantic
-    /// Reading Layer uses. Default [`SemanticMode::Marks`] — pick a
-    /// question and the passages that answer it light up. `budget` is
-    /// the DIM version, whose measurements are still running.
-    ///
-    /// **文書の種類は推定しない。** 推定は「読み手のモデルが無い」という
-    /// 穴を「書き手のモデル」に置き換えるだけで、同じ穴に落ちる
-    /// （`docs/design/marks-only-and-review-mode.md` 2 節）。だからフラグ。
-    pub semantic_mode: SemanticMode,
     /// `--marks-questions <path>`: read the marks-mode questions from
     /// this file instead of the built-in set (and instead of
     /// `$XDG_CONFIG_HOME/akapen/marks-questions.json`).
@@ -286,8 +241,7 @@ fn parse_decorations(json: &str) -> Result<Vec<Decoration>> {
 /// `--semantic-cmd` を省いたときの既定を持つ環境変数。
 ///
 /// `~/.zshrc` に 1 行書けば `akapen foo.md` が**どこからでも** marks で開く。
-/// 意味層はフラグを書いたときだけ生えるようになっていて、それは「文書の種類を
-/// 推定しない」（[`Config::semantic_mode`]）の裏返しだったが、**判定器を選ぶ
+/// 意味層はフラグを書いたときだけ生えるようになっているが、**判定器を選ぶ
 /// のは文書ごとの判断ではなく環境の設定**なので、環境変数の方が形に合う。
 pub const SEMANTIC_CMD_ENV: &str = "AKAPEN_SEMANTIC_CMD";
 
@@ -330,11 +284,6 @@ impl Config {
         let mut decorations: Vec<Decoration> = Vec::new();
         let mut semantic: Option<PathBuf> = None;
         let mut semantic_cmd: Option<String> = None;
-        // **「既定の marks」と「--semantic-mode marks と書いた」を区別する。**
-        // 下の 2 つの検査（層の無いモード、問いのファイル）は「書いたのに
-        // 効かない」を言うためのもので、既定に対して言うと層を使わない
-        // 起動が全部 bail する。
-        let mut semantic_mode: Option<SemanticMode> = None;
         let mut marks_questions: Option<PathBuf> = None;
         let mut decoration_blend = DecorationBlend::default();
         let mut it = args.into_iter();
@@ -364,11 +313,6 @@ impl Config {
                 }
                 "--semantic" => semantic = it.next().map(PathBuf::from),
                 "--semantic-cmd" => semantic_cmd = it.next(),
-                "--semantic-mode" => {
-                    if let Some(v) = it.next() {
-                        semantic_mode = Some(SemanticMode::parse(&v)?);
-                    }
-                }
                 "--marks-questions" => marks_questions = it.next().map(PathBuf::from),
                 "--mark-blend" => {
                     if let Some(v) = it.next() {
@@ -404,7 +348,7 @@ impl Config {
         }
         if files.is_empty() {
             bail!(
-                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>] [--semantic-mode <marks|budget>]"
+                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>]"
             );
         }
         if send_cmd.is_some() && send_agent {
@@ -424,23 +368,11 @@ impl Config {
             }
             bail!("--semantic and --semantic-cmd are mutually exclusive");
         }
-        // A mode without a layer is a flag that does nothing. Say so
-        // rather than starting a session where the keys refuse.
-        //
-        // **書いたときだけ言う。** marks が既定になったので、層を渡さない
-        // 起動（`akapen foo.md`）はここを通る。
+        // `--marks-questions` は層が無ければ読まれない。「書いたのに
+        // 効かない」を黙って通さず、ここで言う。
         let no_layer = semantic.is_none() && semantic_cmd.is_none();
-        if semantic_mode.is_some() && no_layer {
-            bail!("--semantic-mode needs --semantic or --semantic-cmd");
-        }
-        // `--marks-questions` は層が無ければ読まれない。既定が marks に
-        // なって上の検査から漏れたので、ここで自分の分を言う。
         if marks_questions.is_some() && no_layer {
             bail!("--marks-questions needs --semantic or --semantic-cmd");
-        }
-        let semantic_mode = semantic_mode.unwrap_or_default();
-        if marks_questions.is_some() && semantic_mode != SemanticMode::Marks {
-            bail!("--marks-questions needs --semantic-mode marks");
         }
         Ok(Action::Run(Box::new(Config {
             files,
@@ -456,7 +388,6 @@ impl Config {
             cursor_anchor,
             semantic,
             semantic_cmd,
-            semantic_mode,
             marks_questions,
             decoration_blend,
             decorations,
@@ -652,10 +583,10 @@ mod tests {
             cfg(&parse(&["x.md"])).semantic.is_none(),
             "the Semantic Reading Layer is opt-in"
         );
-        let action = parse(&["x.md", "--semantic", "examples/semantic/demo.json"]);
+        let action = parse(&["x.md", "--semantic", "examples/semantic/demo-marks.json"]);
         assert_eq!(
             cfg(&action).semantic.as_deref(),
-            Some(std::path::Path::new("examples/semantic/demo.json"))
+            Some(std::path::Path::new("examples/semantic/demo-marks.json"))
         );
         // The fixture itself is read at startup, not here — a path that
         // does not exist is not a PARSE error.
@@ -690,8 +621,8 @@ mod tests {
         // Two annotations for one document is a question, not a
         // configuration — same shape as --send-cmd / --send-agent.
         for args in [
-            vec!["x.md", "--semantic", "demo.json", "--semantic-cmd", "annotate-doc"],
-            vec!["x.md", "--semantic-cmd", "annotate-doc", "--semantic", "demo.json"],
+            vec!["x.md", "--semantic", "d.json", "--semantic-cmd", "annotate-doc"],
+            vec!["x.md", "--semantic-cmd", "annotate-doc", "--semantic", "d.json"],
         ] {
             let err = match Config::parse(args.iter().map(|s| s.to_string())) {
                 Err(e) => e.to_string(),
@@ -783,71 +714,40 @@ mod tests {
     }
 
     #[test]
-    fn the_env_default_counts_as_a_layer_for_the_mode_and_questions_checks() {
+    fn the_env_default_counts_as_a_layer_for_the_questions_check() {
         use super::SEMANTIC_CMD_ENV;
-        // 「層が無いのにモードを書いた」の検査は、環境変数で層があるなら
-        // 通さなければならない。通さないと `--semantic-mode budget` が
+        // 「層が無いのに問いのファイルを書いた」の検査は、環境変数で層が
+        // あるなら通さなければならない。通さないと `--marks-questions` が
         // `~/.zshrc` の 1 行のせいでだけ落ちる。
         assert!(
             parse_with(
-                &["x.md", "--semantic-mode", "budget"],
+                &["x.md", "--marks-questions", "q.json"],
                 one_var(SEMANTIC_CMD_ENV, "jev-annotate"),
             )
             .is_ok()
         );
         assert!(
-            parse_with(&["x.md", "--semantic-mode", "budget"], |_| None).is_err(),
-            "層が無いままモードだけ書いたら今までどおり止まる"
+            parse_with(&["x.md", "--marks-questions", "q.json"], |_| None).is_err(),
+            "層が無いままファイルだけ書いたら今までどおり止まる"
         );
     }
 
     #[test]
-    fn the_semantic_mode_defaults_to_marks() {
-        // 2026-09-22 に既定を反転した。DIM 版は `--semantic-mode budget`
-        // で残っている — **消えたのではなく既定から降りただけ**である。
-        use super::SemanticMode;
-        let action = parse(&["x.md", "--semantic", "d.json"]);
-        assert_eq!(cfg(&action).semantic_mode, SemanticMode::Marks);
-        let action = parse(&["x.md", "--semantic", "d.json", "--semantic-mode", "budget"]);
-        assert_eq!(cfg(&action).semantic_mode, SemanticMode::Budget);
-        assert_eq!(SemanticMode::default(), SemanticMode::Marks);
-    }
-
-    #[test]
-    fn the_default_mode_does_not_need_a_layer_but_the_written_one_does() {
-        // 既定が marks になっても、層を渡さない起動は通る。ここを
-        // 「モード != budget なら bail」のままにすると `akapen foo.md`
-        // が全部落ちる。
+    fn a_layerless_start_passes_but_a_flag_that_needs_the_layer_does_not() {
+        // 層を渡さない起動（`akapen foo.md`）は通る。
         assert!(
             Config::parse(["x.md"].iter().map(|s| s.to_string())).is_ok(),
             "層を渡さない起動は通る"
         );
         // 書いたのに効かない、は言う。
-        for args in [
-            vec!["x.md", "--semantic-mode", "marks"],
-            vec!["x.md", "--semantic-mode", "budget"],
-            vec!["x.md", "--marks-questions", "q.json"],
-        ] {
-            let err = match Config::parse(args.iter().map(|s| s.to_string())) {
-                Err(e) => e.to_string(),
-                Ok(_) => panic!("層の無いフラグはエラーであるべき: {args:?}"),
-            };
-            assert!(err.contains("--semantic"), "{err}");
-        }
-    }
-
-    #[test]
-    fn marks_questions_still_needs_marks_mode() {
         let err = match Config::parse(
-            ["x.md", "--semantic", "d.json", "--semantic-mode", "budget", "--marks-questions", "q.json"]
-                .iter()
-                .map(|s| s.to_string()),
+            ["x.md", "--marks-questions", "q.json"].iter().map(|s| s.to_string()),
         ) {
             Err(e) => e.to_string(),
-            Ok(_) => panic!("budget との併用はエラーであるべき"),
+            Ok(_) => panic!("層の無いフラグはエラーであるべき"),
         };
-        assert!(err.contains("--semantic-mode marks"), "{err}");
-        // 既定（marks）なら書かなくても通る。
+        assert!(err.contains("--semantic"), "{err}");
+        // 層があれば通る。
         assert!(
             Config::parse(
                 ["x.md", "--semantic", "d.json", "--marks-questions", "q.json"]

@@ -11,6 +11,11 @@
 刺しにくるものではありませんが、**設計書と実装の差**として残っています。
 どれも「誤記」ではないので、直すには判断が要ります。
 
+> **DIM 版（Reading Budget）は 2026-09-22 に削除しました。** 4 と、5 の中で
+> Tier・Budget・二段台帳・前提の閉包に触れている部分は、**当時の記録**です —
+> そこに書かれた「未解決」はコードごと消えました。なぜ削ったかは
+> [`semantic-reading.md`](semantic-reading.md) の冒頭にあります。
+
 ### 1. `incremental reanalysis` は無い（`cache` は 2026-09-22 に作った）
 
 設計書 [`design/semantic-reading-layer.md`](../design/semantic-reading-layer.md)
@@ -32,17 +37,17 @@
 | `docs/gotchas/semantic-reading.md` | 5.3〜5.6 ¢（≈ 8 円） |
 
 **費用の 9 割は問いの中身ではなく、`state`（文書の全文）を 30 回近く送って
-いることにあります。** 開き直し・再起動・READ の上げ下げでそれを毎回払うのは、
+いることにあります。** 開き直し・再起動・つまみの上げ下げでそれを毎回払うのは、
 判定の質と何の関係もない出費でした。読み手の言葉は「思ったより高い」。
 
 いま入っているのは 2 つです。**どちらも判定には触っていません** —— 走る回数が
 変わるだけで、走ったときの答えは同じです。
 
 1. **sha キャッシュ**: キーは `sha256(source)` ＋ `sha256(--semantic-cmd の
-   文字列)`。同じ文書は二度解析しません。費用が発生するのは文書が変わった
-   ときだけです
-2. **解析の遅延**: `--semantic-cmd` は開いただけでは走らず、READ キー
-   （`-` `+` `<` `>`）の**最初の 1 打**で始まります。素で読むだけの文書に
+   文字列)` ＋ `sha256(問いの文面)`。同じ文書に同じ問いは二度解析しません。
+   費用が発生するのは文書か問いが変わったときだけです
+2. **解析の遅延**: `--semantic-cmd` は開いただけでは走らず、**問いを決めた
+   最初の 1 打**（`m` / `M` / `/`）で始まります。素で読むだけの文書に
    1 回分を払いません
 
 `incremental reanalysis` を作らない判断は**維持されています**。理由は変わって
@@ -94,20 +99,26 @@ Phase 1 Range Attribution / 2 Range Decoration / 3 Render Mapping 強化 /
 裏返る。[`design/jev.md`](../design/jev.md) の「実測」）。残っているのは閾値を
 持たない使い方だけです。
 
-線引きは「順位付けか / ガードか」ではなく **「Tier の中か / Tier そのものか」**
-です。同一 Tier 内の順序に使うのは設計どおり（`policy::keep_order` は
-バイト長という連続値を既に使っています）。駄目なのは離散 Tier を連続値で
-置き換えることで、そこは設計書の「0〜100 の importance score は使用しない」に
-直接反します。
+**この線引きは 2026-09-22 に書き換わりました。** Reading Tier が消え、Jev が
+返すのは問いへの Noul（連続値）そのものになったので、「離散 Tier を連続値で
+置き換えるな」という禁止は対象を失いました。設計書が禁じているのは
+**文書の側の属性としての 0〜100 importance score** であって、
+**問いとの距離**はそれではありません（設計書「問いとスコア」）。
+残っているのは `confidence` / `probabilities` の使い道だけで、閾値を持つ
+使い方は実測で不採用のままです。
 
 **確認したこと**: `crates/semantic-reading/src/protocol.rs` の
 `AnalyzeResponse` が `version` と `units` しか持たないこと
 （`confidence` / `probabilities` というフィールドはこの crate のどこにも
 無い）。`examples/semantic/jev-annotate.py` が各 Unit の `jev` フィールドへ
-`tier_confidence` / `redundancy_confidence` を書いていること。
+`score` / `core_confidence` を書いていること。
 `docs/design/jev.md` に未解決として記録済みであること。
 
-### 4. 同一 Tier 内の rule の逐次性 — `context preservation`（**解決済み。2026-09-21**）
+### 4. 同一 Tier 内の rule の逐次性 — `context preservation`（**2026-09-22 に機能ごと削除**）
+
+> この項目は 2026-09-21 に「解決済み」として閉じ、翌 2026-09-22 に
+> **機能ごと削除**しました（`Presupposes`・閉包・二段台帳・`policy::floor`）。
+> 以下は当時の記録で、**ここに出てくるコードはもうありません。**
 
 > **2026-09-21 に実装しました。** 以下は「何が未解決だったか」と「何を決めて
 > 解決したか」の記録です。**まだ残っている部分**は末尾にあります。
@@ -504,7 +515,7 @@ Unit の組を固定。表示は `decorate-report` を 65 KB / 248 Unit の
 2. **読み手への表示が無い。** いまの akapen は劣化した文書と完全な文書を
    区別できません。何の表示もないまま marks が粗くなるのは、
    「動いているのに壊れて見える」の別の形です。ステータス行は
-   `READ 73%` と `analyzing…` しか持っていません
+   読み出し（`Essential · 12 · 20%`）と `analyzing…` しか持っていません
 
 **確認したこと**: `protocol.rs` の `relations_may_be_omitted` と
 「`core_atoms` は 3 値」の表。`src/semantic.rs::CommandProvider::analyze` が

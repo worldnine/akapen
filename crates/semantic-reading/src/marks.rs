@@ -1,14 +1,13 @@
-//! マーカーのみの層 — **問いに答えている箇所だけを光らせる**
-//! （`docs/design/marks-only-and-review-mode.md` 0 節）。
+//! マーカー — **問いに答えている箇所だけを光らせる**
+//! （`docs/design/semantic-reading-layer.md`）。**この層の唯一の機構**で
+//! ある。
 //!
-//! [`crate::policy::decorate`] とは**別の関数**である。あちらは Reading
-//! Budget で全 Unit に判決（MARKED / NORMAL / DIM）を下すが、こちらは
 //! 判決を下さない — 光るか、何も言わないか、だけである。
 //!
 //! ```text
 //! 境界を 1 回取る（キャッシュ）
 //!   ↓
-//! 問い = 定型（4 本）または 自由入力
+//! 問い = 定型（5 本）または 自由入力
 //!   ↓
 //! Unit ごとに Noul 1 ラウンド → [`crate::SemanticUnit::score`]
 //!   ↓
@@ -19,7 +18,9 @@
 //!
 //! **[`DisplayState::Dim`] を 1 つも返さない。** DIM は verdict（外れると
 //! 読み手が信頼を払う）で、MARKED は offer（外れても損をしない）である
-//! （設計書 1 節「判決」）。この層は offer しか出さない。
+//! （`docs/design/marks-only-and-review-mode.md` 1 節「判決」）。この層は
+//! offer しか出さない。沈めるのは読み手が自分で押したとき（akapen の `f`）
+//! だけで、それはクライアント側にある。
 //!
 //! # つまみ — 上から N %、ただし [`SCORE_FLOOR`] 未満は出さない
 //!
@@ -88,18 +89,15 @@ pub const DEFAULT_SHARE: u8 = 20;
 ///
 /// **問いごとの閾値は置かない。** 上の 2 つの帯は 5 文書 8 問すべてに共通で、
 /// 定数 1 つで足りることが測れている。
-///
-/// これは [`crate::policy::floor`] とは**別物**である。あちらは文書から
-/// 決まる測定値（Reading Budget の下限）で、こちらは全文書共通の定数である。
 pub const SCORE_FLOOR: f32 = 0.20;
 
 /// 光る Unit を、スコアの降順（同点は文書順）で返す。
 ///
 /// 足切りを超えていて、かつ核を持つ Unit だけが候補になる — 核を持たない
 /// Unit（`core_atoms` が `Some([])`）は光らせる先が無いので、上位に居ても
-/// 数に入れない。marks の判定器は**run キャップを掛けない**ので、ここに
-/// 落ちるのは散文の Atom を 1 つも持たない Unit と、核の選択肢が 32k 枠を
-/// 超えた Unit である。
+/// 数に入れない。ここに落ちるのは、足切りを越えず核を聞かれなかった Unit、
+/// 散文の Atom を 1 つも持たない Unit、核の選択肢が 32k 枠を超えた Unit で
+/// ある。
 fn ranked(doc: &SemanticDocument) -> Vec<usize> {
     let mut candidates: Vec<usize> = doc
         .units
@@ -161,8 +159,7 @@ pub fn lit(doc: &SemanticDocument, share: u8) -> usize {
 
 /// この annotation はスコアを持っているか。
 ///
-/// `false` は「marks モードで開いたが、判定器（または fixture）がスコアを
-/// 返していない」を意味する。呼び出し側はそれを**黙った 0 本にせず、
+/// `false` は「判定器（または fixture）がスコアを返していない」を意味する。呼び出し側はそれを**黙った 0 本にせず、
 /// 理由として言う**（akapen 側の `crate::chrome`）。
 pub fn has_scores(doc: &SemanticDocument) -> bool {
     doc.units.iter().any(|unit| unit.score.is_some())
@@ -171,8 +168,7 @@ pub fn has_scores(doc: &SemanticDocument) -> bool {
 /// 現在のつまみでの Atom ごとの表示状態を返す。
 ///
 /// 戻り値は `doc.atoms` と同じ並び順・同じ個数で、各要素は
-/// `(source のバイト範囲, 表示状態)`。[`crate::policy::decorate`] と同じ
-/// 形なので、クライアントは同じ経路へ流せる。
+/// `(source のバイト範囲, 表示状態)`。
 ///
 /// **返るのは [`DisplayState::Marked`] と [`DisplayState::Normal`] だけ
 /// である。** DIM は出さない。
@@ -213,7 +209,7 @@ pub fn mark(doc: &SemanticDocument, share: u8) -> Vec<(Range<usize>, DisplayStat
 mod tests {
     use super::*;
     use crate::atom::{Atom, AtomIndex, AtomKind};
-    use crate::unit::{ReadingTier, SemanticUnit};
+    use crate::unit::SemanticUnit;
 
     /// スコア付きの Unit を 1 Atom ずつ並べた文書。
     fn doc(scores: &[Option<f32>]) -> SemanticDocument {
@@ -227,8 +223,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, score)| {
-                let mut unit =
-                    SemanticUnit::new(format!("u{}", i + 1), [AtomIndex(i)], ReadingTier::Detail);
+                let mut unit = SemanticUnit::new(format!("u{}", i + 1), [AtomIndex(i)]);
                 unit.score = *score;
                 unit
             })
@@ -348,11 +343,7 @@ mod tests {
                 kind: AtomKind::Sentence,
             })
             .collect();
-        let mut unit = SemanticUnit::new(
-            "u1",
-            [AtomIndex(0), AtomIndex(1), AtomIndex(2)],
-            ReadingTier::Detail,
-        );
+        let mut unit = SemanticUnit::new("u1", [AtomIndex(0), AtomIndex(1), AtomIndex(2)]);
         unit.score = Some(0.9);
         unit.set_core([AtomIndex(1)]);
         let document = SemanticDocument::new(atoms, vec![unit]);

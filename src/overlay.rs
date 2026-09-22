@@ -239,12 +239,11 @@ pub(crate) fn on_timeline_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
 /// only when it overflows the panel (content that fits never scrolls).
 /// Esc / q / `?` close it.
 pub(crate) fn on_help_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
-    let max = help_rows_in(
+    let max = help_rows(
         app.esc_quit_enabled(),
         app.config.reply,
         false,
         app.semantic_enabled(),
-        app.marks_mode(),
     )
         .len()
         .saturating_sub(overlay_visible_rows());
@@ -464,27 +463,8 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
 pub(crate) fn help_rows(
     esc_quit: bool,
     reply: bool,
-    in_git: bool,
-    semantic: bool,
-) -> Vec<(&'static str, &'static str)> {
-    help_rows_in(esc_quit, reply, in_git, semantic, false)
-}
-
-/// [`help_rows`] にモードを添えたもの。
-///
-/// marks モードでは同じ 4 本のキーが別のものを動かすので、行そのものを
-/// 差し替える（budget の行をそのまま出すと、下限も `READ %` も無いのに
-/// あると言うことになる）。
-///
-/// **引数を増やさずに包んである**のは、`help_rows` を呼んでいる既存の
-/// テストに手を入れないためである（DIM 版を触っていない、を機械的に
-/// 言えるようにしておく）。
-pub(crate) fn help_rows_in(
-    esc_quit: bool,
-    reply: bool,
     _in_git: bool,
     semantic: bool,
-    marks: bool,
 ) -> Vec<(&'static str, &'static str)> {
     let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
@@ -510,22 +490,16 @@ pub(crate) fn help_rows_in(
         // Only with `--semantic`: without an annotation these keys refuse,
         // and the help must not offer what the session cannot do.
         //
-        // marks モードは別の行を出す。同じ 4 本のキーが別のものを動かす
-        // ので、budget の行をそのまま出すと嘘になる（下限も READ % も無い）。
-        if marks {
-            // **2 行に割ってある。** 1 行に 4 キーと括弧書きを詰めていた
-            // ときは、panel（幅 70 %）の右端で `… (MARK` と切れていた
-            // （2026-09-22 の実機）。ヘルプが切れるのは、いちばん読まれる
-            // 場面で読めないということである。
-            rows.push(("mark", "m what to mark · M previous · / ask your own"));
-            rows.push(("amount", "-/+ ±1 · </> ±10 (count and % in the title bar)"));
-            // **トグル 1 つ**（`crate::focus`）。押している間だけ沈む形は
-            // 試して捨てたので、端末による違いをここに書くことは無い。
-            rows.push(("focus", "f sink everything unmarked (toggle) · Esc off"));
-            rows.push(("marks", "]m next mark · [m previous mark"));
-        } else {
-            rows.push(("read", "-/+ budget ±1 · </> ±10 (READ % in the footer; stops at the document's floor)"));
-        }
+        // **2 行に割ってある。** 1 行に 4 キーと括弧書きを詰めていた
+        // ときは、panel（幅 70 %）の右端で `… (MARK` と切れていた
+        // （2026-09-22 の実機）。ヘルプが切れるのは、いちばん読まれる
+        // 場面で読めないということである。
+        rows.push(("mark", "m what to mark · M previous · / ask your own"));
+        rows.push(("amount", "-/+ ±1 · </> ±10 (count and % in the title bar)"));
+        // **トグル 1 つ**（`crate::focus`）。押している間だけ沈む形は
+        // 試して捨てたので、端末による違いをここに書くことは無い。
+        rows.push(("focus", "f sink everything unmarked (toggle) · Esc off"));
+        rows.push(("marks", "]m next mark · [m previous mark"));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
@@ -545,12 +519,11 @@ pub(crate) fn draw_help_overlay(f: &mut Frame, app: &App) {
         .fg(Color::LightBlue)
         .add_modifier(Modifier::BOLD);
 
-    let rows = help_rows_in(
+    let rows = help_rows(
         app.esc_quit_enabled(),
         app.config.reply,
         false,
         app.semantic_enabled(),
-        app.marks_mode(),
     );
     let visible = overlay_visible_rows();
     // Scroll only when the reference overflows the panel; a reference

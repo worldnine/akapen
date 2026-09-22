@@ -498,46 +498,14 @@ pub(crate) fn footer_hints(app: &App) -> String {
             format!("L{}/{}", line + 1, total)
         }
     };
-    // `READ 73%` rides beside the position: both describe the document
-    // being read, not the mode. Shown ONLY while a semantic annotation is
-    // actually loaded — without one the budget exists as a number but
-    // means nothing, and advertising it would promise keys that refuse.
-    //
-    // `analyzing…` is the exception: an external `--semantic-cmd` shells out
-    // and goes over the network, and a status line that says nothing for
-    // that long is indistinguishable from a feature that does not work. It rides
-    // beside the budget because the budget is what the answer will act
-    // on — and it appears even before the first annotation exists, which
-    // is exactly when the silence would be most confusing.
-    //
-    // `(floor)` rides on the percentage when the budget sits on its floor:
-    // below it `-`/`<` do nothing, because the first tier of the ledger
-    // (the cores and their lineage) is kept regardless of the budget
-    // (`policy::floor`). The number is the floor itself, so what the
-    // footer says and what the screen shows agree — READ 43% (floor)
-    // means 43 % is on screen and no less can be asked for.
-    // **marks の読み出しはここから引っ越した**（2026-09-22。読み手の注文）。
-    // `MARK n% · k · <問い>` はタイトル行の右で薄く常駐する
+    // **意味層の読み出しはフッタに無い**（2026-09-22。読み手の注文）。
+    // `<問い> · k · n%` はタイトル行の右で薄く常駐する
     // （`title_metrics` の `readout`、文言は `App::marks_readout`）。
-    // フッタは操作案内だけに戻り、marks 導入前の姿になっている。
+    // フッタは操作案内だけである。
     //
     // 分けた理由は 2 つある。フッタは**打てるキーの一覧**で、読み出しは
     // 押しても何も起きない値だったこと。そして読み出しが伸びるほど
     // 右の `? help` が押し出されて、いちばん要る案内が先に落ちていたこと。
-    let read = |p: String| {
-        if app.marks_mode() {
-            // 読み出しはタイトル行にある。ここは位置だけ。
-            return p;
-        }
-        let floor = if app.at_reading_floor() { " (floor)" } else { "" };
-        match (&app.semantic_doc, app.semantic_inflight) {
-            (_, Some(_)) => {
-                format!("{p} · READ {}%{floor} · analyzing…", app.reading_budget)
-            }
-            (Some(_), None) => format!("{p} · READ {}%{floor}", app.reading_budget),
-            (None, None) => p,
-        }
-    };
     let hints = match app.mode {
         // 問いの 1 行プロンプト（`/`）。改行は無いので `^j newline` を
         // 出さない — composer のヒントを借りると、打てない操作を勧める。
@@ -546,7 +514,7 @@ pub(crate) fn footer_hints(app: &App) -> String {
         }
         Mode::Input => "Enter confirm · ^j newline · ←→↑↓ move · Esc cancel".to_string(),
         Mode::View => {
-            let p = read(pos(app.view.cursor, app.source.len()));
+            let p = pos(app.view.cursor, app.source.len());
             // With a selection active, j/k EXTENDS it (the parallel model —
             // same as source mode); the footer must say so, or "j/k
             // scroll" silently grows the range after a Tab handoff. Esc
@@ -558,7 +526,7 @@ pub(crate) fn footer_hints(app: &App) -> String {
                     format!("{p} · {}–{} · j/k extend · c comment · Esc cancel · ? help", a + 1, b + 1)
                 }
                 None => {
-                    // `f` は marks モードでだけ束縛されている（`crate::keys`）。
+                    // 沈める先が無いときは案内しない（`App::can_focus`）。
                     // 使えないキーを案内しない、という同じ作法。
                     let focus = if app.can_focus() { " · f focus" } else { "" };
                     format!("{p} · j/k scroll · v select · c comment{focus} · ? help")
@@ -566,7 +534,7 @@ pub(crate) fn footer_hints(app: &App) -> String {
             }
         }
         Mode::Source => {
-            let p = read(pos(app.cursor, app.source.len()));
+            let p = pos(app.cursor, app.source.len());
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
@@ -881,7 +849,6 @@ mod footer_tests {
             fx: true,
             semantic: None,
             semantic_cmd: None,
-        semantic_mode: Default::default(),
         marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),

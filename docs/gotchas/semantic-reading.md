@@ -7,6 +7,28 @@
 
 ---
 
+### DIM 版（Reading Budget）は 2026-09-22 に削除しました
+
+**この文書には削除前の記述が残っています。** Reading Tier の 4 段、
+Reading Budget と `READ n%`、二段台帳、下限、冗長の負け、前提の閉包、
+見出し復元に触れている項目は、**当時の記録として読んでください** — その
+コードはもうありません。境界・核・キャッシュ・鍵・分割の項目はそのまま
+生きています。
+
+削った理由は 1 つです。**System 1 らしさが無かった。** 判決（DIM）を
+正しくするために、System 1 的な部品を何段も重ねて System 2 的な出力を
+得ようとしていました（Tier → 冗長の Choice → 対の Noul → 前提の波 ×N）。
+そのうえ判決そのものが据わらない — 何が重要かは読み手の目的で逆転するのに
+（Pichert & Anderson 1977）、Reading Tier は 1 軸で読み手を知りません。
+**逆転するものに判決を下すのが無理**でした。
+
+いま残っているのは、**問いを当てて、答えている箇所を光らせる**という
+1 段の機構だけです（[`../design/semantic-reading-layer.md`](../design/semantic-reading-layer.md)）。
+コードの資産は惜しいが、機能としては削ってよい、が読み手の判断です。
+戻したくなったら `git log` にあります。
+
+---
+
 
 ### `FixtureProvider` は渡された source を見ない → `source_sha256` の照合が要る
 
@@ -94,7 +116,7 @@ Unit が落ちた                  -> 全 Atom DIM（**一律**）
 
 - **`core_atoms` が「無い」は「核が無い」ではなく「絞り込みを受けていない」**で、
   Unit 全体が MARKED になります。これが既存 fixture と古い判定器の経路です。
-  ここを「空なら光らせない」に変えると、`demo.json` も `annotate-doc.py` も
+  ここを「空なら光らせない」に変えると、核を選ばない判定器の答えが
   黙って何も光らなくなります。**空の配列 `[]` は別の意味**（核を持たない =
   MARKED にならない）で、下の「`core_atoms` は 3 値」を見てください
 - **DIM を同じように選択的にしないでください。** Unit が落ちたなら丸ごと
@@ -263,8 +285,8 @@ MARKED 比率を突き合わせたこと。数字は
 という向きに倒れます。だから `skip_serializing_if` は `Vec::is_empty` ではなく
 `Option::is_none` です。
 
-**`Some([])` は NORMAL であって DIM ではありません。** 沈めるかどうかは Tier と
-Budget が決めることで、核の選に漏れたことは「読まなくてよい」を意味しません。
+**`Some([])` は NORMAL です。** 核を持たないことは「読まなくてよい」を
+意味しません — 光らないだけです。
 
 **版は上げません。** `[]` を知らない古い akapen はそれを空の Vec と読んで
 「絞り込み無し」に倒すので、表示が従来どおりに戻るだけで、位置を取り違える
@@ -277,52 +299,6 @@ Budget が決めることで、核の選に漏れたことは「読まなくて�
 `crates/semantic-reading/src/policy.rs::an_essential_unit_with_an_empty_core_is_normal_not_marked`。
 Atom を隣の Unit に取られて核が全部落ちた場合に `Some([])` へ倒す（`None` へ
 戻さない）ことは `protocol.rs::overlapping_atoms_go_to_the_first_unit_that_claims_them`。
-
-### `core_atoms` は DIM に効く — **2026-09-22 に変わりました**
-
-> **この項目は逆になりました。** 台帳が一段だった頃は「核は DIM に効かない」で、
-> 下にその根拠（Budget 4 点で DIM 集合が完全一致）を残してあります。
-> **台帳を二段にしたので、いまは効きます。**
-
-`policy::decorate` の**一段目**は、核を持つ Unit（ESSENTIAL かつ非 REDUNDANT
-かつ `core_atoms != Some([])`）を **Budget を見ずに**残します。だから
-`core_atoms` を `Some([])` にするか否かで、**その Unit が沈むかどうかが
-変わります**。
-
-- `None` / `Some([i])` … 一段目。**どの Budget でも沈まない**
-- `Some([])` … 二段目。Tier と Budget の取り合いに出る
-
-実測では `design`（173 Unit / 核 38）で、二段にしたとき低い予算で落ちた Unit が
-延べ 122 個あり、**その全部が「ESSENTIAL だが `Some([])`」**でした
-（`examples/semantic/measurements/context-preservation.md` 第 4 版）。
-run キャップが核の選に漏れさせた Unit です。
-
-**切り分け方**: 沈み方が変わったとき、まず**核の 3 値が動いていないか**を見ます。
-`Some([])` が増減していれば一段目の顔ぶれが変わっているので、それは Tier の
-揺れではありません。3 値が同じなら、従来どおりラウンド 2 の Tier の揺れを疑い
-ます（比べたい 2 条件のラウンド 2 の question が同一かを先に見ること）。
-
-**`keep_order` と `cost` は相変わらず核を読みません。** 核が効くのは
-「一段目に入るか」だけで、**並び順と値段には効きません**。
-
-**確認したこと**: `decorate` の一段目が `bears_a_core`（`reading_tier` /
-`is_redundant` / `has_core`）を読むこと。表示状態の割り当ても同じ関数を読むので、
-「一段目で確保したのに MARKED にならない」はずれません。落ちた 122 個の内訳は
-`~/.local/share/akapen/evidence/runs/2026-09-22-two-tier-ledger/xcheck.json`。
-
-<details>
-<summary>台帳が一段だった頃の記述（2026-09-21 まで）</summary>
-
-`policy::keep_order` と `cost` は核を読みません。**どの Unit が沈むかは Tier と
-Budget だけで決まります。** 核が決めるのは「残った Unit の中で MARKED か NORMAL か」
-だけです。
-
-だから核の選び方を変えたときに「沈む項目が変わった」と見えたら、それは
-**ラウンド 2 の Tier の揺れ**であって核の変更の効果ではありません。実測でも、
-同じ応答から `core_atoms` だけを抜いて通すと DIM の集合は Budget
-100 / 60 / 40 / 20 % のどれでも完全に一致しました（業務議事録と業務 `CLAUDE.md`）。
-
-</details>
 
 ### `examples/semantic/README.md` は測定対象の文書でもある — 測りながら書くと分母が動く
 
@@ -660,56 +636,6 @@ parsing」）。**似た規則が 2 つあると読まないこと** — `bounda
 
 ---
 
-### 冗長の効き目を測るなら、対の両側が一段目にいないかを先に見る
-
-**「核は奪わない」と「負けは位置で決めない」は、重なると打ち消し合います。**
-（2026-09-22）
-
-- **核は奪わない**（`policy::bears_a_core`）… 冗長でも ESSENTIAL で核を持つ
-  Unit は一段目に入る。**一段目は Budget を見ない**ので沈まない
-- **負けは位置で決めない**（`policy::losers`）… 対のうち Tier が低い方・
-  同 Tier なら長い方が `weakened()` される。これが効くのは
-  **`keep_order` の実効 Tier だけ**
-
-つまり**対の両側が ESSENTIAL かつ核持ちなら、どちらが負けても表示は同じ**
-です。負けの決め方を変えた効果が見えるのは、負けた側が二段目にいるとき
-（ESSENTIAL 以外、または `core_atoms == Some([])`）だけになります。
-
-実測（5 文書 × 4 ラン）では冗長な対 22 件のうち **21 件で負けが入れ替わり**、
-表示が動いた延べ 70 側の内訳は **(b) だけ 58 ・ (b) と (c) の両方 12 ・
-(c) だけ 0** でした。短い Unit はどちらの規則でも同じ予算帯で残るので、
-二段目にいても動かないことがあります。
-
-**効き目の大きさは判定器の側で決まります。** 冗長な ESSENTIAL 54 個のうち
-**37 個は run キャップに漏れて `core_atoms = []`** で、一段目に入らないので
-(c) では光りません。新しく光ったのは 17 個だけです。**「核は奪わない」は
-核を与える規則ではありません。**
-
-**切り分け方**: 「規則を変えたのに何も変わらない」と見えたら、対の両側の
-`reading_tier` と `core_atoms` を先に見ること。両方 ESSENTIAL かつ
-`core_atoms != []` なら、**それは変わらないのが正しい**動作です。次に
-Budget を 1〜100 で振って、どこかで差が出るかを見ます（1 点だけ見て
-「効かない」と言わないこと）。
-
-**一段目が太ると、対と無関係な Unit も動きます。** 二段目の予算が減るので
-取り合いの結果が変わります。いまの判定器では一段目がほとんど太らないので
-実測 0 側でしたが、**核が剥がされていた頃の応答では 3 側がこれで動き**、
-動いた帯は 3 件とも新旧の下限のあいだに収まっていました。
-
-**測る応答の版を間違えると結論が逆になります。** `redundancy-choice` の前の
-応答は冗長な Unit から `core_atoms` を剥がしていたので、同じコードで測っても
-「(c) が主で (b) はほとんど効かない」と出ます（対 7 件・MARKED +4〜5・
-下限 +4〜5 ポイント）。**冗長を測るときは、応答の側で冗長 ESSENTIAL に核が
-付いているかを先に確かめること。**
-
-**確認したこと**: `bears_a_core` が `is_redundant()` を読まないこと、
-`losers` が Budget を引数に取らないこと、20 fixture × Budget 1..100 の
-2,000 点で単調性違反 0 / MARKED が動いた点 0。対ごとの内訳は repo 外
-`runs/2026-09-22-redundancy-loser/out-pairs.txt` と `out-visible.txt`、
-前の版との違いは同 `README.md`「版が 2 つある」。
-
----
-
 ### Choice に「該当なし」を置いても、Jev は「無い」と言わない — redundancy を Choice 単独にすると冗長が 0〜1 件から数十件になる
 
 `REDUNDANT_WITH` の相手を Jev に選ばせるために、redundancy を「先行 Unit の
@@ -748,29 +674,6 @@ Budget を 1〜100 で振って、どこかで差が出るかを見ます（1 �
 question は方向を持つ」。数字は
 `examples/semantic/measurements/redundancy.md`。
 
-### Budget の下限は「数字の約束」であって「集合の約束」ではない
-
-`policy::floor` は一段目（核とその閉包）のバイト数 ÷ 全体を**切り上げた**
-整数です。下限より下では残る集合は動きませんが、**`decorate(doc, floor)` が
-`decorate(doc, floor - 1)` と同じとは限りません** — 切り上げの端数（全体の
-1 % 未満）に収まる小さな Unit を、二段目が下限ちょうどで拾うことがあります。
-実測では 40 fixture のうち 17 でそうなりました（記事・設計書・業務議事録を含む）。
-
-下限が約束しているのは **`budget >= floor` なら残る Unit の表示量が
-`budget` % 以下、`budget < floor` なら超えている**（数字が嘘をつくかどうか）
-だけです。予算の外で戻る見出しの行（`restore_section_heads`）はこの数字に
-入っていません — 実測では下限で設計書 +1.4 ポイント、業務議事録
-+0.1 ポイントが見出しのぶんとして上乗せされ、差はすべて `heading` Atom の
-バイト数で説明できます（`section_of` を外した対照との差で数えました）。
-「下限で残る集合 = 一段目」を前提にしたテストや計測を書くと、文書によって
-落ちます。一段目そのものが要るなら `decorate(doc, MIN_BUDGET)` を読んでください。
-
-**確認したこと**: `policy.rs` の `floor` の doc コメントと
-`the_floor_is_where_the_number_stops_lying`（`budget < floor` で集合が
-`MIN_BUDGET` と一致し表示量が超えていること、`budget >= floor` で表示量が
-収まること）。fixture ごとの `floor_equals_floor_minus_1` は repo 外
-`runs/2026-09-22-read-floor/floors*.jsonl`。
-
 ### 判定器のプロンプトだけ変えると、古いキャッシュが当たる
 
 2026-09-22 から、`--semantic-cmd` の答えは
@@ -798,7 +701,7 @@ mtime を見る案も、シェル文字列の中からパスを推測するこ�
 **akapen で開いて確かめている**ときだけです。
 
 **marks モードの「問い」だけは踏みません**（2026-09-22）。
-`--semantic-mode marks` の項目は `<sha(source)>.q<sha(問いの文面)>.json` と
+問いつきの項目は `<sha(source)>.q<sha(問いの文面)>.json` と
 いう名前なので、**定型の文面を直せば自動で外れます**
 （`assets/marks-questions.json`、`SemanticCache::entry_path_asking`）。
 外れないのは判定器の中の文面（核の Choice など）の方で、そちらはどちらの

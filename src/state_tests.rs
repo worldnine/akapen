@@ -48,7 +48,7 @@ fn caret_runs(buf: &ratatui::buffer::Buffer) -> Vec<(usize, usize, usize)> {
 }
 
 use crate::comment::Selection;
-    use crate::config::{Config, EscQuit, SemanticMode};
+    use crate::config::{Config, EscQuit};
     use ratatui::backend::Backend;
     use crate::highlight::Highlighter;
     use crate::ime::ImeMode;
@@ -58,9 +58,8 @@ use crate::comment::Selection;
 
     /// A fresh app over a temp file with `n` lines ("line1"..), in `mode`.
     ///
-    /// **`--semantic-mode budget` を明示する。** 既定は marks になったが
-    /// （2026-09-22）、この下のセマンティクスのテストは DIM 版の READ を
-    /// 見ている。marks のテストは `crate::marks_tests` の側にある。
+    /// 意味層のテストは `crate::marks_tests` の側にもある（あちらは
+    /// fixture から組み立てた App で投影そのものを見る）。
     fn make_app(n: usize, mode: Mode) -> App {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
@@ -82,7 +81,6 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: SemanticMode::Budget,
             marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
@@ -130,7 +128,6 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: SemanticMode::Budget,
             marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
@@ -833,7 +830,6 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: SemanticMode::Budget,
             marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
@@ -887,7 +883,6 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: SemanticMode::Budget,
             marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
@@ -928,7 +923,6 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: SemanticMode::Budget,
             marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
@@ -1908,7 +1902,6 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: SemanticMode::Budget,
             marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
@@ -2026,7 +2019,6 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: SemanticMode::Budget,
             marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
@@ -2329,7 +2321,6 @@ use crate::comment::Selection;
             fx: true,
             semantic: None,
             semantic_cmd: None,
-            semantic_mode: SemanticMode::Budget,
             marks_questions: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
@@ -5999,7 +5990,6 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         fx: false,
         semantic: None,
         semantic_cmd: None,
-        semantic_mode: SemanticMode::Budget,
         marks_questions: None,
         decoration_blend: Default::default(),
         decorations: vec![
@@ -6122,7 +6112,6 @@ fn a_dimmed_list_item_dims_its_marker_too() {
         fx: false,
         semantic: None,
         semantic_cmd: None,
-        semantic_mode: SemanticMode::Budget,
         marks_questions: None,
         decoration_blend: Default::default(),
         decorations: vec![Decoration {
@@ -6169,12 +6158,12 @@ fn a_dimmed_list_item_dims_its_marker_too() {
 }
 
 /// The Semantic Reading Layer, drawn into a real (test) terminal:
-/// `--semantic` through `Config` → `App` → `Provider` → `policy::decorate`
+/// `--semantic` through `Config` → `App` → `Provider` → `marks::mark`
 /// → `draw` → cells. The milestone of this phase — **one source line
 /// splits mid-line into two different styles, and which two depends on
-/// the READ budget** — seen the way the terminal sees it.
+/// the knob and on focus** — seen the way the terminal sees it.
 #[test]
-fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
+fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
     use crate::decoration::DecorationStyles;
 
     let path = std::path::PathBuf::from(concat!(
@@ -6183,7 +6172,7 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
     ));
     let fixture = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/examples/semantic/demo.json"
+        "/examples/semantic/demo-marks.json"
     ));
     let config = Config {
         files: vec![path.clone()],
@@ -6199,7 +6188,6 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
         fx: false,
         semantic: Some(fixture.clone()),
         semantic_cmd: None,
-        semantic_mode: SemanticMode::Budget,
         marks_questions: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
@@ -6242,30 +6230,30 @@ fn the_reading_budget_splits_one_terminal_line_into_two_styles() {
         (cell(row, left).style(), cell(row, right).style())
     };
 
-    // READ 100 % — the design document's first demo: the whole document
-    // is shown and the ESSENTIAL half is marked. Nothing is dim.
-    assert_eq!(app.reading_budget, 100);
-    let (essential, detail) = halves(&mut app, &mut terminal);
-    assert_eq!(essential.bg, mark_bg, "ESSENTIAL は MARKED");
-    assert_ne!(detail.bg, mark_bg, "DETAIL は NORMAL");
-    assert!(!detail.add_modifier.contains(ratatui::style::Modifier::DIM));
-    assert_ne!(essential, detail, "100 % でもう行の途中で切り替わっている");
+    // 既定のつまみ（上から 20 %）。前半の一文が核として光り、後半は
+    // 別の Unit で、まだ上位に入っていない。**行の途中で切り替わる。**
+    assert_eq!(app.marks_share, semantic_reading::marks::DEFAULT_SHARE);
+    let (core, rest) = halves(&mut app, &mut terminal);
+    assert_eq!(core.bg, mark_bg, "核は MARKED");
+    assert_ne!(rest.bg, mark_bg, "隣の Unit は NORMAL");
+    assert!(!rest.add_modifier.contains(ratatui::style::Modifier::DIM));
+    assert_ne!(core, rest, "つまみを触らなくても行の途中で切り替わっている");
 
-    // READ 30 % — the same line, now MARKED against DIM. The dim is a
-    // real foreground COLOR (SGR 2 is too widely ignored to rely on), so
-    // the two halves differ in a way every terminal renders.
-    let bright = detail.fg;
-    assert!(app.nudge_reading_budget(-70));
-    assert_eq!(app.reading_budget, 30);
-    let (essential, detail) = halves(&mut app, &mut terminal);
-    assert_eq!(essential.bg, mark_bg, "ESSENTIAL は Budget を下げても MARKED");
-    assert_eq!(detail.fg, Some(styles.dim_fg(bright)), "DETAIL は DIM に落ちる");
-    assert_ne!(detail.fg, bright);
-    assert_eq!(essential.fg, bright, "MARKED 側の前景は動かない");
-    for style in [essential, detail] {
+    // フォーカス（`f`）— 同じ行が MARKED と DIM になる。dim は本物の
+    // 前景**色**である（SGR 2 は無視する端末が多すぎて頼れない）ので、
+    // どの端末でも 2 つの半分が違って描かれる。
+    let bright = rest.fg;
+    assert!(app.press_focus(std::time::Instant::now()));
+    assert!(app.focused());
+    let (core, rest) = halves(&mut app, &mut terminal);
+    assert_eq!(core.bg, mark_bg, "核は沈めても MARKED のまま");
+    assert_eq!(rest.fg, Some(styles.dim_fg(bright)), "光っていない側は沈む");
+    assert_ne!(rest.fg, bright);
+    assert_eq!(core.fg, bright, "MARKED 側の前景は動かない");
+    for style in [core, rest] {
         assert!(!style.add_modifier.contains(ratatui::style::Modifier::DIM));
     }
-    assert_ne!(essential, detail);
+    assert_ne!(core, rest);
 }
 
 /// **A MARKED line under the cursor shows the band, not the amber.** Seen
@@ -6289,7 +6277,7 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
     ));
     let fixture = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/examples/semantic/demo.json"
+        "/examples/semantic/demo-marks.json"
     ));
     let config = Config {
         files: vec![path.clone()],
@@ -6305,7 +6293,6 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
         fx: false,
         semantic: Some(fixture),
         semantic_cmd: None,
-        semantic_mode: SemanticMode::Budget,
         marks_questions: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
@@ -6365,14 +6352,14 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
     assert_ne!(detail.bg, mark_bg);
 }
 
-/// 設計書「Budget 変更では Jev を呼ばない」を、呼び出し回数と
+/// 設計書「つまみの操作では Jev を呼ばない」を、呼び出し回数と
 /// レンダー済み行の同一性で固定する。
 ///
 /// Phase 2 は「decoration が `render::render` に到達しない」ことを構造で
-/// 示した。ここはその 1 段上 — Budget キーが `Provider::analyze` にも
+/// 示した。ここはその 1 段上 — つまみのキーが `Provider::analyze` にも
 /// `ViewState::render` にも到達しないこと。
 #[test]
-fn moving_the_budget_calls_neither_the_provider_nor_the_renderer() {
+fn moving_the_knob_calls_neither_the_provider_nor_the_renderer() {
     use semantic_reading::{Provider, SemanticDocument};
     use std::cell::Cell;
     use std::rc::Rc;
@@ -6389,7 +6376,7 @@ fn moving_the_budget_calls_neither_the_provider_nor_the_renderer() {
         }
     }
 
-    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo.json");
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/semantic/demo-marks.json");
     let document: SemanticDocument =
         serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
 
@@ -6405,8 +6392,8 @@ fn moving_the_budget_calls_neither_the_provider_nor_the_renderer() {
     app.reanalyze_semantics();
     assert_eq!(calls.get(), 1);
     assert!(app.semantic_doc.is_some());
-    let at_100 = app.semantic_decorations.clone();
-    assert!(!at_100.is_empty());
+    let at_default = app.semantic_decorations.clone();
+    assert!(!at_default.is_empty());
 
     // 「この行は再レンダーされていない」の目印。`ViewState::render` が
     // 走れば rows は作り直されて消える。
@@ -6415,213 +6402,41 @@ fn moving_the_budget_calls_neither_the_provider_nor_the_renderer() {
         style: ratatui::style::Style::default(),
     }];
 
-    for _ in 0..7 {
-        on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
-    }
-    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
-
-    assert_eq!(app.reading_budget, 29, "7 回の <（-10）と 1 回の -（-1）");
-    assert_eq!(calls.get(), 1, "Budget 操作で analyze は呼ばれない");
-    assert_eq!(
-        app.view.rows[0][0].text, "SENTINEL",
-        "Budget 操作で markdown は再レンダーされない"
-    );
-    // それでいて表示状態はちゃんと変わっている（no-op ではない）。
-    assert_ne!(app.semantic_decorations, at_100);
-
-    // 上限・下限で止まり、そこでも provider には触れない。下限は 1 % では
-    // なく文書の下限（`policy::floor` — 一段目の大きさ）である。
-    for _ in 0..40 {
-        on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
-    }
-    assert_eq!(app.reading_budget, app.reading_floor().unwrap());
-    for _ in 0..40 {
+    let start = app.marks_share;
+    for _ in 0..5 {
         on_view_key(&mut app, KeyCode::Char('>'), KeyModifiers::NONE, None);
     }
-    assert_eq!(app.reading_budget, crate::semantic::MAX_BUDGET);
-    assert_eq!(app.semantic_decorations, at_100, "100 % に戻れば元どおり");
-    assert_eq!(calls.get(), 1);
-
-    // `+` と `=` は同じ 1 段。`-` と対になる。
-    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
-    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
-    assert_eq!(app.reading_budget, 98);
     on_view_key(&mut app, KeyCode::Char('+'), KeyModifiers::NONE, None);
-    assert_eq!(app.reading_budget, 99);
-    on_view_key(&mut app, KeyCode::Char('='), KeyModifiers::NONE, None);
-    assert_eq!(app.reading_budget, 100);
-    assert_eq!(calls.get(), 1);
-}
 
-/// **The budget cannot be turned below the document's floor.** Below the
-/// first tier of the ledger (cores and their lineage, kept regardless of
-/// the budget) the screen does not move, so `-`/`<` stop there instead
-/// of spinning a number that lies. The footer says so — `(floor)` rides
-/// on the percentage — and no BEL is rung (nothing invalid was asked).
-#[test]
-fn the_budget_stops_at_the_floor_and_the_footer_says_so() {
-    let fixture = std::path::PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/semantic/demo.json"
-    ));
-    let path = std::path::PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/semantic/demo.md"
-    ));
-    let mut app = make_app(3, Mode::View);
-    app.source = Source::load(path).unwrap();
-    app.set_semantic_source(Some(crate::semantic::SemanticSource::Inline(
-        crate::semantic::load_fixture(&fixture).unwrap(),
-    )));
-    app.reanalyze_semantics();
-    let floor = app.reading_floor().expect("annotation in hand → a floor");
-    assert!(
-        floor > crate::semantic::MIN_BUDGET,
-        "demo.json has cores, so the floor is above 1 % ({floor})"
+    assert_eq!(app.marks_share, start + 51, "5 回の >（+10）と 1 回の +（+1）");
+    assert_eq!(calls.get(), 1, "つまみの操作で analyze は呼ばれない");
+    assert_eq!(
+        app.view.rows[0][0].text, "SENTINEL",
+        "つまみの操作で markdown は再レンダーされない"
     );
+    // それでいて表示状態はちゃんと変わっている（no-op ではない）。
+    assert_ne!(app.semantic_decorations, at_default);
 
-    // Above the floor: no mark.
-    assert!(!app.at_reading_floor());
-    let hints = crate::chrome::footer_hints(&app);
-    assert!(hints.contains("READ 100%"), "{hints}");
-    assert!(!hints.contains("floor"), "{hints}");
-
-    // Hold `<`: the readout lands on the floor and stays there.
+    // 上限・下限で止まり、そこでも provider には触れない。
+    for _ in 0..20 {
+        on_view_key(&mut app, KeyCode::Char('>'), KeyModifiers::NONE, None);
+    }
+    assert_eq!(app.marks_share, semantic_reading::marks::MAX_SHARE);
     for _ in 0..20 {
         on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
     }
-    assert_eq!(app.reading_budget, floor);
-    assert!(app.at_reading_floor());
-    let hints = crate::chrome::footer_hints(&app);
-    assert!(hints.contains(&format!("READ {floor}% (floor)")), "{hints}");
-    assert!(app.status.is_none(), "止まるだけで、何も鳴らさない: {:?}", app.status);
+    assert_eq!(app.marks_share, semantic_reading::marks::MIN_SHARE);
+    assert_eq!(calls.get(), 1);
 
-    // `-` at the floor is a no-op too, and the decorations are exactly
-    // those of the floor budget — the number matches the screen.
-    let at_floor = app.semantic_decorations.clone();
-    assert!(!app.nudge_reading_budget(-1));
-    assert_eq!(app.reading_budget, floor);
-    assert_eq!(app.semantic_decorations, at_floor);
-    assert_eq!(
-        at_floor,
-        crate::semantic::decorations_for(app.semantic_doc.as_ref().unwrap(), floor)
-    );
-
-    // What the floor promises: the bytes on screen fit in `floor` %, and
-    // one step below they would not (the number would lie).
-    let document = app.semantic_doc.as_ref().unwrap();
-    let shown = |budget: u8| -> usize {
-        semantic_reading::policy::decorate(document, budget)
-            .iter()
-            .filter(|(_, s)| *s != semantic_reading::DisplayState::Dim)
-            .map(|(r, _)| r.len())
-            .sum()
-    };
-    let total: usize = document.atoms.iter().map(|a| a.len()).sum();
-    assert!(shown(floor) * 100 <= floor as usize * total);
-    assert!(shown(floor - 1) * 100 > (floor as usize - 1) * total);
-
-    // Stepping up leaves the floor; the mark goes away.
+    // `+` と `=` は同じ 1 段。`-` と対になる。
     on_view_key(&mut app, KeyCode::Char('+'), KeyModifiers::NONE, None);
-    assert_eq!(app.reading_budget, floor + 1);
-    assert!(!crate::chrome::footer_hints(&app).contains("floor"));
-}
-
-/// **An answer that arrives under the budget lifts it onto the floor.**
-/// The budget rides along across documents, so it can be sitting at 5 %
-/// when an annotation with a 40 % floor lands; a re-analysis can move
-/// the floor the same way. Never lowered — a budget above the floor is
-/// the user's choice. Without an annotation there is no floor at all.
-#[test]
-fn an_arriving_annotation_lifts_the_budget_onto_its_floor() {
-    use semantic_reading::{Atom, AtomIndex, AtomKind, ReadingTier, SemanticDocument, SemanticUnit};
-
-    let mut app = make_app(3, Mode::View);
-    install_semantic_command(&mut app, "true");
-    let tx = app.semantic_results.as_ref().unwrap().tx.clone();
-    let content = app.source.content.clone();
-    assert!(content.len() >= 10, "make_app の文書は 10 バイト以上: {}", content.len());
-
-    // 核が文書の 4 割 → 下限 40 %。
-    let with_floor = |core_len: usize| {
-        let mut doc = SemanticDocument::new(
-            vec![
-                Atom::new(0..core_len, AtomKind::Sentence),
-                Atom::new(core_len..10, AtomKind::Sentence),
-            ],
-            vec![
-                SemanticUnit::new("core", [AtomIndex(0)], ReadingTier::Essential),
-                SemanticUnit::new("rest", [AtomIndex(1)], ReadingTier::Detail),
-            ],
-        );
-        doc.source_sha256 = Some(crate::semantic::source_digest(&content));
-        doc
-    };
-
-    // No annotation yet: no floor, and the budget goes wherever it is put.
-    assert_eq!(app.reading_floor(), None);
-    assert!(!app.at_reading_floor());
-    app.reading_budget = 5;
-
-    app.semantic_generation = 1;
-    app.semantic_inflight = Some(1);
-    tx.send(crate::app::AnalysisMessage {
-        generation: 1,
-        result: Ok(with_floor(4)),
-    })
-    .unwrap();
-    app.poll_semantic_analysis();
-    assert_eq!(app.reading_floor(), Some(40));
-    assert_eq!(app.reading_budget, 40, "5 % は下限を割っていたので引き上げる");
-    assert!(app.at_reading_floor());
-    assert_eq!(
-        app.semantic_decorations,
-        crate::semantic::decorations_for(app.semantic_doc.as_ref().unwrap(), 40),
-        "引き上げた予算で投影されている"
-    );
-
-    // Re-analysis moves the floor up (core grew to 7 / 10): lifted again.
-    app.semantic_generation = 2;
-    app.semantic_inflight = Some(2);
-    tx.send(crate::app::AnalysisMessage {
-        generation: 2,
-        result: Ok(with_floor(7)),
-    })
-    .unwrap();
-    app.poll_semantic_analysis();
-    assert_eq!(app.reading_floor(), Some(70));
-    assert_eq!(app.reading_budget, 70);
-
-    // Re-analysis moves the floor down (core shrank to 2 / 10): the
-    // budget stays where the user left it, and `<` can now go lower.
-    app.semantic_generation = 3;
-    app.semantic_inflight = Some(3);
-    tx.send(crate::app::AnalysisMessage {
-        generation: 3,
-        result: Ok(with_floor(2)),
-    })
-    .unwrap();
-    app.poll_semantic_analysis();
-    assert_eq!(app.reading_floor(), Some(20));
-    assert_eq!(app.reading_budget, 70, "下限が下がっても予算は下げない");
-    assert!(!app.at_reading_floor());
-    for _ in 0..10 {
-        on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
-    }
-    assert_eq!(app.reading_budget, 20);
-    assert!(crate::chrome::footer_hints(&app).contains("READ 20% (floor)"));
-
-    // A failed re-analysis keeps the annotation, hence the floor.
-    app.semantic_generation = 4;
-    app.semantic_inflight = Some(4);
-    tx.send(crate::app::AnalysisMessage {
-        generation: 4,
-        result: Err("boom".to_string()),
-    })
-    .unwrap();
-    app.poll_semantic_analysis();
-    assert_eq!(app.reading_floor(), Some(20));
-    assert_eq!(app.reading_budget, 20);
+    on_view_key(&mut app, KeyCode::Char('+'), KeyModifiers::NONE, None);
+    assert_eq!(app.marks_share, 3);
+    on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
+    assert_eq!(app.marks_share, 2);
+    on_view_key(&mut app, KeyCode::Char('='), KeyModifiers::NONE, None);
+    assert_eq!(app.marks_share, 3);
+    assert_eq!(calls.get(), 1);
 }
 
 /// 継ぎ目の反対側: **文書が入れ替わったら provider は呼ばれる。**
@@ -6648,11 +6463,15 @@ fn the_provider_is_re_asked_when_the_document_itself_changes() {
                     0..source.len(),
                     semantic_reading::AtomKind::Sentence,
                 )],
-                vec![semantic_reading::SemanticUnit::new(
-                    "u1",
-                    [semantic_reading::AtomIndex(0)],
-                    semantic_reading::ReadingTier::Essential,
-                )],
+                vec![{
+                    let mut unit = semantic_reading::SemanticUnit::new(
+                        "u1",
+                        [semantic_reading::AtomIndex(0)],
+                    );
+                    // スコアが無い Unit は光らないので、装飾が出ない。
+                    unit.score = Some(0.9);
+                    unit
+                }],
             ))
         }
     }
@@ -6687,7 +6506,7 @@ line5
 fn a_fixture_for_another_document_is_refused_and_leaves_no_decorations() {
     let fixture = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/examples/semantic/demo.json"
+        "/examples/semantic/demo-marks.json"
     ));
     // make_app の文書は "line1..line3" — demo.md ではない。
     let mut app = make_app(3, Mode::View);
@@ -6701,11 +6520,14 @@ fn a_fixture_for_another_document_is_refused_and_leaves_no_decorations() {
     let (message, _, is_error) = app.status.clone().expect("警告が出ていること");
     assert!(is_error, "黙って何もしないのではなく loud に断る");
     assert!(message.contains("a different document"), "{message}");
-    // READ の表示は出ない（Budget は値としては存在するが意味を持たない）。
-    assert!(!crate::chrome::footer_hints(&app).contains("READ"));
-    // キーも断る。
+    // 読み出しも出ない（注釈が無いので本数も % も意味を持たない）。
+    assert_eq!(app.marks_readout(40), None);
+    // キーも断る（問いは決まっているのに注釈が無い = provider が断った）。
+    app.marks_questions = crate::marks_questions::Questions::built_in().ok();
+    app.marks_question = app.marks_questions.as_ref().map(|q| q.presets()[0].clone());
+    let before = app.marks_share;
     on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
-    assert_eq!(app.reading_budget, 100);
+    assert_eq!(app.marks_share, before);
     assert!(
         app.status.as_ref().unwrap().0.contains("unavailable"),
         "{:?}",
@@ -6715,13 +6537,14 @@ fn a_fixture_for_another_document_is_refused_and_leaves_no_decorations() {
     assert!(app.semantic_enabled());
 }
 
-/// 追加要件: **`--semantic` が無いセッションは、この改修の前と完全に同一**。
+/// 追加要件: **`--semantic` が無いセッションは、この層を入れる前と完全に
+/// 同一**。
 ///
-/// API キー（将来の Jev）も fixture も持たない人に、使えない機能の気配を
-/// 見せない。キーは束縛せず、読み出しも出さず、ヘルプにも載せず、断りの
-/// メッセージすら出さない。
+/// API キー（Jev）も fixture も持たない人に、使えない機能の気配を見せない。
+/// キーは束縛せず、読み出しも出さず、ヘルプにも載せず、断りのメッセージ
+/// すら出さない。
 #[test]
-fn without_semantic_the_budget_keys_are_not_bound_at_all() {
+fn without_semantic_the_layer_keys_are_not_bound_at_all() {
     let mut app = make_app(6, Mode::View);
     assert!(app.config.semantic.is_none());
     assert!(
@@ -6737,7 +6560,7 @@ fn without_semantic_the_budget_keys_are_not_bound_at_all() {
     for key in ['-', '+', '=', '<', '>'] {
         on_view_key(&mut app, KeyCode::Char(key), KeyModifiers::NONE, None);
         // 無い層は動かない。
-        assert_eq!(app.reading_budget, crate::semantic::DEFAULT_BUDGET);
+        assert_eq!(app.marks_share, semantic_reading::marks::DEFAULT_SHARE);
         assert!(app.semantic_decorations.is_empty());
         // そして「使えません」も言わない — 未束縛のキーとまったく同じ、
         // 何も起きないという振る舞い。
@@ -6753,34 +6576,32 @@ fn without_semantic_the_budget_keys_are_not_bound_at_all() {
         assert!(app.running);
     }
 
-    // ステータス行と `?` ヘルプにも痕跡が無い。
-    let hints = crate::chrome::footer_hints(&app);
-    assert!(!hints.contains("READ"), "{hints}");
+    // 読み出しにも `?` ヘルプにも痕跡が無い。
+    assert_eq!(app.marks_readout(40), None);
     app.mode = Mode::Source;
-    assert!(!crate::chrome::footer_hints(&app).contains("READ"));
     assert!(
         !crate::overlay::help_rows(false, false, false, app.semantic_enabled())
             .iter()
-            .any(|(label, keys)| *label == "read" || keys.contains("budget")),
-        "? ヘルプに READ の行が出ている"
+            .any(|(label, _)| matches!(*label, "mark" | "amount" | "focus" | "marks")),
+        "? ヘルプに意味層の行が出ている"
     );
 }
 
-/// `READ 73%` はステータス行に出るが、semantic doc が読めているときだけ。
+/// 読み出しはタイトル行に出るが、semantic doc が読めているときだけ。
 #[test]
-fn the_read_readout_appears_only_with_a_semantic_document() {
+fn the_readout_appears_only_with_a_semantic_document() {
     let fixture = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/examples/semantic/demo.json"
+        "/examples/semantic/demo-marks.json"
     ));
     let mut app = make_app(3, Mode::View);
-    // Budget だけを動かしても、annotation が無ければ何も出ない。
-    app.reading_budget = 73;
-    assert!(!crate::chrome::footer_hints(&app).contains("READ"));
+    // つまみだけを動かしても、annotation が無ければ何も出ない。
+    app.marks_share = 40;
+    assert_eq!(app.marks_readout(60), None);
     assert!(
         !crate::overlay::help_rows(false, false, false, app.semantic_enabled())
             .iter()
-            .any(|(label, _)| *label == "read"),
+            .any(|(label, _)| *label == "amount"),
         "? ヘルプも、使えないキーを宣伝しない"
     );
 
@@ -6795,18 +6616,19 @@ fn the_read_readout_appears_only_with_a_semantic_document() {
     )));
     app.reanalyze_semantics();
     assert!(app.semantic_doc.is_some());
+    app.marks_question = app.marks_questions.as_ref().map(|q| q.presets()[0].clone());
 
-    let hints = crate::chrome::footer_hints(&app);
-    assert!(hints.contains("READ 73%"), "{hints}");
-    // source モードでも同じ読み出しが出る（文書の性質であってモードの
+    let readout = app.marks_readout(60).expect("注釈があれば読み出しが出る");
+    assert!(readout.contains("40%"), "{readout}");
+    // モードによらず同じ読み出しになる（文書の性質であってモードの
     // 性質ではない）。キー操作は view だけ。
     app.mode = Mode::Source;
-    assert!(crate::chrome::footer_hints(&app).contains("READ 73%"));
+    assert_eq!(app.marks_readout(60).as_deref(), Some(readout.as_str()));
     assert!(
         crate::overlay::help_rows(false, false, false, true)
             .iter()
-            .any(|(label, keys)| *label == "read" && keys.contains("-/+")),
-        "? ヘルプに READ の行が出る"
+            .any(|(label, keys)| *label == "amount" && keys.contains("-/+")),
+        "? ヘルプにつまみの行が出る"
     );
 }
 
@@ -6826,17 +6648,21 @@ fn reference_semantic_command() -> String {
 /// のは `set_semantic_source` の仕事）。
 ///
 /// **起点も越えさせる。** 下の各テストは「答えがどう届くか」を見るもので、
-/// 実際の読み手なら READ キーを 1 回押した後の状態にあたる。遅延そのものは
-/// [`the_external_command_does_not_run_until_a_read_key_is_pressed`] が
-/// 見ている。
+/// 実際の読み手なら問いを 1 つ選んだ後の状態にあたる。
 fn install_semantic_command(app: &mut App, cmd: &str) {
     app.set_semantic_source(Some(crate::semantic::SemanticSource::Command(
         crate::semantic::CommandProvider::new(cmd),
     )));
-    // 起点は立てるが、ここでは解析を始めない（`arm_semantic_layer` は
-    // その場で 1 世代使ってしまう）。各テストが自分で
+    // 起点は立てるが、ここでは解析を始めない。各テストが自分で
     // `reanalyze_semantics` を呼んで世代 1 から始められるように。
     app.semantic_armed = true;
+    // 問いが無いと `reanalyze_semantics` は何も聞かない。
+    if app.marks_questions.is_none() {
+        app.marks_questions = crate::marks_questions::Questions::built_in().ok();
+    }
+    if app.marks_question.is_none() {
+        app.marks_question = app.marks_questions.as_ref().map(|q| q.presets()[0].clone());
+    }
 }
 
 /// 見出しを持つ Markdown を開いた App。参照実装は見出しを ESSENTIAL に
@@ -6872,6 +6698,13 @@ fn install_counting_semantic_command(
         crate::semantic::CommandProvider::new(cmd).with_cache(cache),
     )));
     app.semantic_armed = true;
+    // 問いが無いと `reanalyze_semantics` は何も聞かない。
+    if app.marks_questions.is_none() {
+        app.marks_questions = crate::marks_questions::Questions::built_in().ok();
+    }
+    if app.marks_question.is_none() {
+        app.marks_question = app.marks_questions.as_ref().map(|q| q.presets()[0].clone());
+    }
 }
 
 fn semantic_calls(counter: &Path) -> usize {
@@ -6889,7 +6722,7 @@ fn pump_until_idle(app: &mut App, what: &str) {
     }
 }
 
-/// **遅延。** 開いただけでは外部コマンドが 1 度も起きず、READ キーの
+/// **遅延。** 開いただけでは外部コマンドが 1 度も起きず、問いを決めた
 /// 最初の 1 打で初めて解析が始まる。
 ///
 /// 1 文書 1 回の解析は業務議事録で約 5 円かかる
@@ -6897,31 +6730,33 @@ fn pump_until_idle(app: &mut App, what: &str) {
 /// 文書にそれを払わない、がこの機構の全部である。
 ///
 /// 起点前の表示が `--semantic-cmd` を渡していないときと同じであること —
-/// `READ` も `analyzing…` も出ない — も一緒に見ている。出てしまうと
+/// 読み出しも `analyzing…` も出ない — も一緒に見ている。出てしまうと
 /// 「動いていない」に見える。
 #[test]
-fn the_external_command_does_not_run_until_a_read_key_is_pressed() {
+fn the_external_command_does_not_run_until_a_question_is_picked() {
     let (mut app, dir) = semantic_markdown_app();
     let counter = dir.path().join("calls");
     install_counting_semantic_command(&mut app, &counter, None);
     app.semantic_armed = false; // 実際の起動時の状態へ戻す
+    app.marks_question = None;
 
     // 起動時の 1 回（`main.rs` が呼ぶ場所）。走らない。
     app.reanalyze_semantics();
     assert_eq!(semantic_calls(&counter), 0, "開いただけでは走らない");
     assert_eq!(app.semantic_generation, 0, "世代も上がらない");
     assert!(app.semantic_doc.is_none() && app.semantic_inflight.is_none());
-    let hints = crate::chrome::footer_hints(&app);
-    assert!(!hints.contains("READ"), "層が無いときと同じ表示: {hints}");
-    assert!(!hints.contains("analyzing"), "{hints}");
+    assert_eq!(app.marks_readout(60), None, "層が無いときと同じ表示");
 
     // ファイルが変わっても、起点前なら走らない。
     app.reanalyze_semantics();
     assert_eq!(semantic_calls(&counter), 0);
 
-    // 起点 — READ キーの 1 打。Budget も動く。
+    // つまみを動かしても起点にはならない（問いの無い解析は使えない）。
     on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
-    assert_eq!(app.reading_budget, 99, "押したのに数字が動かない、にしない");
+    assert_eq!(semantic_calls(&counter), 0, "つまみは起点ではない");
+
+    // 起点 — 問いを 1 つ選ぶ。
+    assert!(app.ask_marks_preset(0));
     assert!(app.semantic_inflight.is_some(), "ここで初めて走る");
     pump_until_idle(&mut app, "起点の解析");
     assert_eq!(semantic_calls(&counter), 1);
@@ -6931,7 +6766,7 @@ fn the_external_command_does_not_run_until_a_read_key_is_pressed() {
     for _ in 0..5 {
         on_view_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
     }
-    assert_eq!(semantic_calls(&counter), 1, "Budget 操作で解析は増えない");
+    assert_eq!(semantic_calls(&counter), 1, "つまみの操作で解析は増えない");
 }
 
 /// **キャッシュ。** 同じ文書を開き直しても外部コマンドは 1 回しか起きない。
@@ -6978,10 +6813,9 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
     // 戻ってきた時点ではまだ答えは無い — これが「固まらない」の中身。
     assert!(app.semantic_doc.is_none(), "解析はまだ走っているだけ");
     assert_eq!(app.semantic_inflight, Some(1));
-    // ステータス行は黙らずに「解析中」と言う。
-    let hints = crate::chrome::footer_hints(&app);
-    assert!(hints.contains("analyzing"), "{hints}");
-    assert!(hints.contains("READ 100%"), "{hints}");
+    // 読み出しは黙らずに「解析中」と言う。
+    let readout = app.marks_readout(60).expect("読み出しが出ること");
+    assert!(readout.contains("analyzing"), "{readout}");
 
     pump_until_idle(&mut app, "最初の解析");
     let document = app.semantic_doc.as_ref().expect("注釈が入ること");
@@ -6991,10 +6825,10 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
         "range は akapen 自身の atomize のもの"
     );
     assert!(!app.semantic_decorations.is_empty());
-    // 答えが来たら「解析中」は消え、READ の読み出しだけが残る。
-    let hints = crate::chrome::footer_hints(&app);
-    assert!(!hints.contains("analyzing"), "{hints}");
-    assert!(hints.contains("READ 100%"), "{hints}");
+    // 答えが来たら「解析中」は消え、問い・本数・% の読み出しだけが残る。
+    let readout = app.marks_readout(60).expect("読み出しが出ること");
+    assert!(!readout.contains("analyzing"), "{readout}");
+    assert!(readout.contains('%'), "{readout}");
 }
 
 /// **世代カウンタ**: 解析中に文書が変わったら、古い方の答えは捨てる。
@@ -7007,7 +6841,7 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
 /// メッセージを直接流し込み、ポンプに通す。
 #[test]
 fn an_answer_from_an_older_generation_is_thrown_away() {
-    use semantic_reading::{Atom, AtomIndex, AtomKind, ReadingTier, SemanticDocument, SemanticUnit};
+    use semantic_reading::{Atom, AtomIndex, AtomKind, SemanticDocument, SemanticUnit};
 
     let mut app = make_app(3, Mode::View);
     // 走らせないコマンド（このテストで子プロセスは 1 つも起動しない）。
@@ -7018,7 +6852,7 @@ fn an_answer_from_an_older_generation_is_thrown_away() {
     let document_a = |text: &str| {
         let mut doc = SemanticDocument::new(
             vec![Atom::new(0..text.len().min(5), AtomKind::Sentence)],
-            vec![SemanticUnit::new("old", [AtomIndex(0)], ReadingTier::Essential)],
+            vec![SemanticUnit::new("old", [AtomIndex(0)])],
         );
         doc.source_sha256 = Some(crate::semantic::source_digest(text));
         doc
@@ -7071,7 +6905,7 @@ fn a_slow_analysis_started_first_never_overwrites_a_newer_one() {
     // 応答は「Atom 0 番だけの Unit 1 つ」。id で、どちらの答えかが分かる。
     let cmd = "input=$(cat); \
         case \"$input\" in *SLOWDOWN*) sleep 1; id=slow ;; *) id=fast ;; esac; \
-        printf '{\"version\":1,\"units\":[{\"id\":\"%s\",\"atoms\":[0],\"reading_tier\":\"essential\"}]}' \"$id\"";
+        printf '{\"version\":1,\"units\":[{\"id\":\"%s\",\"atoms\":[0],\"score\":0.9}]}' \"$id\"";
     install_semantic_command(&mut app, cmd);
 
     // 文書 A（遅い方）。
@@ -7178,33 +7012,34 @@ fn a_new_document_drops_the_old_annotation_before_the_answer_arrives() {
     assert_eq!(document.atoms, semantic_reading::atomize(&app.source.content));
 }
 
-/// 解析中に Budget キーを押しても「使えません」ではなく「解析中」と言う
+/// 解析中につまみのキーを押しても「使えません」ではなく「解析中」と言う
 /// （数秒後には使えるので、断り方が違う）。
 #[test]
-fn the_budget_keys_say_analyzing_while_an_answer_is_on_its_way() {
+fn the_knob_keys_say_analyzing_while_an_answer_is_on_its_way() {
     let mut app = make_app(3, Mode::View);
     install_semantic_command(&mut app, "sleep 5");
     app.reanalyze_semantics();
     assert!(app.semantic_doc.is_none());
 
+    let before = app.marks_share;
     on_view_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE, None);
     let (message, _, is_error) = app.status.clone().expect("何か言うこと");
     assert!(message.contains("analyzing"), "{message}");
     assert!(!is_error, "エラーではない — 待てば使える");
-    assert_eq!(app.reading_budget, 100, "まだ動かない");
+    assert_eq!(app.marks_share, before, "まだ動かない");
 }
 /// The Phase 2 milestone, now on the SOURCE screen: `--semantic` through
-/// `Config` → `App` → `Provider` → `policy::decorate` → `build_rows` →
+/// `Config` → `App` → `Provider` → `marks::mark` → `build_rows` →
 /// cells, with **one source line splitting mid-line into two styles** and
-/// the split moving with the READ budget — driven by the real key
-/// handler, because the budget keys are bound in source mode now.
+/// the split moving with focus — driven by the real key handler, because
+/// the layer keys are bound in source mode too.
 ///
 /// The rendered-view twin is
-/// `the_reading_budget_splits_one_terminal_line_into_two_styles`; both
+/// `the_marks_knob_splits_one_terminal_line_into_two_styles`; both
 /// read the same line of `examples/semantic/demo.md`, which is the point:
 /// the two modes decorate the same source bytes.
 #[test]
-fn the_reading_budget_splits_one_source_line_into_two_styles() {
+fn the_marks_projection_splits_one_source_line_into_two_styles() {
     use crate::decoration::DecorationStyles;
 
     let path = std::path::PathBuf::from(concat!(
@@ -7213,7 +7048,7 @@ fn the_reading_budget_splits_one_source_line_into_two_styles() {
     ));
     let fixture = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/examples/semantic/demo.json"
+        "/examples/semantic/demo-marks.json"
     ));
     let config = Config {
         files: vec![path.clone()],
@@ -7229,7 +7064,6 @@ fn the_reading_budget_splits_one_source_line_into_two_styles() {
         fx: false,
         semantic: Some(fixture),
         semantic_cmd: None,
-        semantic_mode: SemanticMode::Budget,
         marks_questions: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
@@ -7272,43 +7106,40 @@ fn the_reading_budget_splits_one_source_line_into_two_styles() {
         (cell(row, left).style(), cell(row, right).style())
     };
 
-    // READ 100 %: the ESSENTIAL half is MARKED, the DETAIL half NORMAL.
-    assert_eq!(app.reading_budget, 100);
-    let (essential, detail) = halves(&mut app, &mut terminal);
-    assert_eq!(essential.bg, mark_bg, "ESSENTIAL は source view でも MARKED");
-    assert_ne!(detail.bg, mark_bg, "DETAIL は NORMAL");
-    assert_ne!(essential, detail, "source view でも行の途中で切り替わる");
-    let bright = detail.fg;
+    // 既定のつまみ: 核は MARKED、隣の Unit は NORMAL。
+    assert_eq!(app.marks_share, semantic_reading::marks::DEFAULT_SHARE);
+    let (core, rest) = halves(&mut app, &mut terminal);
+    assert_eq!(core.bg, mark_bg, "核は source view でも MARKED");
+    assert_ne!(rest.bg, mark_bg, "隣の Unit は NORMAL");
+    assert_ne!(core, rest, "source view でも行の途中で切り替わる");
+    let bright = rest.fg;
 
-    // `<` を 7 回 — **source モードのキーハンドラを通す**。この層が view
-    // 専用だったあいだ、これらのキーは source には束ねられていなかった。
-    for _ in 0..7 {
-        crate::on_source_key(&mut app, KeyCode::Char('<'), KeyModifiers::NONE, None);
-    }
-    assert_eq!(app.reading_budget, 30, "source モードで budget キーが効く");
-    let (essential, detail) = halves(&mut app, &mut terminal);
-    assert_eq!(essential.bg, mark_bg, "MARKED のまま");
-    assert_eq!(detail.fg, Some(styles.dim_fg(bright)), "DETAIL は DIM に落ちる");
-    assert_ne!(detail.fg, bright);
-    assert_eq!(essential.fg, bright, "MARKED 側の前景は動かない");
-    for style in [essential, detail] {
+    // `f` — **source モードのキーハンドラを通す**。この層が view 専用
+    // だったあいだ、これらのキーは source には束ねられていなかった。
+    crate::on_source_key(&mut app, KeyCode::Char('f'), KeyModifiers::NONE, None);
+    assert!(app.focused(), "source モードでも f が効く");
+    let (core, rest) = halves(&mut app, &mut terminal);
+    assert_eq!(core.bg, mark_bg, "MARKED のまま");
+    assert_eq!(rest.fg, Some(styles.dim_fg(bright)), "光っていない側は沈む");
+    assert_ne!(rest.fg, bright);
+    assert_eq!(core.fg, bright, "MARKED 側の前景は動かない");
+    for style in [core, rest] {
         assert!(!style.add_modifier.contains(ratatui::style::Modifier::DIM));
     }
 
-    // `>` で戻せば元どおり（キーは両方向に効く）。
-    for _ in 0..7 {
-        crate::on_source_key(&mut app, KeyCode::Char('>'), KeyModifiers::NONE, None);
-    }
-    assert_eq!(app.reading_budget, 100);
-    let (_, detail) = halves(&mut app, &mut terminal);
-    assert_eq!(detail.fg, bright, "100 % に戻れば DIM も戻る");
+    // もう一度押せば戻る（トグル）。**auto-repeat よけの門を越えてから**
+    // 押す（`crate::focus::REPEAT_GUARD`）。
+    assert!(app.press_focus(std::time::Instant::now() + crate::focus::REPEAT_GUARD * 2));
+    assert!(!app.focused());
+    let (_, rest) = halves(&mut app, &mut terminal);
+    assert_eq!(rest.fg, bright, "戻せば沈みも戻る");
 }
 
-/// `--semantic` のないセッションでは、source モードの budget キーは
+/// `--semantic` のないセッションでは、source モードのつまみキーは
 /// 「その層が無かったとき」と同じ動きをする（腕が `semantic_enabled()`
 /// ガードで落ち、`_ => {}` に吸われる）。view 側と同じ約束。
 #[test]
-fn budget_keys_do_nothing_in_source_mode_without_semantic() {
+fn layer_keys_do_nothing_in_source_mode_without_semantic() {
     let mut app = make_app(5, Mode::Source);
     assert!(!app.semantic_enabled());
     for key in ['-', '+', '=', '<', '>'] {

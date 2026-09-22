@@ -1,8 +1,8 @@
 //! Provider — semantic annotation の供給源。
 //!
-//! 「文書を見て意味のまとまりと読む優先度を知覚する」という遅くて非決定的な
-//! 部分は、すべてこの trait の内側に閉じ込める。外側（[`crate::policy`]）は
-//! 決定論的な純粋計算だけになる。
+//! 「文書を見て意味のまとまりを知覚し、いまの問いに答えているかを測る」と
+//! いう遅くて非決定的な部分は、すべてこの trait の内側に閉じ込める。
+//! 外側（[`crate::marks`]）は決定論的な純粋計算だけになる。
 //!
 //! **この crate 内の**実装は [`FixtureProvider`] のみである。akapen 側には
 //! 外部コマンドへ委譲する `CommandProvider`（`--semantic-cmd`）があり、
@@ -33,7 +33,7 @@ pub trait Provider {
 
 /// あらかじめ用意した JSON を返すだけの provider。
 ///
-/// Jev を繋ぐ前に Reading Policy とクライアント側の描画を開発・テストする
+/// Jev を繋ぐ前に [`crate::marks`] とクライアント側の描画を開発・テストする
 /// ための足場。[`Provider::analyze`] は**渡された source を見ない** —
 /// fixture の範囲は fixture 作成時の source に対するものなので、別の
 /// テキストを渡しても中身は変わらない。
@@ -79,11 +79,10 @@ mod tests {
     use super::*;
     use crate::atom::AtomKind;
     use crate::error::Error;
-    use crate::unit::ReadingTier;
 
     const JSON: &str = r#"{
       "atoms": [{ "range": { "start": 0, "end": 12 }, "kind": "heading" }],
-      "units": [{ "id": "u1", "atoms": [0], "reading_tier": "essential", "relations": [] }]
+      "units": [{ "id": "u1", "atoms": [0], "score": 0.94 }]
     }"#;
 
     #[test]
@@ -91,28 +90,29 @@ mod tests {
         let provider = FixtureProvider::from_json(JSON).unwrap();
         let doc = provider.analyze("まったく別のテキスト").unwrap();
         assert_eq!(doc.atoms[0].kind, AtomKind::Heading);
-        assert_eq!(doc.units[0].reading_tier, ReadingTier::Essential);
+        assert_eq!(doc.units[0].score, Some(0.94));
         assert_eq!(&doc, provider.document());
     }
 
     #[test]
-    fn relations_may_be_omitted() {
+    fn a_unit_may_carry_no_judgement_at_all() {
         let json = r#"{
           "atoms": [{ "range": { "start": 0, "end": 3 }, "kind": "sentence" }],
-          "units": [{ "id": "u1", "atoms": [0], "reading_tier": "detail" }]
+          "units": [{ "id": "u1", "atoms": [0] }]
         }"#;
         let doc = FixtureProvider::from_json(json)
             .unwrap()
             .analyze("")
             .unwrap();
-        assert!(doc.units[0].relations.is_empty());
+        assert_eq!(doc.units[0].score, None);
+        assert_eq!(doc.units[0].core_atoms, None);
     }
 
     #[test]
     fn broken_fixtures_are_rejected_at_load_time() {
         let json = r#"{
           "atoms": [],
-          "units": [{ "id": "u1", "atoms": [4], "reading_tier": "detail", "relations": [] }]
+          "units": [{ "id": "u1", "atoms": [4] }]
         }"#;
         assert!(matches!(
             FixtureProvider::from_json(json),

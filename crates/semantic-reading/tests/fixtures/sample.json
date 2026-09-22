@@ -154,16 +154,18 @@
       "atoms": [
         0
       ],
-      "reading_tier": "essential",
-      "relations": []
+      "core_atoms": [],
+      "score": 0.92
     },
     {
       "id": "u2",
       "atoms": [
         1
       ],
-      "reading_tier": "supporting",
-      "relations": []
+      "core_atoms": [
+        1
+      ],
+      "score": 0.61
     },
     {
       "id": "u3",
@@ -171,8 +173,10 @@
         2,
         3
       ],
-      "reading_tier": "essential",
-      "relations": []
+      "core_atoms": [
+        2
+      ],
+      "score": 0.92
     },
     {
       "id": "u4",
@@ -182,8 +186,10 @@
         6,
         7
       ],
-      "reading_tier": "context",
-      "relations": []
+      "core_atoms": [
+        5
+      ],
+      "score": 0.34
     },
     {
       "id": "u5",
@@ -192,8 +198,10 @@
         9,
         10
       ],
-      "reading_tier": "essential",
-      "relations": []
+      "core_atoms": [
+        9
+      ],
+      "score": 0.92
     },
     {
       "id": "u6",
@@ -202,8 +210,10 @@
         12,
         13
       ],
-      "reading_tier": "context",
-      "relations": []
+      "core_atoms": [
+        12
+      ],
+      "score": 0.34
     },
     {
       "id": "u7",
@@ -211,20 +221,20 @@
         14,
         15
       ],
-      "reading_tier": "supporting",
-      "relations": [
-        {
-          "redundant_with": "u3"
-        }
-      ]
+      "core_atoms": [
+        15
+      ],
+      "score": 0.34
     },
     {
       "id": "u8",
       "atoms": [
         16
       ],
-      "reading_tier": "context",
-      "relations": []
+      "core_atoms": [
+        16
+      ],
+      "score": 0.34
     },
     {
       "id": "u9",
@@ -232,8 +242,10 @@
         17,
         18
       ],
-      "reading_tier": "detail",
-      "relations": []
+      "core_atoms": [
+        17
+      ],
+      "score": 0.12
     },
     {
       "id": "u10",
@@ -241,8 +253,10 @@
         19,
         20
       ],
-      "reading_tier": "detail",
-      "relations": []
+      "core_atoms": [
+        19
+      ],
+      "score": 0.12
     }
   ]
 }
