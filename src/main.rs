@@ -23,6 +23,7 @@ mod overlay;
 mod reload;
 mod render;
 mod semantic;
+mod semantic_cache;
 mod snapshot;
 mod source;
 mod theme;
@@ -112,7 +113,13 @@ fn main() -> Result<()> {
                  \x20                   its stdin and reads version/units back (atom\n\
                  \x20                   INDICES, never ranges). Runs off the UI thread;\n\
                  \x20                   see examples/semantic/annotate-doc.py.\n\
-                 \x20                   Exclusive with --semantic\n\
+                 \x20                   Exclusive with --semantic. The first press of\n\
+                 \x20                   a READ key starts the analysis (opening a file\n\
+                 \x20                   does not), and answers are cached per document\n\
+                 \x20                   under $XDG_CACHE_HOME/akapen/semantic\n\
+                 \x20 --semantic-cache-clear  wipe that cache and exit (needed after\n\
+                 \x20                   changing an analyser's prompts without\n\
+                 \x20                   changing its command line)\n\
                  \x20 --mark-blend <f>  how far the MARKED background is lifted off\n\
                  \x20                   the page, 0.0..1.0 (default 0.27)\n\
                  \x20 --dim-blend <f>   how far a DIM foreground is moved toward the\n\
@@ -142,6 +149,17 @@ fn main() -> Result<()> {
         }
         Action::Version => {
             println!("akapen {VERSION}");
+            Ok(())
+        }
+        Action::ClearSemanticCache => {
+            // 置き場が決められない環境（HOME も XDG も無い）は「無い」。
+            let Some(cache) = semantic_cache::SemanticCache::discover() else {
+                println!("no semantic cache to clear (no HOME/XDG_CACHE_HOME)");
+                return Ok(());
+            };
+            let root = cache.root().display().to_string();
+            let removed = cache.clear()?;
+            println!("cleared {removed} cached analyses ({root})");
             Ok(())
         }
         Action::Run(config) => run(config),
@@ -2802,12 +2820,29 @@ fn active_review_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
 /// Move the Reading Budget (`-`/`+`, `<`/`>`, in both the rendered
 /// view and source mode — the decoration layer paints in both).
 ///
-/// **The whole of the budget key path.** It reaches
-/// [`App::nudge_reading_budget`] and stops there: no parse, no render,
-/// no `Provider::analyze`. The new percentage is read off the status
-/// line rather than toasted — the point of a 1 % step is that you hold
-/// the key, and a toast per step would strobe.
+/// **The whole of the budget key path.** After the first press it
+/// reaches [`App::nudge_reading_budget`] and stops there: no parse, no
+/// render, no `Provider::analyze`. The new percentage is read off the
+/// status line rather than toasted — the point of a 1 % step is that you
+/// hold the key, and a toast per step would strobe.
+///
+/// **遅延の起点はここである。** `--semantic-cmd` のセッションでは、この
+/// キーの**最初の 1 打**が [`App::arm_semantic_layer`] を通って解析を
+/// 始める（`docs/design/semantic-reading-layer.md`「遅延」）。それまで
+/// 外部コマンドは 1 度も起きず、素で読むだけの文書に 1 回分の解析費用
+/// （業務議事録で約 5 円）を払わない。2 度目以降の文書は、変わっていなければ
+/// キャッシュに当たるので 0 円である。
+///
+/// その 1 打は Budget も動かす — 「押したのに数字が動かない」を避ける。
+/// まだ注釈が無いので下限は効かず、`-` なら 100 → 99 になる（既定の 100 %
+/// で `+` を押した場合は上限で止まり、動くのはステータス行の `analyzing…`
+/// だけ）。答えが届いた時点で `App::lift_budget_onto_floor` が下限まで
+/// 持ち上げ直す。
 fn adjust_reading_budget(app: &mut App, delta: i16) {
+    if app.arm_semantic_layer() {
+        app.nudge_reading_budget(delta);
+        return;
+    }
     if app.semantic_doc.is_none() && app.semantic_inflight.is_some() {
         // `--semantic-cmd` の答え待ち。まだ無いのは事実だが「使えない」
         // とは違う — 数秒後には来る。

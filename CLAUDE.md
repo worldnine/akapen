@@ -17,6 +17,15 @@ Semantic Reading Layer の判定品質は実文書でしか測れないので、
 詳しくは `docs/gotchas/public-repo.md`「業務文書の本文はこのリポジトリに書かない」。
 **2026-09-21 に実際に踏んで、未 push の 50 コミットを書き換えて消しています。**
 
+**解析結果のキャッシュも repo の外です。** `--semantic-cmd` の答えは
+`~/.cache/akapen/semantic/` に置きます（`$XDG_CACHE_HOME` / `AKAPEN_CACHE_DIR`
+で移せます）。リポジトリの中にも文書の隣にも置かない、ファイルは 0600・
+ディレクトリは 0700。実測では**本文は 1 バイトも入りません**（中身は byte range
+と kind と Tier だけ）が、節の構造とどこが要点かは業務文書を語るので、本文と
+同じ扱いにしてあります。消すのは `akapen --semantic-cache-clear`。
+なお `~/.cache/akapen/snapshots/` の方は**文書の全文**を持っていて、そちらは
+0600 ではありません（この層より前からある別のキャッシュです）。
+
 ## 先に読むもの
 
 - `docs/README.md` — 何がどこにあるか

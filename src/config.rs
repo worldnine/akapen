@@ -53,6 +53,14 @@ pub enum Action {
     Help,
     /// Print the version and exit 0.
     Version,
+    /// `--semantic-cache-clear`: wipe the analysis cache and exit 0.
+    ///
+    /// **判定器のプロンプトを変えたときの唯一の逃げ道**である。キャッシュの
+    /// キーは文書の sha とコマンド行の sha なので、同じコマンド行のまま
+    /// プロンプトだけ変えると古い項目が当たる
+    /// （`docs/gotchas/semantic-reading.md`）。ファイル引数を取らないので、
+    /// `--help` と同じく短絡する。
+    ClearSemanticCache,
 }
 
 /// Resolved runtime configuration.
@@ -235,6 +243,7 @@ impl Config {
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "-h" | "--help" => return Ok(Action::Help),
+                "--semantic-cache-clear" => return Ok(Action::ClearSemanticCache),
                 "-V" | "--version" => return Ok(Action::Version),
                 "--light" => light = Some(true),
                 "--dark" => light = Some(false),
