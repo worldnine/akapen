@@ -1,21 +1,40 @@
 # Semantic Reading Layer のデモ
 
+**既定は marks モード**（2026-09-22。それまでは DIM 版）。
+
 ```sh
-akapen examples/semantic/demo.md --semantic examples/semantic/demo.json
+akapen examples/semantic/demo.md --semantic examples/semantic/demo-marks.json
 ```
 
-view モードで `-` / `+`（`=` も可）が Reading Budget ±1、`<` / `>` が ±10。
-現在値はステータス行に `READ 73%` として出る。
+view モードで `m` / `M` が問いを巡り、`/` で自由入力。`-` / `+`（`=` も可）が
+つまみ ±1、`<` / `>` が ±10 で、現在値はステータス行に `MARK 20% · 3本 · 要点`
+として出る。
 
-`--semantic` を渡さなければ、この 4 つのキーは**束縛されない**。READ の
-読み出しも `?` ヘルプの行も出ず、akapen はこの層が無かったときと完全に
-同じ動きをする。
+DIM 版（Reading Budget と Tier）はフラグで残っている。
+
+```sh
+akapen examples/semantic/demo.md --semantic examples/semantic/demo.json \
+  --semantic-mode budget
+```
+
+こちらは `-` / `+` / `<` / `>` が Reading Budget を動かし、`READ 73%` として
+出る。
+
+**スコアの無い注釈を既定のまま開くと光らない。** `demo.json` は DIM 版の
+fixture なのでスコアを持たず、marks では 0 本になる。黙って budget へ落とす
+ことはしない（「marks のつもりで DIM を見ている」を画面で見分けられない）
+ので、ステータス行が
+`MARK · no scores in this answer (try --semantic-mode budget)` と理由と
+逃げ道を言う。
+
+`--semantic` を渡さなければ、これらのキーは**束縛されない**。読み出しも
+`?` ヘルプの行も出ず、akapen はこの層が無かったときと完全に同じ動きをする。
 
 見え方の強さは 2 つのフラグで調整できる（既定は実機で選んだ値）。
 
 ```sh
 akapen examples/semantic/demo.md --semantic examples/semantic/demo.json \
-  --mark-blend 0.22 --dim-blend 0.60
+  --semantic-mode budget --mark-blend 0.22 --dim-blend 0.60
 ```
 
 - `--mark-blend` — MARKED の背景をページからテキスト色の方へどれだけ

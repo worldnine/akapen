@@ -108,8 +108,10 @@ fn main() -> Result<()> {
                  \x20                   terminal shaders; the IME composition window\n\
                  \x20                   then loses its anchor)\n\
                  \x20 --semantic <file> paint the Semantic Reading Layer from a\n\
-                 \x20                   semantic-reading annotation (JSON); the READ\n\
-                 \x20                   budget is -/+ by 1 and </> by 10 in both views\n\
+                 \x20                   semantic-reading annotation (JSON); -/+ by 1\n\
+                 \x20                   and </> by 10 move the amount in both views\n\
+                 \x20                   (MARK % by default, READ % under\n\
+                 \x20                   --semantic-mode budget)\n\
                  \x20 --semantic-cmd <cmd> get that annotation from a command instead:\n\
                  \x20                   akapen writes version/source/atoms JSON to\n\
                  \x20                   its stdin and reads version/units back (atom\n\
@@ -119,12 +121,15 @@ fn main() -> Result<()> {
                  \x20                   a READ key starts the analysis (opening a file\n\
                  \x20                   does not), and answers are cached per document\n\
                  \x20                   under $XDG_CACHE_HOME/akapen/semantic\n\
-                 \x20 --semantic-mode <m>  marks|budget (default budget). `marks`\n\
+                 \x20 --semantic-mode <m>  marks|budget (default marks). `marks`\n\
                  \x20                   drops DIM entirely: pick a question (m/M, or\n\
                  \x20                   / to type one) and the passages that answer\n\
                  \x20                   it light up; -/+ and </> then move HOW MANY\n\
                  \x20                   (MARK % in the footer). 0 marks is a real\n\
-                 \x20                   answer — nothing here answers that question\n\
+                 \x20                   answer — nothing here answers that question.\n\
+                 \x20                   `budget` is the DIM version: every Unit gets\n\
+                 \x20                   a verdict and -/+ move the READ budget. An\n\
+                 \x20                   annotation without scores needs it\n\
                  \x20 --marks-questions <file>  read the marks questions from this\n\
                  \x20                   JSON instead of the built-in four (also\n\
                  \x20                   $XDG_CONFIG_HOME/akapen/marks-questions.json)\n\
@@ -473,7 +478,6 @@ fn run(config: Config) -> Result<()> {
     app.histories = histories;
     app.snapshot_cache = snapshot_cache;
     app.file_states = file_states;
-    app.semantic_mode = app.config.semantic_mode;
     app.marks_questions = marks_questions;
     app.set_semantic_source(semantic_source);
     activate_first_file(&mut app);
