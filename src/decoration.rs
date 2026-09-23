@@ -86,9 +86,19 @@
 //! `Rendered -> Vec<Vec<Span>>` is the same call folded over
 //! `rows.iter().zip(&row_attrs)`.
 //!
+//! # The mark's SHAPE is being chosen on the real terminal (temporary)
+//!
+//! `AKAPEN_MARK_STYLE` picks one of [`MarkVariant`]'s looks (see
+//! [`MarkVariant::from_env`]). It exists so six candidates can be put side
+//! by side in herdr panes and chosen by eye, and **it is not a setting**:
+//! the one that wins gets written in as the only look and this switch (and
+//! the losing variants) are deleted. Unset means [`MarkVariant::Amber`],
+//! which is the shipped look, byte for byte.
+//!
 //! [`Rendered`]: crate::render::Rendered
 
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
 use tui_markdown::Attr;
@@ -112,6 +122,14 @@ pub struct Decoration {
 pub enum DecorationKind {
     /// "This is worth reading": a subdued background, theme-derived.
     SemanticMark,
+    /// **`AKAPEN_MARK_STYLE=f` の 2 段目** — 光った Unit 全体に敷く、核より
+    /// 薄い琥珀の地。
+    ///
+    /// [`DecorationKind::SemanticMark`] と同じ背景のチャンネルを使うが、
+    /// **別の kind にしてある**のは重ねたときの勝ち負けを順序で決めるため
+    /// である — `decorate_row` は slice 順に patch するので、薄い地を先に、
+    /// 核を後に置けば濃い側が勝つ。**既定では 1 つも出ない。**
+    SemanticMarkFaint,
     /// "This can be skimmed": the foreground moved toward the page.
     Dim,
     /// **「ここを直せ」** — Review の候補（`R`）。細い下線だけを引く。
@@ -238,11 +256,78 @@ pub const MARK_BG_BLEND_CEILING: f32 = 0.40;
 /// build, not a test run.
 const _: () = assert!(MARK_BG_BLEND <= MARK_BG_BLEND_CEILING);
 
+/// **`AKAPEN_MARK_STYLE=c`（字を太く）**の地の濃さ。
+///
+/// 既定の 0.27 のままだと太さの違いが地に紛れるので、少しだけ濃くする。
+/// 天井 0.40 の内側なので、上の字はまだ読める（約 5:1）。
+const MARK_BG_BLEND_BOLD: f32 = 0.32;
+
+/// **`AKAPEN_MARK_STYLE=f`（2 段）**の、Unit 全体に敷く薄い地。
+///
+/// 核（0.27）の下に敷くものなので、地の文と見分けが付くぎりぎりまで薄く
+/// してある。読み手が「核」として拾うのは濃いほうだけである。
+const MARK_BG_BLEND_FAINT: f32 = 0.10;
+
 /// How far a [`DecorationKind::Dim`] foreground is moved from its own
 /// color toward the theme background. 0.60 was picked by eye on a real
 /// terminal: far enough to recede, near enough to stay readable and keep
 /// its hue.
 pub const DIM_BLEND: f32 = 0.60;
+
+/// 候補の見た目を選ぶ環境変数。**暫定** — 選ばれたら消える。
+const MARK_STYLE_ENV: &str = "AKAPEN_MARK_STYLE";
+
+/// **実機で並べて選ぶための、暫定の見た目**（環境変数 `AKAPEN_MARK_STYLE`）。
+///
+/// これは**本番の設定項目ではない**。候補を 1 つのバイナリで切り替えて実機に
+/// 並べ、選ばれた 1 案だけを正式に焼き直すための、使い捨ての切り替えである
+/// （`marks-style` の作業）。
+///
+/// **未設定なら [`MarkVariant::Amber`]** で、以前と 1 バイトも変わらない。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkVariant {
+    /// `a` — いまのまま。amber `#ffb000` へ 0.27、地色だけ。
+    #[default]
+    Amber,
+    /// `b` — 天井まで濃く（0.40）。
+    Deep,
+    /// `c` — 少し濃く（0.32）+ 字を太く。
+    Bold,
+    /// `d` — 地色はそのまま、ガターの行頭に琥珀の `▌` を足す。
+    Bar,
+    /// `e` — 地色をやめて、字の下に琥珀の下線。
+    Rule,
+    /// `f` — Unit 全体に薄い地（0.10）+ 核に濃い地（0.27）の 2 段。
+    TwoTone,
+}
+
+impl MarkVariant {
+    /// 記号（1 文字）と長い名前の両方を受ける。**知らない値は `Amber`**
+    /// に落ちる — 打ち間違いで見た目が変わるより、既定に戻るほうが安全で、
+    /// この切り替えは残らないものだから。
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "b" | "deep" => Self::Deep,
+            "c" | "bold" => Self::Bold,
+            "d" | "bar" => Self::Bar,
+            "e" | "rule" | "underline" => Self::Rule,
+            "f" | "two" | "twotone" => Self::TwoTone,
+            _ => Self::Amber,
+        }
+    }
+
+    /// 環境変数 [`MARK_STYLE_ENV`]。**プロセスで 1 度だけ読む** —
+    /// 1 回の起動の中で見た目が変わることは無いし、レンダのたびに getenv を
+    /// 叩く理由も無い。
+    pub fn from_env() -> Self {
+        static CACHED: OnceLock<MarkVariant> = OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var(MARK_STYLE_ENV)
+                .map(|value| Self::parse(&value))
+                .unwrap_or_default()
+        })
+    }
+}
 
 /// The two blend factors, together. **The defaults live here and nowhere
 /// else**; the command line overrides them (`--mark-blend` /
@@ -269,6 +354,10 @@ impl Default for DecorationBlend {
 pub struct DecorationStyles {
     /// The mark's patch: a background and nothing else.
     mark: Style,
+    /// [`DecorationKind::SemanticMarkFaint`] の地。既定では出さない。
+    faint_mark: Style,
+    /// いま選ばれている見た目（[`MarkVariant`]）。
+    variant: MarkVariant,
     /// Where a dimmed foreground travels toward — the theme's background.
     dim_target: Color,
     /// The foreground a span that declares none actually renders with.
@@ -284,6 +373,8 @@ impl Default for DecorationStyles {
     fn default() -> Self {
         Self {
             mark: Style::default().bg(MARK_BG_DARK),
+            faint_mark: Style::default().bg(MARK_BG_DARK),
+            variant: MarkVariant::Amber,
             dim_target: DIM_TARGET_DARK,
             default_fg: Color::Rgb(0xcd, 0xd6, 0xf4),
             dim_blend: DIM_BLEND,
@@ -292,22 +383,55 @@ impl Default for DecorationStyles {
 }
 
 impl DecorationStyles {
-    /// Resolve both kinds against `highlighter`'s theme at `blend`.
+    /// Resolve both kinds against `highlighter`'s theme at `blend`, with the
+    /// look picked by [`MarkVariant::from_env`].
     pub fn from_theme(highlighter: &Highlighter, blend: DecorationBlend) -> Self {
+        Self::from_theme_with_variant(highlighter, blend, MarkVariant::from_env())
+    }
+
+    /// [`Self::from_theme`] の見た目を明示する版。**テストと実機の並べ比べ
+    /// だけが使う** — 本番は環境変数から 1 本に決まる
+    /// （[`Self::from_theme`]）。
+    pub fn from_theme_with_variant(
+        highlighter: &Highlighter,
+        blend: DecorationBlend,
+        variant: MarkVariant,
+    ) -> Self {
         let default_fg = highlighter.default_fg();
-        Self {
-            mark: Style::default().bg(mark_background(highlighter, blend.mark)),
-            dim_target: match highlighter.theme().settings.background {
-                Some(bg) => Color::Rgb(bg.r, bg.g, bg.b),
-                // No theme background at all: pick the side from the text
-                // color, exactly as `mark_background` does.
-                None => match default_fg {
-                    Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => {
-                        DIM_TARGET_DARK
-                    }
-                    _ => DIM_TARGET_LIGHT,
-                },
+        let dim_target = match highlighter.theme().settings.background {
+            Some(bg) => Color::Rgb(bg.r, bg.g, bg.b),
+            // No theme background at all: pick the side from the text
+            // color, exactly as `mark_background` does.
+            None => match default_fg {
+                Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => {
+                    DIM_TARGET_DARK
+                }
+                _ => DIM_TARGET_LIGHT,
             },
+        };
+        // 案ごとに、同じ紙・同じ amber から別の 1 点だけを動かす。
+        let amber = mark_background(highlighter, blend.mark);
+        let mark = match variant {
+            MarkVariant::Amber => Style::default().bg(amber),
+            MarkVariant::Deep => {
+                Style::default().bg(mark_background(highlighter, MARK_BG_BLEND_CEILING))
+            }
+            MarkVariant::Bold => Style::default()
+                .bg(mark_background(highlighter, MARK_BG_BLEND_BOLD))
+                .add_modifier(Modifier::BOLD),
+            MarkVariant::Bar => Style::default().bg(amber),
+            // 地色をやめる。下線は 1 桁の線なので、[`TICK_BLEND`] と同じ
+            // 濃さで紙から amber へ寄せる（薄いと明るいテーマで消える）。
+            MarkVariant::Rule => Style::default()
+                .add_modifier(Modifier::UNDERLINED)
+                .underline_color(crate::view::lerp_color(dim_target, MARK_TINT, TICK_BLEND)),
+            MarkVariant::TwoTone => Style::default().bg(amber),
+        };
+        Self {
+            mark,
+            faint_mark: Style::default().bg(mark_background(highlighter, MARK_BG_BLEND_FAINT)),
+            variant,
+            dim_target,
             default_fg,
             dim_blend: blend.dim,
         }
@@ -316,6 +440,13 @@ impl DecorationStyles {
     /// The mark's patch: a background, no foreground, no modifier.
     pub fn mark_style(&self) -> Style {
         self.mark
+    }
+
+    /// いま選ばれている見た目（[`MarkVariant`]）。**案 d だけが読む** —
+    /// ガターに琥珀の `▌` を足すのは描画側の仕事なので、見た目の選択が
+    /// ここから `view.rs` へ渡る。
+    pub fn mark_variant(&self) -> MarkVariant {
+        self.variant
     }
 
     /// The mark's background color on its own — the amber the paint
@@ -384,6 +515,9 @@ impl DecorationStyles {
     pub fn patch(&self, base: Style, kind: DecorationKind) -> Style {
         match kind {
             DecorationKind::SemanticMark => base.patch(self.mark_style()),
+            // 案 f の薄い地。核（`SemanticMark`）と重なる場合は、呼び出し側が
+            // 薄いほうを先に置くので濃いほうが勝つ。
+            DecorationKind::SemanticMarkFaint => base.patch(self.faint_mark),
             DecorationKind::Dim => base.fg(self.dim_fg(base.fg)),
             // **下線だけ。** 前景も地色も触らないので、琥珀の上でも、
             // 選択の帯の上でも、syntax highlight の上でも重なって読める。
@@ -1075,6 +1209,119 @@ mod tests {
             };
             assert!(near(r, fr, page.r) && near(g, fg_, page.g) && near(b, fb, page.b));
         }
+    }
+
+    /// **候補の見た目（`AKAPEN_MARK_STYLE`）は、amber の式のまま 1 点だけ
+    /// 動かす。** 既定（`Amber`）は 1 バイトも変わらない。
+    ///
+    /// これは使い捨ての切り替えなので、案ごとの値は実機で並べたときの
+    /// 記録としてここに固定する。選ばれたら負けた腕ごと消す。
+    #[test]
+    fn each_variant_moves_exactly_one_thing() {
+        let hl = Highlighter::new(None, false);
+        let blend = Default::default();
+        let amber = mark_background(&hl, MARK_BG_BLEND);
+        let base = DecorationStyles::from_theme_with_variant(&hl, blend, MarkVariant::Amber);
+        assert_eq!(base.mark_style(), Style::default().bg(amber), "a は今のまま");
+
+        let deep = DecorationStyles::from_theme_with_variant(&hl, blend, MarkVariant::Deep);
+        assert_eq!(
+            deep.mark_style(),
+            Style::default().bg(mark_background(&hl, MARK_BG_BLEND_CEILING)),
+            "b は天井まで濃く"
+        );
+
+        let bold = DecorationStyles::from_theme_with_variant(&hl, blend, MarkVariant::Bold);
+        assert_eq!(bold.mark_style().bg, Some(mark_background(&hl, MARK_BG_BLEND_BOLD)));
+        assert!(bold.mark_style().add_modifier.contains(Modifier::BOLD), "c は字も太く");
+
+        let bar = DecorationStyles::from_theme_with_variant(&hl, blend, MarkVariant::Bar);
+        assert_eq!(bar.mark_style(), base.mark_style(), "d は地色を変えない（線はガター）");
+        assert_eq!(bar.mark_variant(), MarkVariant::Bar, "描画側が読む");
+
+        let rule = DecorationStyles::from_theme_with_variant(&hl, blend, MarkVariant::Rule);
+        assert_eq!(rule.mark_style().bg, None, "e は地色をやめる");
+        assert!(rule.mark_style().add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(
+            rule.mark_style().underline_color,
+            Some(crate::view::lerp_color(DIM_TARGET_DARK, MARK_TINT, TICK_BLEND)),
+            "e の下線は amber の濃いほう"
+        );
+
+        let two = DecorationStyles::from_theme_with_variant(&hl, blend, MarkVariant::TwoTone);
+        assert_eq!(two.mark_style(), base.mark_style(), "f の核は a と同じ");
+        assert_eq!(
+            two.faint_mark,
+            Style::default().bg(mark_background(&hl, MARK_BG_BLEND_FAINT)),
+            "f は Unit 全体に薄い地を足す"
+        );
+    }
+
+    /// **案 e の下線と Review の下線は別物であること。** 同じ「下線」という
+    /// 形なので、分けるのは色相だけである（amber は暖色、Review は青緑）。
+    /// 両者は同時に乗りうる — marks は地色、Review は下線しか書かないので
+    /// 重なっても打ち消し合わない（`App::active_decorations`）。
+    #[test]
+    fn the_amber_rule_is_not_the_review_underline() {
+        let hl = Highlighter::new(None, false);
+        let styles = DecorationStyles::from_theme_with_variant(
+            &hl,
+            Default::default(),
+            MarkVariant::Rule,
+        );
+        let rule = styles.mark_style().underline_color.expect("a rule");
+        let review = styles.review_underline();
+        assert_ne!(rule, review);
+        let (Color::Rgb(rr, rg, rb), Color::Rgb(pr, pg, pb)) = (rule, review) else {
+            panic!("RGB")
+        };
+        assert!(rr > rg && rg > rb, "案 e は暖色 rgb({rr},{rg},{rb})");
+        assert!(pb > pr && pg > pr, "Review は青緑 rgb({pr},{pg},{pb})");
+        assert!((rr > rb) != (pr > pb), "r と b の大小が逆 = 色相が遠い");
+    }
+
+    /// 案 f の 2 段は、薄い地を**先に**敷いて核を後に置く。`decorate_row`
+    /// は slice 順に patch するので、順序が仕様である。逆にすると核が
+    /// 薄いほうに負ける（黙って a に見える）。
+    #[test]
+    fn the_faint_unit_wash_loses_to_the_core() {
+        let hl = Highlighter::new(None, false);
+        let styles = DecorationStyles::from_theme_with_variant(
+            &hl,
+            Default::default(),
+            MarkVariant::TwoTone,
+        );
+        let faint = styles.patch(Style::default(), DecorationKind::SemanticMarkFaint);
+        assert!(faint.bg.is_some());
+        assert_ne!(faint.bg, styles.mark_style().bg, "薄い地と核は別の色");
+        // 薄い地の上に核を重ねると核の色。
+        assert_eq!(
+            styles.patch(faint, DecorationKind::SemanticMark).bg,
+            styles.mark_style().bg
+        );
+        // 逆順は薄いほうが勝つ — だから順序が仕様である。
+        assert_eq!(
+            styles
+                .patch(
+                    styles.patch(Style::default(), DecorationKind::SemanticMark),
+                    DecorationKind::SemanticMarkFaint,
+                )
+                .bg,
+            faint.bg
+        );
+    }
+
+    /// 案の切り替えは記号でも名前でも読み、**知らない値は既定**に落ちる。
+    #[test]
+    fn the_temporary_mark_variants_parse_by_letter_and_by_name() {
+        assert_eq!(MarkVariant::parse("a"), MarkVariant::Amber);
+        assert_eq!(MarkVariant::parse("b"), MarkVariant::Deep);
+        assert_eq!(MarkVariant::parse("D"), MarkVariant::Bar);
+        assert_eq!(MarkVariant::parse(" rule "), MarkVariant::Rule);
+        assert_eq!(MarkVariant::parse("two"), MarkVariant::TwoTone);
+        assert_eq!(MarkVariant::parse("f"), MarkVariant::TwoTone);
+        assert_eq!(MarkVariant::parse(""), MarkVariant::Amber);
+        assert_eq!(MarkVariant::parse("nonsense"), MarkVariant::Amber);
     }
 
     /// 既定のブレンド率で実際に出る色。ダークの値はユーザーが実機で

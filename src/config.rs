@@ -245,8 +245,11 @@ fn parse_decorations(json: &str) -> Result<Vec<Decoration>> {
             }
             let kind = match spec.kind.as_str() {
                 "mark" | "semantic-mark" => DecorationKind::SemanticMark,
+                "mark-faint" | "semantic-mark-faint" => DecorationKind::SemanticMarkFaint,
                 "dim" => DecorationKind::Dim,
-                other => bail!("--decorations: unknown kind {other:?} (mark | dim)"),
+                other => bail!(
+                    "--decorations: unknown kind {other:?} (mark | mark-faint | dim)"
+                ),
             };
             Ok(Decoration { range: start..end, kind })
         })

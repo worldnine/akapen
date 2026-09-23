@@ -14,7 +14,9 @@ use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 use ratatui::text::{Line, Text};
 
-use crate::decoration::{Decoration, DecorationBlend, DecorationKind, DecorationStyles, decorate_row};
+use crate::decoration::{
+    Decoration, DecorationBlend, DecorationKind, DecorationStyles, MarkVariant, decorate_row,
+};
 use crate::highlight::{Highlighter, Span};
 use crate::render::{self, Rendered, Segment};
 use crate::source::Source;
@@ -990,6 +992,22 @@ impl ViewState {
             };
             let highlight_style = Style::default().bg(selected_bg);
             let gutter_hl = cursor_row || in_sel_row;
+            // **案 d（`AKAPEN_MARK_STYLE=d`）** — この行に marks の琥珀が
+            // 乗っているか。ガターの行頭に琥珀の `▌` を足すための判定である。
+            //
+            // 見るのは `decorate_row` と同じ字の範囲（`row_segments`）なので、
+            // 実際に地色が乗っている行とだけ一致する。行の後ろのほうに 1 つ
+            // だけマークがあっても、その行の頭には線が立つ — マークが行の
+            // 途中から始まるのは普通だからである。`Segment::source` が
+            // その句の**ソース**のバイト範囲である（`start`/`end` は行内）。
+            let bar_row = self.decoration_styles.mark_variant() == MarkVariant::Bar
+                && segments.iter().any(|s| {
+                    decorations.iter().any(|d| {
+                        d.kind == DecorationKind::SemanticMark
+                            && d.range.start >= s.source.start
+                            && d.range.end <= s.source.end
+                    })
+                });
             let mut spans: Vec<ratatui::text::Span> = Vec::new();
             // The marker column rides the frame's left border (drawn by
             // `draw_view` over the border cells): `>` marks the cursor
@@ -1075,6 +1093,13 @@ impl ViewState {
                 } else {
                     ("▌", Style::default().fg(Color::Green))
                 }
+            } else if bar_row {
+                // **案 d。** 地色は amber のまま、その行の頭に縦の琥珀を
+                // 足す。コメントの黄、選択の青緑、変更の緑、削除の赤より
+                // 下に置いてあるので、同じ行で競合しても既存の印が消えない。
+                // 色は [`DecorationStyles::mark_tick`]（地色と同じ紙・同じ
+                // amber から作った濃いほう）で、**焼き込まない**。
+                ("▌", Style::default().fg(self.decoration_styles.mark_tick()))
             } else {
                 ("│", border_style)
             };
@@ -2636,7 +2661,7 @@ mod tests {
 #[cfg(test)]
 mod decoration_tests {
     use super::*;
-    use crate::decoration::{Decoration, DecorationKind, DecorationStyles};
+    use crate::decoration::{Decoration, DecorationKind, DecorationStyles, MarkVariant};
 
     const SEL_BG: Color = Color::Rgb(88, 91, 112);
 
@@ -2812,6 +2837,38 @@ mod decoration_tests {
         );
         assert!(banded.iter().all(|(_, s)| s.bg == Some(SEL_BG)));
         assert_ne!(styles.mark_style().bg, Some(SEL_BG));
+    }
+
+    /// **案 d（`AKAPEN_MARK_STYLE=d`）**は、地色を変えずに、マークの乗って
+    /// いる行のガターへ琥珀の `▌` を足す。マークの無い行は `│` のまま。
+    /// 既定（`Amber`）ではガターに 1 セルも足さない。
+    #[test]
+    fn the_bar_variant_puts_an_amber_bar_in_the_gutter_of_marked_rows() {
+        let (source, mut view, _) = view_of("先頭の段落\n\n前重要後\n\n末尾の段落\n", 40);
+        let highlighter = Highlighter::new(None, false);
+        let decorations = vec![Decoration {
+            range: at(&source, "重要"),
+            kind: DecorationKind::SemanticMark,
+        }];
+        let marked = row_with(&view, "前重要後");
+        // カーソルは行 0 にあるので、`>` の付かない行を選ぶ。
+        let plain = row_with(&view, "末尾の段落");
+
+        view.decoration_styles = DecorationStyles::from_theme_with_variant(
+            &highlighter,
+            Default::default(),
+            MarkVariant::Bar,
+        );
+        let amber = view.decoration_styles.mark_tick();
+        let (_, gutter) = view.visible_text_decorated(100, None, SEL_BG, &decorations);
+        assert_eq!(gutter[marked].glyph, "▌");
+        assert_eq!(gutter[marked].style.fg, Some(amber));
+        assert_eq!(gutter[plain].glyph, "│", "マークの無い行はそのまま");
+
+        // 既定は 1 バイトも変わらない — ガターに何も足さない。
+        view.decoration_styles = DecorationStyles::from_theme(&highlighter, Default::default());
+        let (_, gutter) = view.visible_text_decorated(100, None, SEL_BG, &decorations);
+        assert_eq!(gutter[marked].glyph, "│");
     }
 
     /// The paint path is the identity when nothing is decorated: the

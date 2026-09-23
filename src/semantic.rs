@@ -76,7 +76,7 @@ use semantic_reading::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::decoration::{Decoration, DecorationKind};
+use crate::decoration::{Decoration, DecorationKind, MarkVariant};
 use crate::export::Deadline;
 use crate::marks_questions::Question;
 use crate::semantic_cache::SemanticCache;
@@ -440,16 +440,42 @@ pub(crate) fn decoration_kind(state: DisplayState) -> Option<DecorationKind> {
 /// **MARKED しか返さない**（DIM が 1 つも無い）。沈める分を足すのは
 /// [`focus_decorations_for`] の仕事である。
 ///
+/// 例外は `AKAPEN_MARK_STYLE=f`（2 段）のときだけで、光った Unit 全体に
+/// [`DecorationKind::SemanticMarkFaint`] の薄い地を**先に**積む。既定では
+/// 1 つも出ない（[`MarkVariant`]）。
+///
 /// **この関数から解析へ到達する経路は無い。** つまみを
 /// 1 ポイント動かすたびに走るのはここだけで、`marks::mark` は純粋関数である。
 pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> Vec<Decoration> {
-    marks::mark(document, share)
-        .into_iter()
-        .filter_map(|(range, state)| {
-            debug_assert!(state != DisplayState::Dim, "marks モードは DIM を出さない");
-            decoration_kind(state).map(|kind| Decoration { range, kind })
-        })
-        .collect()
+    let states = marks::mark(document, share);
+    let mut out: Vec<Decoration> = Vec::new();
+    // **案 f（2 段）のときだけ**、光った Unit の全 Atom に薄い地を先に敷く。
+    // 核（濃い地）はこのあとに積むので、`decorate_row` の slice 順で濃い側が
+    // 勝つ。既定（`AKAPEN_MARK_STYLE` 未設定）では 1 つも出ない。
+    if MarkVariant::from_env() == MarkVariant::TwoTone {
+        for unit in &document.units {
+            let lit = unit
+                .atoms
+                .iter()
+                .any(|atom| matches!(states.get(atom.0), Some((_, DisplayState::Marked))));
+            if !lit {
+                continue;
+            }
+            for atom in &unit.atoms {
+                if let Some((range, _)) = states.get(atom.0) {
+                    out.push(Decoration {
+                        range: range.clone(),
+                        kind: DecorationKind::SemanticMarkFaint,
+                    });
+                }
+            }
+        }
+    }
+    out.extend(states.into_iter().filter_map(|(range, state)| {
+        debug_assert!(state != DisplayState::Dim, "marks モードは DIM を出さない");
+        decoration_kind(state).map(|kind| Decoration { range, kind })
+    }));
+    out
 }
 
 /// **フォーカスの** decoration 列（`f`）。
