@@ -1303,8 +1303,12 @@ def save_boundaries(source: str, plan: list[dict], atoms: list[dict]) -> None:
 #: （`src/semantic.rs` の `COMMAND_BACKSTOP` = 600 秒）より十分短い。
 BOUNDARY_WAIT_LIMIT = 120.0
 
-#: 番が空いたかを見る間隔（秒）。
-BOUNDARY_WAIT_POLL = 0.05
+#: 番が空いたかを見る間隔（秒）。**待ちの上乗せはこの間隔だけ**である —
+#: 待っている側は、相手の境界のラウンド（`showcase-slop.md` で 0.35〜0.46 秒）を
+#: 自分で回す代わりに待つので、差は「空いてから気づくまで」しかない。
+#: 50 ms では `R` の中央値が 0.1 秒ほど伸びて見えた。10 ms なら 1 秒の待ちで
+#: 100 回の `flock` で、費用は無視できる。
+BOUNDARY_WAIT_POLL = 0.01
 
 #: 待っている間に生存信号を出す間隔（秒）。akapen の無音の上限
 #: （`COMMAND_IDLE_TIMEOUT` = 30 秒）より短くないと、待っているだけの子が
