@@ -85,6 +85,7 @@ mac の人は akapen を起動するシェルの環境に鍵を持ち込む必�
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -95,6 +96,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+try:
+    import fcntl
+except ImportError:  # Windows。境界の排他（[`boundary_turn`]）が効かないだけで、解析は走る
+    fcntl = None
 
 VERSION = 1
 
@@ -1288,6 +1294,97 @@ def save_boundaries(source: str, plan: list[dict], atoms: list[dict]) -> None:
         return
 
 
+#: 境界の番を待つ上限（秒）。**永久に待たないためにある。**
+#:
+#: 番を持っている側が死ねば `flock` はその場で外れるので、ふつうはこの上限に
+#: 届かない。届くのは、相手が生きたまま境界のラウンドを 2 分より長く回している
+#: とき — そのときは待つのをやめて自分で聞く（重複を払うだけで、答えは同じ）。
+#: 推定の最悪（大文書の 74 秒）より長く、akapen の天井
+#: （`src/semantic.rs` の `COMMAND_BACKSTOP` = 600 秒）より十分短い。
+BOUNDARY_WAIT_LIMIT = 120.0
+
+#: 番が空いたかを見る間隔（秒）。**待ちの上乗せはこの間隔だけ**である —
+#: 待っている側は、相手の境界のラウンド（`showcase-slop.md` で 0.35〜0.46 秒）を
+#: 自分で回す代わりに待つので、差は「空いてから気づくまで」しかない。
+#: 50 ms では `R` の中央値が 0.1 秒ほど伸びて見えた。10 ms なら 1 秒の待ちで
+#: 100 回の `flock` で、費用は無視できる。
+BOUNDARY_WAIT_POLL = 0.01
+
+#: 待っている間に生存信号を出す間隔（秒）。akapen の無音の上限
+#: （`COMMAND_IDLE_TIMEOUT` = 30 秒）より短くないと、待っているだけの子が
+#: 固まった子として殺される。
+BOUNDARY_WAIT_SAY_EVERY = 5.0
+
+
+def say(line: str) -> None:
+    """stderr へ 1 行。akapen への生存信号（[`progress`] と同じ作法で、失敗は黙る）。"""
+    try:
+        print(f"{stderr_prefix()}{line}", file=sys.stderr, flush=True)
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
+@contextlib.contextmanager
+def boundary_turn(source: str):
+    """**境界のラウンドは文書 1 版につき 1 プロセスずつ**回す — その番を取る。
+
+    akapen は要求 1 つにつきこのスクリプトを 1 プロセス起こし、Review の
+    ルールは**同時に**起こす（`src/app.rs` の `reanalyze_review`）。reload では
+    marks と Review が、問いを差し替えたときは古い解析と新しい解析が重なる。
+    キャッシュが空のまま重なると、全員が境界のラウンドを聞いていた
+    （2026-09-23、`showcase-slop.md` で 39 + 39 問）。
+
+    番は境界キャッシュの隣の `<digest>.lock` に対する `flock` で、
+    **読む → 無ければ聞く → 書く** の間だけ持つ。後から来た側は番が空くのを
+    待ち、空いたらキャッシュを読んで 0 問で抜ける。
+
+    - **待つのは境界だけ。** probe はこの外（前）で済ませ、スコアと核の
+      ラウンドは番を放してから回す。別の文書は別の番なので互いに待たない
+    - **相手が落ちても待ち続けない。** `flock` はプロセスが死ねば外れ、
+      例外で抜けても `finally` で外れる。空いたのにキャッシュが無ければ、
+      待っていた側が自分で聞く。上限（[`BOUNDARY_WAIT_LIMIT`]）を過ぎたら
+      番を取らずに聞く
+    - **番のファイルは消さない。** 消すと、古いファイルを掴んだ側と新しく
+      作った側が同時に番を持てる（`flock` はファイルではなく inode に付く）。
+      中身は空で、キャッシュと同じく 0600（ディレクトリは 0700）
+    - 番が取れない環境（`fcntl` が無い、置き場が作れない）は、今までどおり
+      各自が聞く。**解析は止めない**
+    """
+    path = boundary_cache_path(source)
+    fd = None
+    if fcntl is not None and path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            fd = None
+    if fd is None:
+        yield
+        return
+    try:
+        started = time.monotonic()
+        said = started
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                pass
+            except OSError:
+                break  # 番の仕組みそのものが使えない。各自で聞く
+            now = time.monotonic()
+            if now - started >= BOUNDARY_WAIT_LIMIT:
+                say(f"boundaries: gave up waiting after {now - started:.0f}s, asking myself")
+                break
+            if now - said >= BOUNDARY_WAIT_SAY_EVERY:
+                said = now
+                say(f"boundaries: waiting for another run ({now - started:.0f}s)")
+            time.sleep(BOUNDARY_WAIT_POLL)
+        yield
+    finally:
+        os.close(fd)  # 閉じれば flock は外れる
+
+
 def marks_questions(atoms: list[dict], units: list[list[int]], text: str) -> dict:
     """スコアのラウンド — **Unit ごとに Noul 1 問**。
 
@@ -1341,18 +1438,22 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
         return answers
 
     # --- ラウンド 1: 境界（キャッシュに当たれば 0 問）-------------------
+    #
+    # **番を取ってから読む**（[`boundary_turn`]）。同じ文書を同時に解析して
+    # いる別のプロセスが境界を聞いている最中なら、その答えを待って読む。
     plan = plan_boundaries(atoms, state)
-    cached = load_boundaries(state, plan, atoms)
-    if not cached:
-        questions = boundary_questions(atoms, plan)
-        if questions:
-            answers = ask(questions, "boundary")
-            for entry in plan:
-                key = f"boundary:{entry['after_atom']}"
-                if entry["decision"] is None and key not in answers:
-                    entry["decision"], entry["by"] = NEW, "rule:question_too_large"
-            apply_boundary_answers(plan, answers)
-        save_boundaries(state, plan, atoms)
+    with boundary_turn(state):
+        cached = load_boundaries(state, plan, atoms)
+        if not cached:
+            questions = boundary_questions(atoms, plan)
+            if questions:
+                answers = ask(questions, "boundary")
+                for entry in plan:
+                    key = f"boundary:{entry['after_atom']}"
+                    if entry["decision"] is None and key not in answers:
+                        entry["decision"], entry["by"] = NEW, "rule:question_too_large"
+                apply_boundary_answers(plan, answers)
+            save_boundaries(state, plan, atoms)
     units = group_units(atoms, plan)
 
     # --- ラウンド 2: 問いへのスコア（Unit ごとに Noul 1 問）-------------
