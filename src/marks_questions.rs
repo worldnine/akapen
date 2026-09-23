@@ -241,6 +241,43 @@ mod tests {
         assert!(questions.free_hint().is_ascii());
     }
 
+    /// **表示の語を変えても、Jev に送る問いは 1 字も動かない。**
+    ///
+    /// 2026-09-23 に `Decide` → `Your call`、`Settled` / `Unsettled` の
+    /// hint を直した（`decided` / `undecided` / `Decide` の語根が 3 か所で
+    /// かぶっていた）。変えたのは `label` と `hint` だけで、要求に載る
+    /// `id` と `text`（キャッシュの鍵も `text` の sha）は測ったときのまま
+    /// である。ここの sha が変わったら、実測は根拠でなくなり、キャッシュも
+    /// 全部外れる — 文面を変えるなら測り直してからこの表を直すこと。
+    #[test]
+    fn relabelling_leaves_the_asked_ids_and_texts_untouched() {
+        let questions = Questions::built_in().unwrap();
+        let asked: Vec<(&str, String)> = questions
+            .presets()
+            .iter()
+            .map(|q| (q.id.as_str(), crate::semantic::source_digest(&q.text)))
+            .collect();
+        let pinned = [
+            ("essential", "9b377222da7675cca14409c5e731ed62288fc62cc2550edd79e4746cb49df297"),
+            ("settled", "0f13a7ed218e13e814c4c59ee62d2aa3ea3b2456151dcd589d77315a7d2499f2"),
+            ("unsettled", "bda9a76bd2c74985eec9914959b7702934c864ba2e35bc589ff3df3d4d6488d4"),
+            ("decide", "c555c5f1f3e4225640fdae72476907b3e5b4dc2705031ec0d32f7e7da7b7131a"),
+            ("numbers", "e8b270a0941f4f80110e308e703b1bfe9b04e4583a1b655ffe998fb195c61a94"),
+        ];
+        let pinned: Vec<(&str, String)> =
+            pinned.iter().map(|(id, sha)| (*id, sha.to_string())).collect();
+        assert_eq!(asked, pinned);
+        // 表示の語はこちら。`decide` の id は据え置きで、名前だけが変わった。
+        let shown: Vec<(&str, &str)> = questions
+            .presets()
+            .iter()
+            .map(|q| (q.label.as_str(), q.hint.as_str()))
+            .collect();
+        assert_eq!(shown[1], ("Settled", "agreed, fixed, final"));
+        assert_eq!(shown[2], ("Unsettled", "open, pending, waiting to be confirmed"));
+        assert_eq!(shown[3], ("Your call", "asks you to judge, confirm or choose"));
+    }
+
     #[test]
     fn the_decide_preset_carries_the_design_documents_wording_verbatim() {
         // 設計書 0 節の定型 2 の逐語。段 1 で独立しなかったことは
