@@ -431,3 +431,44 @@ match (a, b) {
 `the_flash_lands_on_the_cushion_and_nowhere_else`。`app.last_draw` を
 150 ms 前へずらして 1 枚描くと、演出の途中の絵が見られます（実機では
 速すぎて captured frame に写りません — CLI の往復が 300 ms より遅い）。
+
+### `RAPID_BLINK` は波線の印 — 別の用途に使わない
+
+**Review の下線のセルには `Modifier::RAPID_BLINK` が立っています**
+（`crate::decoration::CURL_CARRIER`）。ratatui 0.30 のセルには下線の形を
+書く場所が無いので、印を借りて描画の出口（`NoBlinkBackend::draw` →
+`crate::undercurl::draw`）で `CSI 4:3 m` か普通の下線に読み替えています。
+出口は印を**必ず落とす**ので、点滅は 1 度も端末に出ません。
+
+- 何かを本当に点滅させたくて `RAPID_BLINK` を立てても、**出口が黙って
+  捨てます**（波線の印と見分けられない）。点滅は使わない前提です
+  （`tui-design` の「blink は避ける」とも合う）
+- `TestBackend` のテストで Review の下線を探すときは、`UNDERLINED` では
+  なく `UNDERLINED | CURL_CARRIER` で数えてください。レベル 1 の見出しも
+  `UNDERLINED` を持っています（`src/render.rs` の見出しのスタイル）
+- `NoBlinkBackend` を通らない描画（`CrosstermBackend` を直に使う）を
+  足すと、印が点滅として漏れます
+
+**確認したこと**: `src/undercurl.rs` の
+`a_carried_underline_curls_only_when_the_terminal_can`（`on` / `off`
+どちらの出口でも `CSI 5 m` / `CSI 6 m` が出ない）と
+`src/review_render_tests.rs` の
+`the_painted_underline_leaves_as_a_curl_through_the_exit`（実際に描いた
+画面を出口に通す）。
+
+### herdr は下線の色を落とす — 波線は通る
+
+herdr 0.9.1 の中で akapen を開くと、**Review の下線の重さの色が出ません**
+（下線は文字色になる）。herdr は `CSI 58`（下線の色）を内部の画面には
+持っていますが、外側の端末へ描くときに出しません。波線（`CSI 4:3 m`）は
+そのまま外側へ出ます。akapen の不具合ではないので、重さはガターの `!` の
+色で読んでください（`!` は前景色なので herdr を通る）。
+
+**確認したこと**: 2026-09-23、別名のセッション（`herdr --session
+<name>`）を tmux の中で立て、その pane で `printf` と akapen を描いて
+tmux の `capture-pane -e` で herdr の**外側への出力**を読んだ。`4:3` は
+あり、`58;2;…` / `58:5:…` は無い（外側の `TERM` を `tmux-256color`・
+`xterm-ghostty` のどちらにしても同じ）。同じ pane を
+`herdr pane read --format ansi` で読むと `58;2;210;57;73` がある。
+`--undercurl auto` は herdr に専用の枝を持たず、herdr を立てた端末の
+`TERM_PROGRAM` で決まる（`src/undercurl.rs` のモジュールの文書）。

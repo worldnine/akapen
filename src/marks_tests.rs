@@ -47,6 +47,7 @@ fn app_with(fixture: &str) -> App {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -83,6 +84,7 @@ fn app_without_a_layer() -> App {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };

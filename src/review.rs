@@ -88,7 +88,8 @@ pub(crate) enum Finding {
     Lint {
         /// linter の理由の文。一覧とコメントに出る。
         message: String,
-        /// LSP の severity。**今は読むだけ**（色分けに使わない）。
+        /// LSP の severity。下線とガターの `!` の色になる
+        /// （[`Candidate::severity`]、[`crate::decoration::ReviewSeverity`]）。
         severity: Option<u8>,
     },
 }
@@ -118,7 +119,41 @@ pub(crate) struct Candidate {
     pub(crate) atoms: Vec<Range<usize>>,
 }
 
+/// **文書全体を範囲にする指摘**の閾値 — 範囲が文書の行の何割を覆えば
+/// 「文書全体」とみなすか（分子, 分母）。
+///
+/// textlint の `ai-tech-writing-guideline` の総評は L1–192 / 192 行を覆う。
+/// これを他の候補と同じに扱うと、一覧の先頭に来て、全行に下線と `!` が
+/// 立ち、本文のどの指摘も見分けられなくなる。9 割にしたのは、総評が
+/// 前付け（front matter）や末尾の空行を外して返す linter でも拾えるように
+/// するためで、段落 1 つ・節 1 つの指摘（`sentence-length` の 3 行など）は
+/// 長い文書では 1 割にも届かない。
+pub(crate) const WHOLE_DOCUMENT_SHARE: (usize, usize) = (9, 10);
+
+/// 「文書全体」とみなす最小の行数。1〜2 行の文書では、1 文の指摘が
+/// そのまま全体を覆ってしまう — それは総評ではなく普通の指摘である。
+pub(crate) const WHOLE_DOCUMENT_MIN_LINES: usize = 3;
+
 impl Candidate {
+    /// **重さ**（下線とガターの `!` の色）。Jev のルールは `Info`（青緑）。
+    pub(crate) fn severity(&self) -> crate::decoration::ReviewSeverity {
+        match &self.finding {
+            Finding::Rule { .. } => crate::decoration::ReviewSeverity::Info,
+            Finding::Lint { severity, .. } => crate::decoration::ReviewSeverity::from_lsp(*severity),
+        }
+    }
+
+    /// **文書全体を範囲にする指摘か**（`total_lines` は文書の行数）。
+    ///
+    /// そうなら一覧の**末尾**に回り、本文には下線もガターの `!` も出さない。
+    /// 一覧の行は `L1` ではなく「文書全体」と名乗る。閾値は
+    /// [`WHOLE_DOCUMENT_SHARE`] と [`WHOLE_DOCUMENT_MIN_LINES`]。
+    pub(crate) fn is_whole_document(&self, total_lines: usize) -> bool {
+        let covered = (self.lines.1 as usize + 1).saturating_sub(self.lines.0 as usize);
+        let (num, den) = WHOLE_DOCUMENT_SHARE;
+        covered >= WHOLE_DOCUMENT_MIN_LINES && covered * den >= total_lines * num
+    }
+
     /// まだ見ていない候補か — 本文に下線が要るか。
     pub(crate) fn is_pending(&self) -> bool {
         self.state == CandidateState::Pending

@@ -44,6 +44,8 @@
 - `scope_style` はアルファを捨てる — DarkNeon の引用とインラインコードが読めない
 - 演出の立っている 1 枚目には琥珀が無い — テストが「マークが消えた」と言う
 - **名前付きの色を塗ったセルは tachyonfx の演出が素通りする** — `lerp_color` は RGB 同士でしか混ぜない
+- `RAPID_BLINK` は波線の印 — 別の用途に使わない（出口が黙って捨てる）
+- herdr は下線の色を落とす — 波線は通る（重さはガターの `!` で読む）
 
 ### [Semantic Reading Layer](gotchas/semantic-reading.md)
 

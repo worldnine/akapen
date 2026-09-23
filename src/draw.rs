@@ -1110,10 +1110,10 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         // 形である。accept した候補は Pending でなくなるので、この旗と
         // コメントの印（source では行番号が黄色になる）が同じ行で
         // 競合することは無い。
-        let review_line = review_lines.get(idx).copied().unwrap_or(false);
+        let review_line = review_lines.get(idx).copied().flatten();
         let cursor_mark = if is_cursor {
             ">"
-        } else if review_line {
+        } else if review_line.is_some() {
             "!"
         } else if added {
             "▌"
@@ -1175,9 +1175,11 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
             let fg = if added { Color::LightGreen } else { Color::LightCyan };
             let s = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
-        } else if review_line {
-            // view モードの `!` と同じ青緑。
-            let s = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        } else if let Some(severity) = review_line {
+            // view モードの `!` と同じ — 重さの色（下線と同じ色）。
+            let s = Style::default()
+                .fg(app.decoration_styles.review_underline(severity))
+                .add_modifier(Modifier::BOLD);
             if changed_bg { s.bg(app.ui_changed_bg) } else { s }
         } else if changed_bg {
             Style::default().fg(Color::Green).bg(app.ui_changed_bg)
