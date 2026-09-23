@@ -103,6 +103,11 @@ DEFAULT_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_MODEL = "jev-latest"
 API_PATH = "/v1/systemone"
 
+#: 名乗る User-Agent。**urllib の既定（`Python-urllib/3.x`）は Cloudflare に
+#: error 1010（署名で拒否）の 403 で弾かれる**（2026-09-23 に踏んだ。curl や
+#: 独自の名前なら通る）。空にも既定にも戻さないこと。
+USER_AGENT = f"akapen-jev-annotate/{VERSION}"
+
 #: 1 リクエストあたりのタイムアウト（秒）。**ラウンドやプロセス全体ではない。**
 #:
 #: Jev の SDK 既定は 10 秒（`docs/jev.md`）。**1 リクエストは実測でその 1/6 で
@@ -923,6 +928,7 @@ def ask_jev(state: str, questions: dict, model: str, timeout: float) -> dict:
         headers={
             "Authorization": f"Bearer {api_key()}",
             "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
         },
     )
     started = time.monotonic()

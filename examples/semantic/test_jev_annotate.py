@@ -964,6 +964,44 @@ class ProgressTest(unittest.TestCase):
         """
         self.assertLess(jev.DEFAULT_TIMEOUT, 30.0)
 
+    def test_ask_jev_names_itself_instead_of_the_urllib_default(self):
+        """urllib の既定の User-Agent は Cloudflare に 403（error 1010）で弾かれる。"""
+        sent = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"answers": {"q": {"choice": "a"}}}).encode()
+
+        def fake_urlopen(request, *a, **k):
+            sent.append(request)
+            return FakeResponse()
+
+        real_urlopen = jev.urllib.request.urlopen
+        real_key = os.environ.get("TYPESAFE_API_KEY")
+        real_stderr = jev.sys.stderr
+        jev.urllib.request.urlopen = fake_urlopen
+        jev.sys.stderr = self.Capturing()
+        os.environ["TYPESAFE_API_KEY"] = "stub"
+        try:
+            jev.ask_jev("state", {"q": {"type": "choice", "criteria": {}}}, "m", 5.0)
+        finally:
+            jev.urllib.request.urlopen = real_urlopen
+            jev.sys.stderr = real_stderr
+            if real_key is None:
+                os.environ.pop("TYPESAFE_API_KEY", None)
+            else:
+                os.environ["TYPESAFE_API_KEY"] = real_key
+
+        agent = sent[0].get_header("User-agent")
+        self.assertEqual(agent, jev.USER_AGENT)
+        self.assertNotIn("Python-urllib", agent)
+
     def test_ask_jev_reports_every_request(self):
         """**`ask_jev` が出す** —— `send_in_chunks` ではない。
 
