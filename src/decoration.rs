@@ -250,11 +250,56 @@ pub const MARK_BG_BLEND: f32 = 0.27;
 /// A ceiling on the SHIPPED default, not on `--mark-blend`: the flag is a
 /// knob for looking at alternatives, and silently clamping what the user
 /// typed would make it a useless one. A test holds the default under it.
+///
+/// **It is the ceiling for the RESTING mark only.** The line the reveal
+/// draws is transient (it passes in 450 ms and its wake dries in 250 ms),
+/// so it may go past this — [`MARK_FLASH_BLEND`] does, and that is where
+/// the value is picked instead.
 pub const MARK_BG_BLEND_CEILING: f32 = 0.40;
 
 /// The ceiling is not advice: raising [`MARK_BG_BLEND`] past it stops the
 /// build, not a test run.
 const _: () = assert!(MARK_BG_BLEND <= MARK_BG_BLEND_CEILING);
+
+/// **演出で引かれる線の濃さ**（`Draw` の `bright`）。
+///
+/// 確定色（[`MARK_BG_BLEND`] = 0.27）より濃い。**`MARK_BG_BLEND_CEILING`
+/// を超えてよい唯一の場所**である — 天井は「**マークの上の字が読み続け
+/// られるか**」の天井で、一瞬で通り過ぎる線には当てはまらない（線が
+/// 通った後ろも 250 ms で確定色へ乾く）。
+///
+/// 読み手の注文（2026-09-23、「引かれる線をもっと明るく」）で 0.40 から
+/// 上げた。0.40 / 0.65 / 0.90 を実機に並べて選ばれたのが 0.65 である —
+/// ダークで `rgb(176,124,16)`、その上の字は 2.83:1（確定色では 7.03:1）。
+/// 線は前線の 1 列だけでなく、通った後ろが乾くまでの 250 ms も濃いので、
+/// これ以上上げるとその帯の字が読めなくなる。
+pub const MARK_FLASH_BLEND: f32 = 0.65;
+
+/// **線は確定色の天井を超えていること。** これが崩れると「引かれる線」が
+/// 確定色に紛れて見えなくなるので、テストではなくビルドで止める。
+const _: () = assert!(MARK_FLASH_BLEND > MARK_BG_BLEND_CEILING);
+
+/// 線の濃さを一時的に変える環境変数。**暫定** — 選ばれたら消える。
+const FLASH_ENV: &str = "AKAPEN_MARK_FLASH";
+
+/// [`MARK_FLASH_BLEND`] を環境変数で上書きする（`AKAPEN_MARK_FLASH=0.9`）。
+/// **プロセスで 1 度だけ読む**（[`MarkVariant::from_env`] と同じ理由）。
+pub fn flash_blend() -> f32 {
+    static CACHED: OnceLock<f32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(FLASH_ENV)
+            .ok()
+            .and_then(|value| parse_flash_blend(&value))
+            .unwrap_or(MARK_FLASH_BLEND)
+    })
+}
+
+/// `0.0..=1.0` の小数だけを受ける（`--mark-blend` と同じ契約で、黙って
+/// clamp しない）。読めなければ `None`。
+fn parse_flash_blend(value: &str) -> Option<f32> {
+    let t: f32 = value.trim().parse().ok()?;
+    (0.0..=1.0).contains(&t).then_some(t)
+}
 
 /// **`AKAPEN_MARK_STYLE=c`（字を太く）**の地の濃さ。
 ///
@@ -434,10 +479,9 @@ impl DecorationStyles {
         Self {
             mark,
             faint_mark: Style::default().bg(mark_background(highlighter, MARK_BG_BLEND_FAINT)),
-            // **演出の出発点。** 天井（[`MARK_BG_BLEND_CEILING`]）の色で、
-            // 確定色より濃い。`MarkVariant::Deep` では確定色と一致するので
-            // 演出は「落ちない」— 見た目が既に天井だからである。
-            flash: mark_background(highlighter, MARK_BG_BLEND_CEILING),
+            // **演出の線の色。** [`MARK_FLASH_BLEND`] の色で、確定色より
+            // 濃い（`MarkVariant::Deep` でも線はさらに濃い）。
+            flash: mark_background(highlighter, flash_blend()),
             variant,
             dim_target,
             default_fg,
@@ -457,13 +501,12 @@ impl DecorationStyles {
         self.variant
     }
 
-    /// **演出の線の色。**
+    /// **演出で引かれる線の色。**
     ///
-    /// [`MARK_BG_BLEND_CEILING`]（0.40）の色で、確定色（[`Self::mark_bg`]）
-    /// より濃い。`marks_draw_effect` は**この色で線を引き、通った後ろを
-    /// 確定色へ戻す**ので、**「目立たないが読みやすい」確定色を変えずに、
-    /// 引かれる線の瞬間だけ強くする**ことができる（読み手の注文、
-    /// 2026-09-23）。
+    /// [`MARK_FLASH_BLEND`]（0.65）の色で、確定色（[`Self::mark_bg`]）より
+    /// 濃い。`marks_draw_effect` は**この色で線を引き、通った後ろを確定色へ
+    /// 戻す**ので、**「目立たないが読みやすい」確定色を変えずに、引かれる
+    /// 線の瞬間だけ強くする**ことができる（読み手の注文、2026-09-23）。
     ///
     /// **焼き込まない** — `--light` でも `--theme` でも同じ式で出る。
     pub fn mark_flash_bg(&self) -> Color {
@@ -1345,6 +1388,55 @@ mod tests {
         assert_eq!(MarkVariant::parse("f"), MarkVariant::TwoTone);
         assert_eq!(MarkVariant::parse(""), MarkVariant::Amber);
         assert_eq!(MarkVariant::parse("nonsense"), MarkVariant::Amber);
+    }
+
+    /// **引かれる線は、確定色より必ず濃い。** それが演出の全体の狙いで、
+    /// これが崩れると「線が引かれる」が見えなくなる。
+    ///
+    /// 天井（[`MARK_BG_BLEND_CEILING`] = 0.40）は**確定色**の話なので、
+    /// 線はそれを超えてよい — 0.65 を実機に並べて選んだ（読み手の注文、
+    /// 2026-09-23）。
+    #[test]
+    fn the_drawn_line_is_brighter_than_the_resting_mark() {
+        for light in [false, true] {
+            let hl = Highlighter::new(None, light);
+            let styles = DecorationStyles::from_theme_with_variant(
+                &hl,
+                Default::default(),
+                MarkVariant::Amber,
+            );
+            let page = hl.theme().settings.background.expect("a theme background");
+            let page = Color::Rgb(page.r, page.g, page.b);
+            let mark = styles.mark_bg();
+            let flash = styles.mark_flash_bg();
+            assert_eq!(
+                flash,
+                mark_background(&hl, MARK_FLASH_BLEND),
+                "light={light}: 線は式どおり"
+            );
+            // 「紙からどれだけ離れているか」で濃さを比べる。
+            let away = |c: Color| {
+                let (Color::Rgb(r, g, b), Color::Rgb(pr, pg, pb)) = (c, page) else {
+                    panic!("RGB")
+                };
+                (r as i32 - pr as i32).abs()
+                    + (g as i32 - pg as i32).abs()
+                    + (b as i32 - pb as i32).abs()
+            };
+            assert!(away(flash) > away(mark), "light={light}: 線が確定色より濃くない");
+        }
+    }
+
+    /// 線の濃さの上書きは `0.0..=1.0` の小数だけを受ける。
+    #[test]
+    fn the_temporary_flash_blend_parses_only_a_fraction() {
+        assert_eq!(parse_flash_blend("0.9"), Some(0.9));
+        assert_eq!(parse_flash_blend(" 1 "), Some(1.0));
+        assert_eq!(parse_flash_blend("0"), Some(0.0));
+        assert_eq!(parse_flash_blend("1.5"), None, "黙って clamp しない");
+        assert_eq!(parse_flash_blend("-0.1"), None);
+        assert_eq!(parse_flash_blend("x"), None);
+        assert_eq!(parse_flash_blend(""), None);
     }
 
     /// 既定のブレンド率で実際に出る色。ダークの値はユーザーが実機で
