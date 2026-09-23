@@ -261,6 +261,7 @@ pub(crate) fn on_help_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyMo
         app.config.reply,
         false,
         app.semantic_enabled(),
+        app.semantic_enabled() || app.lint.is_some(),
     )
         .len()
         .saturating_sub(overlay_visible_rows());
@@ -487,6 +488,7 @@ pub(crate) fn help_rows(
     reply: bool,
     _in_git: bool,
     semantic: bool,
+    review: bool,
 ) -> Vec<(&'static str, &'static str)> {
     let mut rows = vec![
         ("move", "j/k · g/G · PgUp/PgDn · ^u/^d"),
@@ -525,8 +527,10 @@ pub(crate) fn help_rows(
         // 問いを消す道。`f` の Esc（沈めるのを解く）とは別の段で、
         // 沈んでいれば先にそちらが取る（`crate::keys::MARKS_CLEAR_HINT`）。
         rows.push(("clear", crate::keys::MARKS_CLEAR_HINT));
-        // Review は marks の下、けれど同じ `--semantic` の段にある。
-        // **別機能だが、同じ層を使っている**ことがこの並びで読める。
+    }
+    // Review は marks の下にある（**別機能だが、同じ層を使いうる**ことが
+    // この並びで読める）。`--lint-cmd` だけのセッションでも出る。
+    if review {
         rows.push(("review", crate::keys::REVIEW_HINT));
     }
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
@@ -552,6 +556,7 @@ pub(crate) fn draw_help_overlay(f: &mut Frame, app: &App) {
         app.config.reply,
         false,
         app.semantic_enabled(),
+        app.semantic_enabled() || app.lint.is_some(),
     );
     let visible = overlay_visible_rows();
     // Scroll only when the reference overflows the panel; a reference
@@ -1064,13 +1069,16 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
 // j/k と Enter・Esc で閉じる）。違うのは行の中身と、accept / dismiss の
 // 2 本のキーだけである。
 
+/// 候補の出どころが 1 本も無いときの 1 行 — **何をすれば候補が出るか**。
+pub(crate) const NO_REVIEW_SOURCE: &str = "no review source — set --lint-cmd or enable a rule";
+
 /// 一覧を開く（`R`）。**ここが Review の遅延の起点である。**
 ///
 /// `--semantic <fixture>` では断る（[`App::review_enabled`]）— fixture は
 /// 1 つの問いへの固定の答えで、ルールの文面で聞き直す道が無い。
 pub(crate) fn open_review(app: &mut App) {
     if !app.review_enabled() {
-        app.flash_err("review needs --semantic-cmd");
+        app.flash_err(NO_REVIEW_SOURCE);
         return;
     }
     app.arm_review();
@@ -1217,10 +1225,14 @@ pub(crate) fn draw_review_overlay(f: &mut Frame, app: &App) {
 
     if total == 0 {
         lines.push(Line::from(""));
+        // lint が失敗したなら**「0 件」とは言わない**（形の違う出力は
+        // 「指摘が無い」ではない）。
         let message = if app.review_inflight > 0 {
-            " asking the analyser…"
+            " asking the analyser…".to_string()
+        } else if let Some(error) = app.review_lint_error.as_deref() {
+            format!(" {error}")
         } else {
-            " nothing to fix in this document"
+            " nothing to fix in this document".to_string()
         };
         lines.push(Line::from(Span::styled(message, dark_gray)));
         lines.push(Line::from(""));
@@ -1240,26 +1252,44 @@ pub(crate) fn draw_review_overlay(f: &mut Frame, app: &App) {
             continue;
         };
         let selected = *entry == app.overlay_cursor;
-        let label = app
-            .review_rules
-            .as_ref()
-            .and_then(|rules| rules.get(&candidate.rule))
-            .map(|rule| rule.label.clone())
-            .unwrap_or_else(|| candidate.rule.clone());
         // `L42` は候補の先頭行。範囲の候補も先頭だけを出す — 飛び先が
         // 分かればよく、桁が揃っている方が 9 本を上から読める。
+        //
+        // Jev のルールは `Filler 0.87`、lint は `<code>` だけ（`<source>/` は
+        // 落とす。一覧の幅は理由の文に回す）。
+        let tag = match &candidate.finding {
+            crate::review::Finding::Rule { score, .. } => {
+                let label = app
+                    .review_rules
+                    .as_ref()
+                    .and_then(|rules| rules.get(&candidate.rule))
+                    .map(|rule| rule.label.clone())
+                    .unwrap_or_else(|| candidate.rule.clone());
+                format!("{label} {score:.2}")
+            }
+            crate::review::Finding::Lint { .. } => candidate
+                .rule
+                .split_once('/')
+                .map_or(candidate.rule.as_str(), |(_, code)| code)
+                .to_string(),
+        };
         let head = format!(
-            "{}{} L{} · {} {:.2} · ",
+            "{}{} L{} · {} · ",
             if selected { "▸ " } else { "  " },
             candidate.mark(),
             candidate.lines.0,
-            label,
-            candidate.score,
+            tag,
         );
+        // Unit の先頭は 40 桁で足りるが、lint の理由の文は切ると意味が
+        // 読めないので、パネルの残り幅いっぱいまで使う。
+        let cols = match candidate.finding {
+            crate::review::Finding::Rule { .. } => REVIEW_HEAD_COLS,
+            crate::review::Finding::Lint { .. } => usize::MAX,
+        };
         let body = crate::review::head_of(
             &app.source.content,
             candidate,
-            inner.saturating_sub(head.width()).min(REVIEW_HEAD_COLS),
+            inner.saturating_sub(head.width()).min(cols),
         );
         // 見たものは沈める（`✓` も `–` も）。**残っているのは記録で
         // あって作業ではない**ので、Pending と同じ明るさで並ぶと、

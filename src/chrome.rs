@@ -1307,6 +1307,7 @@ mod footer_tests {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

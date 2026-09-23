@@ -27,6 +27,7 @@ mod marks_questions;
 mod overlay;
 mod reload;
 mod render;
+mod lint;
 mod review;
 mod review_contract;
 mod review_rules;
@@ -134,11 +135,18 @@ fn main() -> Result<()> {
                  \x20                   JSON instead of the built-in five (also\n\
                  \x20                   $XDG_CONFIG_HOME/akapen/marks-questions.json)\n\
                  \x20 --review-rules <file>  read the Review rules (R) from this JSON\n\
-                 \x20                   instead of the built-in three (also\n\
+                 \x20                   instead of the built-in three, all off by default (also\n\
                  \x20                   $XDG_CONFIG_HOME/akapen/review-rules.json)\n\
                  \x20                   Accepted Review comments are sent with a\n\
                  \x20                   rewrite contract first (built in; override\n\
                  \x20                   with $XDG_CONFIG_HOME/akapen/review-contract.md)\n\
+                 \x20 --lint-cmd <cmd>  let a linter find the Review candidates (R).\n\
+                 \x20                   Runs via sh in the document's directory with\n\
+                 \x20                   the document's absolute path appended; must\n\
+                 \x20                   print LSP diagnostics JSON on stdout (any exit\n\
+                 \x20                   code). See examples/lint/. Needs no\n\
+                 \x20                   --semantic-cmd. $AKAPEN_LINT_CMD is the\n\
+                 \x20                   default when this flag is absent\n\
                  \x20 --review-json     print the Review candidates as JSON and exit,\n\
                  \x20                   without starting the TUI (lines, rule, action\n\
                  \x20                   and score only — never the document text).\n\
@@ -511,6 +519,7 @@ fn run(config: Config) -> Result<()> {
     app.file_states = file_states;
     app.marks_questions = marks_questions;
     app.review_rules = review_rules;
+    app.lint = app.config.lint_cmd.as_deref().map(crate::lint::LintCommand::new);
     // 捨てた候補の置き場。決められない環境（HOME も XDG も無い）は
     // `None` で、セッション内だけ消えて記録は残らない。
     app.review_dismissed_store = review::DismissedStore::discover();
@@ -1002,7 +1011,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             }
             MouseEventKind::ScrollDown => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled())
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled(), app.semantic_enabled() || app.lint.is_some())
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = (app.overlay_cursor + 1).min(max);
@@ -1025,7 +1034,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             },
             MouseEventKind::ScrollUp => match app.overlay {
                 Some(Overlay::Help) => {
-                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled())
+                    let max = help_rows(app.esc_quit_enabled(), app.config.reply, false, app.semantic_enabled(), app.semantic_enabled() || app.lint.is_some())
                         .len()
                         .saturating_sub(overlay_visible_rows());
                     app.overlay_cursor = app.overlay_cursor.saturating_sub(1).min(max);
@@ -2738,9 +2747,10 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         }
         // **Review の一覧**（`R`）— 校正候補。`l` の隣に置いてあるのは、
         // どちらも「台帳を開く」キーだからである（`crate::keys::REVIEW_OPEN`）。
-        // 層の無いセッションでは他のキーと同じく黙って落ちる — 使えない
-        // 機能の断りを見せない、という marks と同じ作法である。
-        KeyCode::Char(crate::keys::REVIEW_OPEN) if app.semantic_enabled() => {
+        // 層も `--lint-cmd` も無いセッションでは他のキーと同じく黙って
+        // 落ちる — 使えない機能の断りを見せない、という marks と同じ作法
+        // である。**lint だけのセッションでは生きている**（意味層は要らない）。
+        KeyCode::Char(crate::keys::REVIEW_OPEN) if app.review_key_live() => {
             open_review(app);
         }
         KeyCode::Char('t') => {
@@ -3604,9 +3614,10 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         }
         // **Review の一覧**（`R`）— 校正候補。`l` の隣に置いてあるのは、
         // どちらも「台帳を開く」キーだからである（`crate::keys::REVIEW_OPEN`）。
-        // 層の無いセッションでは他のキーと同じく黙って落ちる — 使えない
-        // 機能の断りを見せない、という marks と同じ作法である。
-        KeyCode::Char(crate::keys::REVIEW_OPEN) if app.semantic_enabled() => {
+        // 層も `--lint-cmd` も無いセッションでは他のキーと同じく黙って
+        // 落ちる — 使えない機能の断りを見せない、という marks と同じ作法
+        // である。**lint だけのセッションでは生きている**（意味層は要らない）。
+        KeyCode::Char(crate::keys::REVIEW_OPEN) if app.review_key_live() => {
             open_review(app);
         }
         KeyCode::Char('t') => {
@@ -4010,6 +4021,7 @@ pub(crate) fn export_text(app: &App) -> String {
         &app.comments,
         app.review_rules.as_ref(),
         &review_contract::contract_text(),
+        &review_contract::lint_contract_text(),
     )
 }
 

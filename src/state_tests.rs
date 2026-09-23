@@ -84,6 +84,7 @@ use crate::comment::Selection;
             marks_questions: None,
             review_rules: None,
             review_json: false,
+            lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -133,6 +134,7 @@ use crate::comment::Selection;
             marks_questions: None,
             review_rules: None,
             review_json: false,
+            lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -432,12 +434,12 @@ use crate::comment::Selection;
 
     #[test]
     fn help_rows_reflect_the_esc_binding() {
-        let rows = help_rows(false, false, false, false);
+        let rows = help_rows(false, false, false, false, false);
         assert!(
             rows.iter().any(|(l, k)| *l == "quit" && *k == "q quit · Esc cancel"),
             "default help advertises Esc as cancel"
         );
-        let rows = help_rows(true, false, false, false);
+        let rows = help_rows(true, false, false, false, false);
         assert!(
             rows.iter().any(|(l, k)| *l == "quit" && *k == "Esc/q quit"),
             "esc-quit help advertises Esc/q as quit"
@@ -446,11 +448,11 @@ use crate::comment::Selection;
 
     #[test]
     fn help_advertises_review_navigation() {
-        let rows = help_rows(false, false, true, false);
+        let rows = help_rows(false, false, true, false, false);
         assert!(rows
             .iter()
             .any(|(l, k)| *l == "compare" && k.contains("a acknowledge")));
-        let rows = help_rows(false, true, true, false);
+        let rows = help_rows(false, true, true, false, false);
         assert!(!rows.iter().any(|(l, _)| *l == "compare"));
     }
 
@@ -458,7 +460,7 @@ use crate::comment::Selection;
     fn reply_mode_help_hides_file_navigation_and_edit() {
         // Reply mode: messages replace files — no file switching, no
         // edit, and reloads are automatic.
-        let rows = help_rows(false, true, false, false);
+        let rows = help_rows(false, true, false, false, false);
         assert!(
             !rows.iter().any(|(l, _)| *l == "file"),
             "no file navigation row in reply mode"
@@ -478,7 +480,7 @@ use crate::comment::Selection;
             "reply help advertises auto-reload"
         );
         // Non-reply mode keeps them.
-        let rows = help_rows(false, false, false, false);
+        let rows = help_rows(false, false, false, false, false);
         assert!(rows.iter().any(|(l, _)| *l == "file"));
         assert!(rows.iter().any(|(_, k)| k.contains("e edit")));
     }
@@ -837,6 +839,7 @@ use crate::comment::Selection;
             marks_questions: None,
             review_rules: None,
             review_json: false,
+            lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -892,6 +895,7 @@ use crate::comment::Selection;
             marks_questions: None,
             review_rules: None,
             review_json: false,
+            lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -934,6 +938,7 @@ use crate::comment::Selection;
             marks_questions: None,
             review_rules: None,
             review_json: false,
+            lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -1916,6 +1921,7 @@ use crate::comment::Selection;
             marks_questions: None,
             review_rules: None,
             review_json: false,
+            lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2031,6 +2037,7 @@ use crate::comment::Selection;
             marks_questions: None,
             review_rules: None,
             review_json: false,
+            lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2336,6 +2343,7 @@ use crate::comment::Selection;
             marks_questions: None,
             review_rules: None,
             review_json: false,
+            lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6045,6 +6053,7 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: vec![
             mark_at("重要", DecorationKind::SemanticMark),
@@ -6169,6 +6178,7 @@ fn a_dimmed_list_item_dims_its_marker_too() {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: vec![Decoration {
             range: first_item.range.clone(),
@@ -6247,6 +6257,7 @@ fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -6354,6 +6365,7 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -6640,7 +6652,7 @@ fn without_semantic_the_layer_keys_are_not_bound_at_all() {
     assert_eq!(app.marks_readout(40), None);
     app.mode = Mode::Source;
     assert!(
-        !crate::overlay::help_rows(false, false, false, app.semantic_enabled())
+        !crate::overlay::help_rows(false, false, false, app.semantic_enabled(), app.semantic_enabled())
             .iter()
             .any(|(label, _)| matches!(*label, "mark" | "amount" | "focus" | "marks")),
         "? ヘルプに意味層の行が出ている"
@@ -6659,7 +6671,7 @@ fn the_readout_appears_only_with_a_semantic_document() {
     app.marks_share = 40;
     assert_eq!(app.marks_readout(60), None);
     assert!(
-        !crate::overlay::help_rows(false, false, false, app.semantic_enabled())
+        !crate::overlay::help_rows(false, false, false, app.semantic_enabled(), app.semantic_enabled())
             .iter()
             .any(|(label, _)| *label == "amount"),
         "? ヘルプも、使えないキーを宣伝しない"
@@ -6685,7 +6697,7 @@ fn the_readout_appears_only_with_a_semantic_document() {
     app.mode = Mode::Source;
     assert_eq!(app.marks_readout(60), Some(readout));
     assert!(
-        crate::overlay::help_rows(false, false, false, true)
+        crate::overlay::help_rows(false, false, false, true, true)
             .iter()
             .any(|(label, keys)| *label == "amount" && keys.contains("-/+")),
         "? ヘルプにつまみの行が出る"
@@ -7217,6 +7229,7 @@ fn the_marks_projection_splits_one_source_line_into_two_styles() {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };

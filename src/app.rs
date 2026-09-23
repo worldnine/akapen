@@ -135,10 +135,19 @@ impl AnalysisChannel {
 pub(crate) struct ReviewMessage {
     /// [`App::review_generation`] の値。これが古ければ捨てる。
     pub(crate) generation: u64,
-    /// どのルールの答えか。**世代だけでは足りない** — 1 世代の中で有効な
-    /// ルールの数だけ答えが返ってくる。
-    pub(crate) rule: String,
-    pub(crate) result: Result<SemanticDocument, String>,
+    pub(crate) answer: ReviewAnswer,
+}
+
+/// 出どころ 1 本分の答え。**世代だけでは足りない** — 1 世代の中で、有効な
+/// ルールの数（＋ `--lint-cmd` の 1 本）だけ答えが返ってくる。
+pub(crate) enum ReviewAnswer {
+    /// Jev のルール 1 本の答え。
+    Rule {
+        rule: String,
+        result: Result<SemanticDocument, String>,
+    },
+    /// `--lint-cmd` の答え（[`crate::lint`]）。
+    Lint(Result<Vec<crate::lint::Diagnostic>, String>),
 }
 
 /// Review のワーカーが答える線。marks と同じく 1 セッション 1 本。
@@ -514,6 +523,12 @@ pub(crate) struct App {
     // （別機能だからで、テストがそれを押さえている）。
     /// ルール一式。層の無いセッションは読まないので `None` のまま。
     pub(crate) review_rules: Option<ReviewRules>,
+    /// `--lint-cmd`。**意味層が無くても** Review を立てる出どころである
+    /// （4 節「判定の出どころとしての linter」）。
+    pub(crate) lint: Option<crate::lint::LintCommand>,
+    /// 直前の lint が失敗した理由（`lint: output is not diagnostics JSON` など）。
+    /// 一覧が「0 件」と見せないために持つ。
+    pub(crate) review_lint_error: Option<String>,
     /// いま画面に出ている候補（**文書順**）。
     pub(crate) review_candidates: Vec<Candidate>,
     /// 何度 Review の解析を頼んだか。答えはこの値を名乗るものだけ通す
@@ -693,6 +708,8 @@ impl App {
             semantic_armed: false,
             marks_questions: None,
             review_rules: None,
+            lint: None,
+            review_lint_error: None,
             review_candidates: Vec::new(),
             review_generation: 0,
             review_inflight: 0,
@@ -1294,14 +1311,35 @@ impl App {
     // いるのは**判定器の一段の問い・Unit・境界・sha キャッシュ**だけで、
     // ここから marks の状態へ書く経路は 1 本も無い。
 
-    /// `R` が使えるか — 外部コマンドとルールが揃っているか。
+    /// `R` が使えるか — 候補の出どころが 1 本でもあるか。
     ///
-    /// `--semantic <fixture>` では使えない。fixture は 1 つの問いへの
+    /// 出どころは 2 つ: `--lint-cmd`（[`Self::lint`]）と、`--semantic-cmd`
+    /// の上で有効な Jev のルール（[`Self::review_rules_enabled`]）。
+    /// どちらも無ければ `R` は何をすれば候補が出るかを言って断る。
+    pub(crate) fn review_enabled(&self) -> bool {
+        self.lint.is_some() || self.review_rules_enabled()
+    }
+
+    /// `R` のキーが生きているか — 意味層か `--lint-cmd` のどちらかがあるか。
+    ///
+    /// [`Self::review_enabled`] より広い: 意味層はあるが有効なルールが
+    /// 無いときも `R` は届き、何をすれば候補が出るかを言って断る。
+    pub(crate) fn review_key_live(&self) -> bool {
+        self.semantic_enabled() || self.lint.is_some()
+    }
+
+    /// 走らせる Jev のルールがあるか — 外部コマンドと、有効なルールが
+    /// 揃っているか。
+    ///
+    /// `--semantic <fixture>` では走らない。fixture は 1 つの問いへの
     /// 固定の答えで、ルールの文面で聞き直す道が無いからである
     /// （[`Self::marks_question_is_fixed`] と同じ理由）。
-    pub(crate) fn review_enabled(&self) -> bool {
-        self.review_rules.is_some()
-            && matches!(self.semantic_source, Some(SemanticSource::Command(_)))
+    pub(crate) fn review_rules_enabled(&self) -> bool {
+        matches!(self.semantic_source, Some(SemanticSource::Command(_)))
+            && self
+                .review_rules
+                .as_ref()
+                .is_some_and(|rules| rules.enabled().next().is_some())
     }
 
     /// **`R` の押下。** 遅延の起点である。
@@ -1336,21 +1374,28 @@ impl App {
             return;
         }
         // provider は clone して先に手放す（下で `&mut self` を取る）。
-        let Some(SemanticSource::Command(provider)) = self.semantic_source.as_ref() else {
-            return;
+        let provider = match self.semantic_source.as_ref() {
+            Some(SemanticSource::Command(provider)) if self.review_rules_enabled() => {
+                Some(provider.clone())
+            }
+            _ => None,
         };
-        let provider = provider.clone();
-        if self.review_results.is_none() {
-            return;
-        }
-        let rules: Vec<crate::review_rules::Rule> = self
-            .review_rules
-            .as_ref()
-            .map(|rules| rules.enabled().cloned().collect())
-            .unwrap_or_default();
+        let rules: Vec<crate::review_rules::Rule> = match provider {
+            Some(_) => self
+                .review_rules
+                .as_ref()
+                .map(|rules| rules.enabled().cloned().collect())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let lint = self.lint.clone();
+        // 線は lint だけのセッション（意味層が無い）でもここで張る。
+        let channel = self.review_results.get_or_insert_with(ReviewChannel::new);
+        let tx = channel.tx.clone();
         self.review_generation += 1;
         self.review_candidates.clear();
         self.review_inflight = 0;
+        self.review_lint_error = None;
         self.refresh_review_decorations();
         // 一覧が開いたままなら、カーソルを先頭へ戻す。古い添字のままだと、
         // 新しい答えが届いたとき見てもいない候補を指している。
@@ -1358,29 +1403,43 @@ impl App {
             self.overlay_cursor = 0;
             self.overlay_offset = 0;
         }
-        if rules.is_empty() {
+        if rules.is_empty() && lint.is_none() {
             return;
         }
         // 捨てた記録はここで 1 度だけ読む（文書 1 つにつき 1 回）。
         self.load_dismissed();
         let generation = self.review_generation;
-        self.review_inflight = rules.len();
-        let Some(channel) = self.review_results.as_ref() else {
-            return;
-        };
-        for rule in rules {
-            let provider = provider.clone();
-            let tx = channel.tx.clone();
+        self.review_inflight = rules.len() + usize::from(lint.is_some());
+        if let Some(provider) = provider {
+            for rule in rules {
+                let provider = provider.clone();
+                let tx = tx.clone();
+                let source = self.source.content.clone();
+                let question = rule.question();
+                std::thread::spawn(move || {
+                    let result = provider
+                        .analyze(&source, &question)
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(ReviewMessage {
+                        generation,
+                        answer: ReviewAnswer::Rule {
+                            rule: question.id,
+                            result,
+                        },
+                    });
+                });
+            }
+        }
+        // linter はディスクのファイルを読む。画面の本文と食い違えば
+        // [`crate::lint::LintCommand::run`] が断る。
+        if let Some(lint) = lint {
+            let path = self.current_file_path().to_path_buf();
             let source = self.source.content.clone();
-            let question = rule.question();
             std::thread::spawn(move || {
-                let result = provider
-                    .analyze(&source, &question)
-                    .map_err(|e| e.to_string());
+                let result = lint.run(&path, &source);
                 let _ = tx.send(ReviewMessage {
                     generation,
-                    rule: question.id,
-                    result,
+                    answer: ReviewAnswer::Lint(result),
                 });
             });
         }
@@ -1424,77 +1483,103 @@ impl App {
             return; // 古い世代の答え。捨てる。
         }
         self.review_inflight = self.review_inflight.saturating_sub(1);
-        let rule = self
-            .review_rules
-            .as_ref()
-            .and_then(|rules| rules.get(&message.rule).cloned());
-        match (message.result, rule) {
-            (Ok(document), Some(rule)) => {
-                let dismissed = &self.review_dismissed;
-                let accepted = self.live_review_comments();
-                let fresh: Vec<Candidate> =
-                    crate::review::candidates_for(&document, &rule, &self.source.content)
-                        .into_iter()
-                        .filter(|c| {
-                            !dismissed.contains(&(c.rule.clone(), c.range.start, c.range.end))
-                        })
-                        .map(|mut c| {
-                            // いまの版に同じ指示のコメントが生きている（見届けた
-                            // reload で付け直した）なら、もう一度 `a` を押させない。
-                            if accepted.contains(&(c.rule.clone(), c.lines)) {
-                                c.state = CandidateState::Accepted;
-                            }
-                            c
-                        })
-                        .collect();
-                // 一覧が開いていれば、カーソルの下の候補を覚えておく。
-                // 並べ替えで前に候補が差し込まれると、添字のままの
-                // カーソルは別の候補を指し、`a` / `x` が見ていない行に
-                // 効く（ルールが 2 本以上のときに報告されたずれ）。
-                let under_cursor = (self.overlay == Some(crate::overlay::Overlay::Review))
-                    .then(|| self.review_candidates.get(self.overlay_cursor))
-                    .flatten()
-                    .map(|c| (c.rule.clone(), c.range.clone()));
-                self.review_candidates.extend(fresh);
-                // **文書順**に並べ直す。ルールは 1 本ずつ別のスレッドで
-                // 返ってくるので、届いた順に足すと順序が run ごとに変わる。
-                self.review_candidates.sort_by(|a, b| {
-                    a.range
-                        .start
-                        .cmp(&b.range.start)
-                        .then(a.range.end.cmp(&b.range.end))
-                        .then(a.rule.cmp(&b.rule))
-                });
-                if let Some((rule, range)) = under_cursor
-                    && let Some(index) = self
-                        .review_candidates
-                        .iter()
-                        .position(|c| c.rule == rule && c.range == range)
-                {
-                    self.overlay_cursor = index;
-                    crate::overlay::keep_overlay_cursor_visible(self);
+        let found: Vec<Candidate> = match message.answer {
+            ReviewAnswer::Rule { rule, result } => {
+                let rule = self
+                    .review_rules
+                    .as_ref()
+                    .and_then(|rules| rules.get(&rule).cloned());
+                match (result, rule) {
+                    (Ok(document), Some(rule)) => {
+                        crate::review::candidates_for(&document, &rule, &self.source.content)
+                    }
+                    (Err(e), _) => {
+                        self.flash_err(e);
+                        return;
+                    }
+                    // ルールが消えている（読み直された）。答えの置き場が無い。
+                    (Ok(_), None) => return,
                 }
-                // 一覧から直しに行って戻ったところなら、答えが**揃った**
-                // ときに、直した箇所（か、その次）へカーソルを置く。
-                if self.review_inflight == 0
-                    && let Some(target) = self.review_cursor_target.take()
-                    && self.overlay == Some(crate::overlay::Overlay::Review)
-                    && !self.review_candidates.is_empty()
-                {
-                    self.overlay_cursor = self
-                        .review_candidates
-                        .iter()
-                        .position(|c| c.range.end > target)
-                        .unwrap_or(self.review_candidates.len() - 1);
-                    crate::overlay::keep_overlay_cursor_visible(self);
-                }
-                self.refresh_review_decorations();
-                self.start_readout_flash();
             }
-            (Err(e), _) => self.flash_err(e),
-            // ルールが消えている（読み直された）。答えの置き場が無い。
-            (Ok(_), None) => {}
+            ReviewAnswer::Lint(Ok(diagnostics)) => {
+                crate::lint::candidates(diagnostics, &self.source.content)
+            }
+            ReviewAnswer::Lint(Err(e)) => {
+                // **「0 件」と見せない。** 一覧は理由を出し、フラッシュも同じ 1 行。
+                self.review_lint_error = Some(e.clone());
+                self.flash_err(e);
+                return;
+            }
+        };
+        let dismissed = &self.review_dismissed;
+        let accepted = self.live_review_comments();
+        let fresh: Vec<Candidate> = found
+            .into_iter()
+            .filter(|c| !dismissed.contains(&(c.rule.clone(), c.range.start, c.range.end)))
+            .map(|mut c| {
+                // いまの版に同じ指示のコメントが生きている（見届けた
+                // reload で付け直した）なら、もう一度 `a` を押させない。
+                if accepted.contains(&(c.rule.clone(), c.lines)) {
+                    c.state = CandidateState::Accepted;
+                }
+                c
+            })
+            .collect();
+        // 一覧が開いていれば、カーソルの下の候補を覚えておく。
+        // 並べ替えで前に候補が差し込まれると、添字のままの
+        // カーソルは別の候補を指し、`a` / `x` が見ていない行に
+        // 効く（ルールが 2 本以上のときに報告されたずれ）。
+        let under_cursor = (self.overlay == Some(crate::overlay::Overlay::Review))
+            .then(|| self.review_candidates.get(self.overlay_cursor))
+            .flatten()
+            .map(|c| (c.rule.clone(), c.range.clone()));
+        self.review_candidates.extend(fresh);
+        // **文書順**に並べ直す。出どころは 1 本ずつ別のスレッドで
+        // 返ってくるので、届いた順に足すと順序が run ごとに変わる。
+        // Jev のルールと lint の候補も、ここで同じ一覧に文書順で混ざる。
+        self.review_candidates.sort_by(|a, b| {
+            a.range
+                .start
+                .cmp(&b.range.start)
+                .then(a.range.end.cmp(&b.range.end))
+                .then(a.rule.cmp(&b.rule))
+        });
+        if let Some((rule, range)) = under_cursor
+            && let Some(index) = self
+                .review_candidates
+                .iter()
+                .position(|c| c.rule == rule && c.range == range)
+        {
+            self.overlay_cursor = index;
+            crate::overlay::keep_overlay_cursor_visible(self);
         }
+        // 一覧から直しに行って戻ったところなら、答えが**揃った**
+        // ときに、直した箇所（か、その次）へカーソルを置く。
+        if self.review_inflight == 0
+            && let Some(target) = self.review_cursor_target.take()
+            && self.overlay == Some(crate::overlay::Overlay::Review)
+            && !self.review_candidates.is_empty()
+        {
+            // 直した行より上から始まる候補は後回しにする。linter には文書
+            // 全体を範囲にする指摘があり（文書の品質の総評など）、それが
+            // 「直した位置を覆う最初の候補」として毎回カーソルを先頭へ攫う。
+            let line_start = self
+                .source
+                .content
+                .get(..target)
+                .and_then(|head| head.rfind('\n'))
+                .map_or(0, |at| at + 1);
+            let covers = |c: &Candidate| c.range.end > target;
+            self.overlay_cursor = self
+                .review_candidates
+                .iter()
+                .position(|c| covers(c) && c.range.start >= line_start)
+                .or_else(|| self.review_candidates.iter().position(covers))
+                .unwrap_or(self.review_candidates.len() - 1);
+            crate::overlay::keep_overlay_cursor_visible(self);
+        }
+        self.refresh_review_decorations();
+        self.start_readout_flash();
     }
 
     /// 候補の下線を作り直す。**Pending だけが下線を持つ。**
@@ -1544,7 +1629,7 @@ impl App {
             return false;
         }
         let (start, end) = candidate.lines;
-        let text = crate::review::comment_text(&candidate.rule, candidate.score);
+        let text = candidate.comment_text();
         // 本文は該当行そのもの（コメントの `lines` は常に本文の写しで、
         // 候補の範囲ではない — 送り先が行で照合するため）。
         let lines = self
@@ -1580,7 +1665,7 @@ impl App {
                     && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
             })
             .filter_map(|c| {
-                let (rule, _) = crate::review::parse_comment_text(&c.text)?;
+                let rule = crate::review::candidate_comment_rule(&c.text)?;
                 Some((rule, (c.start, c.end)))
             })
             .collect()
@@ -1610,10 +1695,8 @@ impl App {
         let mut resolved = 0;
         let mut kept = Vec::with_capacity(self.comments.len());
         for mut comment in std::mem::take(&mut self.comments) {
-            let rule = match crate::review::parse_comment_text(&comment.text) {
-                Some((rule, _)) if comment.file_path == current && comment.revision.is_none() => {
-                    rule
-                }
+            let rule = match crate::review::candidate_comment_rule(&comment.text) {
+                Some(rule) if comment.file_path == current && comment.revision.is_none() => rule,
                 _ => {
                     kept.push(comment);
                     continue;

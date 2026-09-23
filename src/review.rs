@@ -12,6 +12,12 @@
 //! 判定器 `jev-annotate.py` は 1 行も変えていない — ルールの `text` を
 //! 問いとして渡すだけである。
 //!
+//! # 出どころは 2 つ
+//!
+//! 候補は Jev のルール（下の閾値）か、`--lint-cmd` の linter（[`crate::lint`]）が
+//! 出す。違うのは [`Finding`] の中身（score と直し方 / 理由の文）と一覧の行・
+//! コメントの本文だけで、範囲・dismiss・差分越しの引き継ぎ・`e` は同じ道を通る。
+//!
 //! # 上位 N % ではなく閾値
 //!
 //! marks のつまみは「上から何 %」だが、Review はルールごとの
@@ -64,6 +70,29 @@ pub(crate) enum CandidateState {
     Dismissed,
 }
 
+/// 候補を**誰が**拾ったか、とその出どころに固有の中身。
+///
+/// Jev のルールは score と直し方を持ち、linter は理由の文（`message`）を
+/// 持つ。一覧の行・コメントの本文・送る契約はここで分かれ、それ以外
+/// （範囲・dismiss・差分越しの引き継ぎ・`e`）は同じ道を通る。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Finding {
+    /// `review-rules.json` のルール（Jev）。
+    Rule {
+        /// 直し方（ルールから写す。段階 2 の送り先が読む）。
+        action: Action,
+        /// この Unit の score。
+        score: f32,
+    },
+    /// `--lint-cmd` の指摘（[`crate::lint`]）。
+    Lint {
+        /// linter の理由の文。一覧とコメントに出る。
+        message: String,
+        /// LSP の severity。**今は読むだけ**（色分けに使わない）。
+        severity: Option<u8>,
+    },
+}
+
 /// 校正候補 1 つ。
 ///
 /// **diagnostics の形に寄せてある**（範囲・行・出所・重さ）ので、後で
@@ -72,16 +101,15 @@ pub(crate) enum CandidateState {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Candidate {
     /// Unit が占めるバイト範囲（先頭 Atom の始まり〜末尾 Atom の終わり）。
+    /// lint の指摘なら指摘の範囲そのもの。
     /// **同一性はここで決まる** — `dismissed.jsonl` の照合もこの範囲である。
     pub(crate) range: Range<usize>,
     /// 1 始まりの行（[`crate::comment::Comment`] と同じ数え方）。
     pub(crate) lines: (u32, u32),
-    /// どのルールが拾ったか。
+    /// どのルールが拾ったか。lint なら `<source>/<code>`。
     pub(crate) rule: RuleId,
-    /// 直し方（ルールから写す。段階 2 の送り先が読む）。
-    pub(crate) action: Action,
-    /// この Unit の score。
-    pub(crate) score: f32,
+    /// 出どころに固有の中身。
+    pub(crate) finding: Finding,
     pub(crate) state: CandidateState,
     /// この Unit の Atom の範囲（文書順）。
     ///
@@ -102,6 +130,14 @@ impl Candidate {
             CandidateState::Pending => " ",
             CandidateState::Accepted => "✓",
             CandidateState::Dismissed => "–",
+        }
+    }
+
+    /// accept したときのコメントの本文（[`comment_text`] / [`lint_comment_text`]）。
+    pub(crate) fn comment_text(&self) -> String {
+        match &self.finding {
+            Finding::Rule { score, .. } => comment_text(&self.rule, *score),
+            Finding::Lint { message, .. } => lint_comment_text(&self.rule, message),
         }
     }
 }
@@ -131,6 +167,44 @@ pub(crate) fn parse_comment_text(text: &str) -> Option<(RuleId, f32)> {
         return None;
     }
     Some((rule.to_string(), score.parse().ok()?))
+}
+
+/// lint の指摘を accept したコメントの本文。**形はここ 1 か所である。**
+///
+/// ```text
+/// lint: textlint/ja-no-weak-phrase — 弱い表現: "かも" が使われています。
+/// ```
+///
+/// 複数行の `message`（`理由:` `修正:` を続ける linter がある）は 1 行に
+/// 畳む — コメントは行の範囲と 1 対 1 で、送る文面の中で次の指摘と
+/// 見分けられなければならない。
+pub(crate) fn lint_comment_text(rule: &str, message: &str) -> String {
+    format!("lint: {rule} — {}", fold(message))
+}
+
+/// [`lint_comment_text`] の逆。形に合わなければ `None`（人の書いた赤入れ）。
+pub(crate) fn parse_lint_comment_text(text: &str) -> Option<(RuleId, String)> {
+    let rest = text.strip_prefix("lint: ")?;
+    let (rule, message) = rest.split_once(" — ")?;
+    if rule.is_empty() || rule.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((rule.to_string(), message.to_string()))
+}
+
+/// Review が作ったコメント（Jev のルールか lint か）なら、その rule。
+///
+/// **差分越しの片付け・付け直しはこれで見分ける**
+/// （[`crate::app::App::settle_review_comments`]）。人の赤入れは `None`。
+pub(crate) fn candidate_comment_rule(text: &str) -> Option<RuleId> {
+    parse_comment_text(text)
+        .map(|(rule, _)| rule)
+        .or_else(|| parse_lint_comment_text(text).map(|(rule, _)| rule))
+}
+
+/// 改行と連続する空白を 1 つの空白に畳む。
+pub(crate) fn fold(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 注釈 1 つ分の候補（文書順）。
@@ -169,8 +243,10 @@ pub(crate) fn candidates_for(
                 range: first..last,
                 lines: lines_at(&starts, &(first..last)),
                 rule: rule.id.clone(),
-                action: rule.action,
-                score,
+                finding: Finding::Rule {
+                    action: rule.action,
+                    score,
+                },
                 state: CandidateState::Pending,
                 atoms,
             })
@@ -203,13 +279,14 @@ pub(crate) fn lines_at(starts: &[usize], range: &Range<usize>) -> (u32, u32) {
 ///
 /// 改行と連続する空白は 1 つの空白に畳む — 一覧は 1 行なので、Unit が
 /// 複数行にまたがっていても 1 行に見えなければならない。
+///
+/// **lint の候補は本文ではなく理由（`message`）を見せる。** 指摘の範囲は
+/// 「かも」の 2 字のように短く、本文の先頭では何を言われたのか分からない。
 pub(crate) fn head_of(source: &str, candidate: &Candidate, cols: usize) -> String {
-    let slice = source
-        .get(candidate.range.clone())
-        .unwrap_or_default()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let slice = match &candidate.finding {
+        Finding::Rule { .. } => fold(source.get(candidate.range.clone()).unwrap_or_default()),
+        Finding::Lint { message, .. } => fold(message),
+    };
     crate::overlay::clip_if_needed(&slice, cols)
 }
 
@@ -405,13 +482,17 @@ pub(crate) fn to_json(source_sha: &str, candidates: &[Candidate]) -> Result<Stri
     let report = JsonReport {
         version: 1,
         source_sha: source_sha.to_string(),
+        // lint の候補は `--review-json` に来ない（判定器の経路だけが呼ぶ）。
         candidates: candidates
             .iter()
-            .map(|c| JsonCandidate {
-                lines: [c.lines.0, c.lines.1],
-                rule: c.rule.clone(),
-                action: c.action.as_str(),
-                score: c.score,
+            .filter_map(|c| match c.finding {
+                Finding::Rule { action, score } => Some(JsonCandidate {
+                    lines: [c.lines.0, c.lines.1],
+                    rule: c.rule.clone(),
+                    action: action.as_str(),
+                    score,
+                }),
+                Finding::Lint { .. } => None,
             })
             .collect(),
     };
@@ -498,7 +579,13 @@ mod tests {
         let doc = document(SOURCE, [0.9, 0.0, 0.0]);
         let got = candidates_for(&doc, &filler(), SOURCE);
         assert_eq!(got[0].rule, "filler");
-        assert_eq!(got[0].action, Action::Delete);
+        assert_eq!(
+            got[0].finding,
+            Finding::Rule {
+                action: Action::Delete,
+                score: 0.9
+            }
+        );
         assert_eq!(got[0].state, CandidateState::Pending);
         assert_eq!(got[0].atoms.len(), 1);
     }
@@ -529,6 +616,23 @@ mod tests {
     fn the_comment_body_is_rule_and_score_to_two_places() {
         assert_eq!(comment_text("filler", 0.8712), "review: filler (0.87)");
         assert_eq!(comment_text("hedge", 1.0), "review: hedge (1.00)");
+    }
+
+    #[test]
+    fn the_lint_comment_body_reads_back_folded_to_one_line() {
+        let text = lint_comment_text("textlint/ja-no-mixed-period", "文末が\"。\"で終わっていません。\n理由: 句点");
+        assert_eq!(
+            text,
+            "lint: textlint/ja-no-mixed-period — 文末が\"。\"で終わっていません。 理由: 句点"
+        );
+        assert_eq!(
+            candidate_comment_rule(&text).as_deref(),
+            Some("textlint/ja-no-mixed-period")
+        );
+        assert_eq!(candidate_comment_rule("review: filler (0.87)").as_deref(), Some("filler"));
+        for other in ["lint: ここは要らない", "lint:  — x", "lint: a b — x", "ここは lint: x — y"] {
+            assert_eq!(candidate_comment_rule(other), None, "{other}");
+        }
     }
 
     #[test]
