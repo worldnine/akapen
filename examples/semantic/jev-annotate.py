@@ -32,11 +32,13 @@ Jev は question を**並列・独立に**評価するので、ラウンド 2 �
 
 **どのラウンドも 1 段である**（設計書「Jev への問いは 1 段に保つ」）。前の
 答えを次の問いの**前提に差し込む**連鎖は無い — ラウンド 3 が前の答えを使うのは
-「どの Unit に聞くか」の絞り込みだけで、問いの文面は Unit の本文しか見ない。
+「どの Unit に聞くか」の絞り込みだけで、question に入るのはいまの問いの文面と
+Unit の本文だけである（問いの文面は akapen が送ってきた入力で、前の答えではない）。
 
 **問いの文面は akapen が送ってくる。** 正本は akapen 側の
-`assets/marks-questions.json` 1 か所で、このスクリプトは枠（`MARKS_FRAME`）と
-本文を足すだけの汎用の器である。2 か所に置くとずれる。
+`assets/marks-questions.json` 1 か所で、このスクリプトは枠（スコアは
+`MARKS_FRAME`、核は `CORE_FRAME`）と本文を足すだけの汎用の器である。
+2 か所に置くとずれる。
 
 akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、3 ラウンドは
 このスクリプトの内部事情である。
@@ -171,7 +173,8 @@ BOUNDARY_CRITERIA = {
 
 SAME, NEW = "same_unit", "new_unit"
 
-#: 核（MARKED を絞る先）を選ばせる question の文面。
+#: 核（MARKED を絞る先）を選ばせる question の枠。**いまの問いの文面は
+#: ここに無い** — [`CORE_FRAME`] で後ろに付ける（[`core_instructions`]）。
 #:
 #: **Unit の本文をここに書かない。** 選択肢そのものが Unit の全文になるので、
 #: instructions にも本文を入れると同じテキストを 2 回送ることになり、
@@ -179,39 +182,71 @@ SAME, NEW = "same_unit", "new_unit"
 #:
 #: 「重要な部分はどれか」とは聞かない。それだと「どれも重要」という答え方が
 #: できてしまい、Unit を丸ごと光らせていた元の状態に戻る。**1 つへ強制的に
-#: 倒す問い方**でなければならない。
+#: 倒す問い方**でなければならない（「いちばんよく当てはまる」）。
 #:
-#: ## なぜ「損失ベース」なのか
+#: ## いまの問いで聞く（2026-09-24）
 #:
-#: 旧文面は「このまとまりから **1 か所だけ**読むとしたら、どこを読めば要点が
-#: 取れるか」だった。これだと
+#: 核は光る Unit の中をさらに同じ軸で絞る操作である。**軸を揃えるのが筋**で、
+#: 揃える先は**スコアを付けたのと同じ問い**である。スコアのラウンドは Unit を
+#: 「対象」として問いの文面に照らしているので、核は Unit の各部分を「対象」と
+#: して**同じ文面**に照らす。
 #:
-#: - 後続をまとめている**導入文**（「方針は次のとおり。」のような、後ろを指すだけの文）
-#: - その節の**主題そのもののラベル**
+#: 旧文面は「このまとまりの中で、これを読み飛ばすと要点を失うのはどれか」で
+#: **問いにかかわらず固定**だった。「軸を揃えている」つもりで、揃っていたのは
+#: 定型の essential だけだった — numbers で光った Unit でも、核は数字を含まない
+#: 「要点」の文を選ぶ。`showcase` のラベルでは、つまみ 100 % でも取りこぼした
+#: 14 件（numbers 9・decide 3・unsettled 2）が全部「Unit は光っているが核が
+#: 同じ Unit の別の文」だった（`examples/semantic/measurements/unit-granularity.md`
+#: 1 節）。この文面に直すと 8 件（5・1・2）に減り、残りのうち 7 件は核の選んだ
+#: 文も問いに答えている — 1 Unit から光るのは 1 文なので、もう片方が光らない
+#: （`core-question.md`）。Review のルール（Filler など）も同じ経路を通るので、
+#: 旧文面は「中身の無い文」で光った Unit の中から「要点の文」を選ばせていた
+#: （こちらは測っていない）。
 #:
-#: が選ばれる。**Jev は問いに正しく答えている** — 「1 か所だけ読んで概要を
-#: 掴む」なら導入文が正解である。悪いのは問いの方で、我々が欲しいのは
-#: 「概要への入口」ではなく「**落とすと取り違える中身**」だった。
+#: **1 段のままである。** 問いの文面は akapen が送ってきた入力であって、
+#: 前のラウンドの答えではない。前の答えが決めるのは「どの Unit に聞くか」
+#: だけで、そこは変えていない。**問いごとの文面をここに書かない**のも同じで、
+#: 正本は akapen 側の `assets/marks-questions.json` 1 か所のまま、判定器は枠を
+#: 持つだけである。
 #:
-#: だから損失ベースにする。設計書 `docs/design/semantic-reading-layer.md` が
-#: 「Jev にさせる小さな意味判断」として挙げる例は**すべてこの形**である
-#: （「ここを飛ばすと要点を失う？」「これは主要な主張を支えている？」）。
-#: 定型「要点」の文面（`assets/marks-questions.json` の `essential`）も
-#: 「落とすと文書の要点、結論、制約、未決の論点や宿題などを取り違える
-#: 可能性が高い」という損失の言い方をしている。
-#: 核は光る Unit の中をさらに同じ軸で絞る操作なので、**軸を揃えるのが筋**で
-#: あって、ここだけ「1 か所だけ読むなら」という別の軸を混ぜる理由が無い。
+#: 問いの文面はどれも「下の「対象」は、…」で始まる（[`MARKS_FRAME`] と組む
+#: Noul の主張の形）。枠の側で「それぞれを「対象」として」と先に言うので、
+#: 同じ文面が Choice の中でもそのまま読める。括弧を問いの文面と同じ「」に
+#: しているのはそのためである。
 #:
-#: 損失ベースの文面は**前任者（`corequestion`）の実測で効いていた** — KEEP
-#: 3/3、決定事項の Unit の核選択にも効いた。実装されなかったのは合格条件の
-#: 置き方が誤っていたためで（落ちるべき項目がそもそもラウンド 3 に到達して
-#: いなかったので、文面をどう変えても満たせなかった）、文面が否定されたわけ
-#: ではない。**その実測は引き継いだ記録であって、ここで取り直したものではない。**
+#: ## 損失ベースは問いの文面の側に残っている
+#:
+#: 旧々文面は「このまとまりから **1 か所だけ**読むとしたら、どこを読めば要点が
+#: 取れるか」で、後続をまとめる**導入文**や節の**主題そのもののラベル**が
+#: 選ばれた。**Jev は問いに正しく答えていた** — 「1 か所だけ読んで概要を
+#: 掴む」なら導入文が正解である。欲しいのは「概要への入口」ではなく「**落と
+#: すと取り違える中身**」で、2026-09-21 に損失の言い方へ変えた（前任者
+#: `corequestion` の実測の引き継ぎで、ここで取り直した数字ではない）。
+#: 定型とルールの文面はどれも「ここを落とすと…取り違える / 失わない」という
+#: 損失の言い方をしているので、問いの文面をそのまま入れれば損失ベースも
+#: そのまま残る。枠に「1 か所だけ読むなら」を戻さないこと。
+#:
+#: 問いの文面のぶん question は長くなる（定型とルールで 67〜194 字、実測で
+#: 核の question 1 問あたり約 165 tokens）。32k の側（[`core_fits`]）はそれも
+#: 数える。実測は `examples/semantic/measurements/core-question.md`。
 CORE_INSTRUCTIONS = (
     "次の選択肢は、この文書の中の連続した 1 つのまとまりを構成する各部分の"
-    "本文である。このまとまりの中で、**これを読み飛ばすと要点を失う**のは"
-    "どれか。"
+    "本文である。それぞれを「対象」として下の説明に照らしたとき、"
+    "**いちばんよく当てはまる**のはどれか。"
 )
+
+#: 核の question で問いの文面を挟む枠。[`MARKS_FRAME`] と同じ形で、中身が
+#: Unit の本文ではなく問いの文面になる。
+CORE_FRAME = "\n\n――― 説明 ―――\n{text}\n―――――――――"
+
+
+def core_instructions(text: str) -> str:
+    """核の question の instructions — 枠 + いまの問いの文面。
+
+    **スコアのラウンドと同じ文面を入れる**（[`marks_questions`] が Noul に
+    入れているもの）。Unit の本文は入れない — 選択肢がそれである。
+    """
+    return CORE_INSTRUCTIONS + CORE_FRAME.format(text=text)
 
 #: 1 question に並べる選択肢の上限。これを超える Unit には核を聞かない
 #: （核が空 = 絞り込み無し = Unit 全体が MARKED という従来の表示に戻る）。
@@ -667,7 +702,7 @@ def core_candidates(atoms: list[dict], unit: dict) -> dict:
     }
 
 
-def core_fits(options: dict, budget: RequestBudget) -> bool:
+def core_fits(options: dict, budget: RequestBudget, text: str) -> bool:
     """この選択肢の集合が 1 question として送れるか（見積もり）。
 
     見るのは `pair`（32k の側）である。**`whole` ではない** — 核 question が
@@ -675,8 +710,11 @@ def core_fits(options: dict, budget: RequestBudget) -> bool:
     「`state` とこの question の 2 つだけで 32k を超える」問題だからで、
     そこは分割で救えない（[`RequestBudget`]）。1 リクエストに並べきれない
     ぶんは [`plan_chunks`] が別のリクエストへ回す。
+
+    **送るのと同じ instructions で見積もる**（[`core_instructions`]）。問いの
+    文面を抜いて数えると、そのぶん小さく出て 32k の側を踏み越える。
     """
-    question = {"type": "choice", "instructions": CORE_INSTRUCTIONS, "criteria": options}
+    question = {"type": "choice", "instructions": core_instructions(text), "criteria": options}
     return question_tokens(question) <= budget.pair
 
 
@@ -702,10 +740,14 @@ def assign_lone_cores(atoms: list[dict], units: list[dict]) -> None:
             unit["jev"]["core_by"] = "rule:only_prose_atom"
 
 
-def core_questions(atoms: list[dict], units: list[dict], budget: RequestBudget) -> dict:
+def core_questions(
+    atoms: list[dict], units: list[dict], budget: RequestBudget, text: str
+) -> dict:
     """ラウンド 3 の questions のうち核の分。
 
     選択肢は Unit を構成する散文 Atom の本文そのもので、キーは `atom:<index>`。
+    instructions は枠といまの問いの文面 `text`（[`core_instructions`]）で、
+    **スコアのラウンドと同じ文面**である。
 
     **候補が 1 つの Unit には聞かない** — 答えが決まっているので
     [`assign_lone_cores`] が先に埋めている。**散文が 1 つも無い Unit にも
@@ -717,16 +759,17 @@ def core_questions(atoms: list[dict], units: list[dict], budget: RequestBudget) 
     全体が MARKED になる — 絞り込めないだけで、注釈としては壊れない安全側の
     振る舞いである。
     """
+    instructions = core_instructions(text)
     questions = {}
     for unit in units:
         if not wants_core(unit):
             continue
         options = core_candidates(atoms, unit)
-        if len(options) < 2 or not core_fits(options, budget):
+        if len(options) < 2 or not core_fits(options, budget, text):
             continue
         questions[f"core:{unit['id']}"] = {
             "type": "choice",
-            "instructions": CORE_INSTRUCTIONS,
+            "instructions": instructions,
             "criteria": options,
         }
     return questions
@@ -1413,8 +1456,8 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
     受け持つ（`measurements/marks-mode.md`）。
 
     **問いの連鎖は無い。** 核のラウンドは「どの Unit に聞くか」を前の答えで
-    絞るだけで、問いの文面は Unit の本文しか見ない（設計書「Jev への問いは
-    1 段」）。
+    絞るだけで、question に入るのはスコアと同じ問いの文面と Unit の本文だけ
+    である（設計書「Jev への問いは 1 段」。[`core_instructions`]）。
     """
     state = request.get("source") or ""
     atoms = request.get("atoms") or []
@@ -1498,7 +1541,7 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
         }
         for n, ix in enumerate(units, start=1)
     ]
-    questions = core_questions(atoms, provisional, budget)
+    questions = core_questions(atoms, provisional, budget, text)
     if questions:
         third = ask(questions, "core")
         for key in unsent.get("core", ()):
@@ -1586,7 +1629,7 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
         {"id": f"u{number}", "atoms": indices, "wants_core": True, "jev": {}}
         for number, indices in enumerate(units, start=1)
     ]
-    third = core_questions(atoms, above_floor, budget)
+    third = core_questions(atoms, above_floor, budget, text)
 
     rounds = []
     for number, questions in enumerate((first, second, third), start=1):

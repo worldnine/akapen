@@ -345,8 +345,17 @@ class CoreQuestionTest(unittest.TestCase):
 
     SOURCE = "結論\n\n採用する方式は差分配信である。帯域は 3 割減る見込み。\n"
 
-    def ask(self, units):
-        return jev.core_questions(self.ATOMS, units, jev.RequestBudget.estimated(self.SOURCE))
+    #: akapen が送ってくる問いの文面（定型 numbers と同じ書き出し）。
+    QUESTION = "下の「対象」は、期限・金額・数量のいずれかを含んでいる箇所である。"
+
+    def ask(self, units, text=QUESTION):
+        return jev.core_questions(
+            self.ATOMS, units, jev.RequestBudget.estimated(self.SOURCE), text
+        )
+
+    @staticmethod
+    def budget():
+        return jev.RequestBudget.estimated("短い。")
 
     def test_a_marked_unit_offers_its_prose_atoms_as_choices(self):
         # 見出しは候補に入らない（「1 か所だけ読むなら」の答えにならない）。
@@ -390,14 +399,14 @@ class CoreQuestionTest(unittest.TestCase):
             atom(1, "table_row", "| 応答 | 1.2 秒 |"),
         ]
         unit = {"id": "u1", "atoms": [0, 1], "wants_core": True, "jev": {}}
-        self.assertEqual(jev.core_questions(atoms, [unit], "| 項目 | 値 |"), {})
+        self.assertEqual(jev.core_questions(atoms, [unit], self.budget(), self.QUESTION), {})
         jev.assign_lone_cores(atoms, [unit])
         self.assertEqual(unit["core_atoms"], [1])
 
     def test_a_unit_with_no_prose_is_not_asked(self):
         atoms = [atom(0, "heading", "## 設定例"), atom(1, "code_block", "```\nx\n```")]
         unit = {"id": "u1", "atoms": [0, 1], "wants_core": True, "jev": {}}
-        self.assertEqual(jev.core_questions(atoms, [unit], "## 設定例"), {})
+        self.assertEqual(jev.core_questions(atoms, [unit], self.budget(), self.QUESTION), {})
         jev.assign_lone_cores(atoms, [unit])
         # 核が付かないので Unit 全体が MARKED になる（安全側）。
         self.assertNotIn("core_atoms", unit)
@@ -406,7 +415,7 @@ class CoreQuestionTest(unittest.TestCase):
         # 聞かないだけだと核が空になり、見出しごと MARKED に戻ってしまう。
         atoms = [atom(0, "heading", "## 結論"), atom(1, "sentence", "差分配信にする。")]
         unit = {"id": "u1", "atoms": [0, 1], "wants_core": True, "jev": {}}
-        self.assertEqual(jev.core_questions(atoms, [unit], "## 結論"), {})
+        self.assertEqual(jev.core_questions(atoms, [unit], self.budget(), self.QUESTION), {})
         jev.assign_lone_cores(atoms, [unit])
         self.assertEqual(unit["core_atoms"], [1])
         self.assertEqual(unit["jev"]["core_by"], "rule:only_prose_atom")
@@ -417,20 +426,48 @@ class CoreQuestionTest(unittest.TestCase):
         question = self.ask(self.units())["core:u1"]
         for text in question["criteria"].values():
             self.assertNotIn(text, question["instructions"])
-        self.assertIn("読み飛ばす", question["instructions"])
 
-    def test_the_core_question_is_phrased_as_a_loss_not_as_a_single_read(self):
-        # 旧文面「1 か所だけ読むとしたら、どこを読めば要点が取れるか」は、
-        # 後続をまとめる導入文や節の主題ラベルを選ばせる（Jev は正しく答えて
-        # いて、問いの方が違う軸を聞いていた）。設計書が挙げる判断の例は
-        # すべて「ここを飛ばすと要点を失う？」という損失の形である。
-        self.assertIn("読み飛ばす", jev.CORE_INSTRUCTIONS)
-        self.assertIn("要点を失う", jev.CORE_INSTRUCTIONS)
-        self.assertNotIn("1 か所だけ", jev.CORE_INSTRUCTIONS)
-        # 「重要な部分はどれか」に戻すと「どれも重要」と答えられてしまう。
+    def test_the_core_question_carries_the_current_question(self):
+        # 旧文面は「これを読み飛ばすと要点を失うのはどれか」で問いにかかわらず
+        # 固定だった。numbers で光った Unit でも「要点」の文が核になり、数字を
+        # 含む文が光らなかった（measurements/unit-granularity.md 1 節）。
+        # 核はスコアと同じ問いの文面に照らす。
+        instructions = self.ask(self.units())["core:u1"]["instructions"]
+        self.assertEqual(instructions.count(self.QUESTION), 1)
+        self.assertTrue(instructions.startswith(jev.CORE_INSTRUCTIONS))
+        self.assertIn("――― 説明 ―――\n" + self.QUESTION + "\n", instructions)
+        # 問いが変われば文面も変わる（軸が問いについて行く）。
+        other = self.ask(self.units(), text="下の「対象」は、別の問いである。")
+        self.assertIn("別の問いである。", other["core:u1"]["instructions"])
+        self.assertNotIn(self.QUESTION, other["core:u1"]["instructions"])
+
+    def test_the_frame_reads_each_choice_as_the_target_of_the_question(self):
+        # 問いの文面はどれも「下の「対象」は、…」で始まる（Noul 用の主張）。
+        # 枠の側で各選択肢を「対象」と呼んでおくので、同じ文面が読める。
+        self.assertIn("それぞれを「対象」として", jev.CORE_INSTRUCTIONS)
+        # 1 つへ倒す問い方。「重要な部分はどれか」に戻すと「どれも重要」と
+        # 答えられてしまう。
+        self.assertIn("いちばんよく当てはまる", jev.CORE_INSTRUCTIONS)
         self.assertNotIn("重要", jev.CORE_INSTRUCTIONS)
-        # 本文を instructions に書かない約束はそのまま。
+        # 旧々文面「1 か所だけ読むとしたら」は導入文や節のラベルを選ばせる。
+        # 損失の言い方は問いの文面の側にある。
+        self.assertNotIn("1 か所だけ", jev.CORE_INSTRUCTIONS)
+        # 枠に問いごとの文面を書かない（正本は assets/marks-questions.json）。
+        self.assertNotIn("要点", jev.CORE_INSTRUCTIONS)
         self.assertLess(len(jev.CORE_INSTRUCTIONS), 200)
+
+    def test_every_preset_reads_as_the_explanation_of_the_frame(self):
+        # 正本の文面がどれも枠と組める形であることを確かめる（「下の「対象」
+        # は、」で始まる）。定型・自由入力の型・Review のルールのすべて。
+        assets = HERE.parent.parent / "assets"
+        marks = json.loads((assets / "marks-questions.json").read_text())
+        texts = [p["text"] for p in marks["presets"]]
+        texts.append(marks["free"]["template"])
+        rules = json.loads((assets / "review-rules.json").read_text())
+        texts.extend(r["text"] for r in rules["rules"] if "text" in r)
+        self.assertGreater(len(texts), 6)
+        for text in texts:
+            self.assertTrue(text.startswith("下の「対象」は、"), text[:30])
 
     def test_only_units_above_the_core_floor_are_asked(self):
         # 核を聞くのは足切りを越えた Unit だけ。越えなかった Unit は光らない
@@ -575,14 +612,29 @@ class CoreBudgetTest(unittest.TestCase):
         # state だけで 32k を使い切る文書では、核はどうやっても聞けない。
         self.assertLessEqual(jev.RequestBudget.estimated("あ" * 40_000).pair, 0)
 
+    #: 定型の文面でいちばん長いもの（decide、194 字）より長い 242 字。
+    LONG_QUESTION = "下の「対象」は、" + "読み手に判断を求めている箇所である。" * 13
+
     def test_the_measured_worst_case_still_fits(self):
         # 実測（2026-09-21）: 45,650 バイトの文書の最大 Unit は選択肢 82 個・
-        # 本文 11,026 バイトで、question は 5,469 tokens だった。
+        # 本文 11,026 バイトで、question は 5,469 tokens だった。いちばん長い
+        # 定型の文面を足しても収まる。
         budget = jev.RequestBudget.estimated("x" * 45_650)
         self.assertGreater(budget.pair, 0)
         self.assertTrue(
-            jev.core_fits({f"atom:{i}": "x" * 134 for i in range(82)}, budget)
+            jev.core_fits(
+                {f"atom:{i}": "x" * 134 for i in range(82)}, budget, self.LONG_QUESTION
+            )
         )
+
+    def test_the_budget_counts_the_question_text_too(self):
+        # 送るのと同じ instructions で見積もる。問いの文面を抜いて数えると
+        # 小さく出て、32k の側を踏み越える question を送ってしまう。
+        budget = jev.RequestBudget.estimated("短い。")
+        options = {"atom:0": "a", "atom:1": "b"}
+        self.assertTrue(jev.core_fits(options, budget, "短い問い。"))
+        huge = "下の「対象」は、" + "あ" * (budget.pair * 2)
+        self.assertFalse(jev.core_fits(options, budget, huge))
 
     def test_a_unit_over_the_budget_is_not_asked(self):
         # 上限を超えたら核を聞かない。核が無ければ Unit 全体が MARKED に
@@ -590,13 +642,14 @@ class CoreBudgetTest(unittest.TestCase):
         source = "あ" * 20_000
         atoms = [atom(i, "sentence", "文" * 4_000) for i in range(4)]
         unit = {"id": "u1", "atoms": [0, 1, 2, 3], "wants_core": True, "jev": {}}
+        text = "下の「対象」は、テスト用の問いである。"
         self.assertEqual(
-            jev.core_questions(atoms, [unit], jev.RequestBudget.estimated(source)), {}
+            jev.core_questions(atoms, [unit], jev.RequestBudget.estimated(source), text), {}
         )
         # 同じ Unit でも state が小さければ聞ける。
         self.assertIn(
             "core:u1",
-            jev.core_questions(atoms, [unit], jev.RequestBudget.estimated("短い。")),
+            jev.core_questions(atoms, [unit], jev.RequestBudget.estimated("短い。"), text),
         )
 
 
@@ -713,6 +766,8 @@ class DryRunTest(unittest.TestCase):
             uid = key.split(":", 1)[1]
             self.assertEqual(question["type"], "choice")
             self.assertGreaterEqual(len(question["criteria"]), 2)
+            # 核もスコアと同じ問いの文面で聞く。
+            self.assertIn("\nテスト用の問い。\n", question["instructions"])
             chosen = {int(k.split(":")[1]) for k in question["criteria"]}
             # 選択肢はその Unit の Atom だけで、かつ散文だけ。
             self.assertLessEqual(chosen, set(units[uid]))
@@ -1476,6 +1531,39 @@ class MarksModeTest(unittest.TestCase):
         # u2 だけが足切りを越えている。そこは 1 Atom なので Choice は
         # 要らず（[`assign_lone_cores`]）、核の question は 0 本になる。
         self.assertEqual(cores, [], f"聞いたのは {cores}")
+
+    def test_the_core_round_asks_with_the_question_of_the_request(self):
+        """核もスコアと同じ問いの文面で聞く（1 段のまま）。
+
+        境界を SAME にして、散文 2 つの Unit を作る（核の Choice が要る形）。
+        """
+        sent = {}
+
+        def watching(state, chunk, model, timeout):
+            sent.update(chunk)
+            answers = {}
+            for key in chunk:
+                if key.startswith("boundary:"):
+                    answers[key] = {"choice": jev.SAME, "confidence": 0.9}
+                elif key.startswith("marks:"):
+                    answers[key] = {"noul": 0.9}
+                else:
+                    answers[key] = {"choice": sorted(chunk[key]["criteria"])[0], "confidence": 0.8}
+            return {"answers": answers}
+
+        request = self.request()
+        with_fake_ask(watching, lambda: jev.annotate(request, "m", 1.0))
+        cores = {k: v for k, v in sent.items() if k.startswith("core:")}
+        self.assertEqual(len(cores), 1, f"送った question: {sorted(sent)}")
+        (core,) = cores.values()
+        text = request["question"]["text"]
+        self.assertEqual(core["instructions"], jev.core_instructions(text))
+        # スコアの question と同じ文面である。
+        (marks,) = [v for k, v in sent.items() if k.startswith("marks:")][:1]
+        self.assertTrue(marks["instructions"].startswith(text))
+        # Unit の本文は選択肢にだけ入る。
+        for body in core["criteria"].values():
+            self.assertNotIn(body, core["instructions"])
 
     def test_a_question_nothing_answers_asks_no_core_round_at_all(self):
         """狭い問いでは核のラウンドごと消える（費用 0）。"""
