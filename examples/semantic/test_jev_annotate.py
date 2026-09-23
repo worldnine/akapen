@@ -1579,6 +1579,26 @@ class MarksModeTest(unittest.TestCase):
         )
         self.assertTrue(all(entry["decision"] is None for entry in plan))
 
+    def test_the_boundary_cache_lives_under_akapens_semantic_root(self):
+        """境界の置き場は akapen の `semantic` の下である（`src/semantic_cache.rs`）。
+
+        akapen は `AKAPEN_CACHE_DIR` も `XDG_CACHE_HOME` と同じく**親**として
+        扱い、`<それ>/akapen/semantic` に置く。ここがずれると
+        `--semantic-cache-clear` が境界を消し残す（2026-09-23 に実測で踏んだ）。
+        """
+        root = Path(self._tmp.name)
+        path = jev.boundary_cache_path(self.SOURCE)
+        self.assertEqual(path.parents[2], root / "akapen" / "semantic")
+        with unittest.mock.patch.dict(
+            os.environ, {"XDG_CACHE_HOME": str(root / "xdg")}, clear=False
+        ):
+            os.environ.pop("AKAPEN_CACHE_DIR")
+            try:
+                path = jev.boundary_cache_path(self.SOURCE)
+            finally:
+                os.environ["AKAPEN_CACHE_DIR"] = self._tmp.name
+        self.assertEqual(path.parents[2], root / "xdg" / "akapen" / "semantic")
+
     def test_a_boundary_cache_entry_without_a_fingerprint_misses(self):
         """指紋を持たない古い項目（2026-09-22 より前）は当たらない。"""
         path = jev.boundary_cache_path(self.SOURCE)

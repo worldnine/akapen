@@ -1209,12 +1209,17 @@ def atoms_fingerprint(atoms: list[dict]) -> str:
 
 
 def cache_root() -> pathlib.Path | None:
-    """解析キャッシュの根。akapen（`src/semantic_cache.rs`）と同じ規則。"""
+    """解析キャッシュの根。akapen（`src/semantic_cache.rs`）と同じ規則。
+
+    `AKAPEN_CACHE_DIR` も `XDG_CACHE_HOME` と同じく**親**である — akapen は
+    どちらでも `<それ>/akapen/semantic` に置く。`AKAPEN_CACHE_DIR` を根と
+    読むと境界だけが `<それ>/semantic` へずれ、`--semantic-cache-clear` が
+    消し残す。
+    """
     for name in ("AKAPEN_CACHE_DIR", "XDG_CACHE_HOME"):
         value = os.environ.get(name)
         if value:
-            base = pathlib.Path(value)
-            return base if name == "AKAPEN_CACHE_DIR" else base / "akapen"
+            return pathlib.Path(value) / "akapen"
     home = os.environ.get("HOME")
     return pathlib.Path(home) / ".cache" / "akapen" if home else None
 
