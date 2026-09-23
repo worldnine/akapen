@@ -34,7 +34,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::review::{Candidate, CandidateState, Finding};
+use crate::review::{Candidate, Finding};
 
 /// 出力が Diagnostic の JSON でなかったときの 1 行。**抜粋を足さない。**
 pub(crate) const NOT_DIAGNOSTICS: &str = "lint: output is not diagnostics JSON";
@@ -232,7 +232,6 @@ pub(crate) fn candidates(diagnostics: Vec<Diagnostic>, source: &str) -> Vec<Cand
                 message: d.message,
                 severity: d.severity,
             },
-            state: CandidateState::Pending,
         })
         .collect()
 }

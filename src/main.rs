@@ -157,6 +157,9 @@ fn main() -> Result<()> {
                  \x20 --semantic-cache-clear  wipe that cache and exit (needed after\n\
                  \x20                   changing an analyser's prompts without\n\
                  \x20                   changing its command line)\n\
+                 \x20 --review-dismissed-clear  forget every Review candidate\n\
+                 \x20                   dismissed with x, in every document, and\n\
+                 \x20                   exit (one at a time: x again in the list)\n\
                  \x20 --undercurl <auto|on|off> draw the Review underlines as curly\n\
                  \x20                   lines (default auto: on where the terminal\n\
                  \x20                   is known to draw them). $AKAPEN_UNDERCURL\n\
@@ -201,6 +204,16 @@ fn main() -> Result<()> {
             let root = cache.root().display().to_string();
             let removed = cache.clear()?;
             println!("cleared {removed} cached analyses ({root})");
+            Ok(())
+        }
+        Action::ClearReviewDismissed => {
+            let Some(store) = review::DismissedStore::discover() else {
+                println!("no dismissed review candidates to clear (no HOME/XDG_DATA_HOME)");
+                return Ok(());
+            };
+            let path = store.path().display().to_string();
+            let removed = store.clear()?;
+            println!("cleared {removed} dismissed review candidates ({path})");
             Ok(())
         }
         Action::Run(config) => run(*config),
@@ -4047,6 +4060,20 @@ pub(crate) fn export_text(app: &App) -> String {
     )
 }
 
+/// **送れたあとの片付け** — コメントを全部消し、消した本数を返す。
+/// `--send-cmd` と `--send-agent` の両方の成功がここを通る。
+///
+/// 消す前に、送った review / lint コメントを覚える
+/// （[`App::note_review_sent`]）。その候補は一覧で `✓` のまま（Sent）で、
+/// `a` がもう一度同じ指示を作ることは無い。
+pub(crate) fn clear_sent_comments(app: &mut App) -> usize {
+    let count = app.comments.len();
+    app.note_review_sent();
+    app.comments.clear();
+    replace_view_preserving_cursor(app);
+    count
+}
+
 pub(crate) fn export_all(app: &mut App, send: bool) {
     if app.comments.is_empty() {
         app.flash_err("no comments yet");
@@ -4066,9 +4093,7 @@ pub(crate) fn export_all(app: &mut App, send: bool) {
         match app.config.send_cmd.clone() {
             Some(cmd) => match export::send_command(&cmd, &text) {
                 Ok(()) => {
-                    let count = app.comments.len();
-                    app.comments.clear();
-                    replace_view_preserving_cursor(app);
+                    let count = clear_sent_comments(app);
                     parts.push(format!("sent via {cmd} · {count} comment(s) cleared"));
                 }
                 Err(e) => {
@@ -4083,9 +4108,7 @@ pub(crate) fn export_all(app: &mut App, send: bool) {
                 match export::resolve_agent_pane() {
                     Ok(target) => match export::send_to_agent(&target, &text) {
                         Ok(()) => {
-                            let count = app.comments.len();
-                            app.comments.clear();
-                            replace_view_preserving_cursor(app);
+                            let count = clear_sent_comments(app);
                             parts.push(format!(
                                 "sent to {target} · {count} comment(s) cleared"
                             ));
@@ -4140,6 +4163,8 @@ mod review_tests;
 
 #[cfg(test)]
 mod review_dock_tests;
+#[cfg(test)]
+mod review_undo_tests;
 
 #[cfg(test)]
 mod mouse_tests;

@@ -385,7 +385,6 @@ fn a_jev_rule_shows_the_first_sentence_of_its_definition() {
         rule: "filler".into(),
         finding: crate::review::Finding::Rule { action: crate::review_rules::Action::Delete, score: 0.87 },
         atoms: std::iter::once(0..1).collect(),
-        state: crate::review::CandidateState::Pending,
     };
     let lines = crate::review_dock::detail_lines(&app, &candidate, 200);
     assert_eq!(lines, vec!["下の「対象」は、具体的なことを何も述べていない箇所である。".to_string()]);

@@ -68,6 +68,12 @@ pub enum Action {
     /// 入っているので、定型を直せば自動で外れる（`crate::semantic_cache`）。
     /// 判定器の中の文面はどちらのモードでもここが唯一の逃げ道である。
     ClearSemanticCache,
+    /// `--review-dismissed-clear`: Review で捨てた記録を全部消して exit 0。
+    ///
+    /// `--semantic-cache-clear` と同じ作り（ファイル引数を取らず短絡する）。
+    /// 捨てた候補は一覧に薄く残り 1 本ずつ `x` で戻せるが、まとめて
+    /// 戻す道がここである。
+    ClearReviewDismissed,
 }
 
 /// Resolved runtime configuration.
@@ -331,6 +337,7 @@ impl Config {
             match arg.as_str() {
                 "-h" | "--help" => return Ok(Action::Help),
                 "--semantic-cache-clear" => return Ok(Action::ClearSemanticCache),
+                "--review-dismissed-clear" => return Ok(Action::ClearReviewDismissed),
                 "-V" | "--version" => return Ok(Action::Version),
                 "--light" => light = Some(true),
                 "--dark" => light = Some(false),
@@ -558,6 +565,11 @@ mod tests {
         assert!(matches!(parse(&["-h", "x.md"]), Action::Help));
         assert!(matches!(parse(&["--version"]), Action::Version));
         assert!(matches!(parse(&["-V"]), Action::Version));
+        assert!(matches!(parse(&["--semantic-cache-clear"]), Action::ClearSemanticCache));
+        assert!(matches!(
+            parse(&["--review-dismissed-clear", "x.md"]),
+            Action::ClearReviewDismissed
+        ));
     }
 
     #[test]

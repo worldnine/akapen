@@ -643,6 +643,29 @@ pub(crate) fn footer_layout(
     FooterLayout { hints: text, readout, readout_x, flash_x, flash_w, esc, esc_x }
 }
 
+/// **一覧の `a` / `x` の案内は、カーソル下の候補の状態で替わる** —
+/// そのキーを押すと何が起きるかを言う（`a` / `x` は切り替えなので、同じ
+/// キーでも行き先が違う）:
+///
+/// | 状態 | `a` | `x` |
+/// | --- | --- | --- |
+/// | Pending | `a accept` | `x dismiss` |
+/// | Accepted | `a undo` | `x dismiss` |
+/// | Dismissed | `a accept` | `x restore` |
+/// | Sent | `a/x sent`（どちらも効かない） | |
+///
+/// 候補が無い（一覧が空）ときは Pending と同じ字を出す — 案内の幅が
+/// 答えの到着で揺れない。
+pub(crate) fn review_toggle_hints(state: Option<crate::review::CandidateState>) -> Vec<FooterHint> {
+    use crate::review::CandidateState;
+    match state.unwrap_or(CandidateState::Pending) {
+        CandidateState::Pending => vec![hint("a accept"), hint("x dismiss")],
+        CandidateState::Accepted => vec![hint("a undo"), hint("x dismiss")],
+        CandidateState::Dismissed => vec![hint("a accept"), hint("x restore")],
+        CandidateState::Sent => vec![hint("a/x sent")],
+    }
+}
+
 /// The footer's mode hint: the cursor's position as `L{line}/{total}`
 /// (1-based source line — the cursor IS the review anchor, so the line
 /// number is more actionable than a %), a few labeled actions for the
@@ -662,15 +685,14 @@ pub(crate) fn footer_hint_items(app: &App) -> Vec<FooterHint> {
     // 位置は本文のカーソル — 一覧で選んだ候補の行である。
     if crate::review_dock::is_open(app) {
         let line = if app.view_active() { app.view.cursor } else { app.cursor };
-        return vec![
-            kept(pos(line, app.source.len())),
-            kept("j/k move"),
-            hint("a accept"),
-            hint("x dismiss"),
+        let mut items = vec![kept(pos(line, app.source.len())), kept("j/k move")];
+        items.extend(review_toggle_hints(app.candidate_state(app.overlay_cursor)));
+        items.extend([
             hint("e edit"),
             hint("A accept all"),
             hint("Enter select"),
-        ];
+        ]);
+        return items;
         // `Esc close` は案内に置かない — 右端の予告（`crate::esc::preview`）が
         // `Esc: close list` / `Esc: cancel selection` と、いま効く方を言う。
     }

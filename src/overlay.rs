@@ -1131,9 +1131,13 @@ fn review_overlay_jump(app: &mut App) {
 
 /// Review の一覧のキー。
 ///
-/// j/k（矢印も）で動き、Enter で本文へ飛び、`a` で accept、`x` で
-/// dismiss、`A` で Pending を全部 accept、q / `R` で閉じる（Esc は層を
-/// 1 枚はがす — 選択があればそれ、無ければ一覧）。
+/// j/k（矢印も）で動き、Enter で本文へ飛び、`a` で accept ⇄ 取り消し、
+/// `x` で dismiss ⇄ 戻す、`A` で Pending を全部 accept、q / `R` で閉じる
+/// （Esc は層を 1 枚はがす — 選択があればそれ、無ければ一覧）。
+///
+/// `a` / `x` は**押したキーの状態へ直接行く**切り替えである
+/// （[`App::toggle_accept`] / [`App::toggle_dismiss`]）。送った候補には
+/// どちらも効かず、そう言う（二重に送らせない）。
 ///
 /// **accept / dismiss でカーソルは動かさない。** 一覧の行は消えず印が
 /// 変わるだけなので（`✓` / `–`）、勝手に次へ送ると「いま何を見たか」が
@@ -1159,17 +1163,12 @@ pub(crate) fn on_review_overlay_key(app: &mut App, key: KeyCode, _modifiers: Key
         // accept はカードを差し込み、本文の行が増える。候補を中ほどに
         // 置き直す（dismiss は下線が消えるだけだが、同じ道を通す）。
         KeyCode::Char(crate::keys::REVIEW_ACCEPT) => {
-            if app.accept_candidate(app.overlay_cursor) {
-                // コメントが本文にカードとして出る（`l` の一覧にも載る）。
-                replace_view_preserving_cursor(app);
-                crate::review_dock::follow(app);
-            }
+            let done = app.toggle_accept(app.overlay_cursor);
+            after_review_toggle(app, done);
         }
         KeyCode::Char(crate::keys::REVIEW_DISMISS) => {
-            if app.dismiss_candidate(app.overlay_cursor) {
-                replace_view_preserving_cursor(app);
-                crate::review_dock::follow(app);
-            }
+            let done = app.toggle_dismiss(app.overlay_cursor);
+            after_review_toggle(app, done);
         }
         KeyCode::Char(crate::keys::REVIEW_ACCEPT_ALL) => {
             let made = app.accept_all_pending();
@@ -1188,6 +1187,32 @@ pub(crate) fn on_review_overlay_key(app: &mut App, key: KeyCode, _modifiers: Key
         _ => {}
     }
 }
+
+/// `a` / `x` のあと。コメントが増えた・減ったなら本文のカードを描き直し、
+/// 候補を中ほどに置き直す（dismiss は下線が消えるだけだが、同じ道を通す）。
+///
+/// フラッシュは**見えないところで起きたこと**にだけ出す: コメントを消した
+/// （`l` の一覧から 1 本減った）と、送った候補で何もしなかった理由。印の
+/// 入れ替わり（`✓` / `–` / 空白）は一覧の行そのものが言う。
+fn after_review_toggle(app: &mut App, done: crate::app::ReviewToggle) {
+    use crate::app::ReviewToggle;
+    match done {
+        ReviewToggle::Nothing => return,
+        ReviewToggle::AlreadySent => {
+            app.flash_err(REVIEW_ALREADY_SENT);
+            return;
+        }
+        ReviewToggle::Unaccepted => app.flash("review comment removed"),
+        ReviewToggle::Accepted | ReviewToggle::Dismissed | ReviewToggle::Restored => {}
+    }
+    // コメントが本文にカードとして出る・消える（`l` の一覧にも載る）。
+    replace_view_preserving_cursor(app);
+    crate::review_dock::follow(app);
+}
+
+/// 送った候補で `a` / `x` を押したときの 1 行。書き換わって reload されれば
+/// 決め直す（[`App::forget_review_sent`]）ので、待てばよいことを言う。
+pub(crate) const REVIEW_ALREADY_SENT: &str = "already sent — decided again when the file changes";
 
 /// **一覧の `e` — カーソル下の候補を人が直す**（4 節「直接編集」）。
 ///

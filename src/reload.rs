@@ -293,6 +293,9 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
         return Ok(()); // touched but unchanged
     }
     let old_content = app.source.content.clone();
+    // 送った候補（`✓` のまま）は、書き換わった版で決め直す。送った相手が
+    // 直していれば候補は出ず、直していなければ Pending で出る。
+    app.forget_review_sent();
 
     // Reply mode: each refresh replaces the whole message, so change marks
     // would only paint the entire document. The whole message is "new" by

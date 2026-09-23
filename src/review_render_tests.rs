@@ -498,13 +498,12 @@ fn a_whole_document_diagnostic_goes_last_and_leaves_the_text_clean() {
 /// 閾値の境: 9 割を覆えば文書全体、そうでなければ普通の指摘。
 #[test]
 fn the_whole_document_threshold_is_nine_tenths_of_the_lines() {
-    use crate::review::{Candidate, CandidateState, Finding};
+    use crate::review::{Candidate, Finding};
     let candidate = |lines: (u32, u32)| Candidate {
         range: 0..1,
         lines,
         rule: "t/r".into(),
         finding: Finding::Lint { message: String::new(), severity: None },
-        state: CandidateState::Pending,
         atoms: std::iter::once(0..1).collect(),
     };
     assert!(candidate((1, 192)).is_whole_document(192));
