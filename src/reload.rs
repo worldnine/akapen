@@ -288,6 +288,8 @@ pub(crate) fn ignore_change(app: &mut App) {
 /// Triggered by `r` only — never while Input is open.
 pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<()> {
     app.review_reload_note = None;
+    // 書き換わったら `A` の直後ではない（戻す相手のコメントも付け直される）。
+    app.review_accept_all_undo = None;
     let new_source = Source::load(app.current_file_path().to_path_buf())?;
     if new_source.content == app.source.content {
         return Ok(()); // touched but unchanged

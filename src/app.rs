@@ -621,6 +621,11 @@ pub(crate) struct App {
     /// ある文書の sha のもの）。(ルール, 範囲)。[`App::load_dismissed`] が
     /// 捨てた記録と同じ時に読み、[`App::forget_review_sent`] が捨てる。
     pub(crate) review_sent_disk: HashSet<DismissedKey>,
+    /// **直前の `A` が作ったコメントの結び目**（ルール, 範囲）。`Some` の
+    /// あいだだけ、もう一度 `A` を押すとそれをまとめて Pending に戻す
+    /// （[`App::undo_accept_all`]）。一覧のどのキー（移動も含む）・マウス・
+    /// reload でも `None` に戻る — 戻せるのは `A` の**直後**だけである。
+    pub(crate) review_accept_all_undo: Option<Vec<DismissedKey>>,
     /// 捨てた候補の置き場。決められない環境では `None`（セッション内
     /// だけ消えて、記録は残らない）。
     pub(crate) review_dismissed_store: Option<DismissedStore>,
@@ -791,6 +796,7 @@ impl App {
             review_dismissed: HashSet::new(),
             review_sent: HashSet::new(),
             review_sent_disk: HashSet::new(),
+            review_accept_all_undo: None,
             review_dismissed_store: None,
             review_edit_anchor: None,
             review_cursor_target: None,
@@ -2123,8 +2129,10 @@ impl App {
 
     /// **`A` — Pending を全部 accept する。** 作ったコメントの数を返す。
     ///
-    /// 捨てた候補・送った候補・accept 済みには触らない。まとめての取り消しは
-    /// 作らない — 個々の `a` で戻せる。
+    /// 捨てた候補・送った候補・accept 済みには触らない。1 本でも作ったら、
+    /// 作ったぶんの結び目を [`Self::review_accept_all_undo`] に覚える —
+    /// **直後にもう一度 `A`** を押せばまとめて戻る（`a` / `x` の「同じキーを
+    /// もう一度押せば戻る」と揃えてある）。
     pub(crate) fn accept_all_pending(&mut self) -> usize {
         let pending: Vec<usize> = self
             .candidate_states()
@@ -2133,13 +2141,38 @@ impl App {
             .filter(|(_, state)| state.is_pending())
             .map(|(i, _)| i)
             .collect();
-        let mut made = 0;
+        let mut made = Vec::new();
         for index in pending {
             if self.accept_candidate(index) {
-                made += 1;
+                let c = &self.review_candidates[index];
+                made.push((c.rule.clone(), c.range.start, c.range.end));
             }
         }
-        made
+        let count = made.len();
+        self.review_accept_all_undo = (count > 0).then_some(made);
+        count
+    }
+
+    /// **`A` の直後の `A`** — その `A` で作ったコメントだけを消し、候補を
+    /// Pending に戻す。消した本数を返す。
+    ///
+    /// 消すのは、いまのファイル・いまの版で、結び目が `made` にある review /
+    /// lint コメントだけ。`A` より前に `a` で作ったコメントと人の赤入れは
+    /// 触らない。
+    pub(crate) fn undo_accept_all(&mut self, made: &[DismissedKey]) -> usize {
+        let current = self.current_file_path().to_path_buf();
+        let revision = self.current_revision_context();
+        let before = self.comments.len();
+        self.comments.retain(|c| {
+            let ours = c.file_path == current
+                && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
+                && crate::review::candidate_comment_rule(&c.text).is_some()
+                && c.anchor.as_ref().is_some_and(|a| {
+                    made.contains(&(a.rule.clone(), a.range.start, a.range.end))
+                });
+            !ours
+        });
+        before - self.comments.len()
     }
 
     /// **見た本数と一覧の行数**（読み出しの `3/9`、一覧の題の `(3/9)`）。

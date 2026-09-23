@@ -149,11 +149,104 @@ fn accept_all_still_takes_only_the_pending_candidates() {
         [CandidateState::Sent, CandidateState::Dismissed, CandidateState::Accepted]
     );
     assert_eq!(app.comments.len(), 1, "送った候補も捨てた候補もコメントにしない");
-    // まとめての取り消しは無い — 個々の `a` で戻す。
+    // `A` のあとに別のキーを挟んだら、まとめては戻せない — 個々の `a` で戻す。
     app.overlay_cursor = 2;
     press(&mut app, 'a');
     assert_eq!(app.candidate_state(2), Some(CandidateState::Pending));
     assert!(app.comments.is_empty());
+}
+
+#[test]
+fn a_second_a_right_after_a_undoes_only_what_that_a_accepted() {
+    use CandidateState::*;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    press(&mut app, 'a'); // A より前に a で accept した 1 本
+    app.comments.push(crate::comment::Comment {
+        file_path: app.current_file_path().to_path_buf(),
+        start: 5,
+        end: 5,
+        lines: "ふたつめの段落。".into(),
+        revision: None,
+        anchor: None,
+        text: "人の赤入れ".into(),
+    });
+    press(&mut app, 'A');
+    assert_eq!(app.candidate_states(), [Accepted, Accepted, Accepted]);
+    assert!(app.review_accept_all_undo.is_some(), "直後は戻せる");
+
+    press(&mut app, 'A');
+    assert_eq!(
+        app.candidate_states(),
+        [Accepted, Pending, Pending],
+        "戻るのはその A で accept した 2 本だけ"
+    );
+    let texts: Vec<&str> = app.comments.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(texts, ["review: filler (0.90)", "人の赤入れ"], "a の 1 本と人の赤入れは残る");
+    assert!(app.review_accept_all_undo.is_none(), "戻したら戻す道も閉じる");
+    assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("2 review comments removed"));
+
+    // 3 度目の A はまた accept する（切り替えの往復）。
+    press(&mut app, 'A');
+    assert_eq!(app.candidate_states(), [Accepted, Accepted, Accepted]);
+}
+
+#[test]
+fn any_other_operation_between_the_two_a_presses_closes_the_undo() {
+    use CandidateState::*;
+    // 移動（j）を挟む。
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    press(&mut app, 'A');
+    press(&mut app, 'j');
+    assert!(app.review_accept_all_undo.is_none(), "移動も「ほかの操作」");
+    press(&mut app, 'A');
+    assert_eq!(app.candidate_states(), [Accepted, Accepted, Accepted], "戻さない");
+    assert_eq!(app.comments.len(), 3);
+
+    // マウスを挟む。
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    press(&mut app, 'A');
+    crate::on_mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert!(app.review_accept_all_undo.is_none(), "マウスも「ほかの操作」");
+
+    // 一覧の外のキー（一覧を閉じてから本文で A）。
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    press(&mut app, 'A');
+    app.overlay = None;
+    crate::on_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, None);
+    assert!(app.review_accept_all_undo.is_none(), "一覧の外のキーでも閉じる");
+
+    // reload を挟む（中身が変わった）。
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    press(&mut app, 'A');
+    rewrite_and_reload(&mut app, EDITED);
+    assert!(app.review_accept_all_undo.is_none(), "書き換わったら戻さない");
+}
+
+#[test]
+fn a_that_accepts_nothing_leaves_nothing_to_undo() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    for i in 0..3 {
+        app.overlay_cursor = i;
+        press(&mut app, 'a');
+    }
+    press(&mut app, 'A');
+    assert!(app.review_accept_all_undo.is_none(), "作っていなければ戻す相手が無い");
+    press(&mut app, 'A');
+    assert_eq!(app.comments.len(), 3, "a で作ったコメントは A で消えない");
 }
 
 // ---- 2. Accepted はコメントから決まる -----------------------------------
