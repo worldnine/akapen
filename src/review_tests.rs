@@ -841,3 +841,166 @@ fn a_moved_review_comment_keeps_its_candidate_accepted() {
     assert_eq!(app.review_candidates[0].state, CandidateState::Accepted);
     assert!(!app.accept_candidate(0), "同じ指示を 2 本作らない");
 }
+
+// ---- 10. 一覧から直接 `e` ------------------------------------------------
+
+/// テスト用の `$EDITOR`。**名前は `vi`** — 行ジャンプ（`+N FILE`）を渡す
+/// エディタの一覧に入っている名前なので、本番と同じ引数で呼ばれる。
+/// 受けた `+N` を隣の `args` に書き、`awk` の `program` で N 行目を
+/// 書き換えて終わる。
+fn editor_script(dir: &std::path::Path, program: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("vi");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n\
+             echo \"$1\" > \"$(dirname \"$0\")/args\"\n\
+             n=${{1#+}}\n\
+             awk -v n=\"$n\" '{program}' \"$2\" > \"$2.tmp\" && mv \"$2.tmp\" \"$2\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// 一覧から `e` を押したのと同じ道を、端末の切り替えだけ抜いて通す。
+fn edit_from_the_list(app: &mut App, editor: &std::path::Path) {
+    let editor = editor.display().to_string();
+    crate::overlay::review_edit_with(app, |app, line| {
+        let path = app.current_file_path().to_path_buf();
+        let status = crate::reload::run_editor(&editor, line, &path);
+        crate::reload::after_editor(app, &editor, status);
+    });
+}
+
+fn list_screen(app: &mut App) -> String {
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, app)).unwrap();
+    buffer_text(terminal.backend().buffer())
+}
+
+/// **`e` はカーソル下の候補の先頭行でエディタを開き、戻ったら一覧を
+/// 開き直す。** 答えが揃ったら、カーソルは直した箇所の次の候補に着く
+/// （直した候補は消えている）。
+#[test]
+fn e_in_the_list_edits_the_candidate_and_lands_on_the_next_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.9), Some(0.9)]));
+    crate::overlay::open_review(&mut app);
+    app.overlay_cursor = 1; // ふたつめ（5 行目）
+    // N 行目を消す。
+    let editor = editor_script(dir.path(), "NR != n");
+
+    edit_from_the_list(&mut app, &editor);
+
+    let args = std::fs::read_to_string(editor.parent().unwrap().join("args")).unwrap();
+    assert_eq!(args.trim(), "+5", "候補の先頭行で開く");
+    assert!(!app.source.content.contains("ふたつめ"), "{}", app.source.content);
+    assert_eq!(app.overlay, Some(Overlay::Review), "一覧を開き直す");
+    assert!(app.review_inflight > 0, "再解析を頼んでいる");
+    let screen = list_screen(&mut app);
+    assert!(screen.contains("analyzing"), "解析中と分かる:\n{screen}");
+
+    let doc = app.source.content.clone();
+    deliver(
+        &mut app,
+        "filler",
+        answer_for(&doc, &["ひとつめの段落。", "みっつめの段落。"], &[Some(0.9), Some(0.9)]),
+    );
+    let under = &app.review_candidates[app.overlay_cursor];
+    assert_eq!(
+        app.source.content.get(under.range.clone()),
+        Some("みっつめの段落。"),
+        "直した箇所の次の候補に着く"
+    );
+}
+
+/// 直した候補がまだ候補に残っていれば、カーソルはそれ自身に着く。
+#[test]
+fn e_in_the_list_lands_on_the_candidate_itself_when_it_is_still_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.9), Some(0.9)]));
+    crate::overlay::open_review(&mut app);
+    app.overlay_cursor = 1;
+    // N 行目の末尾に足す（直したが、まだ候補に出る）。
+    let editor = editor_script(dir.path(), "NR == n { print $0 \"まだ足りない。\"; next } { print }");
+
+    edit_from_the_list(&mut app, &editor);
+
+    let doc = app.source.content.clone();
+    assert!(doc.contains("ふたつめの段落。まだ足りない。"), "{doc}");
+    // 1 段落目はもう候補に出ない。前に 1 本減るので、添字のままでは
+    // 3 段落目を指してしまう。
+    deliver(
+        &mut app,
+        "filler",
+        answer_for(
+            &doc,
+            &["ひとつめの段落。", "ふたつめの段落。まだ足りない。", "みっつめの段落。"],
+            &[None, Some(0.9), Some(0.9)],
+        ),
+    );
+    let under = &app.review_candidates[app.overlay_cursor];
+    assert_eq!(
+        doc.get(under.range.clone()),
+        Some("ふたつめの段落。まだ足りない。"),
+        "直した候補そのものに着く"
+    );
+}
+
+/// 何も変えずにエディタを閉じたら、一覧も候補もカーソルもそのまま。
+#[test]
+fn e_in_the_list_without_a_change_leaves_the_list_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.9), Some(0.9)]));
+    crate::overlay::open_review(&mut app);
+    app.overlay_cursor = 2;
+    let generation = app.review_generation;
+    let editor = editor_script(dir.path(), "{ print }");
+
+    edit_from_the_list(&mut app, &editor);
+
+    assert_eq!(app.overlay, Some(Overlay::Review));
+    assert_eq!(app.overlay_cursor, 2);
+    assert_eq!(app.review_candidates.len(), 3);
+    assert_eq!(app.review_generation, generation, "聞き直していない");
+    assert_eq!(app.review_edit_anchor, None);
+    assert_eq!(app.review_cursor_target, None);
+}
+
+/// 外からの書き換えを読み込む前は、一覧からもエディタを開かない
+/// （本文の `e` と同じ断り）。
+#[test]
+fn e_in_the_list_refuses_while_a_file_change_is_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), None, None]));
+    crate::overlay::open_review(&mut app);
+    app.file_changed = true;
+    let mut ran = false;
+    crate::overlay::review_edit_with(&mut app, |_, _| ran = true);
+    assert!(!ran, "エディタを開いていない");
+    let (message, _, err) = app.status.clone().unwrap();
+    assert!(err && message.contains("r reload first"), "{message}");
+    assert_eq!(app.overlay, Some(Overlay::Review));
+}
+
+/// 一覧の案内とヘルプに `e` が載っている。
+#[test]
+fn the_list_and_the_help_mention_e() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), None, None]));
+    crate::overlay::open_review(&mut app);
+    let screen = list_screen(&mut app);
+    assert!(screen.contains("e:edit"), "{screen}");
+    assert!(crate::keys::REVIEW_HINT.contains("e edit"), "{}", crate::keys::REVIEW_HINT);
+}

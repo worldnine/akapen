@@ -1145,6 +1145,47 @@ pub(crate) fn on_review_overlay_key(app: &mut App, key: KeyCode, _modifiers: Key
     }
 }
 
+/// **一覧の `e` — カーソル下の候補を人が直す**（4 節「直接編集」）。
+///
+/// `run` がエディタを開いて戻るまでを受け持つ（本番は
+/// [`crate::reload::open_editor_at`]、テストは端末を抜いた同じ道）。開くのは
+/// 候補の**先頭行**で、一覧は開いたままにしておく — 戻った reload が
+/// 再解析を頼み、答えが揃うまでタイトルが `analyzing…` になる。
+///
+/// 答えが揃ったら、カーソルは**直した箇所**に着く: 直した候補がまだ
+/// 候補なら それ自身、消えていればその位置の次（文書順）。位置は候補の
+/// 先頭バイトを差分で新しい版へ写して決める
+/// （[`App::review_edit_anchor`] → [`App::review_cursor_target`]）。
+///
+/// 本文の `e` と同じ断りをする（reply では編集しない・外の書き換えを
+/// 読み込む前は開かない）。
+pub(crate) fn review_edit_with(app: &mut App, run: impl FnOnce(&mut App, usize)) {
+    let Some(candidate) = app.review_candidates.get(app.overlay_cursor) else {
+        return;
+    };
+    if app.config.reply {
+        app.flash_err("reply mode — editing disabled");
+        return;
+    }
+    if app.file_changed {
+        app.flash_err("file changed — r reload first");
+        return;
+    }
+    let line = candidate.lines.0.max(1) as usize;
+    let cursor = app.overlay_cursor;
+    app.review_edit_anchor = Some(candidate.range.start);
+    app.review_cursor_target = None;
+    run(app, line);
+    // 見届けた reload が錨を消費していなければ、中身は変わらなかった
+    // （閉じただけ・エディタの失敗・読めない書き込み）。候補も答えも前の
+    // ままなので、カーソルも元の候補へ戻す。
+    if app.review_edit_anchor.take().is_some() {
+        app.overlay_cursor = cursor.min(app.review_candidates.len().saturating_sub(1));
+    }
+    app.overlay = Some(Overlay::Review);
+    keep_overlay_cursor_visible(app);
+}
+
 /// 候補の一覧を描く。1 行 = `L42 · Filler 0.87 · <Unit の先頭>`。
 ///
 /// **accept / dismiss した行も残る。** 印だけが変わる（`✓` / `–`）ので、
@@ -1246,7 +1287,7 @@ pub(crate) fn draw_review_overlay(f: &mut Frame, app: &App) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " j/k:move  Enter:jump  a:accept  x:dismiss  A:accept all  Esc/q:close",
+        " j/k:move  Enter:jump  a:accept  x:dismiss  A:accept all  e:edit  Esc/q:close",
         dark_gray,
     )));
 

@@ -137,6 +137,13 @@ fn editor_supports_line_jump(bin: &str) -> bool {
 /// retained but acknowledged as the user's own edit. Triggers on `e` in both
 /// modes.
 pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
+    let line = editor_target_line(app);
+    open_editor_at(app, terminal, line);
+}
+
+/// [`open_editor`] at an explicit 1-based line — the Review list's `e`
+/// opens at the candidate's first line rather than the cursor's.
+pub(crate) fn open_editor_at(app: &mut App, terminal: &mut AppTerminal, line: usize) {
     // Existing comments are preserved on their current generation. When
     // the editor returns, reload_source promotes live comments to the old
     // LOCAL/COMMIT generation before loading the edited NOW. The pre-edit
@@ -146,19 +153,7 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
     capture_pre_edit_snapshot(app);
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
-    // `$EDITOR` may include arguments (e.g. `zed --wait`). Split into the
-    // binary and its args, then append the file path last. Known
-    // limitation: whitespace-split only — quoted paths or args with
-    // spaces (`EDITOR="/Applications/My Editor.app/.../bin/editor"`) are
-    // not supported; use a wrapper script for those.
-    let mut parts = editor.split_whitespace();
-    let bin = parts.next().unwrap_or("nano");
-    let args: Vec<&str> = parts.collect();
-    let mut argv: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-    if editor_supports_line_jump(bin) {
-        argv.push(format!("+{}", editor_target_line(app)));
-    }
-    argv.push(app.current_file_path().display().to_string());
+    let path = app.current_file_path().to_path_buf();
 
     // Suspend the TUI entirely: `ratatui::restore()` leaves the alternate
     // screen, disables raw mode, and shows the cursor — but it does not
@@ -168,9 +163,7 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
-    let status = Command::new(bin)
-        .args(&argv)
-        .status();
+    let status = run_editor(&editor, line, &path);
 
     // Replace the terminal with a fresh one: the no-blink init re-enters
     // raw mode + alternate screen (keeping the hardware cursor never
@@ -196,6 +189,43 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
         app.flash_err(format!("terminal re-init failed: {e}"));
     }
 
+    after_editor(app, &editor, status);
+
+    // Draw immediately — the alternate screen was just re-entered and is
+    // blank. The fresh terminal is guaranteed to be in the correct state.
+    let _ = draw_frame(terminal, app);
+}
+
+/// Run `editor` on `path` at the 1-based `line` and wait for it. The
+/// terminal handling lives in [`open_editor_at`]; this is the part a test
+/// can drive with a script standing in for `$EDITOR`.
+pub(crate) fn run_editor(
+    editor: &str,
+    line: usize,
+    path: &std::path::Path,
+) -> std::io::Result<std::process::ExitStatus> {
+    // `$EDITOR` may include arguments (e.g. `zed --wait`). Split into the
+    // binary and its args, then append the file path last. Known
+    // limitation: whitespace-split only — quoted paths or args with
+    // spaces (`EDITOR="/Applications/My Editor.app/.../bin/editor"`) are
+    // not supported; use a wrapper script for those.
+    let mut parts = editor.split_whitespace();
+    let bin = parts.next().unwrap_or("nano");
+    let mut argv: Vec<String> = parts.map(str::to_string).collect();
+    if editor_supports_line_jump(bin) {
+        argv.push(format!("+{line}"));
+    }
+    argv.push(path.display().to_string());
+    Command::new(bin).args(&argv).status()
+}
+
+/// The editor has returned: reload and acknowledge one's own change, or
+/// say why nothing was reloaded.
+pub(crate) fn after_editor(
+    app: &mut App,
+    editor: &str,
+    status: std::io::Result<std::process::ExitStatus>,
+) {
     match status {
         Ok(s) if s.success() => {
             // Reload and acknowledge the user's own editor change. Existing
@@ -205,10 +235,6 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
         Ok(_) => app.flash_err(format!("{editor} exited with error")),
         Err(e) => app.flash_err(format!("{editor}: {e}")),
     }
-
-    // Draw immediately — the alternate screen was just re-entered and is
-    // blank. The fresh terminal is guaranteed to be in the correct state.
-    let _ = draw_frame(terminal, app);
 }
 
 /// Record the pre-edit on-disk content as a LOCAL generation before the
