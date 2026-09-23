@@ -551,6 +551,9 @@ pub(crate) fn help_rows(
     if review {
         rows.push(("review", crate::keys::REVIEW_HINT));
     }
+    // Esc の行（下の quit）のすぐ上。語は段ごとに変わるので、ここでは
+    // バッジが何を言う場所なのかだけを言う（`crate::esc::badge`）。
+    rows.push(("esc", "top-right badge = what the next Esc does (or click)"));
     rows.push(("quit", if esc_quit { "Esc/q quit" } else { "q quit · Esc cancel" }));
     rows
 }

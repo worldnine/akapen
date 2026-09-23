@@ -154,7 +154,14 @@ pub(crate) enum TitleHit {
     FileCount,
     /// The `▌ N` counter: open the comment list.
     CommentCount,
+    /// 右上の `esc …` のバッジ: `Esc` を 1 回押したのと同じ
+    /// （[`crate::esc::peel`]）。
+    Esc,
 }
+
+/// タイトル行で path に最後まで残す幅。y/s の説明と `esc …` のバッジは、
+/// path がこれを割る前に引き下がる。
+const TITLE_PATH_FLOOR: u16 = 16;
 
 /// Title-bar layout: the x extents of every clickable element, computed
 /// once and shared by [`draw_title`] and the mouse hit-testing so a click
@@ -181,11 +188,13 @@ pub(crate) struct TitleMetrics {
     pub(crate) indicator: String,
     pub(crate) indicator_x: u16,
     pub(crate) indicator_w: u16,
-    /// The `esc close` badge (esc-quit enabled only, not clickable) and
-    /// its x/width. Flush right, to the right of the counter.
-    pub(crate) esc_close: String,
-    pub(crate) esc_close_x: u16,
-    pub(crate) esc_close_w: u16,
+    /// **`Esc` の役割のバッジ** — 次の `Esc` で何が起きるか
+    /// （`esc clear marks`・`esc close`。[`crate::esc::badge`]）。何も起きない
+    /// とき・引き下がったときは空。右端に寄り、`▌ N` の右に立つ。押せる
+    /// （[`TitleHit::Esc`]）。
+    pub(crate) esc: String,
+    pub(crate) esc_x: u16,
+    pub(crate) esc_w: u16,
 }
 
 /// The layout math for the title bar, shared by drawing and hit-testing
@@ -197,16 +206,6 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         format!(" ▌ {} ", app.comments.len())
     };
     let indicator_w = UnicodeWidthStr::width(indicator.as_str()) as u16;
-    // `esc close`: the esc-quit affordance, shown only while it is real
-    // (esc-quit enabled, and not composing — Esc cancels the composer
-    // there). It is the top-right element, right of the comment counter;
-    // the path yields to it before the y/s hint does.
-    let esc_close = if app.esc_quit_enabled() && app.mode != Mode::Input {
-        " esc close ".to_string()
-    } else {
-        String::new()
-    };
-    let esc_close_w = UnicodeWidthStr::width(esc_close.as_str()) as u16;
     // The y/s explainer reads the room: with no comments there is nothing
     // to copy or send (both keys flash "no comments yet"), and without a
     // send target (--send-cmd or --send-agent) there is nothing to send —
@@ -223,14 +222,6 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         format!(" {}", parts.join(" · "))
     };
     let ys_w = UnicodeWidthStr::width(ys.as_str()) as u16;
-    let cluster_w = indicator_w + ys_w + esc_close_w + 1;
-    let ys_x = width.saturating_sub(cluster_w);
-    let show_ys = ys_w > 0 && ys_x >= 16;
-    let cluster_end = if show_ys {
-        ys_x
-    } else {
-        width.saturating_sub(indicator_w + esc_close_w)
-    };
     // Historical generations keep only a tiny `◆ 3/7` badge here: the
     // full readout (provenance · id · age · summary) lives in the
     // scrubber tooltip next to the timeline's `◆`, and the purple frame
@@ -273,6 +264,33 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         String::new()
     };
     let file_count_w = UnicodeWidthStr::width(file_count.as_str()) as u16;
+    // **`esc …` のバッジ**（次の `Esc` で起きること、`crate::esc::badge`）。
+    // 語の長さが段ごとに違う（`esc close` の 11 桁から
+    // `esc deselect deletion` の 23 桁まで）ので、幅はここで毎回測る。
+    //
+    // 狭いときに譲る順（y/s の既存の作法の延長）:
+    // 1. y/s の説明が引き下がる（path が TITLE_PATH_FLOOR を割る前に）
+    // 2. path が TITLE_PATH_FLOOR 桁まで縮む（`truncate_path` の省略）
+    // 3. それでも足りなければバッジが丸ごと引き下がる
+    // `◆ 3/7` などの状態と `1/3 files`・`▌ N` は落とさない（身元と数）。
+    // バッジを短縮形にしないのは、`esc` だけでは何が起きるかを言えない
+    // から — 嘘や謎の字を出すより、出さない方がよい。
+    let esc_full = crate::esc::badge(app).map_or_else(String::new, |b| format!(" {b} "));
+    let esc_full_w = UnicodeWidthStr::width(esc_full.as_str()) as u16;
+    let path_room = |right: u16| width.saturating_sub(right + change_w + file_count_w + 1);
+    let show_esc = esc_full_w > 0 && path_room(indicator_w + esc_full_w) >= TITLE_PATH_FLOOR;
+    let (esc, esc_w) = if show_esc { (esc_full, esc_full_w) } else { (String::new(), 0) };
+    // y/s はバッジより先に退く。バッジが退いた幅で y/s が戻ってくると、
+    // 狭めるほど字が入れ替わって見えるので、バッジが退いたら y/s も出さない。
+    let cluster_w = indicator_w + ys_w + esc_w + 1;
+    let ys_x = width.saturating_sub(cluster_w);
+    let show_ys =
+        ys_w > 0 && ys_x >= TITLE_PATH_FLOOR && (show_esc || esc_full_w == 0);
+    let cluster_end = if show_ys {
+        ys_x
+    } else {
+        width.saturating_sub(indicator_w + esc_w)
+    };
     // **タイトル行に marks の読み出しは無い**（2026-09-22。読み手の決定）。
     // 長いファイル名のとき、読み出しが丸ごと引き下がって「あるはずの値が
     // 消える」形になっていた。path は文書の身元なので譲れない — だから
@@ -299,12 +317,12 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
         ys,
         ys_w,
         show_ys,
-        indicator_x: width.saturating_sub(indicator_w + esc_close_w),
+        indicator_x: width.saturating_sub(indicator_w + esc_w),
         indicator,
         indicator_w,
-        esc_close_x: width.saturating_sub(esc_close_w),
-        esc_close,
-        esc_close_w,
+        esc_x: width.saturating_sub(esc_w),
+        esc,
+        esc_w,
     }
 }
 
@@ -312,7 +330,9 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
 /// math as [`title_metrics`].
 pub(crate) fn title_hit_at(app: &App, width: u16, x: u16) -> Option<TitleHit> {
     let m = title_metrics(app, width);
-    if m.indicator_w > 0 && x >= m.indicator_x && x < m.indicator_x + m.indicator_w {
+    if m.esc_w > 0 && x >= m.esc_x && x < m.esc_x + m.esc_w {
+        Some(TitleHit::Esc)
+    } else if m.indicator_w > 0 && x >= m.indicator_x && x < m.indicator_x + m.indicator_w {
         Some(TitleHit::CommentCount)
     } else if m.file_count_w > 0 && x >= m.file_count_x && x < m.file_count_x + m.file_count_w {
         Some(TitleHit::FileCount)
@@ -325,11 +345,11 @@ pub(crate) fn title_hit_at(app: &App, width: u16, x: u16) -> Option<TitleHit> {
 
 /// The title is file-centric: path + change state + session position. The
 /// mode badge lives in the footer (statusline convention). The top-right
-/// corner carries the comment-presence indicator with the `esc close`
-/// badge to its right (esc-quit only); the y/s explainer sits between
-/// (low priority, vanishes when the path needs the room). The path, the
-/// file counter, and the comment counter are clickable buttons (see
-/// on_mouse).
+/// corner carries the comment-presence indicator with the `esc …`
+/// badge to its right (what the next Esc does, `crate::esc::badge`); the
+/// y/s explainer sits between (low priority, vanishes when the path needs
+/// the room). The path, the file counter, the comment counter, and the
+/// esc badge are clickable buttons (see on_mouse).
 /// The title's neutral count badge.
 /// The text is identical to the plain badge, so the width math and the
 /// click areas in [`title_metrics`] are unaffected.
@@ -404,18 +424,18 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
             },
         );
     }
-    // The esc-quit affordance: a filled badge (dark gray background) at
-    // the very top-right. It is not clickable; Esc does the work itself.
-    if m.esc_close_w > 0 {
+    // `Esc` の役割: 濃い灰色の地に黒字のバッジを右上の端に。押すと Esc を
+    // 1 回押したのと同じ（`TitleHit::Esc`）。
+    if m.esc_w > 0 {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                m.esc_close,
+                m.esc,
                 Style::default().fg(Color::Black).bg(Color::DarkGray),
             ))),
             Rect {
-                x: area.x + m.esc_close_x,
+                x: area.x + m.esc_x,
                 y: area.y,
-                width: m.esc_close_w,
+                width: m.esc_w,
                 height: 1,
             },
         );
@@ -520,15 +540,7 @@ pub(crate) struct FooterLayout {
     /// 出ていなければ幅 0 で、演出は空振りして消える。
     pub(crate) flash_x: u16,
     pub(crate) flash_w: u16,
-    /// **右端の予告** — 次の `Esc` で何が消えるか（`Esc: clear review`、
-    /// [`crate::esc::preview`]）。引き下がったら `None`。
-    pub(crate) esc: Option<String>,
-    /// 予告の開始桁。
-    pub(crate) esc_x: u16,
 }
-
-/// 読み出しと予告の間の空白。座布団の琥珀と予告の字が地続きに見えない幅。
-const ESC_GAP: u16 = 2;
 
 /// 生きている項目を ` · ` でつなぐ。
 fn join_hints(hints: &[FooterHint], alive: &[bool]) -> String {
@@ -557,81 +569,52 @@ fn fit_hints(hints: &[FooterHint], room: usize) -> Option<String> {
     }
 }
 
-/// 右側（読み出し ＋ 予告）の幅。
-fn right_width(readout: Option<&Readout>, esc: Option<&str>) -> u16 {
-    let readout_w = readout.map_or(0, |r| r.width() as u16);
-    let esc_w = esc.map_or(0, |e| UnicodeWidthStr::width(e) as u16);
-    match (readout_w, esc_w) {
-        (0, e) => e,
-        (r, 0) => r,
-        (r, e) => r + ESC_GAP + e,
-    }
-}
-
 /// **フッタの幅の配り方**（純関数。幅ごとのテストはこれを直接呼ぶ）。
 ///
-/// 縮む順は読み手の決定（2026-09-22）そのもので、外側のループが右側
-/// （読み出しと予告）、内側の [`fit_hints`] が案内である:
+/// 縮む順は読み手の決定（2026-09-22）そのもので、外側のループが読み出し、
+/// 内側の [`fit_hints`] が案内である:
 ///
 /// 1. 左の案内を右から落とす（`? help` と位置 `L12/80` は最後まで残す）
-/// 2. 右端の `Esc` の予告が引き下がる
-/// 3. 読み出しを 1 段縮める（`20%` → 問いの名前 の順に落ち、**座布団の
+/// 2. 読み出しを 1 段縮める（`20%` → 問いの名前 の順に落ち、**座布団の
 ///    本数が最後まで残る**）。案内は縮めた分だけ戻ってくる
-/// 4. それでも足りなければ読み出しごと引き下がる
+/// 3. それでも足りなければ読み出しごと引き下がる
 ///
-/// 予告が読み出しより先に退くのは、予告が**キーの案内**だからである —
-/// 案内は状態（いま光っている本数・問いの名前）より先に譲る、という 1 の
-/// 作法と同じ。案内の中では最後まで残る（`? help` と位置の次）。
+/// **`Esc` の予告はフッタに無い**（2026-09-23）。次の `Esc` で何が起きるかは
+/// タイトル行の右上のバッジ 1 か所が言う（`title_metrics`・`crate::esc::badge`）。
 ///
 /// `readouts` は**広い順**に並んだ候補（`App::marks_readouts`）。空なら
-/// 読み出しは無い。`esc` は [`crate::esc::preview`]。
+/// 読み出しは無い。
 pub(crate) fn footer_layout(
     badge_w: u16,
     hints: &[FooterHint],
     readouts: Vec<Readout>,
-    esc: Option<String>,
     width: u16,
 ) -> FooterLayout {
-    // 右側の候補を広い順に。(読み出しの添字, 予告を出すか)。
-    // 予告は読み出しがいちばん広い段のときだけ並ぶ — 読み出しが 1 段でも
-    // 縮むなら、その前に予告が退く。
-    let mut rungs: Vec<(Option<usize>, bool)> = Vec::new();
-    if esc.is_some() {
-        rungs.push((readouts.first().map(|_| 0), true));
-    }
-    rungs.extend((0..readouts.len()).map(|i| (Some(i), false)));
     let mut chosen = None;
     let mut text = String::new();
-    for &(i, show_esc) in &rungs {
-        let readout = i.map(|i| &readouts[i]);
-        let right = right_width(readout, esc.as_deref().filter(|_| show_esc));
-        // 案内と右側の間は最低 1 桁空ける（地続きに見えないように）。
-        let room = width.saturating_sub(badge_w + right + 1);
+    for (i, readout) in readouts.iter().enumerate() {
+        // 案内と読み出しの間は最低 1 桁空ける（地続きに見えないように）。
+        let room = width.saturating_sub(badge_w + readout.width() as u16 + 1);
         if let Some(fitted) = fit_hints(hints, room as usize) {
-            chosen = Some((i, show_esc));
+            chosen = Some(i);
             text = fitted;
             break;
         }
     }
-    let (readout, esc) = match chosen {
-        Some((i, show_esc)) => (
-            i.and_then(|i| readouts.into_iter().nth(i)),
-            esc.filter(|_| show_esc),
-        ),
+    let readout = match chosen {
+        Some(i) => readouts.into_iter().nth(i),
         None => {
-            // 右側を丸ごと引き下げた場合。それでも入らなければ刻む
-            // （固定の項目だけでも入らない幅 — 40 桁を割ると起きる）。
+            // 読み出しが無いか、丸ごと引き下げた場合。それでも入らなければ
+            // 刻む（固定の項目だけでも入らない幅 — 40 桁を割ると起きる）。
             let room = width.saturating_sub(badge_w) as usize;
             text = fit_hints(hints, room).unwrap_or_else(|| {
                 clip_ellipsis(&join_hints(hints, &vec![true; hints.len()]), room)
             });
-            (None, None)
+            None
         }
     };
     let readout_w = readout.as_ref().map_or(0, |r| r.width() as u16);
-    let right = right_width(readout.as_ref(), esc.as_deref());
-    let readout_x = width.saturating_sub(right);
-    let esc_x = width.saturating_sub(esc.as_deref().map_or(0, |e| UnicodeWidthStr::width(e) as u16));
+    let readout_x = width.saturating_sub(readout_w);
     let (flash_x, flash_w) = match readout.as_ref() {
         Some(r) if r.cushioned() => {
             let count_w = UnicodeWidthStr::width(r.count().as_str()) as u16;
@@ -640,7 +623,7 @@ pub(crate) fn footer_layout(
         Some(_) => (readout_x, readout_w),
         None => (0, 0),
     };
-    FooterLayout { hints: text, readout, readout_x, flash_x, flash_w, esc, esc_x }
+    FooterLayout { hints: text, readout, readout_x, flash_x, flash_w }
 }
 
 /// **一覧の `a` / `x` の案内は、カーソル下の候補の状態で替わる** —
@@ -693,8 +676,8 @@ pub(crate) fn footer_hint_items(app: &App) -> Vec<FooterHint> {
             hint("Enter select"),
         ]);
         return items;
-        // `Esc close` は案内に置かない — 右端の予告（`crate::esc::preview`）が
-        // `Esc: close list` / `Esc: cancel selection` と、いま効く方を言う。
+        // `Esc close` は案内に置かない — 右上のバッジ（`crate::esc::badge`）が
+        // `esc close list` / `esc cancel selection` と、いま効く方を言う。
     }
     let mut items = match app.mode {
         // 問いの 1 行プロンプト（`/`）。改行は無いので `^j newline` を
@@ -714,7 +697,7 @@ pub(crate) fn footer_hint_items(app: &App) -> Vec<FooterHint> {
             // same as source mode); the footer must say so, or "j/k
             // scroll" silently grows the range after a Tab handoff. The
             // way out of the SELECT state (Esc) is spelled out by the
-            // right-edge preview (`Esc: cancel selection`, `crate::esc`).
+            // top-right badge (`esc cancel selection`, `crate::esc`).
             match app.selection {
                 Some(sel) => {
                     let (a, b) = sel.range();
@@ -915,7 +898,6 @@ pub(crate) fn footer_metrics(app: &App, width: u16) -> FooterLayout {
         UnicodeWidthStr::width(badge.as_str()) as u16,
         &footer_hint_items(app),
         footer_readouts(app),
-        crate::esc::preview(app),
         width,
     )
 }
@@ -930,8 +912,6 @@ pub(crate) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(badge, badge_style),
         Span::styled(m.hints, dim),
     ];
-    // ここまでに埋まった桁。読み出しと予告は、この桁から空白で右へ寄せる。
-    let mut filled = badge_w + hints_w;
     if let Some(readout) = m.readout {
         // 右端へ寄せる（間は空白で埋める）。`Line` の右寄せを使わないのは、
         // 左の案内と右の読み出しが**1 本の Line**に同居しているからで、
@@ -963,13 +943,6 @@ pub(crate) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             };
             spans.push(Span::styled(count, style));
         }
-        filled = m.readout_x + readout.width() as u16;
-    }
-    if let Some(esc) = m.esc {
-        // 右端の予告。薄いまま（案内と同じ薄さ）— 予告はキーの案内である。
-        let gap = m.esc_x.saturating_sub(filled);
-        spans.push(Span::raw(" ".repeat(gap as usize)));
-        spans.push(Span::styled(esc, dim));
     }
     // Prompts (quit/edit confirmations, file-change) and transient toasts
     // render on the message row directly above this strip (see
@@ -1239,11 +1212,6 @@ mod footer_layout_tests {
         if let Some(r) = m.readout.as_ref() {
             out.push_str(&r.text());
         }
-        if let Some(esc) = m.esc.as_deref() {
-            let filled = UnicodeWidthStr::width(out.as_str()) as u16;
-            out.push_str(&" ".repeat(m.esc_x.saturating_sub(filled) as usize));
-            out.push_str(esc);
-        }
         assert!(
             UnicodeWidthStr::width(out.as_str()) <= width as usize,
             "幅 {width} を溢れた: {out}"
@@ -1255,7 +1223,7 @@ mod footer_layout_tests {
     fn a_wide_terminal_draws_the_shape_the_reader_asked_for() {
         // 読み手が出した形（2026-09-22）:
         // `L12/80 · j/k scroll · v select · c comment · f focus · ? help        Essential · 20% [13]`
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), None, 100);
+        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), 100);
         let line = rendered(&m, 100);
         assert!(
             line.contains("L12/80 · j/k scroll · v select · c comment · f focus · ? help"),
@@ -1275,7 +1243,7 @@ mod footer_layout_tests {
     fn at_eighty_columns_the_hints_yield_and_the_readout_stays_whole() {
         // **案内を落としきってから読み出しを縮める。** 80 桁では時間の
         // 案内と `f focus` が落ち、読み出しは 1 桁も縮まない。
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), None, 80);
+        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), 80);
         let line = rendered(&m, 80);
         assert!(line.contains("L12/80"), "{line}");
         assert!(line.contains("? help"), "{line}");
@@ -1290,7 +1258,7 @@ mod footer_layout_tests {
 
     #[test]
     fn at_sixty_columns_the_hints_go_before_the_percent() {
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), None, 60);
+        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), 60);
         let line = rendered(&m, 60);
         assert!(line.contains("L12/80") && line.contains("? help"), "{line}");
         let r = m.readout.as_ref().unwrap();
@@ -1303,7 +1271,7 @@ mod footer_layout_tests {
 
     #[test]
     fn at_forty_columns_only_the_cushion_and_the_pinned_hints_survive() {
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), None, 40);
+        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), 40);
         let line = rendered(&m, 40);
         // 固定の 2 つは必ず残る。
         assert!(line.contains("L12/80"), "位置が落ちた: {line}");
@@ -1319,7 +1287,7 @@ mod footer_layout_tests {
         // 自由入力の問いは読み手が打った日本語で、いくらでも長い。
         // **`Ask: …` が伸びても `? help` と位置は落ちない。**
         let long = "Ask: 来期の費用と人員の見通しについて述べている箇所";
-        let m = footer_layout(BADGE, &hints(), readouts(long, 7, 35), None, 80);
+        let m = footer_layout(BADGE, &hints(), readouts(long, 7, 35), 80);
         let line = rendered(&m, 80);
         assert!(line.contains("L12/80"), "位置が長い問いに押し出された: {line}");
         assert!(line.contains("? help"), "? help が押し出された: {line}");
@@ -1333,7 +1301,7 @@ mod footer_layout_tests {
         // （`rendered` の中で幅を検算している）。
         let long = "Ask: 日本語日本語日本語日本語日本語";
         for width in [100u16, 80, 72, 64, 60, 52, 48, 44, 40] {
-            let m = footer_layout(BADGE, &hints(), readouts(long, 21, 20), None, width);
+            let m = footer_layout(BADGE, &hints(), readouts(long, 21, 20), width);
             rendered(&m, width);
         }
     }
@@ -1345,7 +1313,7 @@ mod footer_layout_tests {
         let rs = |q: &str| readouts(q, 13, 20);
         let mut last = usize::MAX;
         for width in (30u16..=100).rev() {
-            let m = footer_layout(BADGE, &hints(), rs("Essential"), None, width);
+            let m = footer_layout(BADGE, &hints(), rs("Essential"), width);
             let w = m.readout.as_ref().map_or(0, |r| r.width());
             assert!(w <= last, "幅 {width}: 狭くしたら読み出しが広くなった");
             last = w;
@@ -1356,7 +1324,7 @@ mod footer_layout_tests {
     fn zero_lit_keeps_the_shape_but_loses_the_cushion() {
         // 0 本は座布団を敷かない（薄いまま）。**幅は変えない** — つまみが
         // 0 を跨いだときに行が揺れないためである。
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 0, 1), None, 80);
+        let m = footer_layout(BADGE, &hints(), readouts("Essential", 0, 1), 80);
         let r = m.readout.as_ref().unwrap();
         assert_eq!(r.count(), " 0 ");
         assert!(!r.cushioned(), "0 本に座布団を敷いている");
@@ -1371,66 +1339,17 @@ mod footer_layout_tests {
             Readout { dim: "Essential · analyzing…".into(), lit: None },
             Readout { dim: "analyzing…".into(), lit: None },
         ];
-        let m = footer_layout(BADGE, &hints(), state, None, 60);
+        let m = footer_layout(BADGE, &hints(), state, 60);
         let r = m.readout.as_ref().unwrap();
         assert_eq!(r.count(), "");
         assert!(!r.cushioned());
         assert!(r.dim.contains("analyzing"));
     }
 
-    /// **右端の `Esc` の予告**（`crate::esc::preview`）。広ければ読み出しの
-    /// 右に並び、字は右端で終わる。
-    #[test]
-    fn the_esc_preview_sits_at_the_right_edge() {
-        let esc = Some("Esc: clear marks".to_string());
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), esc, 120);
-        let row = rendered(&m, 120);
-        assert!(row.ends_with("Essential · 20%  13   Esc: clear marks"), "{row}");
-        assert_eq!(UnicodeWidthStr::width(row.as_str()), 120, "右端まで: {row}");
-        // 座布団のフラッシュは本数の上に乗ったまま（予告の上ではない）。
-        let count_x = UnicodeWidthStr::width(row.as_str()) - " 13   Esc: clear marks".len();
-        assert_eq!((m.flash_x as usize, m.flash_w), (count_x, 4));
-    }
-
-    /// **縮む順**: 案内 → 予告 → 読み出しの段 → 読み出しごと。予告は
-    /// キーの案内なので、状態（読み出し）が 1 段でも縮む前に譲る。
-    #[test]
-    fn the_esc_preview_yields_after_the_hints_but_before_the_readout() {
-        let esc = || Some("Esc: clear marks".to_string());
-        // 80 桁: 案内が落ち、読み出しも予告も残る。
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), esc(), 80);
-        assert!(m.esc.is_some(), "{}", rendered(&m, 80));
-        assert_eq!(m.readout.as_ref().unwrap().text(), "Essential · 20%  13 ");
-        assert!(m.hints.contains("? help"));
-        assert!(!m.hints.contains("f focus"), "案内が先に落ちる: {}", m.hints);
-        for width in (BADGE..=80).rev() {
-            let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), esc(), width);
-            rendered(&m, width);
-            if m.esc.is_some() {
-                assert_eq!(
-                    m.readout.as_ref().unwrap().text(),
-                    "Essential · 20%  13 ",
-                    "予告が残ったまま読み出しが縮んだ（{width} 桁）"
-                );
-            }
-        }
-        // 予告が退いたすぐ後は、読み出しがいちばん広い段のまま。
-        let first_without = (0..=80u16)
-            .rev()
-            .find(|&w| footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), esc(), w).esc.is_none())
-            .unwrap();
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), esc(), first_without);
-        assert_eq!(m.readout.unwrap().text(), "Essential · 20%  13 ");
-        // 読み出しが無ければ予告だけで右端に立つ。
-        let m = footer_layout(BADGE, &hints(), Vec::new(), esc(), 100);
-        assert!(rendered(&m, 100).ends_with(" Esc: clear marks"));
-        assert_eq!(m.esc_x, 100 - 16);
-    }
-
     #[test]
     fn without_a_layer_the_hints_own_the_whole_row() {
         // 層の無いセッション: 候補が空なので、案内が右端まで使える。
-        let m = footer_layout(BADGE, &hints(), Vec::new(), None, 100);
+        let m = footer_layout(BADGE, &hints(), Vec::new(), 100);
         assert!(m.readout.is_none());
         assert_eq!(m.flash_w, 0, "演出の面が無い");
         assert!(m.hints.contains("newer →"), "余った幅が案内に回らない: {}", m.hints);
@@ -1439,11 +1358,11 @@ mod footer_layout_tests {
     #[test]
     fn a_hopeless_width_clips_instead_of_panicking() {
         // 固定の項目だけでも入らない幅。読み出しは引き下がり、案内は刻む。
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), None, 12);
+        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), 12);
         assert!(m.readout.is_none());
         assert!(UnicodeWidthStr::width(m.hints.as_str()) <= 4, "{}", m.hints);
         // 幅 0 でも落ちない。
-        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), None, 0);
+        let m = footer_layout(BADGE, &hints(), readouts("Essential", 13, 20), 0);
         assert!(m.readout.is_none());
     }
 }

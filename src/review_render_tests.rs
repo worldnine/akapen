@@ -6,7 +6,7 @@
 //!    折り返しをまたぐ範囲（行頭の余白には乗らない）、表のセル（上位集合 —
 //!    断片ごと）
 //! 2. **重なりの順序** — marks の琥珀・カーソル帯・選択帯・コメントの印の
-//!    下でも下線は残り、地色は帯が勝つ
+//!    下でも下線は残り、地色は帯が勝つ（琥珀の句は帯の上で濃い琥珀）
 //! 3. **重さの色** — 下線はパレットの赤・黄・青緑（`58;5;N`）、ガターは
 //!    同じ色の地に紙の色で抜いた `E` / `W` / `I`（行ではいちばん重いもの）。
 //!    範囲の行だけに立つ（1 段落に畳まれた引用で、範囲の無い行には立たない）
@@ -278,7 +278,8 @@ fn a_diagnostic_inside_a_table_cell_underlines_that_fragment_only() {
 // ---- 2. 重なりの順序 ------------------------------------------------------
 
 /// marks の琥珀・カーソル帯・選択帯・コメントの印。どれの下でも下線は
-/// 残り、地色は後から塗る側（琥珀 → 帯）が勝つ。
+/// 残り、地色は後から塗る側（琥珀 → 帯）が勝つ。琥珀の句は帯の上で
+/// 濃い琥珀（`mark_band_bg`）になり、確定色ではなくなる。
 #[test]
 fn the_underline_survives_the_amber_the_bands_and_a_comment() {
     let _size = Size::set();
@@ -307,7 +308,7 @@ fn the_underline_survives_the_amber_the_bands_and_a_comment() {
         assert!(!buf[(mx, my)].modifier.contains(Modifier::UNDERLINED), "{mode:?}: 範囲の外に線");
         assert_eq!(buf[(mx, my)].bg, styles.mark_bg(), "{mode:?}: 琥珀は範囲の外にも残る");
 
-        // カーソル帯: 帯の地色が勝ち、線は残る。
+        // カーソル帯: 琥珀の句は帯の上の濃い琥珀になり、線は残る。
         match mode {
             Mode::View => app.view.goto_source_line(quote_line),
             _ => app.cursor = quote_line,
@@ -316,13 +317,14 @@ fn the_underline_survives_the_amber_the_bands_and_a_comment() {
         let (x, y) = cell_of(&buf, "かもしれない");
         let ka = &buf[(x, y)];
         assert!(ka.modifier.contains(Modifier::UNDERLINED), "{mode:?}: カーソル帯の下で線が消えた");
-        assert_ne!(ka.bg, styles.mark_bg(), "{mode:?}: カーソル帯より琥珀が勝った");
+        assert_eq!(ka.bg, styles.mark_band_bg(), "{mode:?}: カーソル帯の上で琥珀の句が濃い琥珀でない");
 
         // 選択帯。
         app.selection = Some(crate::comment::Selection::new(quote_line));
         let buf = paint(&mut app);
         let (x, y) = cell_of(&buf, "かもしれない");
         assert!(buf[(x, y)].modifier.contains(Modifier::UNDERLINED), "{mode:?}: 選択帯の下で線が消えた");
+        assert_eq!(buf[(x, y)].bg, styles.mark_band_bg(), "{mode:?}: 選択帯の上で琥珀の句が濃い琥珀でない");
         app.selection = None;
 
         // コメントの印: 同じ行にコメントがあっても、Pending の線は残る。

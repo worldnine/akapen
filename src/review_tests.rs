@@ -1334,10 +1334,25 @@ fn show_marks(app: &mut App) {
     app.refresh_semantic_decorations();
 }
 
-/// **全部の層を重ねて、1 枚ずつはがす。** 1 回ごとに、フッタの予告が
-/// 言ったものが実際に消え、同じ語でフラッシュされる。
+/// タイトル行の右上に描かれる `esc …` のバッジ（前後の空白を除く）。
+fn title_badge(app: &App, width: u16) -> String {
+    crate::chrome::title_metrics(app, width).esc.trim().to_string()
+}
+
+/// 描いた画面のフッタ（最下行）。
+fn footer_row(app: &mut App, width: u16, height: u16) -> String {
+    crate::app::TEST_TERMINAL_SIZE.with(|cell| cell.set(Some((width, height))));
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, app)).unwrap();
+    buffer_text(terminal.backend().buffer()).lines().last().unwrap_or_default().to_string()
+}
+
+/// **全部の層を重ねて、1 枚ずつはがす。** 1 回ごとに、右上のバッジが
+/// 言ったものが実際に消え、同じ語でフラッシュされる。フッタには予告が
+/// 出ない（Esc の役割を言うのはバッジ 1 か所）。
 #[test]
-fn esc_peels_every_layer_in_the_order_the_footer_announces() {
+fn esc_peels_every_layer_in_the_order_the_badge_announces() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = built_in(dir.path());
     deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), None]));
@@ -1351,20 +1366,22 @@ fn esc_peels_every_layer_in_the_order_the_footer_announces() {
     app.confirm_quit = true;
 
     let steps = [
-        ("Esc: cancel quit", "quit cancelled"),
-        ("Esc: cancel selection", "selection cancelled"),
-        ("Esc: close list", "list closed"),
-        ("Esc: focus off", "focus off"),
-        ("Esc: clear review", "review cleared"),
-        ("Esc: clear marks", "marks cleared"),
+        ("esc cancel quit", "quit cancelled"),
+        ("esc cancel selection", "selection cancelled"),
+        ("esc close list", "list closed"),
+        ("esc focus off", "focus off"),
+        ("esc clear review", "review cleared"),
+        ("esc clear marks", "marks cleared"),
     ];
-    for (preview, flash) in steps {
-        assert_eq!(crate::esc::preview(&app).as_deref(), Some(preview));
-        // 予告は描かれるフッタにも出ている（同じ表を読む）。
-        let footer = crate::chrome::footer_metrics(&app, 200);
-        assert_eq!(footer.esc.as_deref(), Some(preview), "フッタの予告");
+    for (badge, flash) in steps {
+        assert_eq!(crate::esc::badge(&app).as_deref(), Some(badge));
+        // バッジは描かれるタイトル行にも出ている（同じ表を読む）。
+        assert_eq!(title_badge(&app, 200), badge, "右上のバッジ");
+        // フッタには出ない。
+        let footer = footer_row(&mut app, 200, 30);
+        assert!(!footer.contains("Esc:") && !footer.contains("esc "), "{footer}");
         press_esc(&mut app);
-        assert_eq!(flashed(&app), Some(flash), "{preview} の後のフラッシュ");
+        assert_eq!(flashed(&app), Some(flash), "{badge} の後のフラッシュ");
     }
     // 何が消えたか。
     assert!(!app.confirm_quit && app.selection.is_none() && app.overlay.is_none());
@@ -1373,10 +1390,10 @@ fn esc_peels_every_layer_in_the_order_the_footer_announces() {
     assert!(app.semantic_doc.is_none() && app.marks_question.is_none());
     // **何も消えないもの。** accept で作ったコメントは残る。
     assert_eq!(app.comments.len(), 1);
-    // もう消すものが無い。`--esc-quit` でもないので、予告は出ず、Esc は
+    // もう消すものが無い。`--esc-quit` でもないので、バッジは出ず、Esc は
     // 何もしない（終了しない）。
-    assert_eq!(crate::esc::preview(&app), None);
-    assert_eq!(crate::chrome::footer_metrics(&app, 200).esc, None);
+    assert_eq!(crate::esc::badge(&app), None);
+    assert_eq!(crate::chrome::title_metrics(&app, 200).esc_w, 0);
     press_esc(&mut app);
     assert!(app.running);
     assert_eq!(flashed(&app), Some("marks cleared"), "何も起きていない");
@@ -1391,12 +1408,12 @@ fn source_mode_peels_the_deletion_focus_right_after_the_selection() {
     app.mode = Mode::Source;
     app.focused_deletion = Some(app.cursor);
     app.selection = Some(crate::comment::Selection::new(app.cursor));
-    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: cancel selection"));
+    assert_eq!(title_badge(&app, 120), "esc cancel selection");
     press_esc(&mut app);
-    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: cancel deletion focus"));
+    assert_eq!(title_badge(&app, 120), "esc deselect deletion");
     press_esc(&mut app);
-    assert_eq!(flashed(&app), Some("deletion focus cancelled"));
-    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: clear marks"));
+    assert_eq!(flashed(&app), Some("deletion deselected"));
+    assert_eq!(title_badge(&app, 120), "esc clear marks");
     // view では同じ値が残っていても段にならない（以前から view の Esc は見ていない）。
     app.focused_deletion = Some(app.cursor);
     app.mode = Mode::View;
@@ -1439,17 +1456,17 @@ fn a_cleared_review_comes_back_on_r_with_its_accepts_and_dismissals() {
 }
 
 /// `--esc-quit` のとき、最後の段は終了。未送信のコメントがあれば `q` と
-/// 同じく確認を挟み、確認中の予告は `Esc: quit` になる。
+/// 同じく確認を挟み、確認中のバッジも `esc close` になる。
 #[test]
 fn with_esc_quit_the_last_layer_is_quit() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = built_in(dir.path());
     app.config.esc_quit = EscQuit::Always;
     show_marks(&mut app);
-    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: clear marks"));
+    assert_eq!(title_badge(&app, 120), "esc clear marks", "閉じると言わない");
     press_esc(&mut app);
     assert!(app.running, "marks を消しただけ");
-    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: quit"));
+    assert_eq!(title_badge(&app, 120), "esc close");
     app.comments.push(crate::comment::Comment {
         file_path: app.current_file_path().to_path_buf(),
         start: 1,
@@ -1461,37 +1478,82 @@ fn with_esc_quit_the_last_layer_is_quit() {
     });
     press_esc(&mut app);
     assert!(app.confirm_quit && app.running, "未送信のコメントがあるので確認");
-    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: quit"));
+    assert_eq!(title_badge(&app, 120), "esc close");
     press_esc(&mut app);
     assert!(!app.running);
 }
 
-/// popup と composer は `Esc` を自分で取る。そこで表の予告を出すと嘘になる。
+/// popup と composer（問いのプロンプトも）は `Esc` を自分で取る。そこで
+/// 表の語を出すと嘘になるので、バッジは出さない — `--esc-quit` でも同じ
+/// （以前の固定の `esc close` は popup の上でも出ていて、閉じるのは popup の
+/// 方だった）。
 #[test]
-fn the_preview_is_silent_while_a_popup_or_the_composer_owns_esc() {
+fn the_badge_is_silent_while_a_popup_or_the_composer_owns_esc() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = built_in(dir.path());
+    app.config.esc_quit = EscQuit::Always;
     show_marks(&mut app);
-    assert!(crate::esc::preview(&app).is_some());
-    app.overlay = Some(crate::overlay::Overlay::MarkFor);
-    assert_eq!(crate::esc::preview(&app), None);
+    assert_eq!(title_badge(&app, 120), "esc clear marks");
+    for overlay in [
+        crate::overlay::Overlay::MarkFor,
+        crate::overlay::Overlay::Help,
+        crate::overlay::Overlay::Comments,
+    ] {
+        app.overlay = Some(overlay);
+        assert_eq!(crate::esc::badge(&app), None, "{overlay:?}");
+        assert_eq!(title_badge(&app, 120), "", "{overlay:?}");
+    }
     app.overlay = None;
     app.mode = Mode::Input;
-    assert_eq!(crate::esc::preview(&app), None);
+    assert_eq!(title_badge(&app, 120), "", "composer");
+    app.marks_prompt = true;
+    assert_eq!(title_badge(&app, 120), "", "問いのプロンプト");
 }
 
-/// 据え付けの一覧のフッタは右端の予告で出口を言う（`Esc close` を
-/// 案内に重ねない）。80 桁でも予告は残る。
+/// 据え付けの一覧は右上のバッジで出口を言う（`Esc close` を案内に重ねず、
+/// フッタの右端にも出さない）。80 桁でもバッジは残る。
 #[test]
-fn the_list_footer_names_its_way_out_at_the_right_edge() {
+fn the_list_names_its_way_out_in_the_top_right_badge() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = built_in(dir.path());
     deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), None]));
     crate::overlay::open_review(&mut app);
+    assert_eq!(title_badge(&app, 80), "esc close list");
     let footer = crate::chrome::footer_metrics(&app, 80);
-    assert_eq!(footer.esc.as_deref(), Some("Esc: close list"));
     assert!(!footer.hints.contains("Esc close"), "{}", footer.hints);
     assert!(footer.hints.contains("e edit"), "{}", footer.hints);
+    let row = footer_row(&mut app, 80, 30);
+    assert!(!row.contains("Esc:") && !row.contains("close list"), "{row}");
+}
+
+/// **バッジを押す = `Esc` を 1 回。** 押すたびにバッジが言った層がはがれ、
+/// 同じ語でフラッシュされる。何も起きないときはバッジが無く、押す場所も無い。
+#[test]
+fn clicking_the_badge_is_one_esc() {
+    use crate::chrome::{title_hit_at, TitleHit};
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    show_marks(&mut app);
+    assert!(app.press_focus(std::time::Instant::now()));
+    let width = 120;
+    crate::app::TEST_TERMINAL_SIZE.with(|cell| cell.set(Some((width, 30))));
+    for flash in ["focus off", "marks cleared"] {
+        let m = crate::chrome::title_metrics(&app, width);
+        assert_eq!(title_hit_at(&app, width, m.esc_x), Some(TitleHit::Esc));
+        assert_eq!(title_hit_at(&app, width, width - 1), Some(TitleHit::Esc));
+        on_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: m.esc_x + 1,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(flashed(&app), Some(flash));
+    }
+    assert_eq!(crate::chrome::title_metrics(&app, width).esc_w, 0);
+    assert_ne!(title_hit_at(&app, width, width - 1), Some(TitleHit::Esc));
 }
 
 // ---- 9. mark for の `0 Off` ---------------------------------------------
@@ -1565,4 +1627,52 @@ fn with_off_shown_the_digits_and_the_cursor_still_point_at_the_presets() {
     // `/` は最下段の自由入力。
     let free = crate::overlay::mark_for_entry_count(&app) - 1;
     assert_eq!(crate::overlay::mark_for_entry(&app, free), crate::overlay::MarkForEntry::Free);
+}
+
+/// **削除の段のバッジは `focus` と言わない**（`f` の `esc focus off` と
+/// 紛れる）。狭めていくと、短縮形にならずに丸ごと引き下がる。残る幅は
+/// path の 16 桁・バッジ・左右の身元の印の和で決まる。
+#[test]
+fn the_deletion_badge_is_short_and_yields_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    show_marks(&mut app);
+    app.mode = Mode::Source;
+    app.focused_deletion = Some(app.cursor);
+    let badge = crate::esc::badge(&app).unwrap();
+    assert_eq!(badge, "esc deselect deletion");
+    assert!(!badge.contains("focus"), "f のフォーカスと紛れる: {badge}");
+    let m = crate::chrome::title_metrics(&app, 200);
+    let floor = 16 + m.esc_w + m.change_w + m.file_count_w + m.indicator_w + 1;
+    for width in (0..=200u16).rev() {
+        let shown = title_badge(&app, width);
+        if width >= floor {
+            assert_eq!(shown, badge, "{width}");
+        } else {
+            assert_eq!(shown, "", "短縮形は出さない ({width})");
+        }
+    }
+    assert_eq!(m.esc_w, 23, "左右の空白込みの桁");
+}
+
+/// `?` のヘルプは、右上のバッジが何を言う場所なのかを Esc の行（quit）の
+/// すぐ上で言う。描いた画面に切れずに出る。
+#[test]
+fn the_help_says_what_the_top_right_badge_is() {
+    let rows = crate::overlay::help_rows(false, false, false, true, true);
+    let at = rows.iter().position(|(label, _)| *label == "esc").expect("esc の行");
+    assert_eq!(rows[at + 1].0, "quit", "Esc の行の隣");
+    let text = rows[at].1;
+    assert!(text.contains("top-right badge") && text.contains("click"), "{text}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    app.overlay = Some(Overlay::Help);
+    app.overlay_cursor = usize::MAX; // 最後の行まで送る
+    crate::app::TEST_TERMINAL_SIZE.with(|cell| cell.set(Some((100, 40))));
+    let backend = ratatui::backend::TestBackend::new(100, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    let screen = buffer_text(terminal.backend().buffer());
+    assert!(screen.contains(text), "{screen}");
 }

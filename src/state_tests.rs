@@ -3154,35 +3154,86 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn title_esc_close_badge_tracks_esc_quit() {
+    fn title_esc_badge_says_close_only_when_esc_quits() {
         let (mut app, _dir) = make_session();
-        // Default (no callback): no badge — Esc is not a close key.
-        assert_eq!(title_metrics(&app, 80).esc_close, "");
-        // With the esc-quit affordance live, the filled badge appears at
-        // the top-right, right of the comment counter.
+        // Default (no callback) and nothing to peel: no badge — Esc does
+        // nothing, so the corner says nothing.
+        assert_eq!(title_metrics(&app, 80).esc, "");
+        // With esc-quit live and nothing else to peel, Esc closes: the
+        // filled badge sits at the top-right, right of the comment counter.
         app.config.callback = Some("fzf".into());
         let m = title_metrics(&app, 80);
-        assert_eq!(m.esc_close, " esc close ");
-        assert_eq!(m.esc_close_x + m.esc_close_w, 80, "flush right");
+        assert_eq!(m.esc, " esc close ");
+        assert_eq!(m.esc_x + m.esc_w, 80, "flush right");
         assert!(
-            m.indicator_x + m.indicator_w <= m.esc_close_x,
+            m.indicator_x + m.indicator_w <= m.esc_x,
             "badge sits right of the comment counter"
         );
+        // A selection is peeled first, so the badge says so — never
+        // `close` while Esc would do something else.
+        app.selection = Some(crate::comment::Selection::new(0));
+        assert_eq!(title_metrics(&app, 80).esc, " esc cancel selection ");
+        app.selection = None;
         // While composing, Esc cancels the composer instead: hide it.
         app.mode = Mode::Input;
-        assert_eq!(title_metrics(&app, 80).esc_close, "");
+        assert_eq!(title_metrics(&app, 80).esc, "");
     }
 
+    /// **狭いときの引き下がり方**: y/s → path（16 桁まで）→ バッジ。
+    /// 状態の印・`1/3 files`・`▌ N` は落とさない。どの幅でも溢れず、
+    /// 引き下がったバッジの幅で y/s が戻ってくることも無い。
     #[test]
-    fn title_esc_close_badge_keeps_room_over_the_path() {
+    fn title_esc_badge_yields_after_the_ys_hint_and_the_path() {
         let (mut app, _dir) = make_session();
         app.config.callback = Some("fzf".into());
-        let m = title_metrics(&app, 20);
-        assert_eq!(m.esc_close, " esc close ", "badge survives narrow widths");
-        assert!(
-            m.path_w + m.esc_close_w <= 20,
-            "the path yields to the badge: {m:?}"
-        );
+        app.selection = Some(crate::comment::Selection::new(0));
+        app.comments.push(crate::comment::Comment {
+            file_path: app.current_file_path().to_path_buf(),
+            start: 1,
+            end: 1,
+            lines: String::new(),
+            revision: None,
+            text: "c".into(),
+        });
+        let mut badge_gone = false;
+        let mut ys_gone = false;
+        for width in (0..=120u16).rev() {
+            let m = title_metrics(&app, width);
+            let used = m.change_w + 1 + m.path_w + m.file_count_w
+                + if m.show_ys { m.ys_w } else { 0 }
+                + m.indicator_w
+                + m.esc_w;
+            // 落とさない要素だけで溢れる幅（ここでは 16 桁未満）は以前から
+            // 溢れる — バッジの話ではないので数えない。
+            if m.change_w + 1 + m.file_count_w + m.indicator_w <= width {
+                assert!(used <= width, "{width}: {m:?}");
+            }
+            assert_eq!(m.indicator, " ▌ 1 ", "the counter never yields ({width})");
+            if m.esc_w > 0 {
+                assert_eq!(m.esc, " esc cancel selection ", "no short form ({width})");
+                assert!(!badge_gone, "the badge came back at {width}");
+                assert!(m.esc_x + m.esc_w == width, "flush right ({width})");
+            } else {
+                badge_gone = true;
+            }
+            if m.show_ys {
+                assert!(!ys_gone, "y/s came back at {width}: {m:?}");
+                assert!(m.esc_w > 0, "y/s outlived the badge at {width}");
+            } else {
+                ys_gone = true;
+            }
+        }
+        assert!(badge_gone && ys_gone);
+        // 80 桁ではどちらも残る（短い path の fixture）。
+        let m = title_metrics(&app, 80);
+        assert!(m.esc_w > 0 && m.show_ys, "{m:?}");
+        // バッジが退くのは path の取り分が 16 桁を割るとき。
+        let first_without = (0..=120u16).rev().find(|&w| title_metrics(&app, w).esc_w == 0).unwrap();
+        let m = title_metrics(&app, first_without + 1);
+        assert!(m.esc_w > 0);
+        let room = (first_without + 1)
+            - (m.indicator_w + m.esc_w + m.change_w + m.file_count_w + 1);
+        assert_eq!(room, 16, "the path keeps 16 columns while the badge stands");
     }
 
     #[test]
@@ -3339,11 +3390,11 @@ use crate::comment::Selection;
         assert!(footer_hints(&app).contains("4–4"));
         assert!(footer_hints(&app).contains("j/k extend"));
         // The way out of the SELECT state is spelled out once, by the
-        // right-edge preview (`crate::esc`) — not repeated in the hints.
+        // top-right badge (`crate::esc`) — not repeated in the hints.
         assert!(!footer_hints(&app).contains("Esc cancel"), "{}", footer_hints(&app));
         assert_eq!(
-            crate::esc::preview(&app).as_deref(),
-            Some("Esc: cancel selection"),
+            crate::esc::badge(&app).as_deref(),
+            Some("esc cancel selection"),
             "the selection state spells out the way out"
         );
         let mut app2 = make_app(10, Mode::Source);
@@ -4075,10 +4126,13 @@ use crate::comment::Selection;
         let mut app = make_app(10, Mode::View);
         on_view_key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, None);
         assert_eq!(app.overlay, Some(Overlay::Help));
-        // The reference fits the panel (24-row terminal): j/k are no-ops
-        // — a list that fits never scrolls. Esc / q / ? close it.
+        // 24 行の端末では 1 行だけはみ出す（右上のバッジの `esc` の行を
+        // 足したため）。j は最後の行まで送り、そこで止まる — 表の端を
+        // 越えてスクロールしない。Esc / q / ? close it.
         on_overlay_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_eq!(app.overlay_cursor, 0, "no scroll when the content fits");
+        assert_eq!(app.overlay_cursor, 1, "scrolls to the last row");
+        on_overlay_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.overlay_cursor, 1, "never past its own end");
         on_overlay_key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE);
         assert_eq!(app.overlay, None, "? toggles the help closed");
         on_source_key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, None);
@@ -6397,19 +6451,24 @@ fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
     assert_ne!(core, rest);
 }
 
-/// **A MARKED line under the cursor shows the band, not the amber.** Seen
-/// on a real document as "policy says MARKED for 17 Atoms and 16 of them
-/// are amber": the seventeenth was the line the cursor had been moved to
-/// in order to look at it. The cursor band paints the whole row's
-/// background and wins over the mark by design (`view.rs`, `span_hl`),
-/// so under the band a MARKED phrase and a NORMAL one are the same
-/// color. The amber is not lost — it is back the moment the cursor
-/// leaves — and nothing in `decorate_row` or the projection is involved.
+/// **A MARKED line under the cursor keeps its amber — a deeper one.**
+/// Seen on a real document as "policy says MARKED for 17 Atoms and 16 of
+/// them are amber": the seventeenth was the line the cursor had been
+/// moved to in order to look at it. The band used to paint the whole
+/// row's background over the mark, so under it a MARKED phrase and a
+/// NORMAL one were the same color (and `]m` landed on an answer that
+/// then could not be seen).
+///
+/// Now the band paints only the NORMAL phrase; the MARKED one takes the
+/// deeper amber (`DecorationStyles::mark_band_bg`, the 0.40 ceiling), and
+/// leaving the line brings the resting amber back. Cursor band and
+/// selection band alike, view and source mode alike, and with focus (`f`)
+/// on as well.
 ///
 /// Same demo line as the test above: 「採用する方式は差分配信である。」
 /// (MARKED) and 「詳細は付録にまとめた。」 (NORMAL) on ONE source line.
 #[test]
-fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
+fn a_marked_line_under_the_cursor_shows_the_deeper_amber_not_the_band() {
     use crate::decoration::DecorationStyles;
 
     let path = std::path::PathBuf::from(concat!(
@@ -6481,20 +6540,56 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
     assert_eq!(essential.bg, mark_bg, "カーソルが他の行にあれば MARKED は琥珀");
     assert_ne!(detail.bg, mark_bg);
 
-    // Cursor on the marked line: the band paints BOTH halves the same
-    // background, and that background is not the amber. This is the
-    // "one MARKED line is not amber" sighting, reproduced.
+    let band = Some(app.ui_selected_bg);
+    let deep = Some(styles.mark_band_bg());
+    assert_ne!(deep, mark_bg, "帯の上の琥珀は確定色より一段濃い別の色");
+    assert_ne!(deep, band);
+
+    // Cursor on the marked line: the MARKED half takes the deeper amber,
+    // the NORMAL half the band. The row no longer reads as "no mark here".
     app.view.cursor = marked_line;
     let (essential, detail) = halves(&mut app, &mut terminal);
-    assert_ne!(essential.bg, mark_bg, "カーソル行では帯が琥珀を覆う");
-    assert!(essential.bg.is_some(), "覆っているのは帯の背景であって、無色ではない");
-    assert_eq!(essential.bg, detail.bg, "帯の下では MARKED と NORMAL が同じ背景になる");
+    assert_eq!(essential.bg, deep, "カーソル帯の上で MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band, "カーソル帯の上で NORMAL は帯のまま");
 
-    // And it is the band, not a lost mark: leaving the line brings it back.
+    // Focus (`f`) on: the band still drops Dim, and the amber still reads.
+    assert!(app.press_focus(std::time::Instant::now()));
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, deep, "沈めても帯の上の MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band);
+    assert!(app.clear_focus());
+
+    // Leaving the line brings the resting amber back.
     app.view.cursor = 0;
     let (essential, detail) = halves(&mut app, &mut terminal);
-    assert_eq!(essential.bg, mark_bg, "カーソルが離れれば琥珀は戻る");
+    assert_eq!(essential.bg, mark_bg, "カーソルが離れれば琥珀は確定色に戻る");
     assert_ne!(detail.bg, mark_bg);
+
+    // The selection band (`v`) is the same band.
+    app.selection = Some(crate::comment::Selection::new(marked_line));
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, deep, "選択帯の上で MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band, "選択帯の上で NORMAL は帯のまま");
+    app.selection = None;
+
+    // Source mode paints its own band — same rule.
+    app.spans = app
+        .highlight
+        .highlight_with(&app.source.content, crate::syntax_for(&app.files[0]));
+    app.mode = Mode::Source;
+    app.cursor = 0;
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, mark_bg, "source: カーソルが他の行なら確定色");
+    assert_ne!(detail.bg, mark_bg);
+    app.cursor = marked_line;
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, deep, "source: カーソル帯の上で MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band, "source: NORMAL は帯のまま");
+    app.cursor = 0;
+    app.selection = Some(crate::comment::Selection::new(marked_line));
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, deep, "source: 選択帯の上で MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band);
 }
 
 /// 設計書「つまみの操作では Jev を呼ばない」を、呼び出し回数と

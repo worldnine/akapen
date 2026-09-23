@@ -1,8 +1,9 @@
 //! **`Esc` は一番手前の層から 1 枚ずつはがす** — その順番の表。
 //!
 //! view と source と Review の据え付けの一覧の 3 か所の `Esc` が、みな
-//! [`peel`] を通る。フッタ右端の予告（`Esc: clear review`）も同じ表を読む
-//! （[`preview`]）。**表は 1 本**なので、予告と実際に消えるものはずれない。
+//! [`peel`] を通る。タイトル行の右上のバッジ（`esc clear review`）も同じ
+//! 表を読む（[`badge`]）。**表は 1 本**なので、バッジと実際に消えるものは
+//! ずれない。バッジを押すのも [`peel`] である（押す = `Esc` を 1 回）。
 //!
 //! ```text
 //! 確認中の終了の取り消し → 選択 → 削除のフォーカス（source）
@@ -49,7 +50,7 @@ pub(crate) enum Layer {
     Quit,
 }
 
-/// **はがす順番。** ここを並べ替えれば、`Esc` の挙動もフッタの予告も
+/// **はがす順番。** ここを並べ替えれば、`Esc` の挙動も右上のバッジも
 /// 同時に変わる。
 pub(crate) const ORDER: [Layer; 8] = [
     Layer::QuitConfirm,
@@ -79,19 +80,24 @@ impl Layer {
         }
     }
 
-    /// フッタの予告に出す動詞句（`Esc: ` の後ろ）。フラッシュの語と対に
-    /// なるように揃えてある（`clear review` → `review cleared`）。
+    /// 右上のバッジに出す動詞句（`esc ` の後ろ）。**語はここ 1 か所。**
+    /// フラッシュの語と対になるように揃えてある（`clear review` →
+    /// `review cleared`）。終了だけは `close` と言う — `--esc-quit` は
+    /// akapen を popup として開いた呼び手のための設定で、閉じると言う方が
+    /// 呼び手の側から見た出来事に合う（以前の固定のバッジと同じ語）。
     pub(crate) fn preview(self, app: &App) -> &'static str {
         match self {
-            Layer::QuitConfirm if app.esc_quit_enabled() => "quit",
+            Layer::QuitConfirm if app.esc_quit_enabled() => "close",
             Layer::QuitConfirm => "cancel quit",
             Layer::Selection => "cancel selection",
-            Layer::DeletionFocus => "cancel deletion focus",
+            // `focus` とは言わない — `f` のフォーカス（`focus off`）と紛れる。
+            // source で `n` / `N` が選んだ削除の塊を選び外す、という動作。
+            Layer::DeletionFocus => "deselect deletion",
             Layer::ReviewList => "close list",
             Layer::Focus => "focus off",
             Layer::Review => "clear review",
             Layer::Marks => "clear marks",
-            Layer::Quit => "quit",
+            Layer::Quit => "close",
         }
     }
 
@@ -112,7 +118,7 @@ impl Layer {
             }
             Layer::DeletionFocus => {
                 app.focused_deletion = None;
-                app.flash("deletion focus cancelled");
+                app.flash("deletion deselected");
             }
             Layer::ReviewList => {
                 app.overlay = None;
@@ -148,12 +154,13 @@ pub(crate) fn peel(app: &mut App) {
     }
 }
 
-/// フッタ右端の予告 — 次の `Esc` で何が消えるか（`Esc: clear review`）。
+/// 右上のバッジ — 次の `Esc` で何が起きるか（`esc clear review`）。
 ///
-/// 何も消すものが無く、`Esc` で終了しない設定なら `None`（出さない）。
-/// **表が効いている場面でだけ出す**: popup と composer は `Esc` を自分で
-/// 取るので、そこで表の予告を出すと嘘になる。
-pub(crate) fn preview(app: &App) -> Option<String> {
+/// 何もはがす層が無く、`Esc` で終了しない設定なら `None`（出さない）。
+/// **表が効いている場面でだけ出す**: popup と composer（問いのプロンプトも）は
+/// `Esc` を自分で取るので、そこで表の語を出すと嘘になる。そちらの出口は
+/// それぞれの案内が言う（composer の `Esc cancel` など）。
+pub(crate) fn badge(app: &App) -> Option<String> {
     let table_owns_esc = match app.overlay {
         None => app.mode != Mode::Input,
         Some(Overlay::Review) => true,
@@ -162,5 +169,5 @@ pub(crate) fn preview(app: &App) -> Option<String> {
     if !table_owns_esc {
         return None;
     }
-    top(app).map(|layer| format!("Esc: {}", layer.preview(app)))
+    top(app).map(|layer| format!("esc {}", layer.preview(app)))
 }
