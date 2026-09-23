@@ -73,7 +73,12 @@ akapen が読むのはこの 1 つだけです。自分の linter をつなぐ�
 - 範囲が壊れている指摘（行の外・start > end・サロゲートの途中）は、その 1 件だけ
   捨てます
 - 幅 0 の範囲（start = end）は、その行の末尾まで広げます
-- `severity` は読みますが、いまは表示に使っていません
+- `severity` で下線とガターの `!` の色が変わります（1 error 赤・2 warning 橙・
+  3 info / 4 hint 青緑。無ければ青緑）。linter ごとの段階はスクリプトの側で LSP の
+  1〜4 に揃えます（textlint の error / warning / info → 1 / 2 / 3、lint.py の
+  critical / warn / info → 1 / 2 / 3）
+- 文書のほぼ全体（行の 9 割以上、3 行以上）を覆う指摘 — textlint の総評など — は
+  一覧の末尾に「文書全体」として出し、本文には下線も `!` も出しません
 
 候補の rule は `<source>/<code>` になり（例 `textlint/ja-no-weak-phrase`）、
 **範囲は指摘の範囲そのまま**です（下線もそこに引きます）。
