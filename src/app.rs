@@ -258,7 +258,9 @@ pub(crate) struct App {
     /// top message (a prompt suppresses it).
     pub(crate) toast_fx: Option<tachyonfx::Effect>,
     /// **マーカーが引かれる演出**（marks モード）。答えが届いた瞬間に
-    /// 立ち、700 ms で終わる（[`crate::effects::marks_reveal_effect`]）。
+    /// 立ち、700〜820 ms で終わる（[`crate::effects::marks_reveal_effect`] /
+    /// [`crate::effects::marks_settle_effect`]。向きは暫定の切り替え
+    /// [`crate::effects::RevealStyle`]）。
     ///
     /// **view モードにも source モードにも乗る。** 琥珀は両方で塗られる
     /// ので、演出だけ view 限定だと「source では効かない機能」になる
@@ -938,10 +940,21 @@ impl App {
         if !self.config.fx {
             return;
         }
-        self.marks_fx = Some(crate::effects::marks_reveal_effect(
-            self.decoration_styles.mark_bg(),
-            self.decoration_styles.page_bg(),
-        ));
+        let amber = self.decoration_styles.mark_bg();
+        let page = self.decoration_styles.page_bg();
+        self.marks_fx = Some(match crate::effects::RevealStyle::from_env() {
+            // ページ色から琥珀へ上げる（2026-09-22 まで）。
+            crate::effects::RevealStyle::Rise => {
+                crate::effects::marks_reveal_effect(amber, page)
+            }
+            // **濃い琥珀でパッと出て、左から乾いて確定色へ落ちる**
+            // （2026-09-23 の読み手の注文）。明るい側の色は b（天井）から
+            // 借りる — 確定色は a のままで、ページ色は使わない。
+            crate::effects::RevealStyle::Settle => crate::effects::marks_settle_effect(
+                amber,
+                self.decoration_styles.mark_flash_bg(),
+            ),
+        });
     }
 
     /// Collect whatever the worker threads have finished. Called once per

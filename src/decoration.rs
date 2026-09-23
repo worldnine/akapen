@@ -356,6 +356,8 @@ pub struct DecorationStyles {
     mark: Style,
     /// [`DecorationKind::SemanticMarkFaint`] の地。既定では出さない。
     faint_mark: Style,
+    /// **演出が最初に出す、一番濃い琥珀**（[`Self::mark_flash_bg`]）。
+    flash: Color,
     /// いま選ばれている見た目（[`MarkVariant`]）。
     variant: MarkVariant,
     /// Where a dimmed foreground travels toward — the theme's background.
@@ -374,6 +376,8 @@ impl Default for DecorationStyles {
         Self {
             mark: Style::default().bg(MARK_BG_DARK),
             faint_mark: Style::default().bg(MARK_BG_DARK),
+            // ダークの紙 rgb(30,30,46) から天井（0.40）の色。
+            flash: Color::Rgb(0x78, 0x58, 0x1b),
             variant: MarkVariant::Amber,
             dim_target: DIM_TARGET_DARK,
             default_fg: Color::Rgb(0xcd, 0xd6, 0xf4),
@@ -430,6 +434,10 @@ impl DecorationStyles {
         Self {
             mark,
             faint_mark: Style::default().bg(mark_background(highlighter, MARK_BG_BLEND_FAINT)),
+            // **演出の出発点。** 天井（[`MARK_BG_BLEND_CEILING`]）の色で、
+            // 確定色より濃い。`MarkVariant::Deep` では確定色と一致するので
+            // 演出は「落ちない」— 見た目が既に天井だからである。
+            flash: mark_background(highlighter, MARK_BG_BLEND_CEILING),
             variant,
             dim_target,
             default_fg,
@@ -449,14 +457,28 @@ impl DecorationStyles {
         self.variant
     }
 
+    /// **演出が最初に出す、一番濃い琥珀。**
+    ///
+    /// [`MARK_BG_BLEND_CEILING`]（0.40）の色で、確定色（[`Self::mark_bg`]）
+    /// より濃い。`marks_settle_effect` はここから確定色へ落ちてくるので、
+    /// **「目立たないが読みやすい」確定色を変えずに出る瞬間だけ強くする**
+    /// ことができる（読み手の注文、2026-09-23）。
+    ///
+    /// **焼き込まない** — `--light` でも `--theme` でも同じ式で出る。
+    pub fn mark_flash_bg(&self) -> Color {
+        self.flash
+    }
+
     /// The mark's background color on its own — the amber the paint
-    /// actually writes.
+    /// actually writes, and the color the reveal settles to.
     ///
     /// The marks reveal animation filters the frame by exactly this
-    /// color (`crate::effects::marks_reveal_effect`), which is why it is
-    /// read from here instead of being written into the effect: a theme,
+    /// color (`crate::effects::marks_settle_effect` /
+    /// `crate::effects::marks_reveal_effect`), which is why it is read
+    /// from here instead of being written into the effect: a theme,
     /// `--light` and `--mark-blend` all move it, and there must be one
-    /// place that decides.
+    /// place that decides. The bright color the settle STARTS from is
+    /// [`Self::mark_flash_bg`].
     pub fn mark_bg(&self) -> Color {
         self.mark.bg.unwrap_or(MARK_BG_DARK)
     }

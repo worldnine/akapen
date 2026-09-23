@@ -216,7 +216,8 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     // 機能」になる。だから上の `view_active()` の塊の外にいる。
     //
     // 面は本文の領域そのもので、どのセルを動かすかは背景色のフィルタが
-    // 決める（`effects::marks_reveal_effect`）。overlay や timeline bar が
+    // 決める（`effects::marks_settle_effect` /
+    // `effects::marks_reveal_effect`）。overlay や timeline bar が
     // 上に出ていても、それらの背景は琥珀ではないので巻き添えにならない。
     if app.config.fx
         && let Some(effect) = app.marks_fx.as_mut()
