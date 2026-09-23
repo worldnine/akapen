@@ -27,6 +27,7 @@ mod overlay;
 mod reload;
 mod render;
 mod review;
+mod review_contract;
 mod review_rules;
 mod semantic;
 mod semantic_cache;
@@ -134,6 +135,9 @@ fn main() -> Result<()> {
                  \x20 --review-rules <file>  read the Review rules (R) from this JSON\n\
                  \x20                   instead of the built-in three (also\n\
                  \x20                   $XDG_CONFIG_HOME/akapen/review-rules.json)\n\
+                 \x20                   Accepted Review comments are sent with a\n\
+                 \x20                   rewrite contract first (built in; override\n\
+                 \x20                   with $XDG_CONFIG_HOME/akapen/review-contract.md)\n\
                  \x20 --review-json     print the Review candidates as JSON and exit,\n\
                  \x20                   without starting the TUI (lines, rule, action\n\
                  \x20                   and score only — never the document text).\n\
@@ -3977,16 +3981,32 @@ fn request_quit(app: &mut App) {
 /// failed send keeps the comments for a retry, and nothing is queued for
 /// stdout (terminal output after quit was confusing; pipe via the send
 /// command instead, e.g. `--send-cmd "cat >> review.txt"`).
+/// `s` / `y` で送る文面。**`y` も `s` も同じ文面である**（貼る先も LLM
+/// だから、コピーと送信で中身が違うと「コピーで試した」が試しにならない）。
+///
+/// review コメントがあれば、書き換えの契約を先頭に足す（4 節「一番怖い
+/// ところ」、[`review_contract::compose`]）。無ければ整形した本文のまま —
+/// 赤入れだけの送信は段階 1 までと 1 バイトも変わらない。
+pub(crate) fn export_text(app: &App) -> String {
+    let body = if app.config.reply {
+        export::format_all_reply(&app.comments)
+    } else {
+        export::format_all(&app.comments)
+    };
+    review_contract::compose(
+        body,
+        &app.comments,
+        app.review_rules.as_ref(),
+        &review_contract::contract_text(),
+    )
+}
+
 pub(crate) fn export_all(app: &mut App, send: bool) {
     if app.comments.is_empty() {
         app.flash_err("no comments yet");
         return;
     }
-    let text = if app.config.reply {
-        export::format_all_reply(&app.comments)
-    } else {
-        export::format_all(&app.comments)
-    };
+    let text = export_text(app);
     let mut parts: Vec<String> = Vec::new();
     let mut had_error = false;
     match export::copy_to_clipboard(&text) {

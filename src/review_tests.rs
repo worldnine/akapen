@@ -601,3 +601,56 @@ fn a_reanalysis_under_the_open_list_puts_the_cursor_back_on_top() {
     deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), Some(0.7)]));
     assert_eq!(app.review_candidates[app.overlay_cursor].lines, (3, 3));
 }
+
+// ---- 8. 送る文面に書き換えの契約が乗る ------------------------------------
+
+/// accept したコメントを送ると、文面の先頭に契約と Filler の定義が乗り、
+/// その後ろは既存の整形そのままである。
+#[test]
+fn an_accepted_candidate_sends_the_contract_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([None, Some(0.87), None]));
+    assert!(app.accept_candidate(0));
+    let text = crate::export_text(&app);
+    let contract = crate::review_contract::contract_text();
+    assert!(text.starts_with(contract.trim_end()), "契約が先頭に無い");
+    let filler = app.review_rules.as_ref().unwrap().get("filler").unwrap().text.clone();
+    assert!(text.contains(&filler), "Filler の定義が無い");
+    assert!(text.ends_with(&crate::export::format_all(&app.comments)));
+    assert!(text.contains("review: filler (0.87)"));
+}
+
+/// `--reply` でも同じく先頭に乗る。
+#[test]
+fn the_reply_mode_sends_the_contract_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    app.config.reply = true;
+    deliver(&mut app, "filler", answer([None, Some(0.87), None]));
+    assert!(app.accept_candidate(0));
+    let text = crate::export_text(&app);
+    let contract = crate::review_contract::contract_text();
+    assert!(text.starts_with(contract.trim_end()));
+    assert!(text.ends_with(&crate::export::format_all_reply(&app.comments)));
+}
+
+/// **review コメントが無い送信は 1 バイトも変わらない。** 候補が届いて
+/// いても、accept していなければ契約は乗らない。
+#[test]
+fn a_send_without_an_accepted_candidate_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), None, None]));
+    app.comments.push(crate::comment::Comment {
+        file_path: app.current_file_path().to_path_buf(),
+        start: 5,
+        end: 5,
+        lines: "ふたつめの段落。".into(),
+        revision: None,
+        text: "ここは言い過ぎ".into(),
+    });
+    assert_eq!(crate::export_text(&app), crate::export::format_all(&app.comments));
+    app.config.reply = true;
+    assert_eq!(crate::export_text(&app), crate::export::format_all_reply(&app.comments));
+}

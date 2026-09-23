@@ -119,6 +119,20 @@ pub(crate) fn comment_text(rule: &str, score: f32) -> String {
     format!("review: {rule} ({score:.2})")
 }
 
+/// [`comment_text`] の逆。形に合わなければ `None`（人の書いた赤入れ）。
+///
+/// 送る文面に契約を足すかどうかは、これで決まる
+/// （[`crate::review_contract::compose`]）。形はここと `comment_text` の
+/// 2 本で 1 組である。
+pub(crate) fn parse_comment_text(text: &str) -> Option<(RuleId, f32)> {
+    let rest = text.strip_prefix("review: ")?;
+    let (rule, score) = rest.strip_suffix(')')?.split_once(" (")?;
+    if rule.is_empty() || rule.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((rule.to_string(), score.parse().ok()?))
+}
+
 /// 注釈 1 つ分の候補（文書順）。
 ///
 /// `score >= rule.threshold` の Unit を拾う。**`has_core()` は見ない** —
@@ -436,6 +450,15 @@ mod tests {
         assert_eq!(got[0].atoms.len(), 2);
         assert_eq!(got[0].lines, (1, 2));
         assert_eq!(got[0].range.start, 0);
+    }
+
+    #[test]
+    fn the_comment_body_reads_back_and_a_hand_written_one_does_not() {
+        let text = comment_text("filler", 0.87);
+        assert_eq!(parse_comment_text(&text), Some(("filler".into(), 0.87)));
+        for other in ["review: ここは要らない", "review: filler", "filler (0.87)", "review:  (0.5)"] {
+            assert_eq!(parse_comment_text(other), None, "{other}");
+        }
     }
 
     #[test]
