@@ -3194,6 +3194,7 @@ use crate::comment::Selection;
             lines: String::new(),
             revision: None,
             text: "c".into(),
+            anchor: None,
         });
         let mut badge_gone = false;
         let mut ys_gone = false;
