@@ -633,6 +633,7 @@ mod handoff_tests {
             end: 1,
             lines: "line1".into(),
             revision: None,
+            anchor: None,
             text: text.into(),
         });
     }

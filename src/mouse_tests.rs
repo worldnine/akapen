@@ -59,6 +59,7 @@
             text: "テスト".into(),
             lines: "テスト".into(),
             revision: None,
+            anchor: None,
         });
         app.refresh_line_rows();
         app

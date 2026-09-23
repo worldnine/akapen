@@ -50,8 +50,23 @@ pub struct Comment {
     /// Exact historical document revision this comment was made against.
     /// `None` means the live working tree.
     pub revision: Option<String>,
+    /// **accept した候補との結び目**（`a` / `A` で作ったときだけ `Some`）。
+    /// 人が書いたコメントは `None`。同じ行に同じルールの候補が 2 本あっても、
+    /// どちらのコメントかをこれで見分ける（`docs/design/marks-only-and-review-mode.md`
+    /// 4 節「コメントと候補の結び目」）。
+    pub anchor: Option<ReviewAnchor>,
     /// The comment body.
     pub text: String,
+}
+
+/// コメントが結ばれている候補 — ルールと、候補の**文書全体でのバイト範囲**
+/// （[`crate::review::Candidate::range`] と同じもの）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ReviewAnchor {
+    /// 候補のルール（lint なら `<source>/<code>`）。
+    pub rule: String,
+    /// 候補のバイト範囲（文書の頭から）。
+    pub range: std::ops::Range<usize>,
 }
 
 impl Comment {
@@ -123,6 +138,7 @@ mod tests {
             end,
             lines: "snippet".into(),
             revision: None,
+            anchor: None,
             text: "text".into(),
         }
     }

@@ -3801,6 +3801,7 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                     end: app.input_end as u32 + 1,
                     lines,
                     revision,
+                    anchor: None,
                     text,
                 });
                 app.flash(format!("comment added ({} total)", app.comments.len()));

@@ -674,6 +674,7 @@ fn a_send_without_an_accepted_candidate_is_unchanged() {
         end: 5,
         lines: "ふたつめの段落。".into(),
         revision: None,
+        anchor: None,
         text: "ここは言い過ぎ".into(),
     });
     assert_eq!(crate::export_text(&app), crate::export::format_all(&app.comments));
@@ -832,6 +833,7 @@ fn a_watched_reload_resolves_the_review_comments_whose_range_changed() {
         end: 3,
         lines: "ひとつめの段落。".into(),
         revision: None,
+        anchor: None,
         text: "ここは言い過ぎ".into(),
     });
 
@@ -1454,6 +1456,7 @@ fn with_esc_quit_the_last_layer_is_quit() {
         end: 1,
         lines: String::new(),
         revision: None,
+        anchor: None,
         text: "c".into(),
     });
     press_esc(&mut app);

@@ -332,6 +332,7 @@ fn the_underline_survives_the_amber_the_bands_and_a_comment() {
             end: quote_line as u32 + 1,
             lines: doc[quote..line_end].to_string(),
             revision: None,
+            anchor: None,
             text: "人の赤入れ".into(),
         });
         park_cursor(&mut app);

@@ -890,6 +890,7 @@ mod tests {
             end,
             lines: lines.into(),
             revision: None,
+            anchor: None,
             text: text.into(),
         }
     }

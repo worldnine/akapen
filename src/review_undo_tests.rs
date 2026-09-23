@@ -120,6 +120,7 @@ fn a_accepts_and_undoes_only_its_own_comment_and_leaves_a_hand_written_one() {
         end: 3,
         lines: "ひとつめの段落。".into(),
         revision: app.current_revision_context(),
+        anchor: None,
         text: "ここは言い過ぎ".into(),
     });
     press(&mut app, 'a');
@@ -264,6 +265,7 @@ fn sending_remembers_only_review_comments_and_only_for_their_own_file() {
         end: 5,
         lines: "ふたつめの段落。".into(),
         revision: None,
+        anchor: None,
         text: "人の赤入れ".into(),
     });
     app.comments.push(crate::comment::Comment {
@@ -272,6 +274,7 @@ fn sending_remembers_only_review_comments_and_only_for_their_own_file() {
         end: 7,
         lines: String::new(),
         revision: None,
+        anchor: None,
         text: crate::review::comment_text("filler", 0.7),
     });
     assert_eq!(crate::clear_sent_comments(&mut app), 3);

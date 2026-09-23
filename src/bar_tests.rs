@@ -9,6 +9,7 @@
             text: text.into(),
             lines: text.into(),
             revision: None,
+            anchor: None,
         }
     }
 

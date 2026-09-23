@@ -1836,6 +1836,10 @@ impl App {
             end,
             lines,
             revision: self.current_revision_context(),
+            anchor: Some(crate::comment::ReviewAnchor {
+                rule: candidate.rule.clone(),
+                range: candidate.range.clone(),
+            }),
             text,
         };
         self.comments.push(comment);
