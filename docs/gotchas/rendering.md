@@ -356,7 +356,7 @@ markdown の scope に当たるのは **DarkNeon だけ**です
 数えると **0 セル**。`app.semantic_decorations` には MARKED が入っていて、
 実機では琥珀が見えている。
 
-**原因**: マーカーが引かれる演出（`effects::marks_draw_effect`）が
+**原因**: マーカーが引かれる演出（`effects::marks_reveal_effect`）が
 立っていました。段 1 は**ページ色から**琥珀の半分へ上げるので、
 `alpha = 0` の 1 枚目では琥珀のセルがちょうどページ色で塗られています
 （線の色（`mark_flash_bg()`）が乗るのは段 2 からです）。答えが

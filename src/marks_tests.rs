@@ -684,8 +684,8 @@ fn focus_refuses_when_nothing_is_marked() {
 fn focus_changes_what_is_painted_not_just_a_flag() {
     let mut app = app_with("demo-marks.json");
     // **演出を止めてから撮る。** マーカーが引かれる演出は琥珀のセルを
-    // ページ色から立ち上げるので（`effects::marks_draw_effect` /
-    // `effects::marks_reveal_effect`）、立った直後の 1 枚は
+    // ページ色から立ち上げるので（`effects::marks_reveal_effect`）、
+    // 立った直後の 1 枚は
     // 「確定色の琥珀が 1 セルも無い」画面になる。
     // 見たいのは静止した絵である。
     app.config.fx = false;
