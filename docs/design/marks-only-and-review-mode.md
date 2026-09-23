@@ -248,7 +248,7 @@ view・source・Review の据え付けの一覧の 3 か所の `Esc` がみな�
 | ---: | --- | --- | --- |
 | 1 | 終了の確認（`q`、未送信のコメントあり） | `esc cancel quit`（`--esc-quit` なら `esc close`） | `quit cancelled` |
 | 2 | 選択（`v`・一覧の Enter） | `esc cancel selection` | `selection cancelled` |
-| 3 | 削除のフォーカス（source の `n` / `N`） | `esc cancel deletion focus` | `deletion focus cancelled` |
+| 3 | 削除のフォーカス（source の `n` / `N`） | `esc deselect deletion` | `deletion deselected` |
 | 4 | Review の据え付けの一覧 | `esc close list` | `list closed` |
 | 5 | フォーカス（`f`） | `esc focus off` | `focus off` |
 | 6 | Review の下線とガターの印（候補） | `esc clear review` | `review cleared` |
@@ -275,6 +275,17 @@ view・source・Review の据え付けの一覧の 3 か所の `Esc` がみな�
     `marks cleared`）で、語は `Layer::preview` の 1 か所にある。終了だけは
     `close` と言う — `--esc-quit` は akapen を popup として開く呼び手の設定で、
     呼び手から見た出来事は「閉じる」である
+  - **削除の段は `focus` と言わない**（2026-09-23）。以前の
+    `esc cancel deletion focus`（余白込み 27 桁）は一番長く、しかも `f` の
+    フォーカス（`esc focus off`）と同じ語を使っていた。source の `n` / `N` が
+    選んだ削除の塊を選び外す動作なので `esc deselect deletion`（23 桁）と言い、
+    フラッシュも `deletion deselected` と対にした。ほかの段は 11〜22 桁で、
+    どれも `focus` とは紛れないので変えていない。狭い幅では、身元の印も
+    `▌ N` も無いとき端末 40 桁までこの段のバッジが残る（以前は 44 桁）
+  - **`?` のヘルプに `esc` の行がある**（quit の行のすぐ上）:
+    `top-right badge = what the next Esc does (or click)`。段ごとの語は
+    並べない — それはバッジが言う。この 1 行のぶん、素のセッションのヘルプは
+    24 行の端末で 1 行だけスクロールするようになった
   - **何も起きないときは出さない。** popup・composer・問いのプロンプトの間も
     出さない（そちらは `Esc` を自分で取る。出口はそれぞれの案内が言う）。
     以前の固定の `esc close` は popup の上でも出ていて、閉じるのは popup の
