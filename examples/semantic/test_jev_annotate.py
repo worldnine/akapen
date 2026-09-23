@@ -23,6 +23,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -1634,6 +1636,195 @@ class MarksModeTest(unittest.TestCase):
         for claim in claims:
             self.assertTrue(claim.startswith(text), claim[:60])
             self.assertIn("――― 対象 ―――", claim)
+
+
+class ConcurrentBoundaryTest(unittest.TestCase):
+    """**境界は文書 1 版につき 1 回だけ聞く** — 同時に来た要求どうしでも。
+
+    akapen の TUI は Review のルールを**別々のスレッドで同時に**呼ぶ
+    （`src/app.rs` `reanalyze_review`）。reload では marks と Review が、
+    問いの差し替えでは古い解析と新しい解析が重なる。空のキャッシュで
+    重なると、全員が境界のラウンドを聞いていた（2026-09-23 の実測で 39 + 39 問）。
+    """
+
+    SOURCE = MarksModeTest.SOURCE
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved = os.environ.get("AKAPEN_CACHE_DIR")
+        os.environ["AKAPEN_CACHE_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("AKAPEN_CACHE_DIR", None)
+        else:
+            os.environ["AKAPEN_CACHE_DIR"] = self._saved
+        self._tmp.cleanup()
+
+    def request(self, question_id):
+        request = MarksModeTest.request(MarksModeTest())
+        request["question"] = dict(request["question"], id=question_id, text=f"問い {question_id}。")
+        return request
+
+    def counting(self, boundary_delay=0.3, fail_first_boundary=False):
+        """境界の問いを数える偽の Jev。境界のラウンドだけ遅い（重なりを作るため）。"""
+        lock = threading.Lock()
+        counts = {"boundary": 0, "boundary_calls": 0}
+        fake = MarksModeTest.fake(MarksModeTest(), [0.9, 0.9, 0.9, 0.9])
+
+        def ask(state, chunk, model, timeout):
+            asked = [k for k in chunk if k.startswith("boundary:")]
+            if asked:
+                with lock:
+                    counts["boundary"] += len(asked)
+                    counts["boundary_calls"] += 1
+                    first = counts["boundary_calls"] == 1
+                time.sleep(boundary_delay)
+                if fail_first_boundary and first:
+                    raise jev.JevError("HTTP 500 from Jev")
+            return fake(state, chunk, model, timeout)
+
+        return ask, counts
+
+    def run_together(self, requests):
+        """`requests` を同時に走らせ、(答え or 例外) の並びを返す。"""
+        barrier = threading.Barrier(len(requests))
+        results = [None] * len(requests)
+
+        def work(index, request):
+            barrier.wait()
+            try:
+                results[index] = jev.annotate(request, "m", 1.0)
+            except jev.JevError as e:
+                results[index] = e
+
+        threads = [
+            threading.Thread(target=work, args=(i, r), daemon=True)
+            for i, r in enumerate(requests)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "待ちが終わらない")
+        return results
+
+    def test_two_questions_at_once_ask_the_boundary_round_once(self):
+        ask, counts = self.counting()
+        alone = len(jev.boundary_questions(self.request("a")["atoms"], jev.plan_boundaries(self.request("a")["atoms"], self.SOURCE)))
+        self.assertGreater(alone, 0, "テストが空振りしないこと（境界の問いがある文書）")
+        results = with_fake_ask(ask, lambda: self.run_together([self.request("filler"), self.request("hedge")]))
+        self.assertEqual(counts["boundary"], alone, f"境界の問い {counts}")
+        # 答えは同じ切り方（片方がキャッシュから読んでも Unit は変わらない）。
+        self.assertEqual(
+            [u["atoms"] for u in results[0]["units"]],
+            [u["atoms"] for u in results[1]["units"]],
+        )
+        self.assertEqual(
+            sorted(r["jev"]["boundaries_cached"] for r in results), [False, True]
+        )
+
+    def test_a_failed_boundary_round_does_not_leave_the_other_waiting(self):
+        """1 本目の境界が落ちたら、待っていた側が自分で聞く。永久には待たない。"""
+        ask, counts = self.counting(fail_first_boundary=True)
+        started = time.monotonic()
+        results = with_fake_ask(ask, lambda: self.run_together([self.request("filler"), self.request("hedge")]))
+        elapsed = time.monotonic() - started
+        failed = [r for r in results if isinstance(r, jev.JevError)]
+        answered = [r for r in results if isinstance(r, dict)]
+        self.assertEqual((len(failed), len(answered)), (1, 1), results)
+        self.assertEqual(counts["boundary_calls"], 2, "待っていた側が聞き直す")
+        self.assertLess(elapsed, 5.0)
+
+    def test_a_holder_that_never_lets_go_is_waited_for_only_so_long(self):
+        """番を持ったまま動かない相手には、上限まで待って自分で聞く。
+
+        待っている間は stderr に生存信号を出す — 出さないと akapen の無音の
+        上限（30 秒）で、待っているだけの子が殺される。
+        """
+        import fcntl
+        import io
+        from contextlib import redirect_stderr
+
+        path = jev.boundary_cache_path(self.SOURCE)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        holder = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        ask, counts = self.counting(boundary_delay=0.0)
+        heard = io.StringIO()
+        try:
+            with unittest.mock.patch.multiple(
+                jev, BOUNDARY_WAIT_LIMIT=0.5, BOUNDARY_WAIT_SAY_EVERY=0.1
+            ), redirect_stderr(heard):
+                out = with_fake_ask(ask, lambda: jev.annotate(self.request("a"), "m", 1.0))
+        finally:
+            os.close(holder)
+        self.assertGreater(counts["boundary"], 0, "上限のあとは自分で聞く")
+        self.assertFalse(out["jev"]["boundaries_cached"])
+        self.assertIn("waiting for another run", heard.getvalue())
+        self.assertIn("gave up waiting", heard.getvalue())
+
+    def test_the_lock_left_behind_holds_no_prose_and_is_private(self):
+        ask, _ = self.counting(boundary_delay=0.0)
+        with_fake_ask(ask, lambda: jev.annotate(self.request("a"), "m", 1.0))
+        folder = jev.boundary_cache_path(self.SOURCE).parent
+        self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+        for path in folder.iterdir():
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600, path.name)
+            raw = path.read_bytes().decode("utf-8", "replace")
+            for fragment in ("決まった", "見出し", "段落"):
+                self.assertNotIn(fragment, raw, path.name)
+
+    def test_two_processes_at_once_ask_the_boundary_round_once(self):
+        """akapen の形そのまま — **別々のプロセス**が同時に起きる。
+
+        判定器は akapen から 1 要求 1 プロセスで呼ばれるので、プロセス内の
+        排他では足りない。ここでは偽の Jev を差し込んだ本物のスクリプトを
+        2 本同時に走らせ、境界の問いを数える。
+        """
+        log = Path(self._tmp.name) / "asked.log"
+        runner = f"""
+import importlib.machinery, importlib.util, sys, time
+loader = importlib.machinery.SourceFileLoader("jev_annotate", {str(SCRIPT)!r})
+spec = importlib.util.spec_from_loader(loader.name, loader)
+jev = importlib.util.module_from_spec(spec)
+loader.exec_module(jev)
+def ask(state, chunk, model, timeout):
+    answers = {{}}
+    boundary = [k for k in chunk if k.startswith("boundary:")]
+    if boundary:
+        with open({str(log)!r}, "a") as f:
+            f.write(f"{{len(boundary)}}\\n")
+        time.sleep(0.4)
+    for key in chunk:
+        if key.startswith("boundary:"):
+            answers[key] = {{"choice": jev.NEW, "confidence": 0.9}}
+        elif key.startswith("marks:"):
+            answers[key] = {{"noul": 0.9}}
+        else:
+            answers[key] = {{"choice": sorted(chunk[key].get("criteria") or ["x"])[0], "confidence": 0.8}}
+    return {{"answers": answers}}
+jev.ask_jev = ask
+sys.argv = ["jev-annotate.py"]
+sys.exit(jev.main())
+"""
+        env = dict(os.environ, AKAPEN_CACHE_DIR=self._tmp.name)
+        children = []
+        for question_id in ("filler", "hedge"):
+            child = subprocess.Popen(
+                [sys.executable, "-c", runner],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, text=True,
+            )
+            child.stdin.write(json.dumps(self.request(question_id)))
+            child.stdin.close()
+            children.append(child)
+        for child in children:
+            self.assertEqual(child.wait(timeout=20), 0, child.stderr.read())
+            child.stdout.close()
+            child.stderr.close()
+        asked = [int(line) for line in log.read_text().split()]
+        self.assertEqual(len(asked), 1, f"境界のラウンドを聞いたプロセス: {asked}")
 
 
 def with_fake_ask(fake, body):
