@@ -3,7 +3,8 @@
 //! `docs/design/marks-only-and-review-mode.md` 4 節。ここで固定するのは 7 つ:
 //!
 //! 1. **accept** — 正しい行にコメントができ、既存の `l` / `y` / `s` に乗る
-//! 2. **dismiss** — セッション内で消え、`dismissed.jsonl` に残り、再読込で出ない
+//! 2. **dismiss** — 本文から消え、`dismissed.jsonl` に残り、再読込でも `–` のまま
+//!    （取り消し・送った候補・遷移表は [`crate::review_undo_tests`]）
 //! 3. **一覧の描画** — `L42 · Filler 0.87 · …` と、`✓` / `–` の印
 //! 4. **下線** — Pending だけに引かれ、**marks の琥珀とは別の色**である
 //! 5. **marks が動かない** — `R` も accept も dismiss も marks の状態を触らない
@@ -30,7 +31,7 @@ use semantic_reading::{Atom, AtomIndex, AtomKind, SemanticDocument, SemanticUnit
 use std::path::PathBuf;
 
 /// 3 つの段落を持つ小さな文書。1 段落 = 1 Atom = 1 Unit である。
-const DOC: &str = "\
+pub(crate) const DOC: &str = "\
 # みだし
 
 ひとつめの段落。
@@ -45,7 +46,7 @@ const DOC: &str = "\
 /// **コマンドは 1 度も走らない。** `reanalyze_review` を呼ばず、答えは
 /// [`App::accept_review_analysis`] に手で渡すからである（`false` を置いて
 /// あるのは、走ってしまったら失敗すると分かるようにするため）。
-fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
+pub(crate) fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
     let path = dir.join("doc.md");
     std::fs::write(&path, DOC).unwrap();
     let config = Config {
@@ -92,12 +93,12 @@ fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
 
 /// 既定のルールで `Filler` だけを有効にした App（**既定では 1 本も
 /// 有効でない** — `--review-rules` で有効にした読み手の状態である）。
-fn built_in(dir: &std::path::Path) -> App {
+pub(crate) fn built_in(dir: &std::path::Path) -> App {
     app_with_rules(dir, Rules::built_in_enabling(&["filler"]))
 }
 
 /// `DOC` の段落を Atom にした注釈。`scores` は段落ごとのスコア。
-fn answer(scores: [Option<f32>; 3]) -> SemanticDocument {
+pub(crate) fn answer(scores: [Option<f32>; 3]) -> SemanticDocument {
     let paragraphs: Vec<(usize, usize)> = ["ひとつめの段落。", "ふたつめの段落。", "みっつめの段落。"]
         .iter()
         .map(|text| {
@@ -124,7 +125,7 @@ fn answer(scores: [Option<f32>; 3]) -> SemanticDocument {
 }
 
 /// 1 ルール分の答えを `App` へ渡す（本番の入口）。
-fn deliver(app: &mut App, rule: &str, document: SemanticDocument) {
+pub(crate) fn deliver(app: &mut App, rule: &str, document: SemanticDocument) {
     app.review_inflight = app.review_inflight.max(1);
     app.accept_review_analysis(ReviewMessage {
         generation: app.review_generation,
@@ -135,7 +136,7 @@ fn deliver(app: &mut App, rule: &str, document: SemanticDocument) {
     });
 }
 
-fn underlined(app: &App) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn underlined(app: &App) -> Vec<std::ops::Range<usize>> {
     app.active_decorations()
         .into_iter()
         .filter(|d| matches!(d.kind, DecorationKind::ReviewCandidate(_)))
@@ -143,7 +144,7 @@ fn underlined(app: &App) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
-fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+pub(crate) fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
     let area = buf.area();
     let mut out = String::new();
     for y in area.y..area.bottom() {
@@ -206,8 +207,8 @@ fn accept_makes_a_comment_on_the_candidates_own_lines() {
     assert_eq!(comment.lines, "ふたつめの段落。");
     assert_eq!(comment.file_path, *app.current_file_path());
     // 一覧からは消えず、印が変わる。
-    assert_eq!(app.review_candidates[0].state, CandidateState::Accepted);
-    assert_eq!(app.review_candidates[0].mark(), "✓");
+    assert_eq!(app.candidate_state(0).unwrap(), CandidateState::Accepted);
+    assert_eq!(app.candidate_state(0).unwrap().mark(), "✓");
     assert_eq!(app.review_counts(), (1, 1));
     // 二度 accept しても 2 つにはならない。
     assert!(!app.accept_candidate(0));
@@ -222,14 +223,14 @@ fn accept_all_takes_every_pending_candidate_and_leaves_the_rest() {
     assert!(app.dismiss_candidate(1), "真ん中を先に捨てておく");
     assert_eq!(app.accept_all_pending(), 2);
     assert_eq!(app.comments.len(), 2);
-    assert_eq!(app.review_candidates[1].state, CandidateState::Dismissed);
-    assert_eq!(app.review_counts(), (2, 3));
+    assert_eq!(app.candidate_state(1).unwrap(), CandidateState::Dismissed);
+    assert_eq!(app.review_counts(), (3, 3), "見た本数は ✓ 2 本と – 1 本");
 }
 
 // ---- 2. dismiss ---------------------------------------------------------
 
 #[test]
-fn a_dismissed_candidate_is_gone_from_the_document_and_comes_back_never() {
+fn a_dismissed_candidate_leaves_the_document_and_stays_dismissed_on_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = built_in(dir.path());
     deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), None]));
@@ -238,17 +239,24 @@ fn a_dismissed_candidate_is_gone_from_the_document_and_comes_back_never() {
     assert!(app.dismiss_candidate(0));
     // 一覧には残る（印が変わるだけ）が、本文からは消える。
     assert_eq!(app.review_candidates.len(), 2);
-    assert_eq!(app.review_candidates[0].mark(), "–");
+    assert_eq!(app.candidate_state(0).unwrap().mark(), "–");
     assert_eq!(underlined(&app).len(), 1, "捨てた候補の下線は消える");
 
-    // **同じ文書を開き直すと出ない。** 置き場を共有した別の App が、
+    // **同じ文書を開き直しても捨てたまま。** 置き場を共有した別の App が、
     // 本番と同じ経路（`load_dismissed` → `accept_review_analysis`）で
-    // 候補を受け取る。
+    // 候補を受け取る。一覧には文書順の位置のまま `–` で残り、本文には
+    // 下線も印も出ない。
     let mut reopened = built_in(dir.path());
     assert_eq!(reopened.review_dismissed.len(), 1, "記録が読めている");
     deliver(&mut reopened, "filler", answer([Some(0.9), Some(0.8), None]));
-    assert_eq!(reopened.review_candidates.len(), 1, "捨てた 1 本が出ていない");
-    assert_eq!(reopened.review_candidates[0].lines, (5, 5));
+    assert_eq!(reopened.review_candidates.len(), 2, "捨てた 1 本も一覧に残る");
+    assert_eq!(
+        reopened.candidate_states(),
+        [CandidateState::Dismissed, CandidateState::Pending],
+        "文書順の位置のまま"
+    );
+    assert_eq!(underlined(&reopened).len(), 1, "捨てた候補に下線は無い");
+    assert_eq!(reopened.review_lines().iter().flatten().count(), 1, "ガターの印も無い");
 }
 
 #[test]
@@ -303,7 +311,7 @@ fn the_list_marks_what_was_accepted_and_what_was_dismissed() {
     // **どちらの行も消えていない。** 印だけが変わる。
     assert!(screen.contains("✓ L3"), "accept の印:\n{screen}");
     assert!(screen.contains("– L5"), "dismiss の印:\n{screen}");
-    assert!(screen.contains("review (1/2)"), "数:\n{screen}");
+    assert!(screen.contains("review (2/2)"), "数（✓ も – も見た本数）:\n{screen}");
 }
 
 #[test]
@@ -680,13 +688,13 @@ fn a_send_without_an_accepted_candidate_is_unchanged() {
 // どちらも、akapen が前後の版を見届けた reload（`reload_source`）を通る。
 
 /// ディスクの文書を `text` に書き換えて、見届けた reload を通す。
-fn rewrite_and_reload(app: &mut App, text: &str) {
+pub(crate) fn rewrite_and_reload(app: &mut App, text: &str) {
     std::fs::write(app.current_file_path(), text).unwrap();
     crate::reload::reload_source(app, false).unwrap();
 }
 
 /// 文書の中の `paragraphs` を 1 段落 = 1 Atom = 1 Unit にした答え。
-fn answer_for(doc: &str, paragraphs: &[&str], scores: &[Option<f32>]) -> SemanticDocument {
+pub(crate) fn answer_for(doc: &str, paragraphs: &[&str], scores: &[Option<f32>]) -> SemanticDocument {
     let atoms: Vec<Atom> = paragraphs
         .iter()
         .map(|text| {
@@ -710,7 +718,7 @@ fn answer_for(doc: &str, paragraphs: &[&str], scores: &[Option<f32>]) -> Semanti
 
 /// 2 段落目だけを直し、3 段落目の前に 1 段落足した版。1 段落目は
 /// 1 バイトも変わらず、3 段落目は中身が同じままバイト位置だけが動く。
-const EDITED: &str = "\
+pub(crate) const EDITED: &str = "\
 # みだし
 
 ひとつめの段落。
@@ -753,7 +761,8 @@ fn a_dismissal_follows_its_unchanged_range_across_a_watched_reload() {
         assert!(!raw.contains(word), "{raw}");
     }
 
-    // 新しい版の答えが届くと、写した 2 本は出ず、直した段落だけが出る。
+    // 新しい版の答えが届くと、写した 2 本は `–` のまま、直した段落だけが
+    // Pending で出る。
     deliver(
         &mut app,
         "filler",
@@ -763,8 +772,21 @@ fn a_dismissal_follows_its_unchanged_range_across_a_watched_reload() {
             &[Some(0.9), Some(0.9), Some(0.9)],
         ),
     );
-    let lines: Vec<(u32, u32)> = app.review_candidates.iter().map(|c| c.lines).collect();
-    assert_eq!(lines, [(5, 5)], "直した段落だけが判定し直される");
+    let got: Vec<((u32, u32), CandidateState)> = app
+        .review_candidates
+        .iter()
+        .map(|c| c.lines)
+        .zip(app.candidate_states())
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ((3, 3), CandidateState::Dismissed),
+            ((5, 5), CandidateState::Pending),
+            ((9, 9), CandidateState::Dismissed)
+        ],
+        "直した段落だけが判定し直される"
+    );
 }
 
 /// 閉じている間に変わったファイル（起動時の読み込み・ファイル切替）は
@@ -856,7 +878,7 @@ fn a_moved_review_comment_keeps_its_candidate_accepted() {
         answer_for(EDITED, &["みっつめの段落。"], &[Some(0.9)]),
     );
     assert_eq!(app.review_candidates.len(), 1);
-    assert_eq!(app.review_candidates[0].state, CandidateState::Accepted);
+    assert_eq!(app.candidate_state(0).unwrap(), CandidateState::Accepted);
     assert!(!app.accept_candidate(0), "同じ指示を 2 本作らない");
 }
 
@@ -1030,7 +1052,7 @@ fn the_list_and_the_help_mention_e() {
 // **後ろの流れは Jev の候補と同じ道を通る**ことを、ここで押さえる。
 
 /// 意味層の無い、`--lint-cmd` だけのセッション。
-fn lint_only(dir: &std::path::Path, cmd: &str) -> App {
+pub(crate) fn lint_only(dir: &std::path::Path, cmd: &str) -> App {
     let mut app = built_in(dir);
     app.set_semantic_source(None);
     app.review_rules = None;
@@ -1039,7 +1061,7 @@ fn lint_only(dir: &std::path::Path, cmd: &str) -> App {
 }
 
 /// `DOC` の `text` の先頭 `chars` 字に当たる Diagnostic の JSON。
-fn diagnostic(doc: &str, text: &str, chars: usize, code: &str, message: &str) -> serde_json::Value {
+pub(crate) fn diagnostic(doc: &str, text: &str, chars: usize, code: &str, message: &str) -> serde_json::Value {
     let at = doc.find(text).unwrap();
     let line = doc[..at].matches('\n').count();
     let line_start = doc[..at].rfind('\n').map_or(0, |i| i + 1);
@@ -1052,7 +1074,7 @@ fn diagnostic(doc: &str, text: &str, chars: usize, code: &str, message: &str) ->
     })
 }
 
-fn deliver_lint(app: &mut App, diagnostics: Vec<serde_json::Value>) {
+pub(crate) fn deliver_lint(app: &mut App, diagnostics: Vec<serde_json::Value>) {
     let json = serde_json::json!({ "diagnostics": diagnostics }).to_string();
     let parsed = crate::lint::parse(&json, &app.source.content).expect("形どおり");
     app.review_inflight = app.review_inflight.max(1);
@@ -1160,7 +1182,7 @@ fn lint_candidates_ride_the_dismiss_and_the_carry_across_a_watched_reload() {
     assert_eq!(live, ["lint: textlint/c — m3"], "中身の変わらない lint コメントは残る");
     assert_eq!(app.comments[0].start, 9, "新しい行へ付け直す");
 
-    // 新しい版の答え: 写した dismiss は出ず、付け直したコメントは ✓ のまま。
+    // 新しい版の答え: 写した dismiss は `–` で残り、付け直したコメントは ✓ のまま。
     deliver_lint(
         &mut app,
         vec![
@@ -1172,11 +1194,16 @@ fn lint_candidates_ride_the_dismiss_and_the_carry_across_a_watched_reload() {
     let got: Vec<(&str, CandidateState)> = app
         .review_candidates
         .iter()
-        .map(|c| (c.rule.as_str(), c.state))
+        .map(|c| c.rule.as_str())
+        .zip(app.candidate_states())
         .collect();
     assert_eq!(
         got,
-        [("textlint/b", CandidateState::Pending), ("textlint/c", CandidateState::Accepted)]
+        [
+            ("textlint/a", CandidateState::Dismissed),
+            ("textlint/b", CandidateState::Pending),
+            ("textlint/c", CandidateState::Accepted)
+        ]
     );
 }
 
@@ -1402,11 +1429,10 @@ fn a_cleared_review_comes_back_on_r_with_its_accepts_and_dismissals() {
     app.arm_review();
     assert!(app.review_armed);
     deliver(&mut app, "filler", scores());
-    let states: Vec<CandidateState> = app.review_candidates.iter().map(|c| c.state).collect();
     assert_eq!(
-        states,
-        [CandidateState::Accepted, CandidateState::Pending],
-        "accept はコメントから、dismiss は記録から戻る（捨てた候補は出ない）"
+        app.candidate_states(),
+        [CandidateState::Accepted, CandidateState::Dismissed, CandidateState::Pending],
+        "accept はコメントから、dismiss は記録から戻る（捨てた候補は `–` で残る）"
     );
 }
 

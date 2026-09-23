@@ -313,14 +313,14 @@ pub(crate) fn draw(f: &mut Frame, app: &App, dock: Dock) {
     let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     let width = dock.area.width;
 
-    // 題。`comments (3)` と同じ形で、`3/9` は accept 済み / 全候補（フッタの
+    // 題。`comments (3)` と同じ形で、`3/9` は見た本数（✓ と –）/ 一覧の行数（フッタの
     // 読み出しと同じ数）。view では本文の枠の下辺に字だけを乗せる — 罫を
     // 引き直すと枠の色（履歴の色・演出）と食い違う。
-    let (accepted, total) = app.review_counts();
+    let (decided, total) = app.review_counts();
     let title_text = if app.review_inflight > 0 {
         " review · analyzing… ".to_string()
     } else {
-        format!(" review ({accepted}/{total}) ")
+        format!(" review ({decided}/{total}) ")
     };
     let buf = f.buffer_mut();
     if app.view_active() {
@@ -411,8 +411,16 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     let visible = area.height as usize;
     let total = app.review_candidates.len();
     let offset = app.overlay_offset.min(total.saturating_sub(visible));
+    let states = app.candidate_states();
     let mut lines = Vec::with_capacity(visible);
-    for (entry, candidate) in app.review_candidates.iter().enumerate().skip(offset).take(visible) {
+    for ((entry, candidate), candidate_state) in app
+        .review_candidates
+        .iter()
+        .enumerate()
+        .zip(states.iter().copied())
+        .skip(offset)
+        .take(visible)
+    {
         let selected = entry == app.overlay_cursor;
         // Jev のルールは `Filler 0.87`、lint は `<code>` だけ（`<source>/` は
         // 落とす。一覧の幅は理由の文に回し、全体は下の出どころの行に出す）。
@@ -451,7 +459,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
             inner.saturating_sub(lead.width() + 1 + head.width()).min(cols),
         );
         // 見たものは沈める（`✓` も `–` も）— 残っているのは記録であって作業ではない。
-        let done = !candidate.is_pending();
+        let done = !candidate_state.is_pending();
         let (head_style, body_style) = if selected {
             (cyan, Style::default().fg(Color::White))
         } else if done {
@@ -462,10 +470,10 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         // **状態の 1 マス**: 残っている候補は本文のガターと同じ白抜きの
         // 重さ（`E` / `W` / `I`、[`crate::decoration::ReviewSeverity::badge`]）、
         // 見たものは `✓` / `–`。1 マスを入れ替えるだけなので桁は増えない。
-        let state = if candidate.is_pending() {
+        let state = if candidate_state.is_pending() {
             candidate.severity().badge(app.decoration_styles.page_bg())
         } else {
-            (candidate.mark(), head_style)
+            (candidate_state.mark(), head_style)
         };
         lines.push(Line::from(vec![
             Span::styled(lead.clone(), head_style),
@@ -483,7 +491,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         let band = Rect { y: area.y + rel as u16, height: 1, ..area };
         f.buffer_mut().set_style(band, Style::default().bg(app.ui_selected_bg));
         if let Some(candidate) = app.review_candidates.get(app.overlay_cursor)
-            && candidate.is_pending()
+            && states.get(app.overlay_cursor).is_some_and(|state| state.is_pending())
             && let Some(cell) = f.buffer_mut().cell_mut((area.x + LIST_STATE_COL, band.y))
         {
             cell.set_style(candidate.severity().badge(app.decoration_styles.page_bg()).1);

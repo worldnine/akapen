@@ -125,6 +125,30 @@ impl AnalysisChannel {
     }
 }
 
+/// review / lint コメントと候補を結ぶ鍵 — (ファイル, 版, ルール, 行)。
+///
+/// コメントは候補のバイト範囲を持たず、行と本文の形（ルール）だけを持つ
+/// （[`crate::review::candidate_comment_rule`]）。同じ行に同じルールの
+/// 候補が 2 本あれば、2 本は同じコメントを指す。
+pub(crate) type ReviewCommentKey = (PathBuf, Option<String>, String, (u32, u32));
+
+/// `a` / `x` を押した結果（一覧のキーがフラッシュを選ぶ）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewToggle {
+    /// 候補が無い（一覧が空・添字の外）。
+    Nothing,
+    /// コメントを作った。
+    Accepted,
+    /// コメントを消して Pending に戻した（Accepted で `a`）。
+    Unaccepted,
+    /// 捨てた（記録した）。
+    Dismissed,
+    /// 捨てたのを取り消して Pending に戻した（Dismissed で `x`）。
+    Restored,
+    /// 送った候補。何もしていない（二重に送らせない）。
+    AlreadySent,
+}
+
 /// Review の 1 ルール分の答え。
 ///
 /// **marks の [`AnalysisMessage`] とは別の型・別の線である。** 同じ線に
@@ -543,11 +567,15 @@ pub(crate) struct App {
     pub(crate) review_armed: bool,
     /// ワーカーが答える線。`--semantic-cmd` のセッションだけ持つ。
     pub(crate) review_results: Option<ReviewChannel>,
-    /// 候補の下線（[`crate::decoration::DecorationKind::ReviewCandidate`]）。
-    /// Pending の候補だけが入る。
-    pub(crate) review_decorations: Vec<Decoration>,
-    /// いまの文書について、過去に捨てられた (ルール, 範囲)。
+    /// いまの文書について、いま捨てている (ルール, 範囲)。**`Dismissed` の
+    /// 状態の元はここだけ**（[`App::candidate_states`]）。
     pub(crate) review_dismissed: HashSet<DismissedKey>,
+    /// `s` で送った review / lint コメントの (ファイル, 版, ルール, 行)。
+    /// **`Sent` の状態の元はここだけ**（[`App::candidate_states`]）。
+    ///
+    /// ディスクには書かない — 送った相手が書き換えれば reload で決め直す
+    /// （[`App::forget_review_sent`]）ので、次に開いたときには要らない。
+    pub(crate) review_sent: HashSet<ReviewCommentKey>,
     /// 捨てた候補の置き場。決められない環境では `None`（セッション内
     /// だけ消えて、記録は残らない）。
     pub(crate) review_dismissed_store: Option<DismissedStore>,
@@ -715,8 +743,8 @@ impl App {
             review_inflight: 0,
             review_armed: false,
             review_results: None,
-            review_decorations: Vec::new(),
             review_dismissed: HashSet::new(),
+            review_sent: HashSet::new(),
             review_dismissed_store: None,
             review_edit_anchor: None,
             review_cursor_target: None,
@@ -1402,7 +1430,6 @@ impl App {
         if self.overlay == Some(crate::overlay::Overlay::Review) {
             self.overlay = None;
         }
-        self.refresh_review_decorations();
         true
     }
 
@@ -1441,7 +1468,6 @@ impl App {
         self.review_candidates.clear();
         self.review_inflight = 0;
         self.review_lint_error = None;
-        self.refresh_review_decorations();
         // 一覧が開いたままなら、カーソルを先頭へ戻す。古い添字のままだと、
         // 新しい答えが届いたとき見てもいない候補を指している。
         if self.overlay == Some(crate::overlay::Overlay::Review) {
@@ -1520,9 +1546,9 @@ impl App {
 
     /// 1 ルール分の答えを取る — **または古い世代として捨てる。**
     ///
-    /// 捨てた候補（`dismissed.jsonl`）はここで落とす。画面に出さないもの
-    /// は数にも入れない（読み出しの `3/9` の分母が、見えている本数と
-    /// 合わなくなる）。
+    /// **捨てた候補（`dismissed.jsonl`）も落とさない。** 一覧に薄く `–` で
+    /// 残り（文書順の位置のまま）、`x` で戻せる。本文には下線も印も出ない
+    /// — 状態は [`Self::candidate_states`] が記録から導く。
     pub(crate) fn accept_review_analysis(&mut self, message: ReviewMessage) {
         if message.generation != self.review_generation {
             return; // 古い世代の答え。捨てる。
@@ -1556,20 +1582,7 @@ impl App {
                 return;
             }
         };
-        let dismissed = &self.review_dismissed;
-        let accepted = self.live_review_comments();
-        let fresh: Vec<Candidate> = found
-            .into_iter()
-            .filter(|c| !dismissed.contains(&(c.rule.clone(), c.range.start, c.range.end)))
-            .map(|mut c| {
-                // いまの版に同じ指示のコメントが生きている（見届けた
-                // reload で付け直した）なら、もう一度 `a` を押させない。
-                if accepted.contains(&(c.rule.clone(), c.lines)) {
-                    c.state = CandidateState::Accepted;
-                }
-                c
-            })
-            .collect();
+        let fresh = found;
         // 一覧が開いていれば、カーソルの下の候補を覚えておく。
         // 並べ替えで前に候補が差し込まれると、添字のままの
         // カーソルは別の候補を指し、`a` / `x` が見ていない行に
@@ -1639,31 +1652,35 @@ impl App {
         if after.is_some() && after != before {
             crate::review_dock::follow(self);
         }
-        self.refresh_review_decorations();
         self.start_readout_flash();
     }
 
-    /// 候補の下線を作り直す。**Pending だけが下線を持つ。**
+    /// 候補の下線。**Pending だけが下線を持つ。**
     ///
     /// Accepted はコメントの印（黄色のバー）に変わり、Dismissed は本文
     /// から消える。下線は「まだ見ていない」という意味なので、見たものに
     /// 残っていると一覧を往復するたびに同じ場所を読み直すことになる。
     ///
+    /// **持たずに毎回導く**（[`Self::active_decorations`] がフレームごとに
+    /// 呼ぶ）。状態がコメントから決まるので、下線を取っておくと本文の
+    /// `d` や `s` のたびに作り直しを忘れる経路が残る。
+    ///
     /// **文書全体を範囲にする指摘は引かない**（[`Candidate::is_whole_document`]）。
     /// 全文に線が乗ると、本文のどの指摘の線も見分けられなくなる。
     ///
     /// 色は候補の重さ（[`Candidate::severity`]）で分かれる。
-    pub(crate) fn refresh_review_decorations(&mut self) {
+    pub(crate) fn review_decorations(&self) -> Vec<Decoration> {
         let total_lines = self.source.len();
-        self.review_decorations = self
-            .review_candidates
+        let states = self.candidate_states();
+        self.review_candidates
             .iter()
-            .filter(|c| c.is_pending() && !c.is_whole_document(total_lines))
-            .flat_map(|c| {
+            .zip(states)
+            .filter(|(c, state)| state.is_pending() && !c.is_whole_document(total_lines))
+            .flat_map(|(c, _)| {
                 let kind = crate::decoration::DecorationKind::ReviewCandidate(c.severity());
                 c.atoms.iter().cloned().map(move |range| Decoration { range, kind })
             })
-            .collect();
+            .collect()
     }
 
     /// 候補の乗っているソース行（0 始まり）— ガターの白抜きの印と、その色の
@@ -1674,10 +1691,12 @@ impl App {
     pub(crate) fn review_lines(&self) -> Vec<Option<crate::decoration::ReviewSeverity>> {
         let total_lines = self.source.len();
         let mut flags = vec![None; total_lines];
-        for candidate in self
+        let states = self.candidate_states();
+        for (candidate, _) in self
             .review_candidates
             .iter()
-            .filter(|c| c.is_pending() && !c.is_whole_document(total_lines))
+            .zip(states)
+            .filter(|(c, state)| state.is_pending() && !c.is_whole_document(total_lines))
         {
             let start = (candidate.lines.0.saturating_sub(1)) as usize;
             let end = (candidate.lines.1.saturating_sub(1)) as usize;
@@ -1689,19 +1708,116 @@ impl App {
         flags
     }
 
-    /// **`a` — 候補をコメントにする。** 作ったら `true`。
+    /// 候補ごとの状態（`review_candidates` と同じ順・同じ長さ）。
+    ///
+    /// **状態は候補が持たず、ここで毎回導く**（[`CandidateState`] の表）:
+    /// 捨てた記録に載っていれば `Dismissed`、この候補のコメントが今あれば
+    /// `Accepted`、送っていれば `Sent`、どれでもなければ `Pending`。
+    /// コメントが消える経路（本文の `d`・`l` の一覧の `d`・`s`・reload の
+    /// 片付け）のどれを通っても、候補は何もしなくても Pending（か Sent）に
+    /// 戻る。
+    pub(crate) fn candidate_states(&self) -> Vec<CandidateState> {
+        if self.review_candidates.is_empty() {
+            return Vec::new();
+        }
+        let accepted = self.live_review_comments();
+        let file = self.current_file_path().to_path_buf();
+        let revision = self.current_revision_context();
+        let sent: HashSet<(&str, (u32, u32))> = self
+            .review_sent
+            .iter()
+            .filter(|(path, rev, _, _)| {
+                *path == file && crate::history::same_revision(rev.as_deref(), revision.as_deref())
+            })
+            .map(|(_, _, rule, lines)| (rule.as_str(), *lines))
+            .collect();
+        self.review_candidates
+            .iter()
+            .map(|c| {
+                if self
+                    .review_dismissed
+                    .contains(&(c.rule.clone(), c.range.start, c.range.end))
+                {
+                    CandidateState::Dismissed
+                } else if accepted.contains(&(c.rule.clone(), c.lines)) {
+                    CandidateState::Accepted
+                } else if sent.contains(&(c.rule.as_str(), c.lines)) {
+                    CandidateState::Sent
+                } else {
+                    CandidateState::Pending
+                }
+            })
+            .collect()
+    }
+
+    /// 1 本の候補の状態（[`Self::candidate_states`]）。添字の外は `None`。
+    pub(crate) fn candidate_state(&self, index: usize) -> Option<CandidateState> {
+        self.candidate_states().get(index).copied()
+    }
+
+    /// **`a` — 切り替え。** Pending / Dismissed → Accepted、Accepted → Pending。
+    ///
+    /// どの状態からも**押したキーの状態へ直接行く**: Dismissed で押せば、
+    /// 捨てたのを取り消してからコメントを作る。送った候補（Sent）には
+    /// 何もしない — 同じ指示を二度送らせない。
+    pub(crate) fn toggle_accept(&mut self, index: usize) -> ReviewToggle {
+        match self.candidate_state(index) {
+            None => ReviewToggle::Nothing,
+            Some(CandidateState::Sent) => ReviewToggle::AlreadySent,
+            Some(CandidateState::Accepted) => {
+                self.remove_candidate_comments(index);
+                ReviewToggle::Unaccepted
+            }
+            Some(CandidateState::Dismissed) => {
+                self.restore_candidate(index);
+                self.accept_candidate(index);
+                ReviewToggle::Accepted
+            }
+            Some(CandidateState::Pending) => {
+                self.accept_candidate(index);
+                ReviewToggle::Accepted
+            }
+        }
+    }
+
+    /// **`x` — 切り替え。** Pending / Accepted → Dismissed、Dismissed → Pending。
+    ///
+    /// Accepted で押せば、コメントを消してから捨てる。送った候補（Sent）には
+    /// 何もしない（捨てても、指示はもう相手に届いている）。
+    pub(crate) fn toggle_dismiss(&mut self, index: usize) -> ReviewToggle {
+        match self.candidate_state(index) {
+            None => ReviewToggle::Nothing,
+            Some(CandidateState::Sent) => ReviewToggle::AlreadySent,
+            Some(CandidateState::Dismissed) => {
+                self.restore_candidate(index);
+                ReviewToggle::Restored
+            }
+            Some(CandidateState::Accepted) => {
+                self.remove_candidate_comments(index);
+                self.dismiss_candidate(index);
+                ReviewToggle::Dismissed
+            }
+            Some(CandidateState::Pending) => {
+                self.dismiss_candidate(index);
+                ReviewToggle::Dismissed
+            }
+        }
+    }
+
+    /// **候補をコメントにする**（`a` の片道）。作ったら `true`。
     ///
     /// コメントは既存の [`Comment`] そのもので、以降は `l` の一覧・
     /// `y copy`・`s send` にそのまま乗る。**コメント ＝ 人が承認した印**
     /// である（4 節の流れの 3）。本文の形は
     /// [`crate::review::comment_text`] の 1 か所にある。
+    ///
+    /// Pending のときだけ作る（2 本目を作らない・捨てた候補・送った候補は
+    /// 作らない）。切り替えは [`Self::toggle_accept`]。
     pub(crate) fn accept_candidate(&mut self, index: usize) -> bool {
-        let Some(candidate) = self.review_candidates.get(index) else {
-            return false;
-        };
-        if candidate.state != CandidateState::Pending {
+        if self.candidate_state(index) != Some(CandidateState::Pending) {
             return false;
         }
+        let candidate = &self.review_candidates[index];
         let (start, end) = candidate.lines;
         let text = candidate.comment_text();
         // 本文は該当行そのもの（コメントの `lines` は常に本文の写しで、
@@ -1723,9 +1839,26 @@ impl App {
             text,
         };
         self.comments.push(comment);
-        self.review_candidates[index].state = CandidateState::Accepted;
-        self.refresh_review_decorations();
         true
+    }
+
+    /// この候補のコメント（いまの版の、同じルール・同じ行の review / lint
+    /// コメント）を消す。消した本数を返す。**人の赤入れは触らない。**
+    fn remove_candidate_comments(&mut self, index: usize) -> usize {
+        let Some(candidate) = self.review_candidates.get(index) else {
+            return 0;
+        };
+        let (rule, lines) = (candidate.rule.clone(), candidate.lines);
+        let current = self.current_file_path().to_path_buf();
+        let revision = self.current_revision_context();
+        let before = self.comments.len();
+        self.comments.retain(|c| {
+            !(c.file_path == current
+                && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
+                && (c.start, c.end) == lines
+                && crate::review::candidate_comment_rule(&c.text).as_deref() == Some(rule.as_str()))
+        });
+        before - self.comments.len()
     }
 
     /// いまの版に生きている review コメントの (ルール, 行)。
@@ -1743,6 +1876,33 @@ impl App {
                 Some((rule, (c.start, c.end)))
             })
             .collect()
+    }
+
+    /// **`s` で送る直前に呼ぶ** — いまある review / lint コメントを「送った」
+    /// として覚える。送ったあとコメントは消えるが、その候補は `✓` のまま
+    /// （[`CandidateState::Sent`]）で、`a` は二度目を作らない。
+    ///
+    /// 人の赤入れは覚えない（候補が無い）。ファイルごと・版ごとに持つので、
+    /// ほかのファイルのコメントを一緒に送っても混ざらない。
+    pub(crate) fn note_review_sent(&mut self) {
+        let sent: Vec<ReviewCommentKey> = self
+            .comments
+            .iter()
+            .filter_map(|c| {
+                let rule = crate::review::candidate_comment_rule(&c.text)?;
+                Some((c.file_path.clone(), c.revision.clone(), rule, (c.start, c.end)))
+            })
+            .collect();
+        self.review_sent.extend(sent);
+    }
+
+    /// **送った印を忘れる** — いまのファイルの NOW が書き換わったとき
+    /// （[`crate::reload::reload_source`]）。送った相手が直したかどうかは、
+    /// 新しい版で候補が出るかどうかで決め直す（出れば Pending）。
+    pub(crate) fn forget_review_sent(&mut self) {
+        let current = self.current_file_path().to_path_buf();
+        self.review_sent
+            .retain(|(path, revision, _, _)| !(*path == current && revision.is_none()));
     }
 
     /// **見届けた reload で、いまの版の review コメントを片付ける。**
@@ -1779,11 +1939,7 @@ impl App {
             let range = self
                 .review_candidates
                 .iter()
-                .find(|c| {
-                    c.state == CandidateState::Accepted
-                        && c.rule == rule
-                        && c.lines == (comment.start, comment.end)
-                })
+                .find(|c| c.rule == rule && c.lines == (comment.start, comment.end))
                 .map(|c| c.range.clone())
                 .unwrap_or_else(|| {
                     // 行の頭から、末尾の行の終わり（改行の手前）まで。
@@ -1813,19 +1969,19 @@ impl App {
         resolved
     }
 
-    /// **`x` — 候補を捨てる。** 捨てたら `true`。
+    /// **候補を捨てる**（`x` の片道）。捨てたら `true`。
     ///
     /// セッション内は印が変わるだけ（一覧からは消えない）で、本文からは
-    /// 下線が消える。加えて `dismissed.jsonl` に追記し、同じ文書を開いたら
-    /// 候補に出さない。**書けなくても捨てる** — ディスクが一杯でも画面の
-    /// 操作は通る（次に開くと戻ってくるだけ）。
+    /// 下線が消える。加えて `dismissed.jsonl` に追記し、同じ文書を開いても
+    /// 一覧に薄く `–` で出る。**書けなくても捨てる** — ディスクが一杯でも
+    /// 画面の操作は通る（次に開くと戻ってくるだけ）。
+    ///
+    /// Pending のときだけ捨てる。切り替えは [`Self::toggle_dismiss`]。
     pub(crate) fn dismiss_candidate(&mut self, index: usize) -> bool {
-        let Some(candidate) = self.review_candidates.get(index) else {
-            return false;
-        };
-        if candidate.state != CandidateState::Pending {
+        if self.candidate_state(index) != Some(CandidateState::Pending) {
             return false;
         }
+        let candidate = &self.review_candidates[index];
         let sha = crate::semantic::source_digest(&self.source.content);
         if let Some(store) = self.review_dismissed_store.as_ref() {
             let _ = store.append(&sha, candidate);
@@ -1836,18 +1992,42 @@ impl App {
             candidate.range.end,
         );
         self.review_dismissed.insert(key);
-        self.review_candidates[index].state = CandidateState::Dismissed;
-        self.refresh_review_decorations();
+        true
+    }
+
+    /// **捨てたのを取り消す**（Dismissed で `x`）。取り消したら `true`。
+    ///
+    /// 記録は**追記**で取り消す（`"undo": true` の行 — 同じ鍵は最後の行が
+    /// 勝つ）。書けなくても画面では戻す（[`Self::dismiss_candidate`] と同じ）。
+    pub(crate) fn restore_candidate(&mut self, index: usize) -> bool {
+        let Some(candidate) = self.review_candidates.get(index) else {
+            return false;
+        };
+        let key = (
+            candidate.rule.clone(),
+            candidate.range.start,
+            candidate.range.end,
+        );
+        if !self.review_dismissed.remove(&key) {
+            return false;
+        }
+        let sha = crate::semantic::source_digest(&self.source.content);
+        if let Some(store) = self.review_dismissed_store.as_ref() {
+            let _ = store.append_undo(&sha, candidate);
+        }
         true
     }
 
     /// **`A` — Pending を全部 accept する。** 作ったコメントの数を返す。
+    ///
+    /// 捨てた候補・送った候補・accept 済みには触らない。まとめての取り消しは
+    /// 作らない — 個々の `a` で戻せる。
     pub(crate) fn accept_all_pending(&mut self) -> usize {
         let pending: Vec<usize> = self
-            .review_candidates
+            .candidate_states()
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.is_pending())
+            .filter(|(_, state)| state.is_pending())
             .map(|(i, _)| i)
             .collect();
         let mut made = 0;
@@ -1859,14 +2039,18 @@ impl App {
         made
     }
 
-    /// accept 済みの本数と候補の総数（読み出しの `3/9`）。
+    /// **見た本数と一覧の行数**（読み出しの `3/9`、一覧の題の `(3/9)`）。
+    ///
+    /// 分母は一覧の行の全部 — 捨てた候補も一覧に残るので数える。分子は
+    /// Pending でない行（`✓` の accept 済み・送った候補と、`–` の捨てた候補）。
+    /// `9/9` は「残っている候補が無い」である。
     pub(crate) fn review_counts(&self) -> (usize, usize) {
-        let accepted = self
-            .review_candidates
+        let decided = self
+            .candidate_states()
             .iter()
-            .filter(|c| c.state == CandidateState::Accepted)
+            .filter(|state| !state.is_pending())
             .count();
-        (accepted, self.review_candidates.len())
+        (decided, self.review_candidates.len())
     }
 
     /// **フッタの読み出しの候補**（広い順）— marks の読み出しの**左**に
@@ -1883,11 +2067,11 @@ impl App {
         if self.review_inflight > 0 {
             return vec!["Review · analyzing…".to_string()];
         }
-        let (accepted, total) = self.review_counts();
+        let (decided, total) = self.review_counts();
         if total == 0 {
             return Vec::new();
         }
-        vec![format!("Review · {accepted}/{total}")]
+        vec![format!("Review · {decided}/{total}")]
     }
 
     /// Set a transient footer message.
@@ -1954,15 +2138,16 @@ impl App {
         // （`crate::decoration::DecorationStyles::patch`）、marks の琥珀と
         // 同じ range に乗っても打ち消し合わない — 後勝ちになるのは同じ
         // ものを書く kind 同士だけである。Review と marks は同時に出る。
+        let review = self.review_decorations();
         if self.semantic_decorations.is_empty()
-            && self.review_decorations.is_empty()
+            && review.is_empty()
             && self.config.decorations.is_empty()
         {
             return Vec::new();
         }
         let mut all = self.config.decorations.clone();
         all.extend_from_slice(&self.semantic_decorations);
-        all.extend_from_slice(&self.review_decorations);
+        all.extend(review);
         crate::decoration::sanitize(&all, &self.source.content)
     }
 

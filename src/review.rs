@@ -32,7 +32,9 @@
 //! # 捨てた候補は記録する
 //!
 //! `x` で捨てた候補は `~/.local/share/akapen/review/dismissed.jsonl` に
-//! 追記し、同じ文書を開いたら出さない。**本文は書かない** — 範囲と sha と
+//! 追記し、同じ文書を開いても一覧に薄く `–` で出す（本文には下線も印も
+//! 出さない）。もう一度 `x` で戻すと取り消しの行を追記する — 同じ鍵は
+//! 最後の行が勝つ（[`DismissedStore::load`]）。**本文は書かない** — 範囲と sha と
 //! ルールの id だけで、`~/.cache/akapen/semantic/` と同じ機密度で扱う
 //! （0600 / 0700、リポジトリの中にも文書の隣にも置かない）。
 
@@ -60,14 +62,45 @@ pub(crate) type RuleId = String;
 /// ある（`✓` / `–`）。Pending だけ残す `Tab` 切替は作らない（読み手の
 /// 決定、2026-09-23）: 9 本のうち 3 本を見たという事実が、一覧の形その
 /// ものであってほしい。
+///
+/// **候補はこの状態を持たない。** 毎回ほかの持ち物から導く
+/// （[`crate::app::App::candidate_states`]）— 状態を 2 か所に持つと、片方だけ
+/// 変わる経路（本文の `d`、`l` の一覧の `d`、`s` で送る）でずれる:
+///
+/// | 状態 | 何から決まるか |
+/// | --- | --- |
+/// | `Dismissed` | 捨てた記録（`dismissed.jsonl` の最後の行）に載っている |
+/// | `Accepted` | この候補の review / lint コメントが今ある |
+/// | `Sent` | そのコメントを `s` で送った（このセッション、この版のうち） |
+/// | `Pending` | どれでもない |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CandidateState {
-    /// まだ見ていない。本文に下線が引かれ、ガターに `!` が出る。
+    /// まだ見ていない。本文に下線が引かれ、ガターに白抜きの重さが出る。
     Pending,
     /// `a` — コメントになった。本文の印はコメントのものに変わる。
     Accepted,
     /// `x` — 外れ。本文から消え、`dismissed.jsonl` に載る。
     Dismissed,
+    /// accept したコメントを `s` で送った。画面では `Accepted` と同じ `✓`
+    /// （新しい印は作らない — 読み手の決定）。`a` / `x` は効かない
+    /// （二重に送らせない）。ファイルが書き換わったら決め直す。
+    Sent,
+}
+
+impl CandidateState {
+    /// まだ見ていない候補か — 本文に下線が要るか。
+    pub(crate) fn is_pending(self) -> bool {
+        self == Self::Pending
+    }
+
+    /// 一覧の行頭に出る印。
+    pub(crate) fn mark(self) -> &'static str {
+        match self {
+            Self::Pending => " ",
+            Self::Accepted | Self::Sent => "✓",
+            Self::Dismissed => "–",
+        }
+    }
 }
 
 /// 候補を**誰が**拾ったか、とその出どころに固有の中身。
@@ -111,7 +144,6 @@ pub(crate) struct Candidate {
     pub(crate) rule: RuleId,
     /// 出どころに固有の中身。
     pub(crate) finding: Finding,
-    pub(crate) state: CandidateState,
     /// この Unit の Atom の範囲（文書順）。
     ///
     /// **下線はここへ引く。** [`Self::range`] に 1 本引くと、Atom の
@@ -152,20 +184,6 @@ impl Candidate {
         let covered = (self.lines.1 as usize + 1).saturating_sub(self.lines.0 as usize);
         let (num, den) = WHOLE_DOCUMENT_SHARE;
         covered >= WHOLE_DOCUMENT_MIN_LINES && covered * den >= total_lines * num
-    }
-
-    /// まだ見ていない候補か — 本文に下線が要るか。
-    pub(crate) fn is_pending(&self) -> bool {
-        self.state == CandidateState::Pending
-    }
-
-    /// 一覧の行頭に出る印。
-    pub(crate) fn mark(&self) -> &'static str {
-        match self.state {
-            CandidateState::Pending => " ",
-            CandidateState::Accepted => "✓",
-            CandidateState::Dismissed => "–",
-        }
     }
 
     /// accept したときのコメントの本文（[`comment_text`] / [`lint_comment_text`]）。
@@ -282,7 +300,6 @@ pub(crate) fn candidates_for(
                     action: rule.action,
                     score,
                 },
-                state: CandidateState::Pending,
                 atoms,
             })
         })
@@ -328,6 +345,11 @@ pub(crate) fn head_of(source: &str, candidate: &Candidate, cols: usize) -> Strin
 // ---- 捨てた候補の記録 ------------------------------------------------
 
 /// `dismissed.jsonl` の 1 行。**本文は入らない。**
+///
+/// **追記のみで、同じ鍵（sha, ルール, 範囲）は最後の行が勝つ。** `x` で
+/// 捨てると `undo` の無い行、捨てたのを `x` で戻すと `"undo": true` の行が
+/// 足される。書き換えも削除もしない — 途中で落ちても、読めた行までの
+/// 判断がそのまま残る。`undo` の無い古い行はそのまま「捨てた」と読む。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DismissedRecord {
     /// 捨てたときの文書の sha256（[`crate::semantic::source_digest`]）。
@@ -335,8 +357,11 @@ struct DismissedRecord {
     /// Unit のバイト範囲 `[start, end]`。
     range: [usize; 2],
     rule: String,
-    /// UNIX 秒。**いつ捨てたか**であって、いつの文書かではない。
+    /// UNIX 秒。**いつ捨てたか（戻したか）**であって、いつの文書かではない。
     at: u64,
+    /// 捨てた判断の取り消し。捨てる行には書かない（古い形と同じ行になる）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    undo: bool,
 }
 
 /// 捨てた候補の置き場（追記のみの JSONL）。
@@ -377,38 +402,72 @@ impl DismissedStore {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    /// この文書について捨てられた (ルール, 範囲)。
+    /// 読めた行を、書かれた順に。
     ///
     /// **読めない行は無かったことにする。** 壊れた 1 行が、捨てた記録を
     /// 丸ごと失う理由にはならない（`serde_json` に落ちた行だけ飛ばす）。
     /// ファイルが無いのは「まだ 1 つも捨てていない」である。
-    pub(crate) fn load(&self, source_sha: &str) -> HashSet<DismissedKey> {
+    fn records(&self) -> Vec<DismissedRecord> {
         let Ok(text) = fs::read_to_string(&self.path) else {
-            return HashSet::new();
+            return Vec::new();
         };
         text.lines()
             .filter_map(|line| serde_json::from_str::<DismissedRecord>(line).ok())
-            .filter(|record| record.source_sha.eq_ignore_ascii_case(source_sha))
-            .map(|record| (record.rule, record.range[0], record.range[1]))
             .collect()
     }
 
-    /// 1 件追記する。
+    /// この文書について、鍵ごとの**最後の行**（`true` = 捨てている）。
+    fn latest(&self, source_sha: &str) -> std::collections::HashMap<DismissedKey, bool> {
+        let mut out = std::collections::HashMap::new();
+        for record in self
+            .records()
+            .into_iter()
+            .filter(|record| record.source_sha.eq_ignore_ascii_case(source_sha))
+        {
+            out.insert((record.rule, record.range[0], record.range[1]), !record.undo);
+        }
+        out
+    }
+
+    /// この文書について**いま**捨てられている (ルール, 範囲)。
+    ///
+    /// 同じ鍵は最後の行が勝つ — 捨てて戻した候補は入らない。
+    pub(crate) fn load(&self, source_sha: &str) -> HashSet<DismissedKey> {
+        self.latest(source_sha)
+            .into_iter()
+            .filter_map(|(key, dismissed)| dismissed.then_some(key))
+            .collect()
+    }
+
+    /// 捨てた記録を 1 件追記する。
     ///
     /// 呼び出し側は失敗を**握りつぶしてよい** — 書けなかったことは、
     /// 画面から候補を消さない理由にならない（次に開くと戻ってくるだけ）。
     pub(crate) fn append(&self, source_sha: &str, candidate: &Candidate) -> Result<()> {
-        self.append_key(source_sha, &candidate.rule, &candidate.range)
+        self.append_key(source_sha, &candidate.rule, &candidate.range, false)
     }
 
-    /// (ルール, 範囲) を 1 件追記する。[`Self::append`] と、差分越しの
-    /// 引き継ぎ（[`Self::carry`]）の共通の口。
-    fn append_key(&self, source_sha: &str, rule: &str, range: &Range<usize>) -> Result<()> {
+    /// **捨てた判断の取り消し**を 1 件追記する（`x` で戻す）。
+    ///
+    /// 前の行は消さない。同じ鍵の最後の行として読まれ、捨てた記録を
+    /// 打ち消す（[`Self::load`]）。失敗の扱いは [`Self::append`] と同じ。
+    pub(crate) fn append_undo(&self, source_sha: &str, candidate: &Candidate) -> Result<()> {
+        self.append_key(source_sha, &candidate.rule, &candidate.range, true)
+    }
+
+    /// (ルール, 範囲) を 1 件追記する。[`Self::append`]・[`Self::append_undo`]
+    /// と、差分越しの引き継ぎ（[`Self::carry`]）の共通の口。
+    fn append_key(
+        &self,
+        source_sha: &str,
+        rule: &str,
+        range: &Range<usize>,
+        undo: bool,
+    ) -> Result<()> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
         fs::DirBuilder::new()
             .recursive(true)
@@ -422,6 +481,7 @@ impl DismissedStore {
             at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
+            undo,
         };
         // 追記のみ。0600 は**作るときにしか効かない**ので、既にある
         // ファイルの権限はここでは触らない（読み手が緩めたなら読み手の判断）。
@@ -438,10 +498,15 @@ impl DismissedStore {
 
     /// **捨てた判断を、見届けた書き換えの向こうへ写す。**
     ///
-    /// `old_sha` の版で捨てた (ルール, 範囲) のうち、`map` で**中身が
-    /// 1 バイトも変わっていない**ものだけを新しい位置へ写し、`new_sha` の
-    /// 記録として追記する。範囲の中が少しでも変わっていれば写さない —
-    /// 直された文は判定し直す。
+    /// `old_sha` の版で**いま**捨てている (ルール, 範囲) のうち、`map` で
+    /// **中身が 1 バイトも変わっていない**ものだけを新しい位置へ写し、
+    /// `new_sha` の記録として追記する。範囲の中が少しでも変わっていれば
+    /// 写さない — 直された文は判定し直す。**捨てて戻した記録は写さない**
+    /// （最後の行が取り消しなら、その鍵は捨てていない）。
+    ///
+    /// 戻した判断の方も向こうへ効かせる: 新しい版で同じ範囲が捨てられて
+    /// いれば（元に戻した版に、昔の記録が残っている）、取り消しの行を
+    /// 足す。足さないと、戻した候補が元の版へ戻ったとたんに消える。
     ///
     /// 呼ぶのは akapen が前後の版を両方見た reload だけである
     /// （[`crate::reload::reload_source`]）。閉じている間に変わった
@@ -459,24 +524,62 @@ impl DismissedStore {
         if old_sha.eq_ignore_ascii_case(new_sha) {
             return out;
         }
-        let already = self.load(new_sha);
-        let mut records: Vec<DismissedKey> = self.load(old_sha).into_iter().collect();
-        // 書く順を決める（HashSet の順は run ごとに変わる）。
+        let already = self.latest(new_sha);
+        let mut records: Vec<(DismissedKey, bool)> = self.latest(old_sha).into_iter().collect();
+        // 書く順を決める（HashMap の順は run ごとに変わる）。
         records.sort();
-        for (rule, start, end) in records {
+        for ((rule, start, end), dismissed) in records {
             let Some(range) = map.map_range(&(start..end)) else {
-                out.changed += 1;
+                if dismissed {
+                    out.changed += 1;
+                }
                 continue;
             };
-            if already.contains(&(rule.clone(), range.start, range.end)) {
+            let there = already
+                .get(&(rule.clone(), range.start, range.end))
+                .copied()
+                .unwrap_or(false);
+            if !dismissed {
+                // 戻した判断。向こうで捨てていなければ、書くことは無い。
+                if there && self.append_key(new_sha, &rule, &range, true).is_ok() {
+                    out.restored += 1;
+                }
+                continue;
+            }
+            if there {
                 out.carried += 1;
                 continue;
             }
-            if self.append_key(new_sha, &rule, &range).is_ok() {
+            if self.append_key(new_sha, &rule, &range, false).is_ok() {
                 out.carried += 1;
             }
         }
         out
+    }
+
+    /// **捨てた記録を全部消す**（`--review-dismissed-clear`）。戻り値は、
+    /// 消す前に**捨てていた**候補の数（文書ごと・鍵ごとに最後の行で数える
+    /// — 捨てて戻したものは入らない）。
+    ///
+    /// ファイルが無いのは「0 件消した」。
+    pub(crate) fn clear(&self) -> Result<usize> {
+        let mut latest: std::collections::HashMap<(String, DismissedKey), bool> =
+            std::collections::HashMap::new();
+        for record in self.records() {
+            latest.insert(
+                (
+                    record.source_sha.to_ascii_lowercase(),
+                    (record.rule, record.range[0], record.range[1]),
+                ),
+                !record.undo,
+            );
+        }
+        let removed = latest.values().filter(|dismissed| **dismissed).count();
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(removed),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e).with_context(|| format!("remove {}", self.path.display())),
+        }
     }
 }
 
@@ -487,6 +590,8 @@ pub(crate) struct Carried {
     pub(crate) carried: usize,
     /// 範囲の中が変わっていて、写さなかった本数。
     pub(crate) changed: usize,
+    /// 戻した判断を向こうの版へ効かせた本数（取り消しの行を足した）。
+    pub(crate) restored: usize,
 }
 
 // ---- `--review-json` -------------------------------------------------
@@ -621,7 +726,6 @@ mod tests {
                 score: 0.9
             }
         );
-        assert_eq!(got[0].state, CandidateState::Pending);
         assert_eq!(got[0].atoms.len(), 1);
     }
 

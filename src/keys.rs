@@ -56,8 +56,12 @@ pub(crate) const REVIEW_OPEN: char = 'R';
 ///
 /// `a` / `x` が accept / dismiss なのは、どちらも一覧の中でしか意味を
 /// 持たないからである（本文の `a` は acknowledge、`x` はどこにも無い）。
+///
+/// **どちらも切り替え**である: accept した候補でもう一度 `a` を押すと
+/// コメントを消して Pending に戻り、捨てた候補でもう一度 `x` を押すと
+/// 捨てた記録を取り消す（`crate::app::App::toggle_accept` / `toggle_dismiss`）。
 pub(crate) const REVIEW_ACCEPT: char = 'a';
-/// 外れを捨てる。
+/// 外れを捨てる（捨てた候補では戻す）。
 pub(crate) const REVIEW_DISMISS: char = 'x';
 /// Pending を全部 accept する。
 pub(crate) const REVIEW_ACCEPT_ALL: char = 'A';
@@ -70,7 +74,7 @@ pub(crate) const REVIEW_EDIT: char = 'e';
 /// `?` ヘルプに出る Review の 1 行。文字列そのものが行になる
 /// （[`crate::overlay::help_rows`]）。
 pub(crate) const REVIEW_HINT: &str =
-    "R candidates to fix · in the list: a accept · x dismiss · A accept all · e edit";
+    "R candidates to fix · in the list: a accept/undo · x dismiss/restore · A accept all · e edit";
 
 /// **フォーカス** — マーカーの無い Unit を沈める。
 ///
