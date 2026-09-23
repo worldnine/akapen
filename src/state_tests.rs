@@ -6400,19 +6400,24 @@ fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
     assert_ne!(core, rest);
 }
 
-/// **A MARKED line under the cursor shows the band, not the amber.** Seen
-/// on a real document as "policy says MARKED for 17 Atoms and 16 of them
-/// are amber": the seventeenth was the line the cursor had been moved to
-/// in order to look at it. The cursor band paints the whole row's
-/// background and wins over the mark by design (`view.rs`, `span_hl`),
-/// so under the band a MARKED phrase and a NORMAL one are the same
-/// color. The amber is not lost — it is back the moment the cursor
-/// leaves — and nothing in `decorate_row` or the projection is involved.
+/// **A MARKED line under the cursor keeps its amber — a deeper one.**
+/// Seen on a real document as "policy says MARKED for 17 Atoms and 16 of
+/// them are amber": the seventeenth was the line the cursor had been
+/// moved to in order to look at it. The band used to paint the whole
+/// row's background over the mark, so under it a MARKED phrase and a
+/// NORMAL one were the same color (and `]m` landed on an answer that
+/// then could not be seen).
+///
+/// Now the band paints only the NORMAL phrase; the MARKED one takes the
+/// deeper amber (`DecorationStyles::mark_band_bg`, the 0.40 ceiling), and
+/// leaving the line brings the resting amber back. Cursor band and
+/// selection band alike, view and source mode alike, and with focus (`f`)
+/// on as well.
 ///
 /// Same demo line as the test above: 「採用する方式は差分配信である。」
 /// (MARKED) and 「詳細は付録にまとめた。」 (NORMAL) on ONE source line.
 #[test]
-fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
+fn a_marked_line_under_the_cursor_shows_the_deeper_amber_not_the_band() {
     use crate::decoration::DecorationStyles;
 
     let path = std::path::PathBuf::from(concat!(
@@ -6484,20 +6489,56 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
     assert_eq!(essential.bg, mark_bg, "カーソルが他の行にあれば MARKED は琥珀");
     assert_ne!(detail.bg, mark_bg);
 
-    // Cursor on the marked line: the band paints BOTH halves the same
-    // background, and that background is not the amber. This is the
-    // "one MARKED line is not amber" sighting, reproduced.
+    let band = Some(app.ui_selected_bg);
+    let deep = Some(styles.mark_band_bg());
+    assert_ne!(deep, mark_bg, "帯の上の琥珀は確定色より一段濃い別の色");
+    assert_ne!(deep, band);
+
+    // Cursor on the marked line: the MARKED half takes the deeper amber,
+    // the NORMAL half the band. The row no longer reads as "no mark here".
     app.view.cursor = marked_line;
     let (essential, detail) = halves(&mut app, &mut terminal);
-    assert_ne!(essential.bg, mark_bg, "カーソル行では帯が琥珀を覆う");
-    assert!(essential.bg.is_some(), "覆っているのは帯の背景であって、無色ではない");
-    assert_eq!(essential.bg, detail.bg, "帯の下では MARKED と NORMAL が同じ背景になる");
+    assert_eq!(essential.bg, deep, "カーソル帯の上で MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band, "カーソル帯の上で NORMAL は帯のまま");
 
-    // And it is the band, not a lost mark: leaving the line brings it back.
+    // Focus (`f`) on: the band still drops Dim, and the amber still reads.
+    assert!(app.press_focus(std::time::Instant::now()));
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, deep, "沈めても帯の上の MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band);
+    assert!(app.clear_focus());
+
+    // Leaving the line brings the resting amber back.
     app.view.cursor = 0;
     let (essential, detail) = halves(&mut app, &mut terminal);
-    assert_eq!(essential.bg, mark_bg, "カーソルが離れれば琥珀は戻る");
+    assert_eq!(essential.bg, mark_bg, "カーソルが離れれば琥珀は確定色に戻る");
     assert_ne!(detail.bg, mark_bg);
+
+    // The selection band (`v`) is the same band.
+    app.selection = Some(crate::comment::Selection::new(marked_line));
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, deep, "選択帯の上で MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band, "選択帯の上で NORMAL は帯のまま");
+    app.selection = None;
+
+    // Source mode paints its own band — same rule.
+    app.spans = app
+        .highlight
+        .highlight_with(&app.source.content, crate::syntax_for(&app.files[0]));
+    app.mode = Mode::Source;
+    app.cursor = 0;
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, mark_bg, "source: カーソルが他の行なら確定色");
+    assert_ne!(detail.bg, mark_bg);
+    app.cursor = marked_line;
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, deep, "source: カーソル帯の上で MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band, "source: NORMAL は帯のまま");
+    app.cursor = 0;
+    app.selection = Some(crate::comment::Selection::new(marked_line));
+    let (essential, detail) = halves(&mut app, &mut terminal);
+    assert_eq!(essential.bg, deep, "source: 選択帯の上で MARKED は濃い琥珀");
+    assert_eq!(detail.bg, band);
 }
 
 /// 設計書「つまみの操作では Jev を呼ばない」を、呼び出し回数と
