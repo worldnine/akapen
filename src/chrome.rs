@@ -617,6 +617,22 @@ pub(crate) fn footer_hint_items(app: &App) -> Vec<FooterHint> {
             format!("L{}/{}", line + 1, total)
         }
     };
+    // **Review の一覧を据え付けているあいだ、キーは一覧に届く。** フッタは
+    // 一覧のキーを案内する（本文のキーを案内すると、打っても効かない）。
+    // 位置は本文のカーソル — 一覧で選んだ候補の行である。
+    if crate::review_dock::is_open(app) {
+        let line = if app.view_active() { app.view.cursor } else { app.cursor };
+        return vec![
+            kept(pos(line, app.source.len())),
+            kept("j/k move"),
+            hint("a accept"),
+            hint("x dismiss"),
+            hint("e edit"),
+            hint("A accept all"),
+            hint("Enter select"),
+            kept("Esc close"),
+        ];
+    }
     let mut items = match app.mode {
         // 問いの 1 行プロンプト（`/`）。改行は無いので `^j newline` を
         // 出さない — composer のヒントを借りると、打てない操作を勧める。
@@ -731,6 +747,17 @@ pub(crate) fn footer_hints(app: &App) -> String {
 /// indicator). All badges are width 8, so the hints never shift when
 /// the mode changes.
 fn mode_badge(app: &App) -> (String, Style) {
+    // 据え付けた一覧がキーを持っているあいだは `REVIEW` を名乗る（窓が
+    // 無いので、どこにキーが届くかを示すものがバッジしか無い）。色は本文の
+    // 候補の下線と同じ青緑 — 一覧と下線が同じ機能だと色で結ぶ。
+    if crate::review_dock::is_open(app) {
+        return (
+            format!("{:^8}", "REVIEW"),
+            Style::default()
+                .fg(Color::Rgb(0, 0, 0))
+                .bg(app.decoration_styles.review_underline()),
+        );
+    }
     match app.mode {
         // 問いの入力は COMMENT ではない。同じ composer を借りているので、
         // バッジが「COMMENT」のままだと打った文字がコメントになると読める。
@@ -926,16 +953,30 @@ pub(crate) fn prompt_message(app: &App) -> Option<Cow<'static, str>> {
 /// layout already — no space is reserved, nothing shifts. Toasts keep
 /// their color semantics (yellow = info, red = an operation that could
 /// not be done — flash_err also beeped).
+/// メッセージ行の y。**描画・toast の演出・IME の錨が同じ行を見る 1 か所。**
+///
+/// ふだんはフッタのすぐ上（view では本文の枠の下辺、source では本文の
+/// 最後の行）。timeline bar が出ていればその上。**Review の一覧を
+/// 据え付けているときは、その題の行**（view では本文の枠の下辺のまま）
+/// — フッタのすぐ上は理由の欄の最後の行で、そこに toast が乗ると読んで
+/// いる理由が消える。
+pub(crate) fn message_row(app: &App, area: Rect) -> u16 {
+    if crate::timeline::timeline_active(app) {
+        return area.height.saturating_sub(3);
+    }
+    let middle = Rect { x: 0, y: 1, width: area.width, height: area.height.saturating_sub(2) };
+    if let (_, Some(dock)) = crate::review_dock::split(app, middle) {
+        return dock.title.y;
+    }
+    area.height.saturating_sub(2)
+}
+
 pub(crate) fn draw_message(f: &mut Frame, app: &App) {
     // The browsing timeline bar owns the bottom two rows (footer and
     // frame border); the message row floats directly above it so
     // prompts and toasts read as part of the bar instead of hovering
     // over the document.
-    let row = if crate::timeline::timeline_active(app) {
-        f.area().height.saturating_sub(3)
-    } else {
-        f.area().height.saturating_sub(2)
-    };
+    let row = message_row(app, f.area());
     // 問いの 1 行プロンプトはこの行を**丸ごと**使う。打っている最中の
     // 入力欄なので、中央のバナー（確認・toast）より優先する — 入力中に
     // toast が上に乗ると、打った字が見えなくなる。

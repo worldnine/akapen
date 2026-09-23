@@ -1533,6 +1533,7 @@ impl App {
             .then(|| self.review_candidates.get(self.overlay_cursor))
             .flatten()
             .map(|c| (c.rule.clone(), c.range.clone()));
+        let before = under_cursor.clone();
         self.review_candidates.extend(fresh);
         // **文書順**に並べ直す。出どころは 1 本ずつ別のスレッドで
         // 返ってくるので、届いた順に足すと順序が run ごとに変わる。
@@ -1577,6 +1578,16 @@ impl App {
                 .or_else(|| self.review_candidates.iter().position(covers))
                 .unwrap_or(self.review_candidates.len() - 1);
             crate::overlay::keep_overlay_cursor_visible(self);
+        }
+        // 一覧のカーソルの下の候補が変わったら（最初の答え・直したあとの
+        // 着地）、本文もそこへ送る。同じ候補のままなら本文は動かさない —
+        // 2 本目の答えが届くたびに、読んでいた場所から引き戻さない。
+        let after = (self.overlay == Some(crate::overlay::Overlay::Review))
+            .then(|| self.review_candidates.get(self.overlay_cursor))
+            .flatten()
+            .map(|c| (c.rule.clone(), c.range.clone()));
+        if after.is_some() && after != before {
+            crate::review_dock::follow(self);
         }
         self.refresh_review_decorations();
         self.start_readout_flash();
@@ -2277,24 +2288,33 @@ impl App {
     }
 
     pub(crate) fn terminal_height(&self) -> u16 {
-        ratatui::crossterm::terminal::size()
-            .map(|s| s.1)
-            .unwrap_or(24)
+        terminal_size().1
     }
 
     /// View-mode viewport height in rows — must match `draw_view`'s
     /// `inner.height` (title bar + footer + the frame's two borders take
     /// the other rows), or per-frame `keep_cursor_visible` re-shoves the
     /// offset and wheel scroll stalls. View mode always draws the frame.
+    ///
+    /// **Review の一覧が据え付けてあれば、そのぶん低い**
+    /// （[`crate::review_dock::body_rows_taken`]）。端末の高さのままだと
+    /// カーソルが一覧の下に潜る。
     pub(crate) fn view_viewport_rows(&self) -> usize {
-        self.terminal_height().saturating_sub(4).max(1) as usize
+        self.terminal_height()
+            .saturating_sub(4)
+            .saturating_sub(crate::review_dock::body_rows_taken(self))
+            .max(1) as usize
     }
 
     /// Source-mode viewport height — must match `draw_source`'s
     /// `inner.height` (title bar + footer only; source mode never draws
-    /// a frame, keeping every column for the source).
+    /// a frame, keeping every column for the source). Review の据え付けの
+    /// ぶんは view と同じく引く。
     pub(crate) fn source_viewport_rows(&self) -> usize {
-        self.terminal_height().saturating_sub(2).max(1) as usize
+        self.terminal_height()
+            .saturating_sub(2)
+            .saturating_sub(crate::review_dock::body_rows_taken(self))
+            .max(1) as usize
     }
 
     /// Is the view pane the one on screen (view mode, or the composer
@@ -2315,6 +2335,24 @@ impl App {
             EscQuit::Auto => self.config.callback.is_some(),
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// テストで端末の大きさを決める（`TestBackend` と同じ大きさにする）。
+    /// `cargo test` は端末の中で走ると本物の大きさを拾うので、高さを
+    /// 前提にするテストはこれで固定する。
+    pub(crate) static TEST_TERMINAL_SIZE: std::cell::Cell<Option<(u16, u16)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// 端末の大きさ `(幅, 高さ)`。取れなければ 80×24。
+pub(crate) fn terminal_size() -> (u16, u16) {
+    #[cfg(test)]
+    if let Some(size) = TEST_TERMINAL_SIZE.with(|cell| cell.get()) {
+        return size;
+    }
+    ratatui::crossterm::terminal::size().unwrap_or((80, 24))
 }
 
 /// Display rows one deleted block occupies at `width` content columns:

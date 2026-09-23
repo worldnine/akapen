@@ -21,7 +21,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Min(0),
         Constraint::Length(1),
     ]);
-    let [title, body, footer] = layout.areas(f.area());
+    let [title, middle, footer] = layout.areas(f.area());
+    // Review の一覧は窓ではなく**本文の下に据え付ける**
+    // （[`crate::review_dock`]）。本文はそのぶん低くなるだけで、字は
+    // 隠れない。閉じていれば `body == middle` で、今までどおりである。
+    let (body, dock) = crate::review_dock::split(app, middle);
     draw_title(f, title, app);
     match app.mode {
         Mode::Input => {
@@ -35,6 +39,9 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         Mode::Source => draw_source(f, body, app),
     }
     draw_footer(f, footer, app);
+    if let Some(dock) = dock {
+        crate::review_dock::draw(f, app, dock);
+    }
     if app.overlay.is_some() {
         draw_overlay(f, app);
     }
@@ -61,11 +68,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     // `draw_message` が描いた行に乗っているので、行の算段はそちらと共有
     // する。
     if app.marks_prompt && app.mode == Mode::Input && app.config.cursor_anchor {
-        let row = if crate::timeline::timeline_active(app) {
-            f.area().height.saturating_sub(3)
-        } else {
-            f.area().height.saturating_sub(2)
-        };
+        let row = crate::chrome::message_row(app, f.area());
         let (x, y) = crate::chrome::ask_prompt_cursor(app, f.area(), row);
         f.set_cursor_position(Position { x, y });
     }
@@ -199,13 +202,14 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     if app.timeline_fx.as_ref().is_some_and(|fx| fx.done()) || !timeline_on {
         app.timeline_fx = None;
     }
+    let message_y = crate::chrome::message_row(app, f.area());
     if app.status.is_some()
         && prompt_message(app).is_none()
         && let Some(effect) = app.toast_fx.as_mut()
     {
         let row = Rect {
             x: 0,
-            y: f.area().height.saturating_sub(if timeline_on { 3 } else { 2 }),
+            y: message_y,
             width: f.area().width,
             height: 1,
         };
