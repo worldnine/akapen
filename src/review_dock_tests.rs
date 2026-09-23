@@ -402,6 +402,9 @@ fn closing_the_list_gives_the_body_back_its_full_height() {
     let rows = screen_rows(&mut app, w, h);
     assert!(rows[h as usize - 1].contains("REVIEW"), "バッジ: {}", rows[h as usize - 1]);
     assert!(rows[h as usize - 1].contains("a accept"), "フッタが一覧のキーを案内する");
+    // 80 桁でも `e edit` まで残る（題と同じ数の読み出しを出さないぶん）。
+    assert!(rows[h as usize - 1].contains("e edit"), "{}", rows[h as usize - 1]);
+    assert!(!rows[h as usize - 1].contains("Review ·"), "数は題に 1 か所: {}", rows[h as usize - 1]);
     on_overlay_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     assert_eq!(app.view_viewport_rows(), 26);
     let rows = screen_rows(&mut app, w, h);

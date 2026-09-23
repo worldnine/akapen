@@ -47,10 +47,11 @@ pub(crate) enum Overlay {
     /// **Review の候補の一覧**（`R`）。`docs/design/marks-only-and-review-mode.md`
     /// 4 節。
     ///
-    /// **`Comments` と同じ体裁**（70 % パネル・黄色いタイトル・`▸` の
-    /// カーソル・j/k と Enter・Esc で閉じる）である。新しい語彙を足して
-    /// いないのは `MarkFor` と同じ理由で、**既にある作法を覚えている人が
-    /// 何も覚え直さずに使える**ようにするためである。
+    /// **窓ではなく、本文の下に据え付ける**（[`crate::review_dock`]）。
+    /// 被さる窓だと指摘箇所が窓の下に隠れて読めなかった（2026-09-23 の
+    /// 読み手の指摘）。キーは `Comments` と同じ作法（黄色いタイトル・`▸` の
+    /// カーソル・j/k と Enter・Esc で閉じる）で、**既にある作法を覚えている
+    /// 人が何も覚え直さずに使える**ようにしてある。
     ///
     /// **`MarkFor` の隣ではない。** marks の popup は「何を光らせるか」を
     /// 選ぶ箱で、こちらは「直す候補」の台帳である。共有しているのは
@@ -1071,10 +1072,11 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
 
 // ---- Review の候補の一覧（`R`） --------------------------------------
 //
-// `docs/design/marks-only-and-review-mode.md` 4 節。`Comments` の一覧の
-// 作法の写しである（70 % パネル・黄色いタイトル・`▸` のカーソル・
-// j/k と Enter・Esc で閉じる）。違うのは行の中身と、accept / dismiss の
-// 2 本のキーだけである。
+// `docs/design/marks-only-and-review-mode.md` 4 節。キーは `Comments` の
+// 一覧の作法の写しである（`▸` のカーソル・j/k と Enter・Esc で閉じる）。
+// 違うのは行の中身と、accept / dismiss の 2 本のキーと、**窓ではなく
+// 本文の下に据え付ける**ことである — 描くのも高さを決めるのも
+// [`crate::review_dock`]。
 
 /// 候補の出どころが 1 本も無いときの 1 行 — **何をすれば候補が出るか**。
 pub(crate) const NO_REVIEW_SOURCE: &str = "no review source — set --lint-cmd or enable a rule";

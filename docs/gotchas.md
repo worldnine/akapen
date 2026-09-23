@@ -30,6 +30,7 @@
 
 ### [描画と attribution](gotchas/rendering.md)
 
+- 本文の高さは端末の高さから直に出さない — Review の一覧が下に据わっている
 - `ViewState` に行を差し込むときは `row_attrs` も対で差し込む
 - 折返しの hanging pad にも装飾の背景が乗る
 - タブを含む行は、fragment の途中で終わる装飾が効かない

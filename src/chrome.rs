@@ -806,7 +806,14 @@ fn footer_readouts(app: &App) -> Vec<Readout> {
         return Vec::new();
     }
     let marks = app.marks_readouts();
-    let review = app.review_readouts();
+    // 一覧を据え付けているあいだは Review の数を出さない — 同じ `3/9` が
+    // 据え付けの題にある。1 つの数を 2 か所に出すより、その幅を一覧の
+    // キーの案内（`e edit` など）に回す。
+    let review = if crate::review_dock::is_open(app) {
+        Vec::new()
+    } else {
+        app.review_readouts()
+    };
     let Some(review) = review.first() else {
         return marks;
     };
