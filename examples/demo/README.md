@@ -119,3 +119,76 @@ $ vhs examples/demo/marks.ja.tape    # 日本語版 → out/marks.ja.{gif,mp4}
 - `電源を切ったままだと？` — 当たるが 0.44 と弱い
 - `深夜に誰が起こされる？` / `夜中に叩き起こされるのは誰？` — 当たるが、
   「夜」がタイトルの「夜間」と重なる
+
+## Your call に答えたら直った（`yourcall.tape` / `yourcall.ja.tape`、約 25 秒）
+
+見せるのは、**読む層（marks、Jev）と赤入れの往復が 1 本でつながるところ**。
+エージェントが書いた計画書に埋もれた「決めてほしい」を Your call で光らせ、
+そこに短く答えて送り、直った版で問い直すと光る所が無くなる。
+
+**書き換えは台本、Jev の判定は本物。** `s` の先は偽のエージェント
+（`yourcall-agent.sh`、`fake-agent.sh` と同じ作り）で、2.5 秒待ってから先に用意した
+直した版（`yourcall/plan.v2.md` / `plan.ja.v2.md`）に差し替えるだけで、答えを読んで
+書き直してはいない。直した版は、デモで送る答えを素直に反映したものを人が書いた。
+一方、光る箇所はどちらの版も本物の Jev が決めていて、**直した版の問い直しは撮るたびに
+キャッシュの外で Jev を呼ぶ**（tape が `AKAPEN_CACHE_DIR` を空にしてから、隠した区間で
+初版の答えだけを入れる）。
+
+```console
+$ vhs examples/demo/yourcall.tape      # 英語版 → out/yourcall.{gif,mp4}
+$ vhs examples/demo/yourcall.ja.tape   # 日本語版 → out/yourcall.ja.{gif,mp4}
+$ examples/demo/yourcall-run.sh        # 手で触るなら（/tmp/akapen-yourcall に展開）
+```
+
+- 題材は架空のアプリ **brambleway** の「写真のアップロードを要求の外へ出す」計画書
+  （`yourcall/plan.md` / `plan.ja.md`、31 行、1 画面に収まる）。判断を求める所は
+  「どこで動かすか（A か B か）」「フラグをいつ入れるか」「WebP もやるか」の 3 つで、
+  3 つの節に 1 つずつ散らしてある
+- **つまみは既定の 20 % から一度も動かさない**。13 Unit の 20 % は 3 本なので、
+  初版の 3 本はつまみの上限と同じ数だが、4 位は 0.69 / 0.48 と離れていて、
+  直した版の 0 本はつまみではなく足切り（0.20）で決まっている
+- `r` で読み込むと、選んでいた問い（Your call）がそのまま直した版に当て直される。
+  もう一度 `m 4` を押す必要は無い
+
+| 秒 | 操作 | 映るもの |
+| --- | --- | --- |
+| 0–2 | 開いたまま | 計画書（判断を求める所は見た目では分からない） |
+| 2–6 | `m` → `4` | Your call · 20% **3**。判断を求める 3 行の、問いの文に琥珀 |
+| 6–17 | `]m` `c` 答え `Enter` × 3 | 3 行の下にコメントのカード |
+| 17–20 | `s` | 送信トースト → ⚡ `file changed` |
+| 20–24 | `r` | `! 3` と緑の印、`analyzing…` → Your call · 20% **0** |
+
+送る答え（英 / 日）:
+
+| 箇所 | 英 | 日 |
+| --- | --- | --- |
+| どこで動かすか | `A — reuse the mail worker.` | `A で。メール用ワーカーを使う。` |
+| フラグをいつ入れるか | `Hold it until the freeze is over.` | `凍結が明けるまで待つ。` |
+| WebP | `No WebP for now.` | `WebP は今回は要らない。` |
+
+Your call の本数（2026-09-23、どれも空のキャッシュから本物の Jev）:
+
+| 版 | ラン | 光った本数 | 上位のスコア |
+| --- | ---: | --- | --- |
+| 英・初版 | 3 | 3 / 3 / 3 | 判断を求める 3 行が 0.93〜0.95、4 位 0.66〜0.69 |
+| 英・直した版 | 7 | 0 × 7 | 最高 0.13〜0.15 |
+| 日・初版 | 3 | 3 / 3 / 3 | 判断を求める 3 行が 0.91〜0.92、4 位 0.46〜0.48 |
+| 日・直した版 | 4 | 0 × 4 | 最高 0.15〜0.17 |
+
+ランには撮影中の 1 回（英・日とも）を含む。
+
+Essential（要点）との重なり: 初版の Essential が選ぶ 3 本は「なぜ」「試験」「範囲」
+などが主で、3 本目がほぼ同点（英 0.65〜0.68、日 0.51〜0.54）で入れ替わる。
+3 ラン中 2 回はそこに判断を求める 1 行が入って **1/3 重なり**、1 回は **0/3**。
+
+選ばなかった直した版の言い方（英、フラグの行）:
+
+- `The flag goes on after next week's release freeze is over.` — 4 ランとも
+  その行だけが 0.21〜0.24 で残って **1 本**（足切りのすぐ上）
+- `The flag stays off until next week's release freeze is over, then goes on.` —
+  5 ランで 1 / 0 / 1 / 0 / 0 と揺れた（0.16〜0.20）
+- `We switch the flag on once next week's release freeze is over.` — 1 本（0.21）
+- `Decided: the flag goes on after next week's release freeze.` — 3 ランとも 0 本
+  だが、答えの反映として「Decided:」を頭に付けるのは不自然なので採らなかった
+- 採ったのは `The flag goes on once the release freeze ends next week; not this Friday.`
+  — 退けた方の選択肢（今週金曜）まで書くと、もう決まったことに読める
