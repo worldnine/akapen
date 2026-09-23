@@ -39,7 +39,7 @@ pub(crate) enum Overlay {
     ///
     /// **`questions` ではなく `mark for` と名乗る。** marks モードでは
     /// 「question」が**文書の中にある問い**とも読める（`Unsettled` や
-    /// `Decide` がまさにそれを光らせる）ので、こちらが持っている問いと
+    /// `Your call` がまさにそれを光らせる）ので、こちらが持っている問いと
     /// 同じ語になってしまう。ステータス行の `MARK n%` と地続きの言い方に
     /// することで、「何を光らせるか」以外に読みようが無くなる
     /// （2026-09-22 の読み手の指摘）。
@@ -294,12 +294,21 @@ pub(crate) fn activate_overlay_selection(app: &mut App) {
         // 開いただけでは何も走らず、選んだ 1 本だけが Jev に届く。
         // 最下段は自由入力なので、popup を閉じて 1 行プロンプトへ渡す。
         Some(Overlay::MarkFor) => {
-            let free_row = mark_for_entry_count(app).saturating_sub(1);
-            let index = app.overlay_cursor;
+            let entry = mark_for_entry(app, app.overlay_cursor);
             app.overlay = None;
-            if index >= free_row {
+            if entry == MarkForEntry::Off {
+                // `0 Off` — `Esc` の marks の段と同じ消し方と同じ語
+                // （`crate::esc::Layer::Marks`）。沈めていたら、沈める先が
+                // 無くなるので一緒に解く。
+                app.clear_focus();
+                if app.clear_marks_question() {
+                    app.flash("marks cleared");
+                }
+            } else if entry == MarkForEntry::Free {
                 crate::open_marks_prompt(app);
-            } else if app.ask_marks_preset(index) {
+            } else if let MarkForEntry::Preset(index) = entry
+                && app.ask_marks_preset(index)
+            {
                 if let Some(label) = app.marks_question_label() {
                     let asking = format!("asking: {label}");
                     app.flash(asking);
@@ -532,8 +541,9 @@ pub(crate) fn help_rows(
         // 試して捨てたので、端末による違いをここに書くことは無い。
         rows.push(("focus", "f sink everything unmarked (toggle) · Esc off"));
         rows.push(("marks", "]m next mark · [m previous mark"));
-        // 問いを消す道。`f` の Esc（沈めるのを解く）とは別の段で、
-        // 沈んでいれば先にそちらが取る（`crate::keys::MARKS_CLEAR_HINT`）。
+        // マークを消す道。Esc は一番手前の層から 1 枚ずつはがすので、
+        // 沈めていればそちら、Review が出ていればそちらが先に取る
+        // （`crate::esc::ORDER`、`crate::keys::MARKS_CLEAR_HINT`）。
         rows.push(("clear", crate::keys::MARKS_CLEAR_HINT));
     }
     // Review は marks の下にある（**別機能だが、同じ層を使いうる**ことが
@@ -1122,7 +1132,8 @@ fn review_overlay_jump(app: &mut App) {
 /// Review の一覧のキー。
 ///
 /// j/k（矢印も）で動き、Enter で本文へ飛び、`a` で accept、`x` で
-/// dismiss、`A` で Pending を全部 accept、Esc / q / `R` で閉じる。
+/// dismiss、`A` で Pending を全部 accept、q / `R` で閉じる（Esc は層を
+/// 1 枚はがす — 選択があればそれ、無ければ一覧）。
 ///
 /// **accept / dismiss でカーソルは動かさない。** 一覧の行は消えず印が
 /// 変わるだけなので（`✓` / `–`）、勝手に次へ送ると「いま何を見たか」が
@@ -1168,7 +1179,11 @@ pub(crate) fn on_review_overlay_key(app: &mut App, key: KeyCode, _modifiers: Key
                 app.flash(format!("{made} comments from review"));
             }
         }
-        KeyCode::Esc | KeyCode::Char('q') => app.overlay = None,
+        // Esc は層の表を通る（`crate::esc`）— 一覧の Enter で作った選択が
+        // あれば先にそれがはがれ、次の Esc で一覧が閉じる。`q` / `R` は
+        // 今までどおり一覧を閉じるだけ。
+        KeyCode::Esc => crate::esc::peel(app),
+        KeyCode::Char('q') => app.overlay = None,
         KeyCode::Char(crate::keys::REVIEW_OPEN) => app.overlay = None,
         _ => {}
     }
@@ -1230,30 +1245,74 @@ pub(crate) const REVIEW_HEAD_COLS: usize = 40;
 // 覚えている人が何も覚え直さずに使えるようにする**ためで、ここだけ違う
 // 操作にする理由が無い。
 
-/// popup の行数 — 定型 ＋ 自由入力の 1 行。
+/// popup の行数 — （`0 Off` ＋）定型 ＋ 自由入力の 1 行。
 ///
 /// 自由入力を**行として置く**のが要点である。`/` は今までどこにも書いて
 /// おらず（`?` ヘルプにしか無かった）、「自由入力があること」自体が
 /// 隠れていた。
 pub(crate) fn mark_for_entry_count(app: &App) -> usize {
-    app.marks_questions
-        .as_ref()
-        .map_or(0, |questions| questions.presets().len() + 1)
+    app.marks_questions.as_ref().map_or(0, |questions| {
+        usize::from(mark_for_has_off(app)) + questions.presets().len() + 1
+    })
+}
+
+/// 先頭に `0 Off`（マークを消す）の行を置くか — **消すマークがあるときだけ**。
+///
+/// 読むのは `Esc` の marks の段と同じ問い（[`App::can_clear_marks_question`]）
+/// なので、`0 Off` が出ているときは `Esc` を重ねても同じものが消える。
+/// 何も光っていないのに `Off` を並べると、押しても何も起きない行になる。
+pub(crate) fn mark_for_has_off(app: &App) -> bool {
+    app.can_clear_marks_question()
+}
+
+/// popup の 1 行が何か。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MarkForEntry {
+    /// `0 Off` — マークを消す。
+    Off,
+    /// 定型（`presets()` の添字）。
+    Preset(usize),
+    /// 最下段の `/ Ask...`。
+    Free,
+}
+
+/// popup の行の添字を、その行の中身へ読む。行の数え方はここ 1 か所。
+pub(crate) fn mark_for_entry(app: &App, row: usize) -> MarkForEntry {
+    let off = usize::from(mark_for_has_off(app));
+    let free_row = mark_for_entry_count(app).saturating_sub(1);
+    if off == 1 && row == 0 {
+        MarkForEntry::Off
+    } else if row >= free_row {
+        MarkForEntry::Free
+    } else {
+        MarkForEntry::Preset(row - off)
+    }
+}
+
+/// 定型 `index` の行の添字（`0 Off` が出ていれば 1 つ下がる）。
+pub(crate) fn mark_for_preset_row(app: &App, index: usize) -> usize {
+    usize::from(mark_for_has_off(app)) + index
 }
 
 /// popup の中身 1 行ぶん: (先頭のキー, 名前, 英語の 1 行)。
 ///
 /// 最後の 1 行が自由入力で、キーは `/`、名前は `Ask...` である。
+/// マークが出ていれば先頭に `0 Off` が立つ（[`mark_for_has_off`]）。
 fn mark_for_rows(app: &App) -> Vec<(String, String, String)> {
     let Some(questions) = app.marks_questions.as_ref() else {
         return Vec::new();
     };
-    let mut rows: Vec<(String, String, String)> = questions
-        .presets()
-        .iter()
-        .enumerate()
-        .map(|(i, q)| ((i + 1).to_string(), q.label.clone(), q.hint.clone()))
-        .collect();
+    let mut rows: Vec<(String, String, String)> = Vec::new();
+    if mark_for_has_off(app) {
+        rows.push(("0".to_string(), "Off".to_string(), MARK_FOR_OFF_HINT.to_string()));
+    }
+    rows.extend(
+        questions
+            .presets()
+            .iter()
+            .enumerate()
+            .map(|(i, q)| ((i + 1).to_string(), q.label.clone(), q.hint.clone())),
+    );
     rows.push((
         "/".to_string(),
         "Ask...".to_string(),
@@ -1293,17 +1352,22 @@ pub(crate) fn mark_for_panel(area: Rect, rows: &[(String, String, String)]) -> R
     }
 }
 
+/// `0 Off` の行の英語の 1 行。
+pub(crate) const MARK_FOR_OFF_HINT: &str = "clear the marks";
+
 /// 名前の欄の幅。`Unsettled` が 9 桁なので、英語の 1 行はここから始まる。
 const MARK_FOR_LABEL_COLS: usize = 12;
 
 /// popup のキー: j/k で動き、Enter で聞く。`1`〜`9` は直接、`/` は自由
-/// 入力。Esc / q / `m` で閉じる。
+/// 入力、`0` はマークを消す（`0 Off` の行があるときだけ）。Esc / q / `m` で
+/// 閉じる。
 ///
 /// **開いただけでは 1 円もかからない。** 解析が走るのは Enter（または
 /// 数字キー）を打った瞬間だけで、そこが巡る形との違いである。
 pub(crate) fn on_mark_for_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
     let count = mark_for_entry_count(app);
     let free_row = count.saturating_sub(1);
+    let presets = app.marks_questions.as_ref().map_or(0, |q| q.presets().len());
     match key {
         KeyCode::Char('j') | KeyCode::Down => {
             if count > 0 {
@@ -1316,10 +1380,17 @@ pub(crate) fn on_mark_for_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
         KeyCode::Enter => activate_overlay_selection(app),
         // 数字で直接。`5` までしか無くても `6` を押して何も起きないのは
         // 正しい（無い行を選べない）。
-        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+        // `0` は `0 Off`（マークが出ているときだけある行）。
+        KeyCode::Char('0') => {
+            if mark_for_has_off(app) {
+                app.overlay_cursor = 0;
+                activate_overlay_selection(app);
+            }
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
             let index = c as usize - '1' as usize;
-            if index < free_row {
-                app.overlay_cursor = index;
+            if index < presets {
+                app.overlay_cursor = mark_for_preset_row(app, index);
                 activate_overlay_selection(app);
             }
         }

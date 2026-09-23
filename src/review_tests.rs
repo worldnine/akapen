@@ -1275,3 +1275,261 @@ fn a_whole_document_diagnostic_does_not_steal_the_cursor_after_an_edit() {
     deliver_lint(&mut app, vec![whole, diagnostic(&doc, "みっつめの段落。", 4, "c", "m3")]);
     assert_eq!(app.review_candidates[app.overlay_cursor].rule, "textlint/c");
 }
+
+// ---- 8. Esc は一番手前の層から 1 枚ずつはがす（`crate::esc`） -------------
+
+/// `Esc` を 1 回押す。キーの届き先は本番と同じ（据え付けの一覧が開いて
+/// いれば一覧、無ければいまのモード）。
+fn press_esc(app: &mut App) {
+    if app.overlay.is_some() {
+        on_overlay_key(app, KeyCode::Esc, KeyModifiers::NONE);
+    } else if app.mode == Mode::Source {
+        on_source_key(app, KeyCode::Esc, KeyModifiers::NONE, None);
+    } else {
+        on_view_key(app, KeyCode::Esc, KeyModifiers::NONE, None);
+    }
+}
+
+fn flashed(app: &App) -> Option<&str> {
+    app.status.as_ref().map(|(msg, _, _)| msg.as_str())
+}
+
+/// marks を出す（問いと答えを手で置く。判定器は呼ばない）。
+fn show_marks(app: &mut App) {
+    app.marks_question = Some(app.marks_questions.as_ref().unwrap().presets()[0].clone());
+    app.semantic_doc = Some(answer([Some(0.9), Some(0.8), Some(0.7)]));
+    app.refresh_semantic_decorations();
+}
+
+/// **全部の層を重ねて、1 枚ずつはがす。** 1 回ごとに、フッタの予告が
+/// 言ったものが実際に消え、同じ語でフラッシュされる。
+#[test]
+fn esc_peels_every_layer_in_the_order_the_footer_announces() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), None]));
+    assert!(app.accept_candidate(0), "accept で作ったコメントは消えないこと");
+    show_marks(&mut app);
+    assert!(app.press_focus(std::time::Instant::now()), "沈める");
+    crate::overlay::open_review(&mut app);
+    app.overlay_cursor = 1;
+    on_overlay_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.selection.is_some(), "一覧の Enter が選択を作る");
+    app.confirm_quit = true;
+
+    let steps = [
+        ("Esc: cancel quit", "quit cancelled"),
+        ("Esc: cancel selection", "selection cancelled"),
+        ("Esc: close list", "list closed"),
+        ("Esc: focus off", "focus off"),
+        ("Esc: clear review", "review cleared"),
+        ("Esc: clear marks", "marks cleared"),
+    ];
+    for (preview, flash) in steps {
+        assert_eq!(crate::esc::preview(&app).as_deref(), Some(preview));
+        // 予告は描かれるフッタにも出ている（同じ表を読む）。
+        let footer = crate::chrome::footer_metrics(&app, 200);
+        assert_eq!(footer.esc.as_deref(), Some(preview), "フッタの予告");
+        press_esc(&mut app);
+        assert_eq!(flashed(&app), Some(flash), "{preview} の後のフラッシュ");
+    }
+    // 何が消えたか。
+    assert!(!app.confirm_quit && app.selection.is_none() && app.overlay.is_none());
+    assert!(!app.focused());
+    assert!(app.review_candidates.is_empty() && app.review_lines().iter().all(Option::is_none));
+    assert!(app.semantic_doc.is_none() && app.marks_question.is_none());
+    // **何も消えないもの。** accept で作ったコメントは残る。
+    assert_eq!(app.comments.len(), 1);
+    // もう消すものが無い。`--esc-quit` でもないので、予告は出ず、Esc は
+    // 何もしない（終了しない）。
+    assert_eq!(crate::esc::preview(&app), None);
+    assert_eq!(crate::chrome::footer_metrics(&app, 200).esc, None);
+    press_esc(&mut app);
+    assert!(app.running);
+    assert_eq!(flashed(&app), Some("marks cleared"), "何も起きていない");
+}
+
+/// source モードでは選択の次に**削除のフォーカス**が入る。view には無い段。
+#[test]
+fn source_mode_peels_the_deletion_focus_right_after_the_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    show_marks(&mut app);
+    app.mode = Mode::Source;
+    app.focused_deletion = Some(app.cursor);
+    app.selection = Some(crate::comment::Selection::new(app.cursor));
+    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: cancel selection"));
+    press_esc(&mut app);
+    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: cancel deletion focus"));
+    press_esc(&mut app);
+    assert_eq!(flashed(&app), Some("deletion focus cancelled"));
+    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: clear marks"));
+    // view では同じ値が残っていても段にならない（以前から view の Esc は見ていない）。
+    app.focused_deletion = Some(app.cursor);
+    app.mode = Mode::View;
+    assert_eq!(crate::esc::top(&app), Some(crate::esc::Layer::Marks));
+}
+
+/// **消した Review は `R` でまた出る。** 消したのは画面の候補だけで、
+/// dismiss の記録と accept のコメントは残っている — 戻ってきた候補は
+/// 前と同じ印を付けている。
+#[test]
+fn a_cleared_review_comes_back_on_r_with_its_accepts_and_dismissals() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    let scores = || answer([Some(0.9), Some(0.8), Some(0.7)]);
+    deliver(&mut app, "filler", scores());
+    assert_eq!(app.review_candidates.len(), 3);
+    assert!(app.accept_candidate(0));
+    assert!(app.dismiss_candidate(1));
+    let generation = app.review_generation;
+
+    assert!(app.clear_review());
+    assert!(app.review_candidates.is_empty());
+    assert!(!app.review_armed, "起点も戻す");
+    assert!(app.review_generation > generation, "走っている答えは古い世代になる");
+    assert!(!app.review_shown());
+    assert!(!app.clear_review(), "2 度目は消すものが無い");
+    // 次の reload（再解析）が頼んでもいない候補を描き直さない。
+    app.reanalyze_review();
+    assert_eq!(app.review_inflight, 0);
+
+    // `R` — 起点が立ち直り、同じ答えが届けば同じ印で戻る。
+    app.arm_review();
+    assert!(app.review_armed);
+    deliver(&mut app, "filler", scores());
+    let states: Vec<CandidateState> = app.review_candidates.iter().map(|c| c.state).collect();
+    assert_eq!(
+        states,
+        [CandidateState::Accepted, CandidateState::Pending],
+        "accept はコメントから、dismiss は記録から戻る（捨てた候補は出ない）"
+    );
+}
+
+/// `--esc-quit` のとき、最後の段は終了。未送信のコメントがあれば `q` と
+/// 同じく確認を挟み、確認中の予告は `Esc: quit` になる。
+#[test]
+fn with_esc_quit_the_last_layer_is_quit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    app.config.esc_quit = EscQuit::Always;
+    show_marks(&mut app);
+    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: clear marks"));
+    press_esc(&mut app);
+    assert!(app.running, "marks を消しただけ");
+    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: quit"));
+    app.comments.push(crate::comment::Comment {
+        file_path: app.current_file_path().to_path_buf(),
+        start: 1,
+        end: 1,
+        lines: String::new(),
+        revision: None,
+        text: "c".into(),
+    });
+    press_esc(&mut app);
+    assert!(app.confirm_quit && app.running, "未送信のコメントがあるので確認");
+    assert_eq!(crate::esc::preview(&app).as_deref(), Some("Esc: quit"));
+    press_esc(&mut app);
+    assert!(!app.running);
+}
+
+/// popup と composer は `Esc` を自分で取る。そこで表の予告を出すと嘘になる。
+#[test]
+fn the_preview_is_silent_while_a_popup_or_the_composer_owns_esc() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    show_marks(&mut app);
+    assert!(crate::esc::preview(&app).is_some());
+    app.overlay = Some(crate::overlay::Overlay::MarkFor);
+    assert_eq!(crate::esc::preview(&app), None);
+    app.overlay = None;
+    app.mode = Mode::Input;
+    assert_eq!(crate::esc::preview(&app), None);
+}
+
+/// 据え付けの一覧のフッタは右端の予告で出口を言う（`Esc close` を
+/// 案内に重ねない）。80 桁でも予告は残る。
+#[test]
+fn the_list_footer_names_its_way_out_at_the_right_edge() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), None]));
+    crate::overlay::open_review(&mut app);
+    let footer = crate::chrome::footer_metrics(&app, 80);
+    assert_eq!(footer.esc.as_deref(), Some("Esc: close list"));
+    assert!(!footer.hints.contains("Esc close"), "{}", footer.hints);
+    assert!(footer.hints.contains("e edit"), "{}", footer.hints);
+}
+
+// ---- 9. mark for の `0 Off` ---------------------------------------------
+
+fn mark_for_screen(app: &mut App) -> String {
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, app)).unwrap();
+    buffer_text(terminal.backend().buffer())
+}
+
+/// マークが出ているときだけ、先頭に `0 Off` が立つ。`0` でも選べて、
+/// `Esc` の marks の段と同じ語でフラッシュする。
+#[test]
+fn mark_for_offers_off_only_while_marks_are_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    let presets = app.marks_questions.as_ref().unwrap().presets().len();
+
+    // マークが無い: `0 Off` は無く、`0` は何もしない。
+    crate::overlay::open_overlay(&mut app, crate::overlay::Overlay::MarkFor, 0);
+    assert_eq!(crate::overlay::mark_for_entry_count(&app), presets + 1);
+    let screen = mark_for_screen(&mut app);
+    assert!(!screen.contains("0 Off"), "{screen}");
+    assert!(screen.contains("1 Essential"), "{screen}");
+    assert!(screen.contains("4 Your call"), "新しい名前: {screen}");
+    on_overlay_key(&mut app, KeyCode::Char('0'), KeyModifiers::NONE);
+    assert_eq!(app.overlay, Some(crate::overlay::Overlay::MarkFor), "閉じない");
+    app.overlay = None;
+
+    // マークが出ている: 先頭に `0 Off`、定型は 1 行下がる。
+    show_marks(&mut app);
+    assert!(app.press_focus(std::time::Instant::now()));
+    crate::overlay::open_overlay(&mut app, crate::overlay::Overlay::MarkFor, 0);
+    assert_eq!(crate::overlay::mark_for_entry_count(&app), presets + 2);
+    let screen = mark_for_screen(&mut app);
+    let off_row = screen.lines().position(|l| l.contains("0 Off")).expect("0 Off が出る");
+    let first_row = screen.lines().position(|l| l.contains("1 Essential")).unwrap();
+    assert_eq!(off_row + 1, first_row, "0 Off は先頭:\n{screen}");
+    assert!(screen.contains("clear the marks"), "{screen}");
+    assert_eq!(
+        crate::overlay::mark_for_entry(&app, 0),
+        crate::overlay::MarkForEntry::Off
+    );
+    assert_eq!(
+        crate::overlay::mark_for_entry(&app, 1),
+        crate::overlay::MarkForEntry::Preset(0)
+    );
+    on_overlay_key(&mut app, KeyCode::Char('0'), KeyModifiers::NONE);
+    assert_eq!(app.overlay, None);
+    assert!(app.semantic_doc.is_none() && app.marks_question.is_none(), "マークが消える");
+    assert!(!app.focused(), "沈める先が無くなるので一緒に解く");
+    assert_eq!(flashed(&app), Some("marks cleared"));
+}
+
+/// `0 Off` が出ている popup でも、数字キーと開いたときのカーソルは
+/// 定型を指す（1 行ずれない）。
+#[test]
+fn with_off_shown_the_digits_and_the_cursor_still_point_at_the_presets() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    show_marks(&mut app);
+    app.marks_preset = 2;
+    on_view_key(&mut app, KeyCode::Char('m'), KeyModifiers::NONE, None);
+    assert_eq!(app.overlay, Some(crate::overlay::Overlay::MarkFor));
+    assert_eq!(
+        crate::overlay::mark_for_entry(&app, app.overlay_cursor),
+        crate::overlay::MarkForEntry::Preset(2),
+        "いま聞いている定型にカーソル"
+    );
+    // `/` は最下段の自由入力。
+    let free = crate::overlay::mark_for_entry_count(&app) - 1;
+    assert_eq!(crate::overlay::mark_for_entry(&app, free), crate::overlay::MarkForEntry::Free);
+}
