@@ -258,8 +258,8 @@ pub(crate) struct App {
     /// top message (a prompt suppresses it).
     pub(crate) toast_fx: Option<tachyonfx::Effect>,
     /// **マーカーが引かれる演出**（marks モード）。答えが届いた瞬間に
-    /// 立ち、700〜820 ms で終わる（[`crate::effects::marks_reveal_effect`] /
-    /// [`crate::effects::marks_settle_effect`]。向きは暫定の切り替え
+    /// 立ち、700〜950 ms で終わる（[`crate::effects::marks_reveal_effect`] /
+    /// [`crate::effects::marks_draw_effect`]。向きは暫定の切り替え
     /// [`crate::effects::RevealStyle`]）。
     ///
     /// **view モードにも source モードにも乗る。** 琥珀は両方で塗られる
@@ -947,12 +947,13 @@ impl App {
             crate::effects::RevealStyle::Rise => {
                 crate::effects::marks_reveal_effect(amber, page)
             }
-            // **濃い琥珀でパッと出て、左から乾いて確定色へ落ちる**
-            // （2026-09-23 の読み手の注文）。明るい側の色は b（天井）から
-            // 借りる — 確定色は a のままで、ページ色は使わない。
-            crate::effects::RevealStyle::Settle => crate::effects::marks_settle_effect(
+            // **濃い琥珀の線が引かれ、後ろが確定色に乾く**（2026-09-23 の
+            // 読み手の注文）。線の色は b（天井）から借りる — 確定色は
+            // a のままで、線が通った後ろだけがそれへ戻る。
+            crate::effects::RevealStyle::Draw => crate::effects::marks_draw_effect(
                 amber,
                 self.decoration_styles.mark_flash_bg(),
+                page,
             ),
         });
     }

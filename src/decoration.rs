@@ -457,12 +457,13 @@ impl DecorationStyles {
         self.variant
     }
 
-    /// **演出が最初に出す、一番濃い琥珀。**
+    /// **演出の線の色。**
     ///
     /// [`MARK_BG_BLEND_CEILING`]（0.40）の色で、確定色（[`Self::mark_bg`]）
-    /// より濃い。`marks_settle_effect` はここから確定色へ落ちてくるので、
-    /// **「目立たないが読みやすい」確定色を変えずに出る瞬間だけ強くする**
-    /// ことができる（読み手の注文、2026-09-23）。
+    /// より濃い。`marks_draw_effect` は**この色で線を引き、通った後ろを
+    /// 確定色へ戻す**ので、**「目立たないが読みやすい」確定色を変えずに、
+    /// 引かれる線の瞬間だけ強くする**ことができる（読み手の注文、
+    /// 2026-09-23）。
     ///
     /// **焼き込まない** — `--light` でも `--theme` でも同じ式で出る。
     pub fn mark_flash_bg(&self) -> Color {
@@ -473,11 +474,11 @@ impl DecorationStyles {
     /// actually writes, and the color the reveal settles to.
     ///
     /// The marks reveal animation filters the frame by exactly this
-    /// color (`crate::effects::marks_settle_effect` /
+    /// color (`crate::effects::marks_draw_effect` /
     /// `crate::effects::marks_reveal_effect`), which is why it is read
     /// from here instead of being written into the effect: a theme,
     /// `--light` and `--mark-blend` all move it, and there must be one
-    /// place that decides. The bright color the settle STARTS from is
+    /// place that decides. The bright color the drawn LINE carries is
     /// [`Self::mark_flash_bg`].
     pub fn mark_bg(&self) -> Color {
         self.mark.bg.unwrap_or(MARK_BG_DARK)

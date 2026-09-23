@@ -638,13 +638,13 @@ pub(crate) fn ghost_effect() -> Effect {
 /// （`marks-style` の作業。選ばれたら負けた腕ごと消す）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RevealStyle {
-    /// **ページ色から琥珀へ上げる** — 2026-09-22 からのもの。
-    /// 全部が半分まで同時に上がり、そこへ線が左→右に引かれて満ちる。
+    /// **確定色の線が引かれる** — 2026-09-22 からのもの（`rise`）。
+    /// 全部が半分まで同時に上がり、そこへ琥珀の線が左→右に引かれて満ちる。
     Rise,
-    /// **濃い琥珀でパッと出て、左から乾いて確定色へ落ちる** —
-    /// 2026-09-23 の読み手の注文。既定はこちら。
+    /// **濃い琥珀の線が引かれ、後ろが確定色に乾く** — 2026-09-23 の
+    /// 読み手の注文。既定はこちら。
     #[default]
-    Settle,
+    Draw,
 }
 
 /// 演出の向きを選ぶ環境変数。**暫定** — 選ばれたら消える。
@@ -652,11 +652,11 @@ const REVEAL_ENV: &str = "AKAPEN_MARK_REVEAL";
 
 impl RevealStyle {
     /// `rise` / `old` / `up` だけが `Rise`。**知らない値は既定
-    /// （`Settle`）**に落ちる。
+    /// （`Draw`）**に落ちる。
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "rise" | "old" | "up" => Self::Rise,
-            _ => Self::Settle,
+            _ => Self::Draw,
         }
     }
 
@@ -672,19 +672,21 @@ impl RevealStyle {
     }
 }
 
-/// `Rise` の段 1（ページ色から琥珀の半分まで上げる）の長さ。
+/// 段 1（ページ色から琥珀の半分まで、全部同時に上げる）の長さ。
+///
+/// **両方の向きで同じ出だし**である — 「どこが光るのか」がまず一望できる。
 pub(crate) const MARKS_FADE_MS: u32 = 250;
 /// 線が引かれるまで（ミリ秒）。左→右のスイープ。両方の向きで同じ長さ。
 pub(crate) const MARKS_SWEEP_MS: u32 = 450;
-/// `Settle` で、前線が通ったセルが確定色まで乾く長さ。
+/// `Draw` で、線が通ったセルが確定色まで乾く長さ。
 pub(crate) const MARKS_COOL_MS: u32 = 250;
 /// `Rise` の全長（250 + 450 = 700 ms）。
 pub(crate) const MARKS_REVEAL_MS: u32 = MARKS_FADE_MS + MARKS_SWEEP_MS;
-/// `Settle` の全長（450 + 250 = 700 ms）。**`Rise` と同じ長さ**である。
+/// `Draw` の全長（250 + 450 + 250 = 950 ms）。
 ///
 /// **どちらも 1 秒以内**（2026-09-22 の読み手の注文 3）。判定の到着は
 /// 数秒かかるが、演出はそれとは別物で、待たせるためのものではない。
-pub(crate) const MARKS_SETTLE_MS: u32 = MARKS_SWEEP_MS + MARKS_COOL_MS;
+pub(crate) const MARKS_DRAW_MS: u32 = MARKS_FADE_MS + MARKS_SWEEP_MS + MARKS_COOL_MS;
 
 /// スイープが通る前の濃さ（琥珀への blend の割合）。
 const MARKS_PRE_SWEEP: f32 = 0.5;
@@ -692,7 +694,7 @@ const MARKS_PRE_SWEEP: f32 = 0.5;
 /// フッタ右下の読み出しが**変化の瞬間だけ**明るくなる長さ。
 ///
 /// 300 ms は「目の端で気づくが、読みに来る頃には戻っている」長さである。
-/// マーカーの演出（[`MARKS_SETTLE_MS`] = 820 ms / [`MARKS_REVEAL_MS`] = 700 ms）
+/// マーカーの演出（[`MARKS_DRAW_MS`] = 950 ms / [`MARKS_REVEAL_MS`] = 700 ms）
 /// より短いのは、こちらが「値が変わった」の合図で、あちらは「線が引かれる」
 /// という出来事だから。
 pub(crate) const READOUT_FLASH_MS: u32 = 300;
@@ -762,7 +764,7 @@ pub(crate) fn readout_flash_effect(bright: Color) -> Effect {
 /// 来る。`--light` でも `--theme DarkNeon` でも `--mark-blend` を動かしても
 /// 同じ演出が乗るのはそのためで、ここに色を書くと片方でしか合わなくなる。
 ///
-/// **既定は [`marks_settle_effect`]**（2026-09-23 の読み手の注文）。
+/// **既定は [`marks_draw_effect`]**（2026-09-23 の読み手の注文）。
 /// こちらは `AKAPEN_MARK_REVEAL=rise` で見られる比較用の腕である。
 pub(crate) fn marks_reveal_effect(amber: Color, page: Color) -> Effect {
     let fade = MARKS_FADE_MS as f32 / MARKS_REVEAL_MS as f32;
@@ -813,41 +815,38 @@ pub(crate) fn marks_reveal_effect(amber: Color, page: Color) -> Effect {
     effect
 }
 
-/// **マーカーが引かれる演出（`Settle`）。** 読み手の注文（2026-09-23）:
+/// **マーカーが引かれる演出（`Draw`）。** 読み手の注文（2026-09-23）:
 ///
 /// ```text
-/// 0 ──────────── 450 ms ────────────┬── 250 ms ──
-///   パッと b で出る（出た瞬間が一番濃い）  左から乾いて a へ
+/// 0 ─── 250 ms ───┬───────── 450 ms ─────────┬── 250 ms ──
+///   半分まで一斉に上がる   濃い琥珀の線が左→右に引かれる   後ろが確定色に乾く
 /// ```
 ///
-/// 以前（[`marks_reveal_effect`]）はページ色から琥珀へ**上げて**いた。
-/// こちらはその逆で、**最初のフレームが一番濃い琥珀（`bright` = 天井
-/// 0.40）で、そこから確定色（`amber` = 0.27）へ落ちる**。落ちる順は左から
-/// で、前線が通り過ぎたセルから順に乾く — 「線が引かれる」の向きはそのままに、
-/// 前線の後ろが冷えていく。
+/// **`Rise` の出だしと「線が引かれる」動きはそのまま**で、引かれる線の色
+/// だけを確定色（`amber` = 0.27）から**一番濃い琥珀（`bright` = 天井 0.40）**
+/// に置き換え、通った後ろを確定色へ戻す。読み手の言葉では「old の左から
+/// 右にシュッとラインを引かれる感じは残して、線をもう少し明るい色に。
+/// ただし明るすぎるので、そこから元の色に落として」。
 ///
-/// **ページ色から立ち上げる段は無い。** 薄く出てから濃くなる段を置くと、
-/// 実機では「暗い→明るい→少し暗い」に見えた（2026-09-23 の実測）。
-/// 読み手が求めたのは「パッと明るく出て、そのあと暗くなる」なので、
-/// **出た瞬間が最大**である。
-///
-/// **「目立たないが読みやすい a」を確定の色にしたまま、出る瞬間だけ b の
-/// 強さを借りる**、という分担である。b は天井ちょうどなので、上の字は
-/// 一時的に 5:1 まで落ちるが、読めない側ではない。
+/// したがって 1 つのセルの時間変化は
+/// **ページ → 半分 →（線が通過）`bright` → `amber`** である。
+/// 前線より右は半分で待ち、前線が来た瞬間に一番濃くなり、そこから乾く。
 ///
 /// # どのセルを掴むか、色を焼き込まないこと
 ///
 /// [`marks_reveal_effect`] とまったく同じ — 琥珀の背景でフィルタし、
-/// 2 つの色は `DecorationStyles`（テーマから解決済み）から来る。
+/// 3 つの色は `DecorationStyles`（テーマから解決済み）から来る。
 /// カーソル行は帯に隠れるので演出に入らない。
-pub(crate) fn marks_settle_effect(amber: Color, bright: Color) -> Effect {
-    let cool = MARKS_COOL_MS as f32 / MARKS_SETTLE_MS as f32;
+pub(crate) fn marks_draw_effect(amber: Color, bright: Color, page: Color) -> Effect {
+    let fade = MARKS_FADE_MS as f32 / MARKS_DRAW_MS as f32;
+    let cool = MARKS_COOL_MS as f32 / MARKS_DRAW_MS as f32;
     // 前線が動ける幅。最後のセルがちょうど演出の終わりに乾き終わる。
-    let sweep = 1.0 - cool;
+    let sweep = 1.0 - fade - cool;
+    let half = lerp_color(page, amber, MARKS_PRE_SWEEP);
     let mut effect = fx::effect_fn_buf(
-        (amber, bright),
-        (MARKS_SETTLE_MS, Interpolation::Linear),
-        move |(amber, bright), ctx, buf| {
+        (amber, bright, page, half),
+        (MARKS_DRAW_MS, Interpolation::Linear),
+        move |(amber, bright, page, half), ctx, buf| {
             let alpha = ctx.timer.alpha();
             let area = ctx.area;
             if area.width == 0 {
@@ -860,14 +859,21 @@ pub(crate) fn marks_settle_effect(amber: Color, bright: Color) -> Effect {
                     if cell.style().bg != Some(*amber) {
                         continue;
                     }
-                    // 前線がこのセルへ来る時刻を求めて、そこからの経過だけ乾かす。
-                    // 前線より右は b のまま待つ（`age <= 0`）。
-                    let front = (x as f32 - area.x as f32) / area.width as f32 * sweep;
-                    let age = (alpha - front) / cool;
-                    let bg = if age <= 0.0 {
-                        *bright
+                    let bg = if alpha <= fade {
+                        // 段 1: ページ色から半分まで、全部同時に。
+                        let t = (alpha / fade).clamp(0.0, 1.0) * MARKS_PRE_SWEEP;
+                        lerp_color(*page, *amber, t)
                     } else {
-                        lerp_color(*bright, *amber, age.clamp(0.0, 1.0))
+                        // 段 2: 前線がこのセルへ来る時刻。右側は半分で待つ。
+                        let front =
+                            fade + (x as f32 - area.x as f32) / area.width as f32 * sweep;
+                        let age = (alpha - front) / cool;
+                        if age <= 0.0 {
+                            *half
+                        } else {
+                            // 段 3: 通った線は `bright` から確定色へ乾く。
+                            lerp_color(*bright, *amber, age.clamp(0.0, 1.0))
+                        }
                     };
                     cell.set_bg(bg);
                 }
@@ -952,61 +958,56 @@ mod tests {
             + (ab as i32 - bb as i32).abs()
     }
 
-    /// **既定（`Settle`）は、出た瞬間が一番濃く（b）、左から順に確定色
-    /// （a）へ乾く。** セルの背景そのもので見る — 一番左のセルは
-    /// **明るさが単調に落ちる**だけである（ページ色から上げる段は無い）。
+    /// **既定（`Draw`）は、`Rise` と同じ出だしで半分まで上がり、そこへ
+    /// 濃い琥珀の線が左→右に引かれ、後ろが確定色へ乾く。**
+    /// 1 つのセルの変化は **ページ → 半分 → `bright` → `amber`**。
     #[test]
-    fn the_settle_reveal_starts_bright_and_dries_left_to_right() {
+    fn the_draw_reveal_puts_a_bright_line_across_and_settles_behind_it() {
         let amber = Color::Rgb(90, 69, 33);
         let bright = Color::Rgb(120, 88, 27);
+        let page = Color::Rgb(30, 30, 46);
+        let half = lerp_color(page, amber, MARKS_PRE_SWEEP);
         let area = Rect::new(0, 0, 8, 1);
-        let mut fx = marks_settle_effect(amber, bright);
+        let mut fx = marks_draw_effect(amber, bright, page);
         let mut step = |ms: u64| {
             let mut buf = amber_row(area, amber);
             fx.process(Duration::from_millis(ms), &mut buf, area);
             buf
         };
 
-        // 最初のフレームで既に b 側にいる（ページ色から立ち上げない）。
-        let buf = step(1);
+        // 段 1 の終わり: 全部が半分（`Rise` と同じ出だし）。
+        let buf = step(MARKS_FADE_MS as u64);
         for x in area.x..area.right() {
-            let c = bg_of(&buf, x, 0);
-            assert!(
-                dist(c, bright) < dist(c, amber),
-                "x={x}: {c:?} が最初から b 側にいない"
-            );
+            assert_eq!(bg_of(&buf, x, 0), half, "段 1 は半分まで");
         }
 
-        // 前線の通った左端は乾き始め、前線の来ていない右端は b のまま。
-        let buf = step(249);
+        // 前線が左端に着いた直後: **左端だけが濃い琥珀**で、右側は半分のまま。
+        let buf = step(1);
         let left = bg_of(&buf, 0, 0);
         let right = bg_of(&buf, area.right() - 1, 0);
         assert!(
-            dist(left, amber) < dist(left, bright),
-            "左端が乾いていない: {left:?}"
+            dist(left, bright) < dist(left, half),
+            "前線の直後が明るくない: {left:?}"
         );
-        assert_eq!(right, bright, "前線の来ていない右端は b のまま");
+        assert_eq!(right, half, "前線の来ていない右端は半分のまま");
 
-        // 終わり: 全部が確定色 a。
-        let buf = step(MARKS_SETTLE_MS as u64);
+        // 途中: 左端はもう確定色へ乾き始め、右端はまだ半分。
+        let buf = step(199);
+        let left = bg_of(&buf, 0, 0);
+        assert!(
+            dist(left, amber) < dist(left, bright),
+            "通った線が乾いていない: {left:?}"
+        );
+        assert_eq!(bg_of(&buf, area.right() - 1, 0), half);
+
+        // 終わり: 全部が確定色。
+        let buf = step(MARKS_DRAW_MS as u64);
         for x in area.x..area.right() {
             assert_eq!(bg_of(&buf, x, 0), amber, "x={x}");
         }
-
-        // **上げてから下げる、ではない。** 一番左のセルの明るさは、最初から
-        // 単調に落ちる（`Rise` との違いはここだけである）。
-        let mut fx = marks_settle_effect(amber, bright);
-        let mut prev = -1;
-        for ms in [1u64, 50, 100, 150, 200, 250, 300] {
-            let mut buf = amber_row(area, amber);
-            fx.process(Duration::from_millis(ms), &mut buf, area);
-            let d = dist(bg_of(&buf, 0, 0), bright);
-            assert!(d >= prev, "{ms}ms で明るさが戻った（{prev} -> {d}）");
-            prev = d;
-        }
     }
 
-    /// `Rise`（2026-09-22 からのもの）はその逆で、**確定色より濃くならない**。
+    /// `Rise`（2026-09-22 からのもの）は**確定色より濃くならない**。
     /// 途中で一番濃いのは確定色 `a` そのもので、前線の右側は半分で待つ。
     #[test]
     fn the_rise_reveal_climbs_to_the_amber_and_never_past_it() {
@@ -1036,13 +1037,13 @@ mod tests {
 
     /// 演出の向きは `rise` / `old` / `up` だけが `Rise`、**知らない値は既定**。
     #[test]
-    fn the_temporary_reveal_styles_parse_and_default_to_settle() {
+    fn the_temporary_reveal_styles_parse_and_default_to_draw() {
         assert_eq!(RevealStyle::parse("rise"), RevealStyle::Rise);
         assert_eq!(RevealStyle::parse(" OLD "), RevealStyle::Rise);
         assert_eq!(RevealStyle::parse("up"), RevealStyle::Rise);
-        assert_eq!(RevealStyle::parse("settle"), RevealStyle::Settle);
-        assert_eq!(RevealStyle::parse(""), RevealStyle::Settle);
-        assert_eq!(RevealStyle::parse("nonsense"), RevealStyle::Settle);
-        assert_eq!(RevealStyle::default(), RevealStyle::Settle);
+        assert_eq!(RevealStyle::parse("draw"), RevealStyle::Draw);
+        assert_eq!(RevealStyle::parse(""), RevealStyle::Draw);
+        assert_eq!(RevealStyle::parse("nonsense"), RevealStyle::Draw);
+        assert_eq!(RevealStyle::default(), RevealStyle::Draw);
     }
 }

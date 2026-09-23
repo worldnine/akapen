@@ -350,13 +350,12 @@ markdown の scope に当たるのは **DarkNeon だけ**です
 数えると **0 セル**。`app.semantic_decorations` には MARKED が入っていて、
 実機では琥珀が見えている。
 
-**原因**: マーカーが引かれる演出（`effects::marks_settle_effect`）が
-立っていました。**1 枚目はもう一番濃い琥珀（`mark_flash_bg()`）で塗られて
-います** — 確定色 (`mark_bg()`) ではないので、琥珀を数えると 0 セルに
-なります（2026-09-23 以前はページ色から上げていたので、同じく 0 セル
-でした）。答えが `semantic_doc` に入った瞬間に立つので
-（`App::accept_analysis`）、**fixture 経路でも起動直後の 1 枚目は必ず
-これに当たります。**
+**原因**: マーカーが引かれる演出（`effects::marks_draw_effect`）が
+立っていました。段 1 は**ページ色から**琥珀の半分へ上げるので、
+`alpha = 0` の 1 枚目では琥珀のセルがちょうどページ色で塗られています
+（線の色（`mark_flash_bg()`）が乗るのは段 2 からです）。答えが
+`semantic_doc` に入った瞬間に立つので（`App::accept_analysis`）、
+**fixture 経路でも起動直後の 1 枚目は必ずこれに当たります。**
 
 **対処**: 画面のセルを見るテストは `app.config.fx = false` にし、
 `app.marks_fx` / `app.readout_fx` を `None` に落としてから描くこと
