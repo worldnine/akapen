@@ -1204,8 +1204,8 @@ impl App {
 
     /// 問いを消せるか — [`Self::clear_marks_question`] が `true` を返す状態か。
     ///
-    /// `Esc` の層の表（[`crate::esc`]）とフッタの予告、mark for の `0 Off` の
-    /// 行が同じ問いを読む。消えるものが無いのに予告を出すと嘘になる。
+    /// `Esc` の層の表（[`crate::esc`]）と右上のバッジ、mark for の `0 Off` の
+    /// 行が同じ問いを読む。消えるものが無いのにバッジが消すと言うと嘘になる。
     pub(crate) fn can_clear_marks_question(&self) -> bool {
         !self.marks_question_is_fixed()
             && (self.marks_question.is_some() || self.semantic_doc.is_some())

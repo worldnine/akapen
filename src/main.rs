@@ -1196,12 +1196,14 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
                 return;
             }
             // The title bar (row 0) is clickable: `▌ N` opens the comment
-            // list, `1/3 files` the file picker, and the path copies the
-            // full path to the clipboard. The hit regions come from the
-            // same layout math draw_title uses.
+            // list, `1/3 files` the file picker, the path copies the
+            // full path to the clipboard, and the `esc …` badge is one Esc
+            // (`crate::esc::peel` — the badge says what that peels). The
+            // hit regions come from the same layout math draw_title uses.
             if mouse.row == 0 {
                 let (w, _) = crate::app::terminal_size();
                 match title_hit_at(app, w, mouse.column) {
+                    Some(TitleHit::Esc) => esc::peel(app),
                     Some(TitleHit::CommentCount) => open_overlay(app, Overlay::Comments, 0),
                     Some(TitleHit::FileCount) => {
                         open_overlay(app, Overlay::Files, app.current_file_index);

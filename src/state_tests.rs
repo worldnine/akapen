@@ -3121,35 +3121,86 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn title_esc_close_badge_tracks_esc_quit() {
+    fn title_esc_badge_says_close_only_when_esc_quits() {
         let (mut app, _dir) = make_session();
-        // Default (no callback): no badge — Esc is not a close key.
-        assert_eq!(title_metrics(&app, 80).esc_close, "");
-        // With the esc-quit affordance live, the filled badge appears at
-        // the top-right, right of the comment counter.
+        // Default (no callback) and nothing to peel: no badge — Esc does
+        // nothing, so the corner says nothing.
+        assert_eq!(title_metrics(&app, 80).esc, "");
+        // With esc-quit live and nothing else to peel, Esc closes: the
+        // filled badge sits at the top-right, right of the comment counter.
         app.config.callback = Some("fzf".into());
         let m = title_metrics(&app, 80);
-        assert_eq!(m.esc_close, " esc close ");
-        assert_eq!(m.esc_close_x + m.esc_close_w, 80, "flush right");
+        assert_eq!(m.esc, " esc close ");
+        assert_eq!(m.esc_x + m.esc_w, 80, "flush right");
         assert!(
-            m.indicator_x + m.indicator_w <= m.esc_close_x,
+            m.indicator_x + m.indicator_w <= m.esc_x,
             "badge sits right of the comment counter"
         );
+        // A selection is peeled first, so the badge says so — never
+        // `close` while Esc would do something else.
+        app.selection = Some(crate::comment::Selection::new(0));
+        assert_eq!(title_metrics(&app, 80).esc, " esc cancel selection ");
+        app.selection = None;
         // While composing, Esc cancels the composer instead: hide it.
         app.mode = Mode::Input;
-        assert_eq!(title_metrics(&app, 80).esc_close, "");
+        assert_eq!(title_metrics(&app, 80).esc, "");
     }
 
+    /// **狭いときの引き下がり方**: y/s → path（16 桁まで）→ バッジ。
+    /// 状態の印・`1/3 files`・`▌ N` は落とさない。どの幅でも溢れず、
+    /// 引き下がったバッジの幅で y/s が戻ってくることも無い。
     #[test]
-    fn title_esc_close_badge_keeps_room_over_the_path() {
+    fn title_esc_badge_yields_after_the_ys_hint_and_the_path() {
         let (mut app, _dir) = make_session();
         app.config.callback = Some("fzf".into());
-        let m = title_metrics(&app, 20);
-        assert_eq!(m.esc_close, " esc close ", "badge survives narrow widths");
-        assert!(
-            m.path_w + m.esc_close_w <= 20,
-            "the path yields to the badge: {m:?}"
-        );
+        app.selection = Some(crate::comment::Selection::new(0));
+        app.comments.push(crate::comment::Comment {
+            file_path: app.current_file_path().to_path_buf(),
+            start: 1,
+            end: 1,
+            lines: String::new(),
+            revision: None,
+            text: "c".into(),
+        });
+        let mut badge_gone = false;
+        let mut ys_gone = false;
+        for width in (0..=120u16).rev() {
+            let m = title_metrics(&app, width);
+            let used = m.change_w + 1 + m.path_w + m.file_count_w
+                + if m.show_ys { m.ys_w } else { 0 }
+                + m.indicator_w
+                + m.esc_w;
+            // 落とさない要素だけで溢れる幅（ここでは 16 桁未満）は以前から
+            // 溢れる — バッジの話ではないので数えない。
+            if m.change_w + 1 + m.file_count_w + m.indicator_w <= width {
+                assert!(used <= width, "{width}: {m:?}");
+            }
+            assert_eq!(m.indicator, " ▌ 1 ", "the counter never yields ({width})");
+            if m.esc_w > 0 {
+                assert_eq!(m.esc, " esc cancel selection ", "no short form ({width})");
+                assert!(!badge_gone, "the badge came back at {width}");
+                assert!(m.esc_x + m.esc_w == width, "flush right ({width})");
+            } else {
+                badge_gone = true;
+            }
+            if m.show_ys {
+                assert!(!ys_gone, "y/s came back at {width}: {m:?}");
+                assert!(m.esc_w > 0, "y/s outlived the badge at {width}");
+            } else {
+                ys_gone = true;
+            }
+        }
+        assert!(badge_gone && ys_gone);
+        // 80 桁ではどちらも残る（短い path の fixture）。
+        let m = title_metrics(&app, 80);
+        assert!(m.esc_w > 0 && m.show_ys, "{m:?}");
+        // バッジが退くのは path の取り分が 16 桁を割るとき。
+        let first_without = (0..=120u16).rev().find(|&w| title_metrics(&app, w).esc_w == 0).unwrap();
+        let m = title_metrics(&app, first_without + 1);
+        assert!(m.esc_w > 0);
+        let room = (first_without + 1)
+            - (m.indicator_w + m.esc_w + m.change_w + m.file_count_w + 1);
+        assert_eq!(room, 16, "the path keeps 16 columns while the badge stands");
     }
 
     #[test]
@@ -3303,11 +3354,11 @@ use crate::comment::Selection;
         assert!(footer_hints(&app).contains("4–4"));
         assert!(footer_hints(&app).contains("j/k extend"));
         // The way out of the SELECT state is spelled out once, by the
-        // right-edge preview (`crate::esc`) — not repeated in the hints.
+        // top-right badge (`crate::esc`) — not repeated in the hints.
         assert!(!footer_hints(&app).contains("Esc cancel"), "{}", footer_hints(&app));
         assert_eq!(
-            crate::esc::preview(&app).as_deref(),
-            Some("Esc: cancel selection"),
+            crate::esc::badge(&app).as_deref(),
+            Some("esc cancel selection"),
             "the selection state spells out the way out"
         );
         let mut app2 = make_app(10, Mode::Source);

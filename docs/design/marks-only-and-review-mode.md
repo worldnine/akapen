@@ -240,18 +240,21 @@ id をそのまま出すので、`decide` の fixture だけは両経路で字�
 
 `Esc` には先客が何人もいる。**順番は 1 本の表**（`src/esc.rs` の `ORDER`）で、
 view・source・Review の据え付けの一覧の 3 か所の `Esc` がみなそこを通る。
-フッタ右端の予告も同じ表を読むので、予告と実際に消えるものはずれない:
+**次の `Esc` で何が起きるかは、タイトル行の右上のバッジ 1 か所が言う**
+（2026-09-23 の改訂。下の「右上のバッジ」）。バッジも同じ表を読むので、
+言ったことと実際に消えるものはずれない:
 
-| 順 | 層 | フッタの予告 | フラッシュ |
+| 順 | 層 | 右上のバッジ | フラッシュ |
 | ---: | --- | --- | --- |
-| 1 | 終了の確認（`q`、未送信のコメントあり） | `Esc: cancel quit`（`--esc-quit` なら `Esc: quit`） | `quit cancelled` |
-| 2 | 選択（`v`・一覧の Enter） | `Esc: cancel selection` | `selection cancelled` |
-| 3 | 削除のフォーカス（source の `n` / `N`） | `Esc: cancel deletion focus` | `deletion focus cancelled` |
-| 4 | Review の据え付けの一覧 | `Esc: close list` | `list closed` |
-| 5 | フォーカス（`f`） | `Esc: focus off` | `focus off` |
-| 6 | Review の下線とガターの印（候補） | `Esc: clear review` | `review cleared` |
-| 7 | marks（問い・マーカー・読み出し） | `Esc: clear marks` | `marks cleared` |
-| 8 | 終了（`--esc-quit` のときだけ） | `Esc: quit` | — |
+| 1 | 終了の確認（`q`、未送信のコメントあり） | `esc cancel quit`（`--esc-quit` なら `esc close`） | `quit cancelled` |
+| 2 | 選択（`v`・一覧の Enter） | `esc cancel selection` | `selection cancelled` |
+| 3 | 削除のフォーカス（source の `n` / `N`） | `esc cancel deletion focus` | `deletion focus cancelled` |
+| 4 | Review の据え付けの一覧 | `esc close list` | `list closed` |
+| 5 | フォーカス（`f`） | `esc focus off` | `focus off` |
+| 6 | Review の下線とガターの印（候補） | `esc clear review` | `review cleared` |
+| 7 | marks（問い・マーカー・読み出し） | `esc clear marks` | `marks cleared` |
+| 8 | 終了（`--esc-quit` のときだけ） | `esc close` | — |
+| — | はがす層が無く、`--esc-quit` でもない | （出さない） | — |
 
 - **手前ほど軽い。** 上ほど一時的で、消しても何も失わない。Review と marks は
   消すと次に出すとき解析をやり直す（キャッシュに当たれば 0 円・一瞬だが、
@@ -261,13 +264,32 @@ view・source・Review の据え付けの一覧の 3 か所の `Esc` がみな�
   コメント・キャッシュは消さない。`R` を押せば同じ候補がまた出て、accept 済みは
   コメントから、捨てた候補は記録から、前と同じ印で戻る。起点（`review_armed`）も
   戻すので、次の reload が頼んでいない候補を描き直すことは無い
-- **予告はフッタの右端**（読み出しの右）。何も消すものが無く `Esc` で終了しない
-  設定なら出さない。popup・composer・問いのプロンプトの間も出さない（そちらは
-  `Esc` を自分で取る）。狭いときは**案内の次に退く** — 左の案内を右から落とし
-  （`? help` と位置は残る）、次に予告、それから読み出しが段を下りる。予告は
-  キーの案内であって状態ではないので、読み出しより先に譲る
-- 予告が出口を言うので、選択中の `Esc cancel` と一覧の `Esc close` は案内から
-  外した（同じ状態を 2 か所で言わない）
+- **右上のバッジ**（2026-09-23 の改訂）。以前は `--esc-quit` のとき右上に
+  固定の `esc close` が出て、フッタの右端に `Esc: clear marks` のような予告が
+  出ていた。marks が出ているあいだ右上は「閉じる」と言うのに実際の `Esc` は
+  marks を消すだけ — **右上が嘘をつき、しかも同じことを 2 か所で言っていた**。
+  いまは右上の 1 か所だけで、語は**次の `Esc` で起きることそのもの**。フッタの
+  予告はやめた（左の案内の作法は変えない）
+  - 見た目は以前のバッジのまま（濃い灰色の地に黒字、右端、`▌ N` の右）。語は
+    全段で小文字の `esc` ＋ 動作。動作の語はフラッシュと対（`clear marks` ↔
+    `marks cleared`）で、語は `Layer::preview` の 1 か所にある。終了だけは
+    `close` と言う — `--esc-quit` は akapen を popup として開く呼び手の設定で、
+    呼び手から見た出来事は「閉じる」である
+  - **何も起きないときは出さない。** popup・composer・問いのプロンプトの間も
+    出さない（そちらは `Esc` を自分で取る。出口はそれぞれの案内が言う）。
+    以前の固定の `esc close` は popup の上でも出ていて、閉じるのは popup の
+    方だった
+  - **押せる。** 押す = `Esc` を 1 回（`TitleHit::Esc` → `esc::peel`）。
+    塗った地のバッジはボタンに見えるし、タイトル行の他の要素（path・
+    `1/3 files`・`▌ N`）も押せる。何が起きるかはバッジの字そのものなので、
+    押して驚くことが無い
+  - **狭いときは y/s の作法の延長で譲る**: y/s の説明が退く → path が 16 桁まで
+    縮む → バッジが丸ごと退く。状態の印・`1/3 files`・`▌ N` は落とさない。
+    短縮形（`esc` だけ）は作らない — 何が起きるかを言えない字は出さない方が
+    よい。バッジが退いた幅で y/s が戻ることも無い（狭めるほど字が入れ替わって
+    見えるので）
+- バッジが出口を言うので、選択中の `Esc cancel` と一覧の `Esc close` は案内から
+  外したまま（同じ状態を 2 か所で言わない）
 - fixture 経路（`--semantic <file>`）では marks の段が立たない — そこは問いを
   選び直す道が無い。`0 Off` も出ない
 
@@ -1089,7 +1111,7 @@ linter ごとの形を akapen に持ち込まない — 変換はスクリプト
 複数行のものもある）。合意した形は「一覧を本文の下に据え付ける」:
 
 ```text
- BASELINE  showcase-slop.md
+ BASELINE  showcase-slop.md                  esc close list   ← 次の Esc で起きること
  ┌──────────────────────────────────────────────┐
  │ …                                            │  ← 選んだ候補が中ほどに来るよう送る
  > …通知の出し方を変える方が効くかもしれない」   │
@@ -1098,7 +1120,7 @@ linter ごとの形を akapen に持ち込まない — 変換はスクリプト
  ▸ ✓ L72 · ja-no-weak-phrase · 弱い表現: …           ← 選んだ行は本文のカーソル帯と同じ色
  ─ textlint/ja-no-weak-phrase · L72 ─────────────  ← 一覧で落とした <source>/ と範囲
    弱い表現: "かも" が使われています。                ← 理由の全文（折り返す）
- REVIEW L72/192 · j/k move · a accept · x dismiss · e edit     Esc: close list
+ REVIEW L72/192 · j/k move · a accept · x dismiss · e edit · A accept all
 ```
 
 | どこ | 何 |
