@@ -51,7 +51,7 @@ pub(crate) struct Diagnostic {
     pub(crate) rule: String,
     pub(crate) message: String,
     /// LSP の severity（1 Error / 2 Warning / 3 Information / 4 Hint）。
-    /// 下線とガターの `!` の色を決める（[`crate::decoration::ReviewSeverity::from_lsp`]）。
+    /// 下線の色とガターの白抜きの印を決める（[`crate::decoration::ReviewSeverity::from_lsp`]）。
     pub(crate) severity: Option<u8>,
 }
 

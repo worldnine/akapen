@@ -131,7 +131,7 @@ pub enum DecorationKind {
     ReviewCandidate(ReviewSeverity),
 }
 
-/// **Review の候補の重さ** — 下線とガターの `!` の色を決める。
+/// **Review の候補の重さ** — 下線の色とガターの白抜きの印（`E` / `W` / `I`）を決める。
 ///
 /// LSP の `severity`（1 Error / 2 Warning / 3 Information / 4 Hint）を
 /// そのまま写す。linter ごとの段階（textlint の error / warning / info、
@@ -139,7 +139,7 @@ pub enum DecorationKind {
 /// （`examples/lint/`）で、akapen が覚えるのは LSP の 4 段だけである。
 ///
 /// 並びは**軽い順**で、`max` が「その行でいちばん重い候補」になる
-/// （ガターの `!` は行ごとに 1 つしか打てない）。
+/// （ガターの印は行ごとに 1 つしか打てない）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ReviewSeverity {
     Hint,
@@ -159,6 +159,72 @@ impl ReviewSeverity {
             Some(4) => Self::Hint,
             _ => Self::Info,
         }
+    }
+
+    /// **重さの色** — 下線・ガターの白抜きの地・`REVIEW` バッジの地。
+    ///
+    /// **ターミナルの 16 色パレットの名前**で返す（RGB を焼き込まない）。
+    /// akapen の色の決まりは「本文 = コードのテーマ、枠まわりの合図 =
+    /// ターミナルのパレット、本文に重ねる印 = 紙から作る」で、重さは**合図**
+    /// の側である。コードのテーマ（tmTheme）には警告色の決まった枠が無く、
+    /// 端末のテーマを替えれば赤も黄も一緒に替わる。marks の琥珀（本文に
+    /// 重ねる印）は今までどおり紙から作る（[`MARK_TINT`]）。
+    ///
+    /// | 重さ | 色 | SGR の下線の色 |
+    /// | --- | --- | --- |
+    /// | Error | 赤 [`Color::Red`] | `58;5;1` |
+    /// | Warning | 黄 [`Color::Yellow`] | `58;5;3` |
+    /// | Info / Hint（Jev の候補・重さ無し） | 青緑 [`Color::Cyan`] | `58;5;6` |
+    ///
+    /// **明るい版（`Light*`）は使わない。** 1 つは、ガターの他の印と揃える
+    /// ため — コメントの `▌` は `Yellow`、削除の `▌` は `Red`、選択は `Cyan`
+    /// で、`Light*` は「強調」（カーソルの `>`・選んだ変更）に取ってある。
+    /// もう 1 つは、明るいテーマで `LightYellow` の地に紙の色（白）で字を
+    /// 抜くと読めないからである。
+    ///
+    /// 名前付きの色は tachyonfx の演出が素通りする
+    /// （`docs/gotchas/rendering.md`「名前付きの色を塗ったセルは tachyonfx の
+    /// 演出が素通りする」）。重さの色の乗るセル（下線・ガター・バッジ）に
+    /// 演出は乗らないので、ここは名前のままでよい。
+    pub fn color(self) -> Color {
+        match self {
+            Self::Error => Color::Red,
+            Self::Warning => Color::Yellow,
+            Self::Info | Self::Hint => Color::Cyan,
+        }
+    }
+
+    /// **ガターの白抜きの字** — `E` / `W` / `I`。
+    ///
+    /// 色だけで重さを言わない（色覚の違い・`NO_COLOR` 相当の端末でも読める）。
+    /// Hint は Info と同じ `I`（色も同じ — [`Self::color`]）。
+    pub fn letter(self) -> &'static str {
+        match self {
+            Self::Error => "E",
+            Self::Warning => "W",
+            Self::Info | Self::Hint => "I",
+        }
+    }
+
+    /// **白抜きの 1 マス**（字と、その style）— 重さの色の地に、紙の色で
+    /// 字を抜く。ガター（view / source）の Review の候補の印はこれ 1 つで
+    /// 作る。
+    ///
+    /// 地と字の色で運ぶのは、herdr が**下線の色（`CSI 58`）を落とす**から
+    /// である。字と地の色は通るので、herdr の中でも重さが読める
+    /// （`docs/gotchas/rendering.md`「herdr は下線の色を落とす」）。
+    ///
+    /// `paper` は紙の色（[`DecorationStyles::page_bg`]）。`REVERSED` ではなく
+    /// 字の色を明示するのは、反転だと字が**端末の**地色になり、テーマの紙と
+    /// 食い違うからである。
+    pub fn badge(self, paper: Color) -> (&'static str, Style) {
+        (
+            self.letter(),
+            Style::default()
+                .fg(paper)
+                .bg(self.color())
+                .add_modifier(Modifier::BOLD),
+        )
     }
 }
 
@@ -196,51 +262,6 @@ pub const CURL_CARRIER: Modifier = Modifier::RAPID_BLINK;
 /// property the previous version had and the reason to keep blending
 /// rather than writing a color in — see [`mark_background`].
 const MARK_TINT: Color = Color::Rgb(0xff, 0xb0, 0x00);
-
-/// **Review の下線が向かう先** — 冷たい青緑。
-///
-/// [`MARK_TINT`] の琥珀と**色相が最も遠い側**である。marks が「読め」で
-/// Review が「直せ」という別の意味を持つので、読み手が作る対応づけも
-/// 別でなければならない（`docs/design/reading-research.md` の Scim —
-/// 色は読み手が対応づけを作る道具である）。
-///
-/// **新しい色を作ってはいない。** 青緑は akapen が既に選択と composer に
-/// 使っている色相で（[`ratatui::style::Color::Cyan`]）、フッタの案内・
-/// 一覧のカーソル・選択の帯がずっとこの系統である。ここが足しているのは
-/// 「この色相を本文の下線にも使う」という 1 点だけである。
-///
-/// **紙から作る**のは琥珀とまったく同じ理由で、テーマ側が持っている色を
-/// 読まない（[`mark_background`]「ONE path, and it always runs」）。
-/// 暗いテーマでは暗い紙から、明るいテーマでは白い紙から、同じ式で寄せる
-/// ので、`--light` でも `--theme` を変えても下線は読める。
-const REVIEW_TINT: Color = Color::Rgb(0x00, 0xb4, 0xc8);
-
-/// **error の下線が向かう先** — 赤。
-///
-/// 端末の慣習（赤 = エラー）どおり。紙から [`REVIEW_BLEND`] で寄せるので、
-/// ダークの紙で `rgb(210,57,73)`、明るい紙で `rgb(254,100,109)`。
-const REVIEW_ERROR_TINT: Color = Color::Rgb(0xff, 0x40, 0x50);
-
-/// **warning の下線が向かう先** — 橙。
-///
-/// 慣習の「黄」にしなかったのは、**明るい紙で線が消える**からである。
-/// 黄 `#f0e030` を同じ式で寄せると明るい紙との対比が 1.22:1 で、1 ピクセルの
-/// 線はほぼ見えない。橙 `#ff8000` なら 2.01:1（ダークでは 4.60:1）。
-///
-/// **marks の琥珀（[`MARK_TINT`]、色相 41°）とは色相で 11° しか離れていない**
-/// が、本文で重なるのは琥珀の**地色**（[`MARK_BG_BLEND`] = 0.27 の暗い琥珀）
-/// と線であって、両者の CIELAB の色差はダークで 55、明るい紙で 50 ある
-/// （地色の上の線の対比は 2.55:1 / 1.73:1）。目盛りの琥珀（[`TICK_BLEND`]）
-/// とは 23 前後と近いが、目盛りはスクロールバーの溝にだけ出て本文には来ない。
-const REVIEW_WARNING_TINT: Color = Color::Rgb(0xff, 0x80, 0x00);
-
-/// 下線が紙から [`REVIEW_TINT`] へどれだけ寄るか。
-///
-/// 高いのは、**下線は 1 ピクセルの線だから**である。地色（
-/// [`MARK_BG_BLEND`] = 0.27）は面積が広いので薄くてよいが、線を同じ
-/// 薄さで引くと明るいテーマではほとんど見えない。[`TICK_BLEND`] と
-/// 同じ側の値で、あちらも 1 桁の点を打つための値である。
-const REVIEW_BLEND: f32 = 0.80;
 
 /// 目盛りと `FOCUS` バッジの琥珀が、紙から [`MARK_TINT`] へどれだけ寄るか。
 ///
@@ -455,27 +476,14 @@ impl DecorationStyles {
         crate::view::lerp_color(self.dim_target, MARK_TINT, TICK_BLEND)
     }
 
-    /// **Review の候補の下線の色**（`R`）— 重さごと。ガターの `!` も同じ色。
+    /// **Review の候補の下線の色**（`R`）— 重さの色そのもの
+    /// （[`ReviewSeverity::color`]、ターミナルのパレット）。
     ///
-    /// [`Self::mark_bg`] / [`Self::mark_tick`] と同じ紙から、重さごとの
-    /// 色相へ同じ [`REVIEW_BLEND`] で寄せたもの。**焼き込んだ色ではない**ので、
-    /// テーマを変えても marks の琥珀との距離が保たれる。
-    ///
-    /// | 重さ | 向かう先 | ダークの紙 | 明るい紙 |
-    /// | --- | --- | --- | --- |
-    /// | Error | [`REVIEW_ERROR_TINT`] | `rgb(210,57,73)` | `rgb(254,100,109)` |
-    /// | Warning | [`REVIEW_WARNING_TINT`] | `rgb(210,108,9)` | `rgb(254,151,45)` |
-    /// | Info / Hint | [`REVIEW_TINT`] | `rgb(6,150,169)` | `rgb(50,193,205)` |
-    ///
-    /// Info と Hint は同じ色である（どちらも「直してもよい」側で、見分けが
-    /// 要るほど出ない）。Jev のルールの候補は Info — 色分けの前と同じ青緑。
+    /// 紙から寄せる式（`REVIEW_BLEND`）はやめた。重さは枠まわりの合図の
+    /// 側で、端末のテーマに従う（[`ReviewSeverity::color`] の文書）。
+    /// 下線の色はパレット番号（`CSI 58;5;N m`）で出る。
     pub fn review_underline(&self, severity: ReviewSeverity) -> Color {
-        let tint = match severity {
-            ReviewSeverity::Error => REVIEW_ERROR_TINT,
-            ReviewSeverity::Warning => REVIEW_WARNING_TINT,
-            ReviewSeverity::Info | ReviewSeverity::Hint => REVIEW_TINT,
-        };
-        crate::view::lerp_color(self.dim_target, tint, REVIEW_BLEND)
+        severity.color()
     }
 
     /// The paper the mark was lifted FROM — where the reveal fades in
@@ -653,7 +661,7 @@ pub fn decorate_row(
 ///
 /// 交差ルール（覆うときだけ）は marks の地色がにじまないための規則で、
 /// Review にそのまま当てると、表のセル・タブのある行の中の指摘が
-/// **本文に何も出ない**（ガターの `!` だけが立って、どこか分からない）。
+/// **本文に何も出ない**（ガターの印だけが立って、どこか分からない）。
 /// 上位集合の span の文字は source の添字で切れないので、範囲の文字だけに
 /// 引くことはできない — それなら**その断片ごと**引く方が、指摘を見失う
 /// よりよい。広すぎる線は 1 つの断片（折返しの 1 行ぶんのセル）で止まる。
@@ -663,6 +671,45 @@ pub fn decorate_row(
 /// 行頭の余白にまで線を引いていた。
 fn review_touches_superset(d: &Decoration, attr: &Attr, span: &Span) -> bool {
     !span.text.trim().is_empty() && d.range.start < attr.range.end && d.range.end > attr.range.start
+}
+
+/// **この描画行に Review の下線が 1 本でも乗るか** — 乗るなら、その中で
+/// いちばん重い候補の重さ。
+///
+/// ガターの白抜きの印（[`ReviewSeverity::badge`]）を**範囲の行だけ**に
+/// 立てるための問いで、[`decorate_row`] が下線を引くかどうかと同じ規則で
+/// 答える（上位集合の span は [`review_touches_superset`]、exact の span は
+/// 範囲が 1 バイトでも重なるか — 重なれば [`push_exact`] がそこで切って
+/// 引く）。行の単位で答えるのは、view で複数のソース行が 1 段落に畳まれると、
+/// ソース行の旗（`App::review_lines`）では段落の全部の行に印が立つから
+/// である。
+pub fn review_severity_on_row(
+    row: &[Span],
+    attrs: &[Option<Attr>],
+    decorations: &[Decoration],
+) -> Option<ReviewSeverity> {
+    let mut worst = None;
+    for d in decorations {
+        let DecorationKind::ReviewCandidate(severity) = d.kind else {
+            continue;
+        };
+        if d.range.is_empty() || worst >= Some(severity) {
+            continue;
+        }
+        let touched = row.iter().zip(attrs).any(|(span, attr)| match attr {
+            None => false,
+            Some(attr) if !attr.exact => review_touches_superset(d, attr, span),
+            Some(attr) => {
+                !span.text.is_empty()
+                    && d.range.start < attr.range.end
+                    && d.range.end > attr.range.start
+            }
+        });
+        if touched {
+            worst = Some(severity);
+        }
+    }
+    worst
 }
 
 /// Split one EXACT span at every decoration edge that falls strictly
@@ -1519,6 +1566,60 @@ mod tests {
             strong.dim_fg(Some(Color::Rgb(1, 2, 3))),
             Color::Rgb(page.r, page.g, page.b)
         );
+    }
+
+    /// 重さごとの白抜き: パレットの地に紙の色の字、`E` / `W` / `I`。
+    #[test]
+    fn each_severity_has_its_palette_ground_and_letter() {
+        let paper = Color::Rgb(1, 2, 3);
+        for (severity, letter, ground) in [
+            (ReviewSeverity::Error, "E", Color::Red),
+            (ReviewSeverity::Warning, "W", Color::Yellow),
+            (ReviewSeverity::Info, "I", Color::Cyan),
+            (ReviewSeverity::Hint, "I", Color::Cyan),
+        ] {
+            let (glyph, style) = severity.badge(paper);
+            assert_eq!(glyph, letter, "{severity:?}");
+            assert_eq!(style.bg, Some(ground), "{severity:?}");
+            assert_eq!(style.fg, Some(paper), "{severity:?}: 字は紙の色");
+            assert!(style.add_modifier.contains(Modifier::BOLD));
+            // 下線の色と同じ色（テーマに依らない）。
+            for light in [false, true] {
+                let highlighter = Highlighter::new(None, light);
+                let styles = DecorationStyles::from_theme(&highlighter, Default::default());
+                assert_eq!(styles.review_underline(severity), ground, "{severity:?} light={light}");
+            }
+        }
+    }
+
+    /// 印を立てる行の問いは、下線を引く規則と同じ答えを返す — 範囲が
+    /// 乗る行だけ、いちばん重いもの。
+    #[test]
+    fn the_row_question_answers_where_the_underline_lands() {
+        let text = "一行目の段落。\n\n二行目にかもがある。\n";
+        let (source, rendered, _) = doc(text, 80);
+        let ka = at(&source, "かも");
+        let first = at(&source, "一行目");
+        let review = |range: Range<usize>, severity| Decoration {
+            range,
+            kind: DecorationKind::ReviewCandidate(severity),
+        };
+        let decorations = vec![
+            review(ka.clone(), ReviewSeverity::Info),
+            review(ka, ReviewSeverity::Error),
+            review(first, ReviewSeverity::Warning),
+            mark(0..text.len()),
+        ];
+        let answer = |needle: &str| {
+            let r = row_with(&rendered, needle);
+            review_severity_on_row(&rendered.rows[r], &rendered.row_attrs[r], &decorations)
+        };
+        assert_eq!(answer("かも"), Some(ReviewSeverity::Error), "行でいちばん重いもの");
+        assert_eq!(answer("一行目"), Some(ReviewSeverity::Warning));
+        // Review の無い装飾（琥珀）だけでは立たない。
+        let only_mark = vec![mark(0..text.len())];
+        let r = row_with(&rendered, "かも");
+        assert_eq!(review_severity_on_row(&rendered.rows[r], &rendered.row_attrs[r], &only_mark), None);
     }
 }
 

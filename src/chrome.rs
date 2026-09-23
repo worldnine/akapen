@@ -795,7 +795,7 @@ fn mode_badge(app: &App) -> (String, Style) {
             format!("{:^8}", "REVIEW"),
             Style::default()
                 .fg(Color::Rgb(0, 0, 0))
-                .bg(app.decoration_styles.review_underline(crate::decoration::ReviewSeverity::Info)),
+                .bg(crate::decoration::ReviewSeverity::Info.color()),
         );
     }
     match app.mode {

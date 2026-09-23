@@ -41,7 +41,7 @@ pub(crate) enum Layer {
     ReviewList,
     /// フォーカス（`f`）— 沈めるのを解く。
     Focus,
-    /// Review の下線とガターの `!`（候補そのもの）。
+    /// Review の下線とガターの白抜きの印（候補そのもの）。
     Review,
     /// marks — 問いとマーカーと読み出し。
     Marks,

@@ -1031,7 +1031,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
     // full-row background for the CHANGED band too (view mode marks
     // changes in the gutter only), so `changed_bg` counts as banded here
     // where view mode has no equivalent.
-    // Review の候補（Pending）の行。ガターの `!` がここを見る。
+    // Review の候補（Pending）の行。ガターの白抜きの印がここを見る。
     let review_lines = app.review_lines();
     let decorations = app.active_decorations();
     let undimmed: Vec<crate::decoration::Decoration> = decorations
@@ -1106,15 +1106,15 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         let added = scoped_added.contains(&idx);
         let is_cursor = idx == app.cursor && !deletion_focused;
         // `▌` marks a current changed line; deletions are their own rows.
-        // Review の候補（Pending）は `!` — view モードのガターと同じ
-        // 形である。accept した候補は Pending でなくなるので、この旗と
+        // Review の候補（Pending）は白抜きの `E` / `W` / `I` — view モードの
+        // ガターと同じ形である。accept した候補は Pending でなくなるので、この旗と
         // コメントの印（source では行番号が黄色になる）が同じ行で
         // 競合することは無い。
         let review_line = review_lines.get(idx).copied().flatten();
         let cursor_mark = if is_cursor {
             ">"
-        } else if review_line.is_some() {
-            "!"
+        } else if let Some(severity) = review_line {
+            severity.letter()
         } else if added {
             "▌"
         } else {
@@ -1176,11 +1176,9 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
             let s = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             if cursor_bg { s.bg(app.ui_selected_bg) } else { s }
         } else if let Some(severity) = review_line {
-            // view モードの `!` と同じ — 重さの色（下線と同じ色）。
-            let s = Style::default()
-                .fg(app.decoration_styles.review_underline(severity))
-                .add_modifier(Modifier::BOLD);
-            if changed_bg { s.bg(app.ui_changed_bg) } else { s }
+            // view モードと同じ白抜きの 1 マス（重さの色の地に紙の色の字）。
+            // 地色が重さなので、変更の帯の色で塗り替えない。
+            severity.badge(app.decoration_styles.page_bg()).1
         } else if changed_bg {
             Style::default().fg(Color::Green).bg(app.ui_changed_bg)
         } else {
