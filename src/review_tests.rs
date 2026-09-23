@@ -1408,9 +1408,9 @@ fn source_mode_peels_the_deletion_focus_right_after_the_selection() {
     app.selection = Some(crate::comment::Selection::new(app.cursor));
     assert_eq!(title_badge(&app, 120), "esc cancel selection");
     press_esc(&mut app);
-    assert_eq!(title_badge(&app, 120), "esc cancel deletion focus");
+    assert_eq!(title_badge(&app, 120), "esc deselect deletion");
     press_esc(&mut app);
-    assert_eq!(flashed(&app), Some("deletion focus cancelled"));
+    assert_eq!(flashed(&app), Some("deletion deselected"));
     assert_eq!(title_badge(&app, 120), "esc clear marks");
     // view では同じ値が残っていても段にならない（以前から view の Esc は見ていない）。
     app.focused_deletion = Some(app.cursor);
@@ -1624,4 +1624,52 @@ fn with_off_shown_the_digits_and_the_cursor_still_point_at_the_presets() {
     // `/` は最下段の自由入力。
     let free = crate::overlay::mark_for_entry_count(&app) - 1;
     assert_eq!(crate::overlay::mark_for_entry(&app, free), crate::overlay::MarkForEntry::Free);
+}
+
+/// **削除の段のバッジは `focus` と言わない**（`f` の `esc focus off` と
+/// 紛れる）。狭めていくと、短縮形にならずに丸ごと引き下がる。残る幅は
+/// path の 16 桁・バッジ・左右の身元の印の和で決まる。
+#[test]
+fn the_deletion_badge_is_short_and_yields_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    show_marks(&mut app);
+    app.mode = Mode::Source;
+    app.focused_deletion = Some(app.cursor);
+    let badge = crate::esc::badge(&app).unwrap();
+    assert_eq!(badge, "esc deselect deletion");
+    assert!(!badge.contains("focus"), "f のフォーカスと紛れる: {badge}");
+    let m = crate::chrome::title_metrics(&app, 200);
+    let floor = 16 + m.esc_w + m.change_w + m.file_count_w + m.indicator_w + 1;
+    for width in (0..=200u16).rev() {
+        let shown = title_badge(&app, width);
+        if width >= floor {
+            assert_eq!(shown, badge, "{width}");
+        } else {
+            assert_eq!(shown, "", "短縮形は出さない ({width})");
+        }
+    }
+    assert_eq!(m.esc_w, 23, "左右の空白込みの桁");
+}
+
+/// `?` のヘルプは、右上のバッジが何を言う場所なのかを Esc の行（quit）の
+/// すぐ上で言う。描いた画面に切れずに出る。
+#[test]
+fn the_help_says_what_the_top_right_badge_is() {
+    let rows = crate::overlay::help_rows(false, false, false, true, true);
+    let at = rows.iter().position(|(label, _)| *label == "esc").expect("esc の行");
+    assert_eq!(rows[at + 1].0, "quit", "Esc の行の隣");
+    let text = rows[at].1;
+    assert!(text.contains("top-right badge") && text.contains("click"), "{text}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    app.overlay = Some(Overlay::Help);
+    app.overlay_cursor = usize::MAX; // 最後の行まで送る
+    crate::app::TEST_TERMINAL_SIZE.with(|cell| cell.set(Some((100, 40))));
+    let backend = ratatui::backend::TestBackend::new(100, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    let screen = buffer_text(terminal.backend().buffer());
+    assert!(screen.contains(text), "{screen}");
 }

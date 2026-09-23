@@ -90,7 +90,9 @@ impl Layer {
             Layer::QuitConfirm if app.esc_quit_enabled() => "close",
             Layer::QuitConfirm => "cancel quit",
             Layer::Selection => "cancel selection",
-            Layer::DeletionFocus => "cancel deletion focus",
+            // `focus` とは言わない — `f` のフォーカス（`focus off`）と紛れる。
+            // source で `n` / `N` が選んだ削除の塊を選び外す、という動作。
+            Layer::DeletionFocus => "deselect deletion",
             Layer::ReviewList => "close list",
             Layer::Focus => "focus off",
             Layer::Review => "clear review",
@@ -116,7 +118,7 @@ impl Layer {
             }
             Layer::DeletionFocus => {
                 app.focused_deletion = None;
-                app.flash("deletion focus cancelled");
+                app.flash("deletion deselected");
             }
             Layer::ReviewList => {
                 app.overlay = None;

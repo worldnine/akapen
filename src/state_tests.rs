@@ -4090,10 +4090,13 @@ use crate::comment::Selection;
         let mut app = make_app(10, Mode::View);
         on_view_key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, None);
         assert_eq!(app.overlay, Some(Overlay::Help));
-        // The reference fits the panel (24-row terminal): j/k are no-ops
-        // — a list that fits never scrolls. Esc / q / ? close it.
+        // 24 行の端末では 1 行だけはみ出す（右上のバッジの `esc` の行を
+        // 足したため）。j は最後の行まで送り、そこで止まる — 表の端を
+        // 越えてスクロールしない。Esc / q / ? close it.
         on_overlay_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_eq!(app.overlay_cursor, 0, "no scroll when the content fits");
+        assert_eq!(app.overlay_cursor, 1, "scrolls to the last row");
+        on_overlay_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.overlay_cursor, 1, "never past its own end");
         on_overlay_key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE);
         assert_eq!(app.overlay, None, "? toggles the help closed");
         on_source_key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, None);
