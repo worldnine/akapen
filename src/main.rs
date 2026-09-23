@@ -15,6 +15,7 @@ mod comment;
 mod config;
 mod decoration;
 mod draw;
+mod edit_map;
 mod effects;
 mod export;
 mod focus;
@@ -868,6 +869,17 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
 fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut AppTerminal>) {
     // Overlay intercepts its own keys first.
     if app.overlay.is_some() {
+        // Review の一覧の `e` だけは端末が要る（エディタのあいだ TUI を
+        // 畳む）ので、端末を持たない overlay のキーの道の手前で拾う。
+        if app.overlay == Some(Overlay::Review)
+            && key == KeyCode::Char(crate::keys::REVIEW_EDIT)
+            && modifiers.is_empty()
+        {
+            if let Some(t) = terminal {
+                review_edit_with(app, |app, line| open_editor_at(app, t, line));
+            }
+            return;
+        }
         return on_overlay_key(app, key, modifiers);
     }
     // A pending `]`/`[` chord resolves on the next key: `c` within the

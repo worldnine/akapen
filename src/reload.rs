@@ -55,7 +55,10 @@ pub(crate) fn reload_now(app: &mut App) {
 /// `r` retries manually.
 pub(crate) fn reload_now_auto(app: &mut App) {
     if finish_reload(app, false) {
-        app.flash("auto-reloaded");
+        match app.review_reload_note.clone() {
+            Some(note) => app.flash(format!("auto-reloaded · {note}")),
+            None => app.flash("auto-reloaded"),
+        }
     }
 }
 
@@ -134,6 +137,13 @@ fn editor_supports_line_jump(bin: &str) -> bool {
 /// retained but acknowledged as the user's own edit. Triggers on `e` in both
 /// modes.
 pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
+    let line = editor_target_line(app);
+    open_editor_at(app, terminal, line);
+}
+
+/// [`open_editor`] at an explicit 1-based line — the Review list's `e`
+/// opens at the candidate's first line rather than the cursor's.
+pub(crate) fn open_editor_at(app: &mut App, terminal: &mut AppTerminal, line: usize) {
     // Existing comments are preserved on their current generation. When
     // the editor returns, reload_source promotes live comments to the old
     // LOCAL/COMMIT generation before loading the edited NOW. The pre-edit
@@ -143,19 +153,7 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
     capture_pre_edit_snapshot(app);
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
-    // `$EDITOR` may include arguments (e.g. `zed --wait`). Split into the
-    // binary and its args, then append the file path last. Known
-    // limitation: whitespace-split only — quoted paths or args with
-    // spaces (`EDITOR="/Applications/My Editor.app/.../bin/editor"`) are
-    // not supported; use a wrapper script for those.
-    let mut parts = editor.split_whitespace();
-    let bin = parts.next().unwrap_or("nano");
-    let args: Vec<&str> = parts.collect();
-    let mut argv: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-    if editor_supports_line_jump(bin) {
-        argv.push(format!("+{}", editor_target_line(app)));
-    }
-    argv.push(app.current_file_path().display().to_string());
+    let path = app.current_file_path().to_path_buf();
 
     // Suspend the TUI entirely: `ratatui::restore()` leaves the alternate
     // screen, disables raw mode, and shows the cursor — but it does not
@@ -165,9 +163,7 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
-    let status = Command::new(bin)
-        .args(&argv)
-        .status();
+    let status = run_editor(&editor, line, &path);
 
     // Replace the terminal with a fresh one: the no-blink init re-enters
     // raw mode + alternate screen (keeping the hardware cursor never
@@ -193,6 +189,43 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
         app.flash_err(format!("terminal re-init failed: {e}"));
     }
 
+    after_editor(app, &editor, status);
+
+    // Draw immediately — the alternate screen was just re-entered and is
+    // blank. The fresh terminal is guaranteed to be in the correct state.
+    let _ = draw_frame(terminal, app);
+}
+
+/// Run `editor` on `path` at the 1-based `line` and wait for it. The
+/// terminal handling lives in [`open_editor_at`]; this is the part a test
+/// can drive with a script standing in for `$EDITOR`.
+pub(crate) fn run_editor(
+    editor: &str,
+    line: usize,
+    path: &std::path::Path,
+) -> std::io::Result<std::process::ExitStatus> {
+    // `$EDITOR` may include arguments (e.g. `zed --wait`). Split into the
+    // binary and its args, then append the file path last. Known
+    // limitation: whitespace-split only — quoted paths or args with
+    // spaces (`EDITOR="/Applications/My Editor.app/.../bin/editor"`) are
+    // not supported; use a wrapper script for those.
+    let mut parts = editor.split_whitespace();
+    let bin = parts.next().unwrap_or("nano");
+    let mut argv: Vec<String> = parts.map(str::to_string).collect();
+    if editor_supports_line_jump(bin) {
+        argv.push(format!("+{line}"));
+    }
+    argv.push(path.display().to_string());
+    Command::new(bin).args(&argv).status()
+}
+
+/// The editor has returned: reload and acknowledge one's own change, or
+/// say why nothing was reloaded.
+pub(crate) fn after_editor(
+    app: &mut App,
+    editor: &str,
+    status: std::io::Result<std::process::ExitStatus>,
+) {
     match status {
         Ok(s) if s.success() => {
             // Reload and acknowledge the user's own editor change. Existing
@@ -202,10 +235,6 @@ pub(crate) fn open_editor(app: &mut App, terminal: &mut AppTerminal) {
         Ok(_) => app.flash_err(format!("{editor} exited with error")),
         Err(e) => app.flash_err(format!("{editor}: {e}")),
     }
-
-    // Draw immediately — the alternate screen was just re-entered and is
-    // blank. The fresh terminal is guaranteed to be in the correct state.
-    let _ = draw_frame(terminal, app);
 }
 
 /// Record the pre-edit on-disk content as a LOCAL generation before the
@@ -258,6 +287,7 @@ pub(crate) fn ignore_change(app: &mut App) {
 /// cursor fraction.
 /// Triggered by `r` only — never while Input is open.
 pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<()> {
+    app.review_reload_note = None;
     let new_source = Source::load(app.current_file_path().to_path_buf())?;
     if new_source.content == app.source.content {
         return Ok(()); // touched but unchanged
@@ -279,10 +309,34 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
         // messages as files.
         app.comments.retain(|comment| comment.file_path != current);
     }
-    let had_live_comments = app
-        .comments
-        .iter()
-        .any(|comment| comment.file_path == current && comment.revision.is_none());
+    // **見届けた書き換え**（`docs/design/marks-only-and-review-mode.md`
+    // 4 節「直接編集」）。前後の版が両方手元にあるのはここだけなので、
+    // 1 バイトも変わっていない範囲に限って、捨てた判断と accept 済みの
+    // review コメントを新しい位置へ写す。reply は文書を丸ごと差し替える
+    // （コメントも上で落とした）ので写す相手が無い。
+    let mut resolved = 0;
+    if !reply {
+        let map = crate::edit_map::EditMap::between(&old_content, &new_source.content);
+        if let Some(store) = app.review_dismissed_store.as_ref() {
+            store.carry(
+                &crate::semantic::source_digest(&old_content),
+                &crate::semantic::source_digest(&new_source.content),
+                &map,
+            );
+        }
+        resolved = app.settle_review_comments(&map, &new_source.content);
+        if let Some(anchor) = app.review_edit_anchor.take() {
+            app.review_cursor_target = Some(map.map_pos(anchor));
+        }
+    }
+    // 生きている review コメントはもう新しい版に付け直してあるので、
+    // 古い版へ留め置くのは人の赤入れだけである。
+    let pinned_here = |comment: &Comment| {
+        comment.file_path == current
+            && comment.revision.is_none()
+            && crate::review::parse_comment_text(&comment.text).is_none()
+    };
+    let had_live_comments = app.comments.iter().any(pinned_here);
     if had_live_comments
         && let Some(cache) = app.snapshot_cache.as_ref()
     {
@@ -355,9 +409,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
             .histories
             .get(app.current_file_index)
             .and_then(|history| history.context_for_content(&old_content));
-        for comment in app.comments.iter_mut().filter(|comment| {
-            comment.file_path == current && comment.revision.is_none()
-        }) {
+        for comment in app.comments.iter_mut().filter(|comment| pinned_here(comment)) {
             comment.revision = old_context.clone();
         }
     }
@@ -405,14 +457,29 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     app.selection = None;
     app.offset = app.offset.min(app.max_offset(app.source_viewport_rows() as u16));
     app.file_changed = false;
+    app.review_reload_note = resolved_note(resolved);
     if reply {
         // The whole message is new, so cumulative review marks stay off.
         app.flash("reloaded");
     } else {
         let count = app.file_review_count(app.current_file_index);
-        app.flash(format!("reloaded · {count} to review"));
+        let note = app
+            .review_reload_note
+            .as_deref()
+            .map(|note| format!(" · {note}"))
+            .unwrap_or_default();
+        app.flash(format!("reloaded · {count} to review{note}"));
     }
     Ok(())
+}
+
+/// 外した review コメントの本数を知らせる 1 行。0 本なら何も言わない。
+fn resolved_note(resolved: usize) -> Option<String> {
+    match resolved {
+        0 => None,
+        1 => Some("1 review comment resolved by edit".into()),
+        n => Some(format!("{n} review comments resolved by edit")),
+    }
 }
 
 /// Whether `files[i]`'s on-disk state differs from what the session last

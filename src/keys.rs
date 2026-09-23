@@ -61,11 +61,16 @@ pub(crate) const REVIEW_ACCEPT: char = 'a';
 pub(crate) const REVIEW_DISMISS: char = 'x';
 /// Pending を全部 accept する。
 pub(crate) const REVIEW_ACCEPT_ALL: char = 'A';
+/// カーソル下の候補を `$EDITOR` で**人が直す**（LLM に送らない道）。
+///
+/// 本文の `e` と同じ文字で、同じエディタを開く。違うのは開く行（候補の
+/// 先頭行）と、戻ったあと一覧が開き直すことだけである。
+pub(crate) const REVIEW_EDIT: char = 'e';
 
 /// `?` ヘルプに出る Review の 1 行。文字列そのものが行になる
 /// （[`crate::overlay::help_rows`]）。
 pub(crate) const REVIEW_HINT: &str =
-    "R candidates to fix · in the list: a accept · x dismiss · A accept all";
+    "R candidates to fix · in the list: a accept · x dismiss · A accept all · e edit";
 
 /// **フォーカス** — マーカーの無い Unit を沈める。
 ///
@@ -163,6 +168,7 @@ mod tests {
         assert_eq!(semantic_key(REVIEW_ACCEPT), None);
         assert_eq!(semantic_key(REVIEW_DISMISS), None);
         assert_eq!(semantic_key(REVIEW_ACCEPT_ALL), None);
+        assert_eq!(semantic_key(REVIEW_EDIT), None);
     }
 
     #[test]

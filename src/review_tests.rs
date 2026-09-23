@@ -654,3 +654,353 @@ fn a_send_without_an_accepted_candidate_is_unchanged() {
     app.config.reply = true;
     assert_eq!(crate::export_text(&app), crate::export::format_all_reply(&app.comments));
 }
+
+// ---- 9. 直接編集 — 見届けた reload を越える ------------------------------
+//
+// `docs/design/marks-only-and-review-mode.md` 4 節「直接編集」。候補を
+// LLM に送らず人が `e` で直す流れと、開いたまま LLM が書き換えた流れの
+// どちらも、akapen が前後の版を見届けた reload（`reload_source`）を通る。
+
+/// ディスクの文書を `text` に書き換えて、見届けた reload を通す。
+fn rewrite_and_reload(app: &mut App, text: &str) {
+    std::fs::write(app.current_file_path(), text).unwrap();
+    crate::reload::reload_source(app, false).unwrap();
+}
+
+/// 文書の中の `paragraphs` を 1 段落 = 1 Atom = 1 Unit にした答え。
+fn answer_for(doc: &str, paragraphs: &[&str], scores: &[Option<f32>]) -> SemanticDocument {
+    let atoms: Vec<Atom> = paragraphs
+        .iter()
+        .map(|text| {
+            let at = doc.find(text).unwrap();
+            Atom::new(at..at + text.len(), AtomKind::Sentence)
+        })
+        .collect();
+    let units: Vec<SemanticUnit> = scores
+        .iter()
+        .enumerate()
+        .map(|(i, score)| {
+            let mut unit = SemanticUnit::new(format!("u{i}"), [AtomIndex(i)]);
+            unit.score = *score;
+            unit
+        })
+        .collect();
+    let mut document = SemanticDocument::new(atoms, units);
+    document.question = Some("filler".into());
+    document
+}
+
+/// 2 段落目だけを直し、3 段落目の前に 1 段落足した版。1 段落目は
+/// 1 バイトも変わらず、3 段落目は中身が同じままバイト位置だけが動く。
+const EDITED: &str = "\
+# みだし
+
+ひとつめの段落。
+
+ふたつめを直した。
+
+足した段落。
+
+みっつめの段落。
+";
+
+/// **dismiss は、中身が変わっていない範囲に限って差分を越える。**
+///
+/// 修正前は sha が変わるので捨てた判断が全部外れ、外れがまた出ていた。
+#[test]
+fn a_dismissal_follows_its_unchanged_range_across_a_watched_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.9), Some(0.9)]));
+    // 1 段落目（動かない）・2 段落目（直す）・3 段落目（位置だけ動く）を捨てる。
+    for index in 0..3 {
+        assert!(app.dismiss_candidate(index));
+    }
+
+    rewrite_and_reload(&mut app, EDITED);
+
+    let sha = crate::semantic::source_digest(EDITED);
+    let store = app.review_dismissed_store.clone().unwrap();
+    let carried = store.load(&sha);
+    let range_of = |text: &str| {
+        let at = EDITED.find(text).unwrap();
+        ("filler".to_string(), at, at + text.len())
+    };
+    assert!(carried.contains(&range_of("ひとつめの段落。")), "{carried:?}");
+    assert!(carried.contains(&range_of("みっつめの段落。")), "位置が動いた方も写る: {carried:?}");
+    assert_eq!(carried.len(), 2, "直した 2 段落目は写さない: {carried:?}");
+    // 記録の形は変えない — 本文は 1 バイトも書かない。
+    let raw = std::fs::read_to_string(store.path()).unwrap();
+    for word in ["ひとつめ", "みっつめ", "直した"] {
+        assert!(!raw.contains(word), "{raw}");
+    }
+
+    // 新しい版の答えが届くと、写した 2 本は出ず、直した段落だけが出る。
+    deliver(
+        &mut app,
+        "filler",
+        answer_for(
+            EDITED,
+            &["ひとつめの段落。", "ふたつめを直した。", "みっつめの段落。"],
+            &[Some(0.9), Some(0.9), Some(0.9)],
+        ),
+    );
+    let lines: Vec<(u32, u32)> = app.review_candidates.iter().map(|c| c.lines).collect();
+    assert_eq!(lines, [(5, 5)], "直した段落だけが判定し直される");
+}
+
+/// 閉じている間に変わったファイル（起動時の読み込み・ファイル切替）は
+/// 見届けていないので、何も写さない。写すのは `reload_source` だけである。
+#[test]
+fn a_dismissal_is_not_carried_when_the_document_is_only_reanalysed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), None, None]));
+    assert!(app.dismiss_candidate(0));
+    let store = app.review_dismissed_store.clone().unwrap();
+    let before = std::fs::read_to_string(store.path()).unwrap();
+    app.reanalyze_semantics();
+    assert_eq!(std::fs::read_to_string(store.path()).unwrap(), before);
+}
+
+/// `review_tests` の App に、NOW だけの履歴を持たせる（人の赤入れが
+/// 古い版へ留め置かれるのを確かめるため — 履歴が無いと留め置く先が無い）。
+fn with_history(app: &mut App) {
+    let mut history =
+        crate::history::DocumentHistory::load(&app.files[0], &app.source.content, 0);
+    history.acknowledge_in_memory(&app.source.content);
+    app.histories = vec![history];
+}
+
+/// **直した箇所の accept 済み review コメントは外れ、変わっていない方は
+/// 新しい位置に付け直され、人の赤入れは古い版に留め置かれる。**
+///
+/// 修正前は 3 本とも古い版に留め置かれ、`s` で直した箇所への指示が
+/// LLM に届いていた。
+#[test]
+fn a_watched_reload_resolves_the_review_comments_whose_range_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    with_history(&mut app);
+    deliver(&mut app, "filler", answer([None, Some(0.87), Some(0.9)]));
+    assert!(app.accept_candidate(0), "2 段落目（直す）");
+    assert!(app.accept_candidate(1), "3 段落目（位置だけ動く）");
+    // 人の赤入れ。1 段落目は変わらないが、それでも触らない。
+    app.comments.push(crate::comment::Comment {
+        file_path: app.current_file_path().to_path_buf(),
+        start: 3,
+        end: 3,
+        lines: "ひとつめの段落。".into(),
+        revision: None,
+        text: "ここは言い過ぎ".into(),
+    });
+
+    rewrite_and_reload(&mut app, EDITED);
+
+    let review: Vec<&crate::comment::Comment> = app
+        .comments
+        .iter()
+        .filter(|c| crate::review::parse_comment_text(&c.text).is_some())
+        .collect();
+    assert_eq!(review.len(), 1, "直した 2 段落目のコメントは外れる");
+    let moved = review[0];
+    assert_eq!(moved.text, "review: filler (0.90)");
+    assert_eq!((moved.start, moved.end), (9, 9), "新しい位置へ付け直す");
+    assert_eq!(moved.lines, "みっつめの段落。");
+    assert_eq!(moved.revision, None, "新しい版（NOW）のコメントとして残る");
+
+    let human = app
+        .comments
+        .iter()
+        .find(|c| c.text == "ここは言い過ぎ")
+        .expect("人の赤入れは消さない");
+    assert!(human.revision.is_some(), "人の赤入れは古い版に留め置く（今の挙動）");
+    assert_eq!((human.start, human.end), (3, 3));
+
+    let (message, _, err) = app.status.clone().unwrap();
+    assert!(!err);
+    assert!(message.contains("1 review comment resolved by edit"), "{message}");
+}
+
+/// 付け直したコメントの候補は、新しい版の答えが届いても Pending に戻らない
+/// （もう一度 `a` を押すと同じ指示が 2 本になる）。
+#[test]
+fn a_moved_review_comment_keeps_its_candidate_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    with_history(&mut app);
+    deliver(&mut app, "filler", answer([None, None, Some(0.9)]));
+    assert!(app.accept_candidate(0));
+    rewrite_and_reload(&mut app, EDITED);
+    deliver(
+        &mut app,
+        "filler",
+        answer_for(EDITED, &["みっつめの段落。"], &[Some(0.9)]),
+    );
+    assert_eq!(app.review_candidates.len(), 1);
+    assert_eq!(app.review_candidates[0].state, CandidateState::Accepted);
+    assert!(!app.accept_candidate(0), "同じ指示を 2 本作らない");
+}
+
+// ---- 10. 一覧から直接 `e` ------------------------------------------------
+
+/// テスト用の `$EDITOR`。**名前は `vi`** — 行ジャンプ（`+N FILE`）を渡す
+/// エディタの一覧に入っている名前なので、本番と同じ引数で呼ばれる。
+/// 受けた `+N` を隣の `args` に書き、`awk` の `program` で N 行目を
+/// 書き換えて終わる。
+fn editor_script(dir: &std::path::Path, program: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("vi");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n\
+             echo \"$1\" > \"$(dirname \"$0\")/args\"\n\
+             n=${{1#+}}\n\
+             awk -v n=\"$n\" '{program}' \"$2\" > \"$2.tmp\" && mv \"$2.tmp\" \"$2\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// 一覧から `e` を押したのと同じ道を、端末の切り替えだけ抜いて通す。
+fn edit_from_the_list(app: &mut App, editor: &std::path::Path) {
+    let editor = editor.display().to_string();
+    crate::overlay::review_edit_with(app, |app, line| {
+        let path = app.current_file_path().to_path_buf();
+        let status = crate::reload::run_editor(&editor, line, &path);
+        crate::reload::after_editor(app, &editor, status);
+    });
+}
+
+fn list_screen(app: &mut App) -> String {
+    let backend = ratatui::backend::TestBackend::new(120, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, app)).unwrap();
+    buffer_text(terminal.backend().buffer())
+}
+
+/// **`e` はカーソル下の候補の先頭行でエディタを開き、戻ったら一覧を
+/// 開き直す。** 答えが揃ったら、カーソルは直した箇所の次の候補に着く
+/// （直した候補は消えている）。
+#[test]
+fn e_in_the_list_edits_the_candidate_and_lands_on_the_next_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.9), Some(0.9)]));
+    crate::overlay::open_review(&mut app);
+    app.overlay_cursor = 1; // ふたつめ（5 行目）
+    // N 行目を消す。
+    let editor = editor_script(dir.path(), "NR != n");
+
+    edit_from_the_list(&mut app, &editor);
+
+    let args = std::fs::read_to_string(editor.parent().unwrap().join("args")).unwrap();
+    assert_eq!(args.trim(), "+5", "候補の先頭行で開く");
+    assert!(!app.source.content.contains("ふたつめ"), "{}", app.source.content);
+    assert_eq!(app.overlay, Some(Overlay::Review), "一覧を開き直す");
+    assert!(app.review_inflight > 0, "再解析を頼んでいる");
+    let screen = list_screen(&mut app);
+    assert!(screen.contains("analyzing"), "解析中と分かる:\n{screen}");
+
+    let doc = app.source.content.clone();
+    deliver(
+        &mut app,
+        "filler",
+        answer_for(&doc, &["ひとつめの段落。", "みっつめの段落。"], &[Some(0.9), Some(0.9)]),
+    );
+    let under = &app.review_candidates[app.overlay_cursor];
+    assert_eq!(
+        app.source.content.get(under.range.clone()),
+        Some("みっつめの段落。"),
+        "直した箇所の次の候補に着く"
+    );
+}
+
+/// 直した候補がまだ候補に残っていれば、カーソルはそれ自身に着く。
+#[test]
+fn e_in_the_list_lands_on_the_candidate_itself_when_it_is_still_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.9), Some(0.9)]));
+    crate::overlay::open_review(&mut app);
+    app.overlay_cursor = 1;
+    // N 行目の末尾に足す（直したが、まだ候補に出る）。
+    let editor = editor_script(dir.path(), "NR == n { print $0 \"まだ足りない。\"; next } { print }");
+
+    edit_from_the_list(&mut app, &editor);
+
+    let doc = app.source.content.clone();
+    assert!(doc.contains("ふたつめの段落。まだ足りない。"), "{doc}");
+    // 1 段落目はもう候補に出ない。前に 1 本減るので、添字のままでは
+    // 3 段落目を指してしまう。
+    deliver(
+        &mut app,
+        "filler",
+        answer_for(
+            &doc,
+            &["ひとつめの段落。", "ふたつめの段落。まだ足りない。", "みっつめの段落。"],
+            &[None, Some(0.9), Some(0.9)],
+        ),
+    );
+    let under = &app.review_candidates[app.overlay_cursor];
+    assert_eq!(
+        doc.get(under.range.clone()),
+        Some("ふたつめの段落。まだ足りない。"),
+        "直した候補そのものに着く"
+    );
+}
+
+/// 何も変えずにエディタを閉じたら、一覧も候補もカーソルもそのまま。
+#[test]
+fn e_in_the_list_without_a_change_leaves_the_list_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.9), Some(0.9)]));
+    crate::overlay::open_review(&mut app);
+    app.overlay_cursor = 2;
+    let generation = app.review_generation;
+    let editor = editor_script(dir.path(), "{ print }");
+
+    edit_from_the_list(&mut app, &editor);
+
+    assert_eq!(app.overlay, Some(Overlay::Review));
+    assert_eq!(app.overlay_cursor, 2);
+    assert_eq!(app.review_candidates.len(), 3);
+    assert_eq!(app.review_generation, generation, "聞き直していない");
+    assert_eq!(app.review_edit_anchor, None);
+    assert_eq!(app.review_cursor_target, None);
+}
+
+/// 外からの書き換えを読み込む前は、一覧からもエディタを開かない
+/// （本文の `e` と同じ断り）。
+#[test]
+fn e_in_the_list_refuses_while_a_file_change_is_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), None, None]));
+    crate::overlay::open_review(&mut app);
+    app.file_changed = true;
+    let mut ran = false;
+    crate::overlay::review_edit_with(&mut app, |_, _| ran = true);
+    assert!(!ran, "エディタを開いていない");
+    let (message, _, err) = app.status.clone().unwrap();
+    assert!(err && message.contains("r reload first"), "{message}");
+    assert_eq!(app.overlay, Some(Overlay::Review));
+}
+
+/// 一覧の案内とヘルプに `e` が載っている。
+#[test]
+fn the_list_and_the_help_mention_e() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), None, None]));
+    crate::overlay::open_review(&mut app);
+    let screen = list_screen(&mut app);
+    assert!(screen.contains("e:edit"), "{screen}");
+    assert!(crate::keys::REVIEW_HINT.contains("e edit"), "{}", crate::keys::REVIEW_HINT);
+}
