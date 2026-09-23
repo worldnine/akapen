@@ -468,6 +468,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | `PROSE_KINDS` に `block_quote` を足したとき（核のラウンドだけ前後 2 ラン、5 文書、marks と DIM 版の両方）。引用を含む Unit の核、question が増えないこと、揺れの床、実機で光った引用の DarkNeon でのコントラスト | [`measurements/core-selection.md`](measurements/core-selection.md)「引用（`block_quote`）を核の候補に入れる」 |
 | **marks モードを実装して**実機の議事録で測ったとき（定型 4 本 ＋ 自由入力 1 本）。節ごとの妥当性が段 1 と小数第 2 位まで並ぶこと、つまみの本数、1 問 0.31 円・2.2 秒、境界のキャッシュが question を 30 % 減らすこと、DIM 版が従来どおりであること | [`measurements/marks-mode.md`](measurements/marks-mode.md) |
 | **marks に Unit は要るか** — Jev の境界と核をやめて文ごと（Unit = Atom）に聞く案 B と現行 A を比べた（6 文書 × 5 問 × 2 案 × 2 ラン、コードは変えていない）。ラベルに対する AUC・精度・取りこぼし、光る場所の重なりと差の内訳、業務議事録の節の中央値、見出しの無い文書、費用、focus の沈めない範囲の見積り | [`measurements/unit-granularity.md`](measurements/unit-granularity.md) |
+| **核の問いに「いまの問い」を入れる**（`CORE_INSTRUCTIONS` を枠にして問いの文面を挟む）— 前回の A の境界を固定して直した核（A'）だけを走らせ、A・B と並べた（6 文書 × 5 問 × 2 ラン）。取りこぼしの減り方と残りの形（1 Unit 1 文の制限）、光る場所の重なり、見出しの無い文書、費用、核が変わった率、業務議事録と `b1` の食い違い 82 行を人が判定する表 | [`measurements/core-question.md`](measurements/core-question.md) |
 | **Review の 1 周**（段階 2、`showcase-slop.md`）— 選別から `s`・書き換え・差分の受け入れまで。キー数と往復時間、書き換えの前後での数字・語・`[要: …]` 印の出入り、指示の範囲の外の変化、ラベルとの照合 | [`measurements/review-roundtrip.md`](measurements/review-roundtrip.md) |
 
 **バイト数と Unit 数は分割前の値。** この README と `docs/gotchas.md` は
