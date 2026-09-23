@@ -334,7 +334,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     let pinned_here = |comment: &Comment| {
         comment.file_path == current
             && comment.revision.is_none()
-            && crate::review::parse_comment_text(&comment.text).is_none()
+            && crate::review::candidate_comment_rule(&comment.text).is_none()
     };
     let had_live_comments = app.comments.iter().any(pinned_here);
     if had_live_comments
@@ -533,6 +533,7 @@ mod handoff_tests {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -597,6 +598,7 @@ mod handoff_tests {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

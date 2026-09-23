@@ -46,6 +46,7 @@ fn app_with(fixture: &str) -> App {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -81,6 +82,7 @@ fn app_without_a_layer() -> App {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -490,7 +492,7 @@ fn the_default_marks_mode_binds_nothing_without_a_layer() {
         "層が無いのにフッタが読み出しの場所を取っている"
     );
 
-    let rows = crate::overlay::help_rows(false, false, false, app.semantic_enabled());
+    let rows = crate::overlay::help_rows(false, false, false, app.semantic_enabled(), app.semantic_enabled());
     assert!(
         !rows.iter().any(|(label, _)| *label == "amount"),
         "? ヘルプが使えないキーを宣伝している"

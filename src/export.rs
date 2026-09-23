@@ -336,6 +336,7 @@ fn pipe_and_wait(
         text,
         Deadline::Absolute(timeout),
         CAPTURE_LIMIT,
+        ChildOptions::default(),
     )
     .map(|_| ())
 }
@@ -349,6 +350,22 @@ pub(crate) struct ChildOutput {
     /// a clipped JSON document would surface as a syntax error and be
     /// read as "the command is broken" rather than "it said too much".
     pub(crate) truncated: bool,
+    /// The exit code (`None` when a signal ended it). Only a caller that
+    /// set [`ChildOptions::any_exit`] ever sees a non-zero one.
+    pub(crate) code: Option<i32>,
+}
+
+/// How [`run_child`] starts the child and reads its exit. The default is
+/// the historical behaviour: the caller's working directory, and a
+/// non-zero exit is an error.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ChildOptions<'a> {
+    /// Run the child here instead of in akapen's own working directory.
+    pub(crate) cwd: Option<&'a std::path::Path>,
+    /// **Hand back the output whatever the exit code.** For a child whose
+    /// exit code is not its verdict — a linter exits 1 when it has
+    /// findings, and prints them on stdout either way (`--lint-cmd`).
+    pub(crate) any_exit: bool,
 }
 
 /// The body of [`pipe_and_wait`], with the stdout capture handed back to
@@ -368,8 +385,13 @@ fn run_child(
     text: &str,
     deadline: Deadline,
     stdout_limit: usize,
+    options: ChildOptions,
 ) -> Result<ChildOutput> {
-    let mut child = Command::new(cmd)
+    let mut command = Command::new(cmd);
+    if let Some(dir) = options.cwd {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -425,7 +447,7 @@ fn run_child(
                 // exiting (without waiting for EOF — see above).
                 out.drain();
                 err.drain();
-                if !status.success() {
+                if !status.success() && !options.any_exit {
                     let tail = err.tail().or_else(|| out.tail());
                     return Err(match tail {
                         // **stderr の末尾を先に置く。** ここは 3 段の接頭辞の
@@ -439,6 +461,7 @@ fn run_child(
                 return Ok(ChildOutput {
                     truncated: out.truncated,
                     stdout: out.buf,
+                    code: status.code(),
                 });
             }
             // The child outlived its budget (e.g. a send command that
@@ -680,11 +703,58 @@ pub(crate) fn run_capturing(
     deadline: Deadline,
     stdout_limit: usize,
 ) -> Result<String> {
-    let out = run_child(label, "sh", &["-c", cmd], text, deadline, stdout_limit)?;
+    let out = run_child(
+        label,
+        "sh",
+        &["-c", cmd],
+        text,
+        deadline,
+        stdout_limit,
+        ChildOptions::default(),
+    )?;
     if out.truncated {
         bail!("{label} wrote more than {stdout_limit} bytes to stdout");
     }
     String::from_utf8(out.stdout).with_context(|| format!("{label} stdout is not UTF-8"))
+}
+
+/// `sh -c '<cmd> "$@"' <label> <args…>` を `cwd` で走らせ、**終了コードに
+/// かかわらず** stdout を返す（`--lint-cmd`）。
+///
+/// 引数は `"$@"` で渡すので、パスに空白や引用符が入っていても `cmd` の側で
+/// 何も引用しなくてよい。stdin は空である。
+///
+/// 成否を決めるのは呼び出し側が stdout を読んでからで、ここで失敗に
+/// なるのは起こせなかった・時間切れ・大きすぎる、の 3 つだけである。
+pub(crate) fn run_capturing_any_exit(
+    label: &str,
+    cmd: &str,
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    deadline: Deadline,
+    stdout_limit: usize,
+) -> Result<(String, Option<i32>)> {
+    let script = format!("{cmd} \"$@\"");
+    let mut argv: Vec<&str> = vec!["-c", &script, label];
+    argv.extend_from_slice(args);
+    let out = run_child(
+        label,
+        "sh",
+        &argv,
+        "",
+        deadline,
+        stdout_limit,
+        ChildOptions {
+            cwd,
+            any_exit: true,
+        },
+    )?;
+    if out.truncated {
+        bail!("{label} wrote more than {stdout_limit} bytes to stdout");
+    }
+    let stdout =
+        String::from_utf8(out.stdout).with_context(|| format!("{label} stdout is not UTF-8"))?;
+    Ok((stdout, out.code))
 }
 
 // ---------------------------------------------------------------------------

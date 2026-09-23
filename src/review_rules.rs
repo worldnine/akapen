@@ -33,7 +33,12 @@
 //! 根拠でなくなる。キャッシュは自動で外れる（鍵に文面の sha が入っている。
 //! [`crate::semantic_cache`]）。
 //!
-//! 既定で `enabled` なのは **`Filler` 1 本だけ**である。`Preamble` は
+//! **既定で `enabled` なルールは無い**（2026-09-23）。`Filler` の拾う
+//! 「空疎さ」は、読み手が実際に直したい箇所（語の選び方の違和感・ぼかし）と
+//! 合わなかった。判定は `--lint-cmd` の linter に任せるのが既定で、Jev の
+//! ルールは `$XDG_CONFIG_HOME/akapen/review-rules.json` か `--review-rules`
+//! で `enabled: true` にしたときだけ走る（4 節「判定の出どころとしての
+//! linter」）。有効にするなら `Filler` 1 本が元の既定である — `Preamble` は
 //! `Filler` と相関 0.98 で同じところを光らせ、`Hedge` は契約・医療では
 //! 正しい書き方なのでジャンル依存である（4 節の表）。
 //!
@@ -215,6 +220,17 @@ impl Rules {
         &self.rules
     }
 
+    /// 既定のルールのうち `ids` だけを有効にした写し（テスト用）。
+    /// `--review-rules` で有効にした読み手と同じ状態を作る。
+    #[cfg(test)]
+    pub(crate) fn built_in_enabling(ids: &[&str]) -> Self {
+        let mut rules = Self::built_in().expect("焼き込んだ既定");
+        for rule in &mut rules.rules {
+            rule.enabled = ids.contains(&rule.id.as_str());
+        }
+        rules
+    }
+
     /// `R` で走るルールだけ。**候補の順はここが決めない** — 候補は
     /// 文書順に並ぶ（[`crate::review`]）。
     pub(crate) fn enabled(&self) -> impl Iterator<Item = &Rule> {
@@ -251,10 +267,20 @@ mod tests {
     }
 
     #[test]
-    fn only_filler_is_enabled_by_default() {
-        // 4 節の判断。`Preamble` は `Filler` と相関 0.98、`Hedge` は
-        // ジャンル依存なので、既定は 1 本である。
+    fn no_rule_is_enabled_by_default() {
+        // 4 節「判定の出どころとしての linter」。判定は `--lint-cmd` に任せ、
+        // Jev のルールは読み手が有効にしたときだけ走る。
         let rules = Rules::built_in().unwrap();
+        assert_eq!(rules.enabled().count(), 0);
+    }
+
+    #[test]
+    fn a_users_file_can_still_turn_filler_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mine.json");
+        let on = BUILT_IN.replacen(r#""enabled": false"#, r#""enabled": true"#, 1);
+        std::fs::write(&path, on).unwrap();
+        let rules = Rules::discover(Some(&path)).unwrap();
         let on: Vec<&str> = rules.enabled().map(|r| r.id.as_str()).collect();
         assert_eq!(on, ["filler"]);
     }

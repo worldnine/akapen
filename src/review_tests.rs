@@ -1,6 +1,6 @@
 //! Review の end-to-end — **校正候補が、直す道まで繋がっているか。**
 //!
-//! `docs/design/marks-only-and-review-mode.md` 4 節。ここで固定するのは 6 つ:
+//! `docs/design/marks-only-and-review-mode.md` 4 節。ここで固定するのは 7 つ:
 //!
 //! 1. **accept** — 正しい行にコメントができ、既存の `l` / `y` / `s` に乗る
 //! 2. **dismiss** — セッション内で消え、`dismissed.jsonl` に残り、再読込で出ない
@@ -8,13 +8,15 @@
 //! 4. **下線** — Pending だけに引かれ、**marks の琥珀とは別の色**である
 //! 5. **marks が動かない** — `R` も accept も dismiss も marks の状態を触らない
 //! 6. **`R` の断り** — fixture 経路では使えない
+//! 7. **lint が出どころ** — `--lint-cmd` の指摘が同じ流れ（一覧・accept・dismiss・
+//!    引き継ぎ・`e`）に乗り、形の違う出力を「0 件」と見せない
 //!
 //! 判定器は呼ばない。[`App::accept_review_analysis`] に手で組んだ
 //! [`SemanticDocument`] を渡す — 本番と同じ入口で、外部プロセスだけが居ない。
 
 use crate::*;
 
-use crate::app::ReviewMessage;
+use crate::app::{ReviewAnswer, ReviewMessage};
 use crate::config::{Config, EscQuit};
 use crate::decoration::DecorationKind;
 use crate::highlight::Highlighter;
@@ -63,6 +65,7 @@ fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -86,8 +89,10 @@ fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
     app
 }
 
+/// 既定のルールで `Filler` だけを有効にした App（**既定では 1 本も
+/// 有効でない** — `--review-rules` で有効にした読み手の状態である）。
 fn built_in(dir: &std::path::Path) -> App {
-    app_with_rules(dir, Rules::built_in().unwrap())
+    app_with_rules(dir, Rules::built_in_enabling(&["filler"]))
 }
 
 /// `DOC` の段落を Atom にした注釈。`scores` は段落ごとのスコア。
@@ -122,8 +127,10 @@ fn deliver(app: &mut App, rule: &str, document: SemanticDocument) {
     app.review_inflight = app.review_inflight.max(1);
     app.accept_review_analysis(ReviewMessage {
         generation: app.review_generation,
-        rule: rule.to_string(),
-        result: Ok(document),
+        answer: ReviewAnswer::Rule {
+            rule: rule.to_string(),
+            result: Ok(document),
+        },
     });
 }
 
@@ -168,8 +175,10 @@ fn an_answer_from_an_older_generation_is_dropped() {
     app.review_generation = 3;
     app.accept_review_analysis(ReviewMessage {
         generation: 2,
-        rule: "filler".into(),
-        result: Ok(answer([Some(0.9), None, None])),
+        answer: ReviewAnswer::Rule {
+            rule: "filler".into(),
+            result: Ok(answer([Some(0.9), None, None])),
+        },
     });
     assert!(app.review_candidates.is_empty(), "古い世代の答えは捨てる");
 }
@@ -451,6 +460,7 @@ fn review_refuses_the_fixture_route() {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -490,6 +500,7 @@ fn a_session_without_the_layer_has_no_review_at_all() {
         marks_questions: None,
         review_rules: None,
         review_json: false,
+        lint_cmd: None,
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -501,7 +512,7 @@ fn a_session_without_the_layer_has_no_review_at_all() {
     assert!(app.review_readouts().is_empty());
     assert!(app.review_lines().iter().all(|f| !f));
     // `?` ヘルプにも出ない。
-    let rows = crate::overlay::help_rows(false, false, false, false);
+    let rows = crate::overlay::help_rows(false, false, false, false, false);
     assert!(
         !rows.iter().any(|(label, _)| *label == "review"),
         "層の無いセッションに Review の案内が出ている"
@@ -510,7 +521,7 @@ fn a_session_without_the_layer_has_no_review_at_all() {
 
 #[test]
 fn the_help_carries_one_review_row_with_the_layer() {
-    let rows = crate::overlay::help_rows(false, false, false, true);
+    let rows = crate::overlay::help_rows(false, false, false, true, true);
     let review: Vec<&(&str, &str)> = rows.iter().filter(|(l, _)| *l == "review").collect();
     assert_eq!(review.len(), 1, "1 行だけ");
     assert!(review[0].1.starts_with("R "), "{}", review[0].1);
@@ -1003,4 +1014,260 @@ fn the_list_and_the_help_mention_e() {
     let screen = list_screen(&mut app);
     assert!(screen.contains("e:edit"), "{screen}");
     assert!(crate::keys::REVIEW_HINT.contains("e edit"), "{}", crate::keys::REVIEW_HINT);
+}
+
+// ---- 10. linter が出どころ（`--lint-cmd`） --------------------------------
+//
+// `docs/design/marks-only-and-review-mode.md` 4 節「判定の出どころとしての
+// linter」。判定は linter がして、akapen はその後ろの流れを受け持つ。
+// **後ろの流れは Jev の候補と同じ道を通る**ことを、ここで押さえる。
+
+/// 意味層の無い、`--lint-cmd` だけのセッション。
+fn lint_only(dir: &std::path::Path, cmd: &str) -> App {
+    let mut app = built_in(dir);
+    app.set_semantic_source(None);
+    app.review_rules = None;
+    app.lint = Some(crate::lint::LintCommand::new(cmd));
+    app
+}
+
+/// `DOC` の `text` の先頭 `chars` 字に当たる Diagnostic の JSON。
+fn diagnostic(doc: &str, text: &str, chars: usize, code: &str, message: &str) -> serde_json::Value {
+    let at = doc.find(text).unwrap();
+    let line = doc[..at].matches('\n').count();
+    let line_start = doc[..at].rfind('\n').map_or(0, |i| i + 1);
+    let character: usize = doc[line_start..at].chars().map(char::len_utf16).sum();
+    let width: usize = text.chars().take(chars).map(char::len_utf16).sum();
+    serde_json::json!({
+        "range": {"start": {"line": line, "character": character},
+                  "end": {"line": line, "character": character + width}},
+        "message": message, "source": "textlint", "code": code, "severity": 2,
+    })
+}
+
+fn deliver_lint(app: &mut App, diagnostics: Vec<serde_json::Value>) {
+    let json = serde_json::json!({ "diagnostics": diagnostics }).to_string();
+    let parsed = crate::lint::parse(&json, &app.source.content).expect("形どおり");
+    app.review_inflight = app.review_inflight.max(1);
+    app.accept_review_analysis(ReviewMessage {
+        generation: app.review_generation,
+        answer: ReviewAnswer::Lint(Ok(parsed)),
+    });
+}
+
+#[test]
+fn a_lint_only_session_opens_review_and_lists_the_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = lint_only(dir.path(), "true");
+    assert!(app.review_enabled(), "意味層が無くても R が使える");
+    assert!(
+        crate::overlay::help_rows(false, false, false, false, true)
+            .iter()
+            .any(|(label, _)| *label == "review"),
+        "lint だけでもヘルプに Review の行が出る"
+    );
+    crate::overlay::open_review(&mut app);
+    assert_eq!(app.overlay, Some(Overlay::Review));
+    deliver_lint(
+        &mut app,
+        vec![diagnostic(DOC, "ふたつめの段落。", 4, "ja-no-weak-phrase", "弱い表現: \"かも\" が使われています。")],
+    );
+    let c = &app.review_candidates[0];
+    assert_eq!(c.rule, "textlint/ja-no-weak-phrase");
+    assert_eq!(app.source.content.get(c.range.clone()), Some("ふたつめ"), "範囲は指摘そのまま");
+    assert_eq!(underlined(&app), vec![c.range.clone()], "下線もその範囲");
+
+    let screen = list_screen(&mut app);
+    let packed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        packed.contains("L5·ja-no-weak-phrase·弱い表現:\"かも\"が使われています。"),
+        "一覧の 1 行は理由を見せる:\n{screen}"
+    );
+}
+
+/// **キーの段でも通る。** `R` の腕が意味層だけを見ていて、lint だけの
+/// セッションでは押しても何も起きなかった（実機の測定で見つけた）。
+#[test]
+fn the_r_key_reaches_the_list_in_a_lint_only_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = lint_only(dir.path(), "true");
+    assert!(!app.semantic_enabled());
+    on_view_key(&mut app, KeyCode::Char(crate::keys::REVIEW_OPEN), KeyModifiers::NONE, None);
+    assert_eq!(app.overlay, Some(Overlay::Review), "VIEW");
+    app.overlay = None;
+    on_source_key(&mut app, KeyCode::Char(crate::keys::REVIEW_OPEN), KeyModifiers::NONE, None);
+    assert_eq!(app.overlay, Some(Overlay::Review));
+}
+
+#[test]
+fn an_accepted_lint_candidate_becomes_a_lint_comment_with_the_lint_paragraph() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = lint_only(dir.path(), "true");
+    deliver_lint(
+        &mut app,
+        vec![diagnostic(DOC, "みっつめの段落。", 4, "ja-no-mixed-period", "文末が\"。\"で終わっていません。\n理由: 句点")],
+    );
+    assert!(app.accept_candidate(0));
+    let comment = app.comments.last().unwrap();
+    assert_eq!(
+        comment.text,
+        "lint: textlint/ja-no-mixed-period — 文末が\"。\"で終わっていません。 理由: 句点"
+    );
+    assert_eq!((comment.start, comment.end), (7, 7));
+    let text = crate::export_text(&app);
+    let lint = crate::review_contract::lint_contract_text();
+    assert!(text.starts_with(lint.trim_end()), "lint の段落が先頭に無い:\n{text}");
+    assert!(!text.contains("[要: 具体例]"), "Jev の契約は足さない");
+    assert!(text.ends_with(&crate::export::format_all(&app.comments)));
+}
+
+/// dismiss・差分越しの引き継ぎ・付け直しは、(rule, 範囲) の鍵のまま
+/// lint の候補にも効く。
+#[test]
+fn lint_candidates_ride_the_dismiss_and_the_carry_across_a_watched_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = lint_only(dir.path(), "true");
+    deliver_lint(
+        &mut app,
+        vec![
+            diagnostic(DOC, "ひとつめの段落。", 4, "a", "m1"),
+            diagnostic(DOC, "ふたつめの段落。", 8, "b", "m2"),
+            diagnostic(DOC, "みっつめの段落。", 4, "c", "m3"),
+        ],
+    );
+    assert!(app.dismiss_candidate(0)); // 動かない
+    assert!(app.dismiss_candidate(1)); // 直される
+    assert!(app.accept_candidate(2)); // 位置だけ動く
+
+    rewrite_and_reload(&mut app, EDITED);
+
+    let store = app.review_dismissed_store.clone().unwrap();
+    let carried = store.load(&crate::semantic::source_digest(EDITED));
+    let at = EDITED.find("ひとつめ").unwrap();
+    assert_eq!(
+        carried.into_iter().collect::<Vec<_>>(),
+        vec![("textlint/a".to_string(), at, at + "ひとつめ".len())],
+        "直した方は写さない"
+    );
+    let live: Vec<&str> = app.comments.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(live, ["lint: textlint/c — m3"], "中身の変わらない lint コメントは残る");
+    assert_eq!(app.comments[0].start, 9, "新しい行へ付け直す");
+
+    // 新しい版の答え: 写した dismiss は出ず、付け直したコメントは ✓ のまま。
+    deliver_lint(
+        &mut app,
+        vec![
+            diagnostic(EDITED, "ひとつめの段落。", 4, "a", "m1"),
+            diagnostic(EDITED, "ふたつめを直した。", 4, "b", "m2"),
+            diagnostic(EDITED, "みっつめの段落。", 4, "c", "m3"),
+        ],
+    );
+    let got: Vec<(&str, CandidateState)> = app
+        .review_candidates
+        .iter()
+        .map(|c| (c.rule.as_str(), c.state))
+        .collect();
+    assert_eq!(
+        got,
+        [("textlint/b", CandidateState::Pending), ("textlint/c", CandidateState::Accepted)]
+    );
+}
+
+#[test]
+fn a_lint_that_prints_no_diagnostics_is_not_shown_as_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = lint_only(dir.path(), "true");
+    crate::overlay::open_review(&mut app);
+    app.review_inflight = 1;
+    app.accept_review_analysis(ReviewMessage {
+        generation: app.review_generation,
+        answer: ReviewAnswer::Lint(Err(crate::lint::NOT_DIAGNOSTICS.into())),
+    });
+    let screen = list_screen(&mut app);
+    assert!(screen.contains("lint: output is not diagnostics JSON"), "{screen}");
+    assert!(!screen.contains("nothing to fix"), "0 件と見せている:\n{screen}");
+}
+
+#[test]
+fn without_a_lint_or_an_enabled_rule_r_says_what_to_set() {
+    let dir = tempfile::tempdir().unwrap();
+    // 既定のルール（1 本も有効でない）と `--semantic-cmd` だけ。
+    let mut app = app_with_rules(dir.path(), Rules::built_in().unwrap());
+    assert!(!app.review_enabled());
+    crate::overlay::open_review(&mut app);
+    assert_eq!(app.overlay, None);
+    let (message, _, _) = app.status.clone().unwrap();
+    assert_eq!(message, "no review source — set --lint-cmd or enable a rule");
+}
+
+#[test]
+fn jev_and_lint_candidates_share_one_list_in_document_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    app.lint = Some(crate::lint::LintCommand::new("true"));
+    deliver(&mut app, "filler", answer([Some(0.9), None, Some(0.9)]));
+    crate::overlay::open_review(&mut app);
+    deliver_lint(&mut app, vec![diagnostic(DOC, "ふたつめの段落。", 4, "x", "m")]);
+    let rules: Vec<&str> = app.review_candidates.iter().map(|c| c.rule.as_str()).collect();
+    assert_eq!(rules, ["filler", "textlint/x", "filler"]);
+    let screen = list_screen(&mut app);
+    assert!(screen.contains("L3 · Filler 0.90"), "Jev の行の形は変わらない:\n{screen}");
+}
+
+/// 本物のコマンドを走らせる道。**exit 1 でも stdout が JSON なら成功**で、
+/// 引数の最後は文書の絶対パスである。
+#[test]
+fn r_runs_the_lint_command_and_its_answer_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("lint.sh");
+    let json = serde_json::json!({
+        "diagnostics": [diagnostic(DOC, "ふたつめの段落。", 4, "weak", "m")]
+    });
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntest -f \"$1\" || exit 3\ncat <<'JSON'\n{json}\nJSON\nexit 1\n"
+        ),
+    )
+    .unwrap();
+    let mut app = lint_only(dir.path(), &format!("sh '{}'", script.display()));
+    app.review_armed = false;
+    crate::overlay::open_review(&mut app);
+    assert_eq!(app.review_inflight, 1);
+    let started = std::time::Instant::now();
+    while app.review_inflight > 0 && started.elapsed() < std::time::Duration::from_secs(10) {
+        app.poll_review_analysis();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(app.review_candidates.len(), 1, "{:?}", app.status);
+    assert_eq!(app.review_candidates[0].rule, "textlint/weak");
+}
+
+/// 一覧から `e` で直して戻ったとき、**文書全体を範囲にする指摘には
+/// 着かない**（実機の測定で、毎回 L1 の総評に攫われていた）。
+#[test]
+fn a_whole_document_diagnostic_does_not_steal_the_cursor_after_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = lint_only(dir.path(), "true");
+    let whole = serde_json::json!({
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 7, "character": 0}},
+        "message": "総評", "source": "textlint", "code": "whole",
+    });
+    deliver_lint(
+        &mut app,
+        vec![
+            whole.clone(),
+            diagnostic(DOC, "ふたつめの段落。", 4, "b", "m2"),
+            diagnostic(DOC, "みっつめの段落。", 4, "c", "m3"),
+        ],
+    );
+    assert_eq!(app.review_candidates.len(), 3, "総評も候補");
+    crate::overlay::open_review(&mut app);
+    app.review_inflight = 0;
+    app.overlay_cursor = 1; // ふたつめ
+    let editor = editor_script(dir.path(), "NR != n");
+    edit_from_the_list(&mut app, &editor);
+    let doc = app.source.content.clone();
+    deliver_lint(&mut app, vec![whole, diagnostic(&doc, "みっつめの段落。", 4, "c", "m3")]);
+    assert_eq!(app.review_candidates[app.overlay_cursor].rule, "textlint/c");
 }

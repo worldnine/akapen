@@ -181,6 +181,17 @@ pub struct Config {
     /// （[`crate::review::to_json`]）。`--semantic-cmd` が要る
     /// （fixture は 1 つの問いにしか答えられない）。
     pub review_json: bool,
+    /// `--lint-cmd <cmd>`: Review（`R`）の候補を linter に出させる。
+    ///
+    /// **判定は linter に任せ、akapen はその後ろの流れ（一覧・捨てる・
+    /// accept・送る・`e` で直す・引き継ぎ）だけを受け持つ**
+    /// （`docs/design/marks-only-and-review-mode.md` 4 節「判定の出どころと
+    /// しての linter」、[`crate::lint`]）。`sh -c` で走らせ、作業ディレクトリは
+    /// 文書のあるディレクトリ、文書の絶対パスを最後の引数に足す。
+    ///
+    /// フラグが無いときは環境変数 [`LINT_CMD_ENV`] を既定にする（空・空白は
+    /// 設定していないのと同じ）。**意味層（`--semantic-cmd`）は要らない。**
+    pub lint_cmd: Option<String>,
     /// `--mark-blend <0.0..1.0>` / `--dim-blend <0.0..1.0>`: how strong
     /// the two range-decoration kinds are. `mark` lifts the mark
     /// background off the page toward the text color; `dim` moves a
@@ -260,6 +271,12 @@ fn parse_decorations(json: &str) -> Result<Vec<Decoration>> {
 /// のは文書ごとの判断ではなく環境の設定**なので、環境変数の方が形に合う。
 pub const SEMANTIC_CMD_ENV: &str = "AKAPEN_SEMANTIC_CMD";
 
+/// `--lint-cmd` を省いたときの既定を持つ環境変数。
+///
+/// [`SEMANTIC_CMD_ENV`] と同じ理由で環境変数を置く — どの linter を使うかは
+/// 文書ごとではなく環境の設定である（ルールは linter 自身の設定が決める）。
+pub const LINT_CMD_ENV: &str = "AKAPEN_LINT_CMD";
+
 impl Config {
     /// 引数だけで解釈する（**環境は読まない**）。テスト用。
     ///
@@ -302,6 +319,7 @@ impl Config {
         let mut marks_questions: Option<PathBuf> = None;
         let mut review_rules: Option<PathBuf> = None;
         let mut review_json = false;
+        let mut lint_cmd: Option<String> = None;
         let mut decoration_blend = DecorationBlend::default();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -333,6 +351,7 @@ impl Config {
                 "--marks-questions" => marks_questions = it.next().map(PathBuf::from),
                 "--review-rules" => review_rules = it.next().map(PathBuf::from),
                 "--review-json" => review_json = true,
+                "--lint-cmd" => lint_cmd = it.next(),
                 "--mark-blend" => {
                     if let Some(v) = it.next() {
                         decoration_blend.mark = parse_blend("--mark-blend", &v)?;
@@ -365,6 +384,13 @@ impl Config {
             semantic_cmd = Some(v);
             semantic_cmd_from_env = true;
         }
+        // `--lint-cmd` も同じ作法。フラグが勝ち、空・空白は「無い」と同じ。
+        if lint_cmd.is_none()
+            && let Some(v) = env(LINT_CMD_ENV)
+        {
+            lint_cmd = Some(v);
+        }
+        let lint_cmd = lint_cmd.filter(|cmd| !cmd.trim().is_empty());
         if files.is_empty() {
             bail!(
                 "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>]"
@@ -425,6 +451,7 @@ impl Config {
             marks_questions,
             review_rules,
             review_json,
+            lint_cmd,
             decoration_blend,
             decorations,
         })))
@@ -687,6 +714,26 @@ mod tests {
 
     fn parse_with(args: &[&str], env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Action> {
         Config::parse_with_env(args.iter().map(|s| (*s).to_string()), env)
+    }
+
+    #[test]
+    fn the_lint_cmd_needs_no_layer_and_its_env_is_the_default() {
+        use super::LINT_CMD_ENV;
+        assert!(cfg(&parse(&["x.md"])).lint_cmd.is_none());
+        // 意味層（`--semantic-cmd`）無しで立つ。
+        let action = parse(&["x.md", "--lint-cmd", "textlint-diagnostics.py"]);
+        assert_eq!(cfg(&action).lint_cmd.as_deref(), Some("textlint-diagnostics.py"));
+        assert!(cfg(&action).semantic_cmd.is_none());
+        let action = parse_with(&["x.md"], one_var(LINT_CMD_ENV, "from-env")).unwrap();
+        assert_eq!(cfg(&action).lint_cmd.as_deref(), Some("from-env"));
+        let action =
+            parse_with(&["x.md", "--lint-cmd", "flag"], one_var(LINT_CMD_ENV, "env")).unwrap();
+        assert_eq!(cfg(&action).lint_cmd.as_deref(), Some("flag"), "フラグが勝つ");
+        for blank in ["", "  "] {
+            let action = parse_with(&["x.md"], move |n| (n == LINT_CMD_ENV).then(|| blank.into()))
+                .unwrap();
+            assert!(cfg(&action).lint_cmd.is_none(), "{blank:?}");
+        }
     }
 
     #[test]

@@ -572,7 +572,8 @@ ESSENTIAL に並ぶ。
 **段階 2 まで実装した。** 候補を拾って一覧に出し、accept でコメントにし（段階 1）、
 送る文面の先頭に書き換えの契約を載せる（段階 2）。流れの 2 → 6 を 1 周して測った
 （下の「段階 1 で作ったもの」「段階 2 で作ったもの」）。LLM に送らず一覧の `e` で
-人が直す道も足した（末尾の「直接編集」）。
+人が直す道も足した（「直接編集」）。**判定の出どころは既定で linter に移した**
+（末尾の「判定の出どころとしての linter」。Jev のルールは既定では 1 本も有効でない）。
 節の残りは 2026-09-22 に読み手と設計したときのままである。
 
 ### ラインマーカーとの違い — 光ったあとの行き先
@@ -731,7 +732,7 @@ Unit・境界・sha キャッシュだけで、UI・読み出し・色は別に�
 
 | どこ | 何 |
 | --- | --- |
-| `assets/review-rules.json` | ルール。`$XDG_CONFIG_HOME/akapen/review-rules.json` で上書き。`text` は上の叩き台の**逐語**で、既定で有効なのは `Filler` 1 本 |
+| `assets/review-rules.json` | ルール。`$XDG_CONFIG_HOME/akapen/review-rules.json` で上書き。`text` は上の叩き台の**逐語**で、既定で有効なのは `Filler` 1 本（**2026-09-23 に 0 本へ**。末尾の「判定の出どころとしての linter」） |
 | `src/review_rules.rs` | ルールの読み込み（`marks_questions.rs` と同じ作法、別のファイル） |
 | `src/review.rs` | 候補（diagnostics の形）・捨てた記録・`--review-json` |
 | `src/app.rs` | 解析（marks とは**別の線**）・accept / dismiss・読み出し |
@@ -953,3 +954,74 @@ score が版ごとに 0.23 → 0.50 と上がって足切りを越えたもの�
 空疎な文を削るほど、残った文の `Filler` が上がる（1 ランの観察）。生値は
 [`review-roundtrip.md`](../../examples/semantic/measurements/review-roundtrip.md)
 「直接編集」。
+
+### 判定の出どころとしての linter（2026-09-23）
+
+**判定は linter に任せ、akapen はその後ろの流れを受け持つ。** 一覧・`x` で捨てる・
+`a` でコメントにする・`s` で送る・一覧から `e` で直す・見届けた reload での引き継ぎ
+— ここまでに作った流れはそのままで、候補の出どころに `--lint-cmd`（環境変数
+`AKAPEN_LINT_CMD`）を足した。ルールは読み手が自分の linter の設定
+（`~/.textlintrc` など）で決め、akapen はその存在を知らない。
+
+**なぜ Jev を既定から外したか。** 読み手の指摘は「`Filler` などで拾える空疎さは、
+実際に気になる箇所と合わない」だった。気になるのは**語の選び方の違和感とぼかし**で、
+文単位の「落としても失うものが無いか」ではない。同じ fixture で数えると、軸が違う
+ことがそのまま出る（生値は
+[`review-roundtrip.md`](../../examples/semantic/measurements/review-roundtrip.md)
+「linter を候補に」）:
+
+| 出どころ | 候補 | 混ぜた slop 12 文に当たった | 12 文の外 | `R` → 出揃うまで |
+| --- | ---: | ---: | ---: | ---: |
+| `Filler`（Jev、段階 1） | 17 | 11 | 6 | 1.29 秒（2 周目、2 ルール） |
+| textlint | 13 | 3 | 8 / 12（総評 1 本を除く） | 1.45〜1.99 秒 |
+| natural-japanese | 6 | 3 | 2 / 6 | 0.33〜0.83 秒 |
+
+linter は空疎な文をほとんど拾わず、72 行目の「かも」のような**2 字の範囲**で語を
+指す。fixture のラベルは空疎さの正解なので、linter の良し悪しはこの表では測れない
+— 判断の根拠は読み手の指摘であって、数字は「別の軸を見ている」ことの確認である。
+Jev のルールは消していない。`review-rules.json` か `--review-rules` で
+`enabled: true` にすれば走り、lint の候補と同じ一覧に文書順で並ぶ。
+
+| どこ | 何 |
+| --- | --- |
+| `src/lint.rs` | コマンドを走らせ、Diagnostic の JSON を読み、UTF-16 の桁をバイトへ直す |
+| `src/review.rs` | `Finding`（Jev のルール / lint）。lint のコメントの形 `lint: <source>/<code> — <message>` |
+| `assets/review-contract-lint.md` | lint のコメントがあるときに送る文面の先頭へ足す段落（`$XDG_CONFIG_HOME/akapen/review-contract-lint.md` で上書き） |
+| `examples/lint/` | textlint と natural-japanese の出力を Diagnostic に直すスクリプト（標準ライブラリだけ）。textlint 側は micro エディタ用の `--unix-oneline` も出す |
+
+**受け付ける形は 1 つ: LSP の `Diagnostic`**（`{"diagnostics":[{range, message,
+source, code, severity}]}`、`line` は 0 始まり、`character` は UTF-16 のコード単位）。
+linter ごとの形を akapen に持ち込まない — 変換はスクリプトの側で、akapen が覚える
+のはこの 1 つだけである。
+
+- **走らせ方。** `sh -c '<cmd> "$@"'` で、作業ディレクトリは文書のあるディレクトリ、
+  最後の引数は文書の絶対パス。stdin は空。見切りは `--semantic-cmd` と同じ（無音
+  30 秒・天井 10 分）。linter はディスクを読むので、画面の本文と食い違えば走らせない
+- **成否は終了コードではなく出力で決める。** textlint は指摘があると exit 1 で JSON を
+  出す。形が違えば `lint: output is not diagnostics JSON`（抜粋は出さない — 本文が
+  混じりうる）で、一覧も「0 件」とは言わない
+- **範囲は指摘そのまま**（Unit に寄せない）。下線もそこに引く。壊れた範囲はその 1 件
+  だけ捨て、幅 0 は行末まで広げる。`severity` は読むが、まだ色分けに使っていない
+  （段階の意味が linter ごとに違う — textlint は error / warning / info、lint.py は
+  critical / warn / info。色に割り当てる前に揃え方を決めたい）
+- **一覧の 1 行は理由を見せる**: `L72 · ja-no-weak-phrase · 弱い表現: "かも" が…`。
+  Jev の候補の行（`L42 · Filler 0.87 · <Unit の先頭>`）は変えていない
+- **accept = `lint: <source>/<code> — <message>`**（複数行は 1 行に畳む）。送る文面には
+  lint 用の短い段落（直し方は指摘に従う・事実を足さない・範囲の外は触らない）を
+  足す。Jev ルール用の契約の文面は変えていない。両方あれば両方、Jev の段落が先
+- **後ろの流れは既存のまま。** dismiss・差分越しの引き継ぎ・片付けは (rule, 範囲) を
+  鍵にしていて、lint の rule（`textlint/ja-no-weak-phrase`）と範囲がそのまま乗る。
+  コメントの見分けは `review:` と `lint:` の 2 つの形の和（`candidate_comment_rule`）
+- **出どころが 1 本も無ければ** `R` は `no review source — set --lint-cmd or enable a
+  rule` と言って断る。`R` のキーは意味層か `--lint-cmd` があれば生きている
+
+**実測で見えたこと。** 1 周の数字は上の表と
+[`review-roundtrip.md`](../../examples/semantic/measurements/review-roundtrip.md)。
+
+- `e` で L72 を直して戻ると 1.42〜1.44 秒で出揃い、13 → 10 本（直した 1 本が消え、
+  捨てた 2 本は 2 / 2 引き継ぎ、accept した 1 本は `✓` のまま）
+- **文書全体を範囲にする指摘がある**（textlint の総評）。下線は全文に引かれ、直すたびに
+  範囲の中が変わるので捨てても引き継がれない。`e` のあとのカーソルも一度はここに
+  攫われた（直した位置を「覆う」最初の候補だったため）。直した行より上から始まる
+  候補を後回しにして直した
+
