@@ -88,8 +88,8 @@ pub(crate) struct FileState {
     pub(crate) last_loaded_stamp: Option<(SystemTime, u64)>,
     pub(crate) file_changed: bool,
     pub(crate) reload_pending: Option<Instant>,
-    pub(crate) review_changed: HashSet<usize>,
-    pub(crate) review_deleted_before: HashSet<usize>,
+    pub(crate) baseline_changed: HashSet<usize>,
+    pub(crate) baseline_deleted_before: HashSet<usize>,
     /// Baseline-relative marks for the generation actually on screen.
     pub(crate) comparison_changed: HashSet<usize>,
     pub(crate) comparison_deleted_before: HashSet<usize>,
@@ -179,12 +179,12 @@ pub(crate) struct App {
     /// indexed by `files`, so it does not need to be moved through the live
     /// FileState slot when switching files.
     pub(crate) histories: Vec<DocumentHistory>,
-    /// Persistent, Git-independent review marks: the cumulative transition
+    /// Persistent, Git-independent change marks: the cumulative transition
     /// from the last acknowledged document to NOW.
-    pub(crate) review_changed: HashSet<usize>,
-    pub(crate) review_deleted_before: HashSet<usize>,
+    pub(crate) baseline_changed: HashSet<usize>,
+    pub(crate) baseline_deleted_before: HashSet<usize>,
     /// Baseline-relative marks for the generation actually rendered. At
-    /// NOW these equal the cumulative review marks above; in history they
+    /// NOW these equal the cumulative change marks above; in history they
     /// describe the displayed generation rather than the working tree.
     pub(crate) comparison_changed: HashSet<usize>,
     pub(crate) comparison_deleted_before: HashSet<usize>,
@@ -622,8 +622,8 @@ impl App {
             file_states: Vec::new(),
             snapshot_cache: None,
             histories: Vec::new(),
-            review_changed: HashSet::new(),
-            review_deleted_before: HashSet::new(),
+            baseline_changed: HashSet::new(),
+            baseline_deleted_before: HashSet::new(),
             comparison_changed: HashSet::new(),
             comparison_deleted_before: HashSet::new(),
             comparison_deleted_blocks: Vec::new(),
@@ -2116,7 +2116,7 @@ impl App {
     }
 
     /// Center a source-line range in the source viewport as far as the
-    /// document edges allow. Used by review navigation; ordinary cursor
+    /// document edges allow. Used by change navigation; ordinary cursor
     /// movement retains the less disruptive keep-visible behavior.
     pub(crate) fn center_source_range(&mut self, start: usize, end: usize, height: u16) {
         if self.source.is_empty() || self.line_rows.is_empty() {
@@ -2205,8 +2205,8 @@ impl App {
         old.last_loaded_stamp = self.last_loaded_stamp;
         old.file_changed = self.file_changed;
         old.reload_pending = self.reload_pending.take();
-        old.review_changed = std::mem::take(&mut self.review_changed);
-        old.review_deleted_before = std::mem::take(&mut self.review_deleted_before);
+        old.baseline_changed = std::mem::take(&mut self.baseline_changed);
+        old.baseline_deleted_before = std::mem::take(&mut self.baseline_deleted_before);
         old.comparison_changed = std::mem::take(&mut self.comparison_changed);
         old.comparison_deleted_before =
             std::mem::take(&mut self.comparison_deleted_before);
@@ -2237,8 +2237,8 @@ impl App {
         self.last_loaded_stamp = new.last_loaded_stamp;
         self.file_changed = new.file_changed;
         self.reload_pending = new.reload_pending.take();
-        self.review_changed = std::mem::take(&mut new.review_changed);
-        self.review_deleted_before = std::mem::take(&mut new.review_deleted_before);
+        self.baseline_changed = std::mem::take(&mut new.baseline_changed);
+        self.baseline_deleted_before = std::mem::take(&mut new.baseline_deleted_before);
         self.comparison_changed = std::mem::take(&mut new.comparison_changed);
         self.comparison_deleted_before =
             std::mem::take(&mut new.comparison_deleted_before);
@@ -2287,11 +2287,11 @@ impl App {
         &self.files[self.current_file_index]
     }
 
-    pub(crate) fn file_review_count(&self, index: usize) -> usize {
+    pub(crate) fn file_unseen_count(&self, index: usize) -> usize {
         let (changed, deleted) = if index == self.current_file_index {
-            (&self.review_changed, &self.review_deleted_before)
+            (&self.baseline_changed, &self.baseline_deleted_before)
         } else if let Some(state) = self.file_states.get(index) {
-            (&state.review_changed, &state.review_deleted_before)
+            (&state.baseline_changed, &state.baseline_deleted_before)
         } else {
             return 0;
         };

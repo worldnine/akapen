@@ -299,8 +299,8 @@ fn activate_first_file(app: &mut App) {
     app.view = std::mem::take(&mut fs.view);
     app.file_stamp = fs.file_stamp;
     app.last_loaded_stamp = fs.last_loaded_stamp;
-    app.review_changed = std::mem::take(&mut fs.review_changed);
-    app.review_deleted_before = std::mem::take(&mut fs.review_deleted_before);
+    app.baseline_changed = std::mem::take(&mut fs.baseline_changed);
+    app.baseline_deleted_before = std::mem::take(&mut fs.baseline_deleted_before);
     app.comparison_changed = std::mem::take(&mut fs.comparison_changed);
     app.comparison_deleted_before = std::mem::take(&mut fs.comparison_deleted_before);
     app.comparison_deleted_blocks = std::mem::take(&mut fs.comparison_deleted_blocks);
@@ -528,13 +528,13 @@ fn run(config: Config) -> Result<()> {
         })
         .collect();
     for (state, history) in file_states.iter_mut().zip(histories.iter()) {
-        if let Some(reviewed) = history.reviewed_content.as_deref() {
+        if let Some(baseline) = history.baseline_content.as_deref() {
             let (changed, deleted, blocks) =
-                history::comparison_transition(reviewed, &state.source.content);
-            state.review_changed = changed;
-            state.review_deleted_before = deleted;
-            state.comparison_changed = state.review_changed.clone();
-            state.comparison_deleted_before = state.review_deleted_before.clone();
+                history::comparison_transition(baseline, &state.source.content);
+            state.baseline_changed = changed;
+            state.baseline_deleted_before = deleted;
+            state.comparison_changed = state.baseline_changed.clone();
+            state.comparison_deleted_before = state.baseline_deleted_before.clone();
             state.comparison_deleted_blocks = blocks;
         }
     }
@@ -929,7 +929,7 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
         match key {
             KeyCode::Char('c') if modifiers.is_empty() => {
                 app.pending_chord = None;
-                jump_review_mark(app, if bracket == ']' { 1 } else { -1 });
+                jump_change_mark(app, if bracket == ']' { 1 } else { -1 });
                 return;
             }
             // `]m` / `[m`: 次・前のマーク行へ（`crate::keys::MARK_JUMP`）。
@@ -1596,40 +1596,40 @@ fn history_key_direction(
     }
 }
 
-/// Recompute the active file's one, cumulative review mark set. Git and the
+/// Recompute the active file's one, cumulative change mark set. Git and the
 /// currently displayed historical generation do not affect this baseline.
-pub(crate) fn refresh_review_marks(app: &mut App) {
+pub(crate) fn refresh_baseline_marks(app: &mut App) {
     let index = app.current_file_index;
-    let reviewed = app
+    let baseline = app
         .histories
         .get(index)
-        .and_then(|history| history.reviewed_content.clone());
-    let Some(reviewed) = reviewed else {
-        app.review_changed.clear();
-        app.review_deleted_before.clear();
+        .and_then(|history| history.baseline_content.clone());
+    let Some(baseline) = baseline else {
+        app.baseline_changed.clear();
+        app.baseline_deleted_before.clear();
         app.comparison_changed.clear();
         app.comparison_deleted_before.clear();
         app.comparison_deleted_blocks.clear();
         return;
     };
-    let (changed, deleted) = history::review_transition(
+    let (changed, deleted) = history::baseline_transition(
         supports_view(app.current_file_path()),
-        &reviewed,
+        &baseline,
         &app.histories[index].revisions[0].content,
     );
-    app.review_changed = changed;
-    app.review_deleted_before = deleted;
+    app.baseline_changed = changed;
+    app.baseline_deleted_before = deleted;
     refresh_comparison_marks(app);
 }
 
 /// Recompute baseline-relative marks for the complete document currently
-/// rendered on screen. This is distinct from the durable NOW review set:
+/// rendered on screen. This is distinct from the durable NOW change set:
 /// historical generations can be inspected without changing what remains
-/// unreviewed in the working document.
+/// unseen in the working document.
 fn refresh_comparison_marks(app: &mut App) {
-    let Some(reviewed) = app
+    let Some(baseline) = app
         .history()
-        .and_then(|history| history.reviewed_content.as_deref())
+        .and_then(|history| history.baseline_content.as_deref())
     else {
         app.comparison_changed.clear();
         app.comparison_deleted_before.clear();
@@ -1638,7 +1638,7 @@ fn refresh_comparison_marks(app: &mut App) {
         return;
     };
     let (changed, deleted, blocks) =
-        history::comparison_transition(reviewed, &app.source.content);
+        history::comparison_transition(baseline, &app.source.content);
     app.comparison_changed = changed;
     app.comparison_deleted_before = deleted;
     app.comparison_deleted_blocks = blocks;
@@ -2161,7 +2161,7 @@ fn inserted_char_ranges(old: &str, new: &str) -> Vec<(usize, usize)> {
 /// fraction.
 /// The per-line transition for the ANIMATIONS: the new lines with no
 /// equal-content match (they stream in) and the old lines with no match
-/// (their text ghosts out). The review marks keep the block-level
+/// (their text ghosts out). The change marks keep the block-level
 /// semantic marking (a whole rendered block lights), but the animations
 /// must work at line granularity — a one-cell edit in a large table
 /// would otherwise mark the whole table as one block, ballooning the
@@ -2638,8 +2638,8 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // as F7/`]c`/n, for 40%-keyboard layouts where neither F7 nor
         // `[`/`]` sit on the base layer (j/k are already the movement
         // keys, so Alt+move is the bigger step, like Ctrl+d/Ctrl+u).
-        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, 1),
-        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, -1),
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_change_mark(app, 1),
+        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_change_mark(app, -1),
         // Shift+↓/↑ and J/K: select-and-move in one key (no `v` first).
         // The Shift+arrow arms must precede the plain arrow arms, which
         // carry no modifier guard. `J`/`K` are matched by character only:
@@ -2723,10 +2723,10 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // no `[`/`]`, no Alt. No modifier guard: some terminals report
         // Shift+N as 'N' WITH the SHIFT flag set, which the is_empty
         // guard would drop.
-        KeyCode::Char('n') => jump_review_mark(app, 1),
-        KeyCode::Char('N') => jump_review_mark(app, -1),
+        KeyCode::Char('n') => jump_change_mark(app, 1),
+        KeyCode::Char('N') => jump_change_mark(app, -1),
         KeyCode::Char('a') => {
-            acknowledge_review(app, true);
+            mark_seen(app, true);
         }
         KeyCode::Tab => {
             // View is only reachable for Markdown-family files; a source
@@ -2771,7 +2771,7 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
                 // A pending agent edit is up for review; opening the editor
                 // now would fold it into one's own edit — the from_editor
                 // reload would acknowledge it without it ever appearing in
-                // the review marks. Review first (`r`), then edit.
+                // the change marks. Review first (`r`), then edit.
                 app.flash_err("file changed — r reload first");
             } else if let Some(t) = terminal {
                 open_editor(app, t);
@@ -2781,8 +2781,8 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         // [`CHORD_MS`] window expires, or on the next non-chord key); `c`
         // within the window jumps to the next/previous change instead
         // (the F7 fallback). F7/Shift+F7 jump directly.
-        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_review_mark(app, -1),
-        KeyCode::F(7) => jump_review_mark(app, 1),
+        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_change_mark(app, -1),
+        KeyCode::F(7) => jump_change_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
         // The knob (only with `--semantic`): `-`/`+` move one point,
@@ -3015,7 +3015,7 @@ fn jump_comment(app: &mut App, dir: isize) {
     }
 }
 
-fn review_targets(app: &App) -> Vec<(usize, usize)> {
+fn change_targets(app: &App) -> Vec<(usize, usize)> {
     let mut lines: Vec<usize> = app.comparison_changed.iter().copied().collect();
     lines.sort_unstable();
     lines.dedup();
@@ -3035,7 +3035,7 @@ fn review_targets(app: &App) -> Vec<(usize, usize)> {
     targets
 }
 
-fn active_review_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
+fn active_change_mark_sets(app: &App) -> (HashSet<usize>, HashSet<usize>) {
     (
         app.comparison_changed.clone(),
         app.comparison_deleted_before.clone(),
@@ -3200,7 +3200,7 @@ pub(crate) fn open_marks_prompt(app: &mut App) {
     app.cursor = line;
 }
 
-fn jump_review_mark(app: &mut App, dir: isize) {
+fn jump_change_mark(app: &mut App, dir: isize) {
     // If an arrow scrub selected a generation that has not rendered yet,
     // materialize it before navigating its baseline-relative marks. A mark
     // must always point into the document the user can actually see.
@@ -3210,7 +3210,7 @@ fn jump_review_mark(app: &mut App, dir: isize) {
     {
         render_pending_history(app, false);
     }
-    let targets = review_targets(app);
+    let targets = change_targets(app);
     if targets.is_empty() {
         app.flash("no changes since baseline");
         return;
@@ -3344,7 +3344,7 @@ fn jump_mark(app: &mut App, dir: isize) {
     ));
 }
 
-pub(crate) fn acknowledge_review(app: &mut App, announce: bool) -> bool {
+pub(crate) fn mark_seen(app: &mut App, announce: bool) -> bool {
     if app.config.reply {
         return false;
     }
@@ -3386,7 +3386,7 @@ pub(crate) fn acknowledge_review(app: &mut App, announce: bool) -> bool {
     // action. Leave SELECT state consistently in both rendered and source
     // modes; Input keeps treating `a` as ordinary text.
     app.selection = None;
-    refresh_review_marks(app);
+    refresh_baseline_marks(app);
     if announce {
         if let Some(label) = baseline_label {
             app.flash(format!("baseline set · {label}"));
@@ -3505,8 +3505,8 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         // Alt+j / Alt+k: next/previous difference from the baseline.
         // as F7/`]c`/n, for 40%-keyboard layouts where neither F7 nor
         // `[`/`]` sit on the base layer.
-        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, 1),
-        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_review_mark(app, -1),
+        KeyCode::Char('j') if modifiers.contains(KeyModifiers::ALT) => jump_change_mark(app, 1),
+        KeyCode::Char('k') if modifiers.contains(KeyModifiers::ALT) => jump_change_mark(app, -1),
         // Shift+↓/↑ and J/K: select-and-move (see on_view_key).
         KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) => select_and_move_source(app, 1, viewport),
         KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) => select_and_move_source(app, -1, viewport),
@@ -3580,7 +3580,7 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
                 // A pending agent edit is up for review; opening the editor
                 // now would fold it into one's own edit — the from_editor
                 // reload would acknowledge it without it ever appearing in
-                // the review marks. Review first (`r`), then edit.
+                // the change marks. Review first (`r`), then edit.
                 app.flash_err("file changed — r reload first");
             } else if let Some(t) = terminal {
                 open_editor(app, t);
@@ -3599,17 +3599,17 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
         // no `[`/`]`, no Alt. No modifier guard: some terminals report
         // Shift+N as 'N' WITH the SHIFT flag set, which the is_empty
         // guard would drop.
-        KeyCode::Char('n') => jump_review_mark(app, 1),
-        KeyCode::Char('N') => jump_review_mark(app, -1),
+        KeyCode::Char('n') => jump_change_mark(app, 1),
+        KeyCode::Char('N') => jump_change_mark(app, -1),
         KeyCode::Char('a') => {
-            acknowledge_review(app, true);
+            mark_seen(app, true);
         }
         // `]`/`[` arm the chord: alone they switch files (when the
         // [`CHORD_MS`] window expires, or on the next non-chord key); `c`
         // within the window jumps to the next/previous change instead
         // (the F7 fallback). F7/Shift+F7 jump directly.
-        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_review_mark(app, -1),
-        KeyCode::F(7) => jump_review_mark(app, 1),
+        KeyCode::F(7) if modifiers.contains(KeyModifiers::SHIFT) => jump_change_mark(app, -1),
+        KeyCode::F(7) => jump_change_mark(app, 1),
         KeyCode::Char(']') => app.pending_chord = Some((Instant::now(), ']')),
         KeyCode::Char('[') => app.pending_chord = Some((Instant::now(), '[')),
         // The layer's keys — the same guard, and the same lack of a

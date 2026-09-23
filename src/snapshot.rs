@@ -44,15 +44,17 @@ pub(crate) struct CachedSnapshot {
 pub(crate) struct CachedFile {
     /// Oldest first. The newest entry is the most recently observed text.
     pub(crate) snapshots: Vec<CachedSnapshot>,
-    pub(crate) reviewed_id: Option<String>,
-    pub(crate) reviewed_content: Option<String>,
+    pub(crate) baseline_id: Option<String>,
+    pub(crate) baseline_content: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FileIndex {
     version: u32,
     path: String,
-    reviewed: Option<String>,
+    /// ディスク上の鍵は `reviewed` のまま（改名前に書いた索引を読むため）。
+    #[serde(rename = "reviewed")]
+    baseline: Option<String>,
     snapshots: Vec<SnapshotMeta>,
 }
 
@@ -102,7 +104,7 @@ impl SnapshotCache {
 
     /// Observe `content`, creating a LOCAL generation only when its content
     /// differs from the latest cached generation. The first observation is
-    /// also the initial review baseline.
+    /// also the initial baseline.
     ///
     /// 互換ラッパ。parent を知らない既存の観測は None として記録する。
     pub(crate) fn record(&self, path: &Path, content: &str) -> Result<CachedFile> {
@@ -125,7 +127,7 @@ impl SnapshotCache {
         let mut index = self.load_index(&canonical)?.unwrap_or_else(|| FileIndex {
             version: FORMAT_VERSION,
             path: canonical.to_string_lossy().into_owned(),
-            reviewed: None,
+            baseline: None,
             snapshots: Vec::new(),
         });
         dedupe_snapshots(&mut index);
@@ -152,8 +154,8 @@ impl SnapshotCache {
             snapshot.parent = parent;
             index.snapshots.push(snapshot);
         }
-        if index.reviewed.is_none() {
-            index.reviewed = Some(id);
+        if index.baseline.is_none() {
+            index.baseline = Some(id);
         }
         trim_file_index(&mut index, self.max_file_snapshots);
         self.save_index(&canonical, &index)?;
@@ -195,14 +197,14 @@ impl SnapshotCache {
         self.materialize(&index)
     }
 
-    /// Move the durable review baseline to `content`.
+    /// Move the durable baseline to `content`.
     pub(crate) fn acknowledge(&self, path: &Path, content: &str) -> Result<CachedFile> {
         let _ = self.record(path, content)?;
         let canonical = canonical_path(path);
         let mut index = self
             .load_index(&canonical)?
             .context("snapshot index disappeared while acknowledging")?;
-        index.reviewed = Some(content_id(content.as_bytes()));
+        index.baseline = Some(content_id(content.as_bytes()));
         trim_file_index(&mut index, self.max_file_snapshots);
         self.save_index(&canonical, &index)?;
         self.gc_global()?;
@@ -210,14 +212,14 @@ impl SnapshotCache {
     }
 
     /// Select an already-viewed historical generation as the durable
-    /// review baseline without making it the newest LOCAL observation.
+    /// baseline without making it the newest LOCAL observation.
     pub(crate) fn set_baseline(&self, path: &Path, content: &str) -> Result<CachedFile> {
         self.ensure_dirs()?;
         let canonical = canonical_path(path);
         let mut index = self.load_index(&canonical)?.unwrap_or_else(|| FileIndex {
             version: FORMAT_VERSION,
             path: canonical.to_string_lossy().into_owned(),
-            reviewed: None,
+            baseline: None,
             snapshots: Vec::new(),
         });
         dedupe_snapshots(&mut index);
@@ -225,7 +227,7 @@ impl SnapshotCache {
         // A Git baseline need not become a LOCAL timeline entry, but keep a
         // compressed body so marks remain reproducible if Git later moves.
         self.write_blob(&id, content)?;
-        index.reviewed = Some(id);
+        index.baseline = Some(id);
         self.save_index(&canonical, &index)?;
         self.gc_global()?;
         self.materialize(&index)
@@ -238,7 +240,7 @@ impl SnapshotCache {
         let mut index = self.load_index(&canonical)?.unwrap_or_else(|| FileIndex {
             version: FORMAT_VERSION,
             path: canonical.to_string_lossy().into_owned(),
-            reviewed: None,
+            baseline: None,
             snapshots: Vec::new(),
         });
         dedupe_snapshots(&mut index);
@@ -254,8 +256,8 @@ impl SnapshotCache {
                 parent: None,
             });
         }
-        if index.reviewed.is_none() {
-            index.reviewed = Some(id);
+        if index.baseline.is_none() {
+            index.baseline = Some(id);
         }
         trim_file_index(&mut index, self.max_file_snapshots);
         self.save_index(&canonical, &index)?;
@@ -355,21 +357,21 @@ impl SnapshotCache {
                 parent: snapshot.parent.clone(),
             });
         }
-        let reviewed_content = index
-            .reviewed
+        let baseline_content = index
+            .baseline
             .as_deref()
             .and_then(|id| snapshots.iter().find(|snapshot| snapshot.id == id))
             .map(|snapshot| snapshot.content.clone())
-            .or_else(|| index.reviewed.as_deref().and_then(|id| self.read_blob(id).ok()));
+            .or_else(|| index.baseline.as_deref().and_then(|id| self.read_blob(id).ok()));
         Ok(CachedFile {
             snapshots,
-            reviewed_id: index.reviewed.clone(),
-            reviewed_content,
+            baseline_id: index.baseline.clone(),
+            baseline_content,
         })
     }
 
-    /// Enforce the global byte limit by deleting the oldest reviewed,
-    /// unpinned generations. NOW, the review baseline, and every generation
+    /// Enforce the global byte limit by deleting the oldest seen,
+    /// unpinned generations. NOW, the baseline, and every generation
     /// newer than that baseline are protected.
     fn gc_global(&self) -> Result<()> {
         let files_dir = self.root.join("files");
@@ -397,7 +399,7 @@ impl SnapshotCache {
                     .snapshots
                     .iter()
                     .map(|snapshot| snapshot.id.clone())
-                    .chain(index.reviewed.iter().cloned())
+                    .chain(index.baseline.iter().cloned())
             })
             .collect();
         if let Ok(blobs) = fs::read_dir(self.root.join("blobs")) {
@@ -421,7 +423,7 @@ impl SnapshotCache {
                 .snapshots
                 .iter()
                 .map(|snapshot| &snapshot.id)
-                .chain(index.reviewed.iter())
+                .chain(index.baseline.iter())
             {
                 blob_sizes.entry(id.clone()).or_insert_with(|| {
                     fs::metadata(self.blob_path(id))
@@ -437,14 +439,14 @@ impl SnapshotCache {
 
         let mut candidates = Vec::new();
         for (file_index, (_, index)) in indices.iter().enumerate() {
-            let reviewed_pos = index
-                .reviewed
+            let baseline_pos = index
+                .baseline
                 .as_ref()
                 .and_then(|id| index.snapshots.iter().position(|s| &s.id == id));
             for (snapshot_index, snapshot) in index.snapshots.iter().enumerate() {
                 let latest = snapshot_index + 1 == index.snapshots.len();
-                let unreviewed = reviewed_pos.is_none_or(|pos| snapshot_index >= pos);
-                if !latest && !unreviewed && !snapshot.pinned {
+                let unseen = baseline_pos.is_none_or(|pos| snapshot_index >= pos);
+                if !latest && !unseen && !snapshot.pinned {
                     candidates.push((snapshot.captured_ms, file_index, snapshot_index));
                 }
             }
@@ -460,7 +462,7 @@ impl SnapshotCache {
             removals.entry(file_index).or_default().insert(snapshot_index);
             // Charge the blob only if no other still-retained entry refers to it.
             let other_ref = indices.iter().enumerate().any(|(fi, (_, index))| {
-                index.reviewed.as_deref() == Some(&id)
+                index.baseline.as_deref() == Some(&id)
                     || index.snapshots.iter().enumerate().any(|(si, snapshot)| {
                         snapshot.id == id
                             && !(fi == file_index && si == snapshot_index)
@@ -493,7 +495,7 @@ impl SnapshotCache {
             fs::rename(temp, &*index_path)?;
             for id in removed_ids {
                 let still_used = indices.iter().any(|(_, other)| {
-                    other.reviewed.as_deref() == Some(&id)
+                    other.baseline.as_deref() == Some(&id)
                         || other.snapshots.iter().any(|snapshot| snapshot.id == id)
                 });
                 if !still_used {
@@ -531,8 +533,8 @@ fn dedupe_snapshots(index: &mut FileIndex) {
 
 fn trim_file_index(index: &mut FileIndex, limit: usize) {
     while index.snapshots.len() > limit {
-        let reviewed_pos = index
-            .reviewed
+        let baseline_pos = index
+            .baseline
             .as_ref()
             .and_then(|id| index.snapshots.iter().position(|s| &s.id == id));
         let removable = index
@@ -541,8 +543,8 @@ fn trim_file_index(index: &mut FileIndex, limit: usize) {
             .enumerate()
             .find(|(i, snapshot)| {
                 let latest = *i + 1 == index.snapshots.len();
-                let unreviewed = reviewed_pos.is_none_or(|pos| *i >= pos);
-                !latest && !unreviewed && !snapshot.pinned
+                let unseen = baseline_pos.is_none_or(|pos| *i >= pos);
+                !latest && !unseen && !snapshot.pinned
             })
             .map(|(i, _)| i);
         let Some(removable) = removable else { break };
@@ -571,7 +573,7 @@ pub(crate) fn now_ms() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
-/// Stable content address used by blobs, per-file indices, review baselines,
+/// Stable content address used by blobs, per-file indices, baselines,
 /// and LOCAL revision references.
 pub(crate) fn content_id(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -582,7 +584,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn records_deduplicates_and_restores_review_baseline() {
+    fn records_deduplicates_and_restores_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("doc.md");
         fs::write(&file, "one\n").unwrap();
@@ -590,12 +592,12 @@ mod tests {
 
         let first = cache.record(&file, "one\n").unwrap();
         assert_eq!(first.snapshots.len(), 1);
-        assert_eq!(first.reviewed_content.as_deref(), Some("one\n"));
+        assert_eq!(first.baseline_content.as_deref(), Some("one\n"));
         let same = cache.record(&file, "one\n").unwrap();
         assert_eq!(same.snapshots.len(), 1);
         let second = cache.record(&file, "two\n").unwrap();
         assert_eq!(second.snapshots.len(), 2);
-        assert_eq!(second.reviewed_content.as_deref(), Some("one\n"));
+        assert_eq!(second.baseline_content.as_deref(), Some("one\n"));
 
         let reopened = cache.load(&file).unwrap();
         assert_eq!(reopened, second);
@@ -628,11 +630,15 @@ mod tests {
         cache.record(&file, "base\n").unwrap();
         cache.record(&file, "changed\n").unwrap();
         let acknowledged = cache.acknowledge(&file, "changed\n").unwrap();
-        assert_eq!(acknowledged.reviewed_content.as_deref(), Some("changed\n"));
+        assert_eq!(acknowledged.baseline_content.as_deref(), Some("changed\n"));
+        // 改名は振る舞いを変えない: 索引の鍵は `reviewed` のまま書かれる。
+        let index = fs::read_to_string(cache.index_path(&canonical_path(&file))).unwrap();
+        assert!(index.contains("\"reviewed\""), "{index}");
+        assert!(!index.contains("\"baseline\""), "{index}");
     }
 
     #[test]
-    fn pinned_and_unreviewed_generations_survive_small_per_file_limit() {
+    fn pinned_and_unseen_generations_survive_small_per_file_limit() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("doc.md");
         fs::write(&file, "zero").unwrap();
@@ -673,7 +679,7 @@ mod tests {
         cache.acknowledge(&file, "one").unwrap();
 
         let loaded = cache.load(&file).unwrap();
-        assert_eq!(loaded.reviewed_content.as_deref(), Some("one"));
+        assert_eq!(loaded.baseline_content.as_deref(), Some("one"));
         assert_eq!(loaded.snapshots.len(), 1);
         assert_eq!(loaded.snapshots[0].content, "one");
     }

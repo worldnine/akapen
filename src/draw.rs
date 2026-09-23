@@ -292,7 +292,7 @@ fn timeline_bar_rect(area: Rect) -> Rect {
 /// words on the footer row (`HERE` at the current revision, `NOW` at
 /// the right edge) and the axis on the row
 /// above (`●` LOCAL / `◼` COMMIT / `◆` the current point / `▮`
-/// baseline, dim left of the review baseline). While a history step is
+/// baseline, dim left of the baseline). While a history step is
 /// fresh, the scrubber tooltip travels with the `◆` on the message row
 /// above the axis (see [`timeline_tooltip_layout`]).
 /// Drawn over the static UI before the effects; the slide effect
@@ -336,8 +336,8 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
     };
 
     // Row 2: the axis — markers over the line. The line is dim left of
-    // the review baseline (reviewed history is behind you) and normal
-    // from the baseline to NOW (the unreviewed stretch); before the
+    // the baseline (seen history is behind you) and normal
+    // from the baseline to NOW (the unseen stretch); before the
     // first acknowledgement the whole axis reads normally.
     {
         let by_col: std::collections::HashMap<usize, &crate::timeline::TimelinePoint> =
@@ -356,7 +356,7 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
                 Some(p) => match p.kind {
                     // NOW always marks the right edge; a baseline
                     // sitting there needs no marker of its own (the
-                    // whole axis reads dim — everything is reviewed).
+                    // whole axis reads dim — everything is seen).
                     crate::timeline::PointKind::Now => (
                         '●',
                         Style::default()
@@ -520,7 +520,7 @@ fn draw_timeline_bar(f: &mut Frame, app: &App) {
 }
 
 /// The scrubber tooltip's anchor and content: `(start column, styled
-/// parts)` — `BASELINE · ` when the point is the review baseline, the
+/// parts)` — `BASELINE · ` when the point is the baseline, the
 /// provenance glyph in its (depth-shifted) family color, `id · age`
 /// bright, and the summary dim. LOCAL's long deterministic sentence
 /// ("akapen local snapshot: uncommitted state captured …") collapses
@@ -617,7 +617,7 @@ fn timeline_tooltip_layout(app: &App, width: usize) -> Option<(usize, Vec<(Strin
 }
 
 /// screen; keyboard navigation, clicks, and the mode handoffs reveal it.
-fn review_flags(marks: &HashSet<usize>, line_count: usize) -> Vec<bool> {
+fn change_flags(marks: &HashSet<usize>, line_count: usize) -> Vec<bool> {
     (0..line_count).map(|line| marks.contains(&line)).collect()
 }
 
@@ -671,10 +671,10 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // segments.
     let sel = app.selection.map(|s| s.range());
     // View and source read the same baseline → displayed-generation marks.
-    let (changed_set, deleted_set) = active_review_mark_sets(app);
+    let (changed_set, deleted_set) = active_change_mark_sets(app);
     let n = app.source.len();
-    let changed = review_flags(&changed_set, n);
-    let deleted = review_flags(&deleted_set, n);
+    let changed = change_flags(&changed_set, n);
+    let deleted = change_flags(&deleted_set, n);
     let emphasized = vec![false; n];
     // Review の候補（Pending）の行。層の無いセッションでは全部 false。
     let review = app.review_lines();
@@ -1124,7 +1124,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         // mode (text colors untouched — a full-row reversal was fatiguing
         // and clashed with the syntax highlighting). A selected row shares
         // the background; the `>` marker keeps the cursor visible at the
-        // selection edge. Present/changed review lines get a restrained
+        // selection edge. Changed lines (since the baseline) get a restrained
         // green background.
         let cursor_bg = is_cursor || selected;
         let changed_bg = added && !cursor_bg;
@@ -1169,7 +1169,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         let wrapped = wrap_spans_tagged(&line.spans, &line.attrs, width, 0);
         // The cursor glyph is bold — it must be findable at a glance
         // (yellow is the comment marker's color), same as view mode. Its
-        // color inherits the review mark under it. Mark-less rows keep the
+        // color inherits the change mark under it. Mark-less rows keep the
         // classic LightCyan.
         let mark_style = if is_cursor {
             let fg = if added { Color::LightGreen } else { Color::LightCyan };

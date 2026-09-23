@@ -114,7 +114,7 @@ pub(crate) fn clip_ellipsis(s: &str, max_cols: usize) -> String {
 /// Clip a history label (`COMMIT · 2/5 · 5b5f349 · subject`) or a
 /// tooltip summary: the free-form tail is the most expendable part, so
 /// it is cut first — a structured head stays whole, and a trailing
-/// ` · base N/M` (the review baseline context) survives even when the
+/// ` · base N/M` (the baseline context) survives even when the
 /// summary above it must go. Never exceeds `max_cols` display columns.
 pub(crate) fn clip_title_label(label: &str, max_cols: usize) -> String {
     use unicode_width::UnicodeWidthChar;
@@ -161,7 +161,7 @@ pub(crate) enum TitleHit {
 /// always lands exactly on what is drawn.
 #[derive(Debug)]
 pub(crate) struct TitleMetrics {
-    /// The pending/review/history badge (⚡ / ! N / revision) and its width.
+    /// The pending/unseen/history badge (⚡ / ! N / revision) and its width.
     pub(crate) change: String,
     pub(crate) change_w: u16,
     /// The truncated path text (click → copy full path).
@@ -422,12 +422,12 @@ pub(crate) fn draw_title(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// The number of unreviewed blocks or lines. The pending ⚡ badge takes
+/// The number of unseen blocks or lines. The pending ⚡ badge takes
 /// precedence in the caller. `!` is the classic "needs attention" mark:
 /// a count badge, not a bullet. Same width as the old `●` badge, so the
 /// path budget in [`title_metrics`] is untouched.
 fn scoped_change_badge(app: &App) -> String {
-    let count = app.file_review_count(app.current_file_index);
+    let count = app.file_unseen_count(app.current_file_index);
     if count == 0 {
         String::new()
     } else {
@@ -1096,7 +1096,7 @@ mod title_tests {
 
     #[test]
     fn history_label_clipping_keeps_the_baseline_context() {
-        // ` · base N/M` is the review reference point: it survives the
+        // ` · base N/M` is the baseline reference point: it survives the
         // clip even when the summary above it is cut away.
         let label = "COMMIT · 2/5 · 5b5f349 · a long subject line that must go · base 1/5";
         let clipped = clip_title_label(label, 30);

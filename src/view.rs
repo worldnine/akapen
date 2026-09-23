@@ -1057,7 +1057,7 @@ impl ViewState {
                 // The cursor glyph keeps its `>` shape but INHERITS the
                 // mark's color (user request): on a changed/deleted row
                 // it reads as the emphasis (Light + BOLD), so a one-line
-                // review mark is not hidden by the cursor. Mark-less
+                // change mark is not hidden by the cursor. Mark-less
                 // rows keep the classic LightCyan.
                 let fg = if deleted_row {
                     // The deletion anchor outranks the change mark (same
@@ -1097,7 +1097,7 @@ impl ViewState {
                 // Deleted blocks are shown by POSITION only (3-1): the
                 // red `▌` marks "a block was deleted here". It uses the
                 // SAME full-height bar as the green change mark, so both
-                // review marks share one visual weight — the color alone
+                // change marks share one visual weight — the color alone
                 // distinguishes add/change (green) from delete (red).
                 // Where the anchor lands on a rewritten line, red WINS on
                 // this first display row and the rest of the area reads
@@ -1834,7 +1834,7 @@ mod tests {
     }
 
     #[test]
-    fn review_range_can_be_centered_in_the_rendered_viewport() {
+    fn change_range_can_be_centered_in_the_rendered_viewport() {
         let mut view = ViewState {
             rows: vec![vec![]; 20],
             source_starts: (0..20).collect(),
@@ -2480,7 +2480,7 @@ mod tests {
         // User request: the cursor's `>` keeps its shape but inherits
         // the mark's color — changed rows LightGreen, deleted-mark rows
         // LightRed, mark-less rows the classic LightCyan. A one-line
-        // review mark therefore stays readable under the cursor.
+        // change mark therefore stays readable under the cursor.
         let changed = vec![false, true, false, false];
         let deleted = vec![false, false, true, false];
         // Cursor on a changed row.
@@ -2616,7 +2616,7 @@ mod tests {
         assert_eq!(gutter[0].glyph, "▌");
         assert!(
             gutter[0].style.add_modifier.contains(Modifier::BOLD),
-            "the selected review mark is bold"
+            "the selected change mark is bold"
         );
         assert_eq!(gutter[0].style.fg, Some(Color::LightGreen));
         assert_eq!(gutter[1].glyph, "▌", "deleted mark outside the target");
