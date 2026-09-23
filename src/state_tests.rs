@@ -6921,9 +6921,9 @@ fn install_semantic_command(app: &mut App, cmd: &str) {
     }
 }
 
-/// 見出しを持つ Markdown を開いた App。参照実装は見出しを ESSENTIAL に
-/// するので、これがあって初めて装飾が出る（見出しの無い文書は全部
-/// DETAIL で、Budget 100 % では誰も装飾されない — それが正しい）。
+/// 見出しを持つ Markdown を開いた App。参照実装は見出しの直後の文を高く
+/// 付けるので、スコアに差のある文書になる（見出しそのものは Unit を持たず、
+/// 光らない）。
 fn semantic_markdown_app() -> (App, tempfile::TempDir) {
     let (mut app, dir) = make_app_keep(3, Mode::View);
     std::fs::write(
