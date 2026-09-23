@@ -130,7 +130,48 @@ impl AnalysisChannel {
 /// コメントは候補のバイト範囲を持たず、行と本文の形（ルール）だけを持つ
 /// （[`crate::review::candidate_comment_rule`]）。同じ行に同じルールの
 /// 候補が 2 本あれば、2 本は同じコメントを指す。
-pub(crate) type ReviewCommentKey = (PathBuf, Option<String>, String, (u32, u32));
+pub(crate) type ReviewCommentKey = (PathBuf, Option<String>, CandidateSpot);
+
+/// review / lint コメントと候補を結ぶ鍵。
+///
+/// **結び目のあるコメントは (ルール, バイト範囲)** で候補と結ぶ — 同じ行に
+/// 同じルールの候補が 2 本あっても取り違えない。結び目の無いコメント（古い
+/// 経路）は今までどおり (ルール, 行) で結ぶ。候補の側は両方の鍵を持つ
+/// （[`Self::of_candidate`]）ので、どちらの形のコメントとも照合できる。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum CandidateSpot {
+    /// ルールとバイト範囲。
+    Range(String, usize, usize),
+    /// ルールと 1 始まりの行（先頭, 末尾）。
+    Lines(String, (u32, u32)),
+}
+
+impl CandidateSpot {
+    /// コメントの鍵。review / lint の形でない本文（人の赤入れ）は `None`。
+    ///
+    /// ルールは本文から読む — 人が本文を書き換えて review の形でなく
+    /// なったら、結び目が残っていても候補とは結ばない（今までと同じ）。
+    pub(crate) fn of_comment(comment: &Comment) -> Option<Self> {
+        let rule = crate::review::candidate_comment_rule(&comment.text)?;
+        Some(match &comment.anchor {
+            Some(anchor) => Self::Range(rule, anchor.range.start, anchor.range.end),
+            None => Self::Lines(rule, (comment.start, comment.end)),
+        })
+    }
+
+    /// 候補の鍵 — バイト範囲のものと行のものの 2 つ。
+    pub(crate) fn of_candidate(candidate: &crate::review::Candidate) -> impl Iterator<Item = Self> {
+        [
+            Self::Range(
+                candidate.rule.clone(),
+                candidate.range.start,
+                candidate.range.end,
+            ),
+            Self::Lines(candidate.rule.clone(), candidate.lines),
+        ]
+        .into_iter()
+    }
+}
 
 /// `a` / `x` を押した結果（一覧のキーがフラッシュを選ぶ）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -576,6 +617,15 @@ pub(crate) struct App {
     /// ディスクには書かない — 送った相手が書き換えれば reload で決め直す
     /// （[`App::forget_review_sent`]）ので、次に開いたときには要らない。
     pub(crate) review_sent: HashSet<ReviewCommentKey>,
+    /// **前のセッションまでに送った**候補（`sent.jsonl` のうち、いま画面に
+    /// ある文書の sha のもの）。(ルール, 範囲)。[`App::load_dismissed`] が
+    /// 捨てた記録と同じ時に読み、[`App::forget_review_sent`] が捨てる。
+    pub(crate) review_sent_disk: HashSet<DismissedKey>,
+    /// **直前の `A` が作ったコメントの結び目**（ルール, 範囲）。`Some` の
+    /// あいだだけ、もう一度 `A` を押すとそれをまとめて Pending に戻す
+    /// （[`App::undo_accept_all`]）。一覧のどのキー（移動も含む）・マウス・
+    /// reload でも `None` に戻る — 戻せるのは `A` の**直後**だけである。
+    pub(crate) review_accept_all_undo: Option<Vec<DismissedKey>>,
     /// 捨てた候補の置き場。決められない環境では `None`（セッション内
     /// だけ消えて、記録は残らない）。
     pub(crate) review_dismissed_store: Option<DismissedStore>,
@@ -745,6 +795,8 @@ impl App {
             review_results: None,
             review_dismissed: HashSet::new(),
             review_sent: HashSet::new(),
+            review_sent_disk: HashSet::new(),
+            review_accept_all_undo: None,
             review_dismissed_store: None,
             review_edit_anchor: None,
             review_cursor_target: None,
@@ -1527,6 +1579,12 @@ impl App {
             .as_ref()
             .map(|store| store.load(&sha))
             .unwrap_or_default();
+        // 送った記録も同じ時に（同じ置き場・同じ sha で）。
+        self.review_sent_disk = self
+            .review_dismissed_store
+            .as_ref()
+            .map(|store| store.sent().load(&sha))
+            .unwrap_or_default();
     }
 
     /// Review のワーカーが終えたぶんを引き取る。イベントループから 1 tick
@@ -1723,13 +1781,13 @@ impl App {
         let accepted = self.live_review_comments();
         let file = self.current_file_path().to_path_buf();
         let revision = self.current_revision_context();
-        let sent: HashSet<(&str, (u32, u32))> = self
+        let sent: HashSet<&CandidateSpot> = self
             .review_sent
             .iter()
-            .filter(|(path, rev, _, _)| {
+            .filter(|(path, rev, _)| {
                 *path == file && crate::history::same_revision(rev.as_deref(), revision.as_deref())
             })
-            .map(|(_, _, rule, lines)| (rule.as_str(), *lines))
+            .map(|(_, _, spot)| spot)
             .collect();
         self.review_candidates
             .iter()
@@ -1739,9 +1797,13 @@ impl App {
                     .contains(&(c.rule.clone(), c.range.start, c.range.end))
                 {
                     CandidateState::Dismissed
-                } else if accepted.contains(&(c.rule.clone(), c.lines)) {
+                } else if CandidateSpot::of_candidate(c).any(|spot| accepted.contains(&spot)) {
                     CandidateState::Accepted
-                } else if sent.contains(&(c.rule.as_str(), c.lines)) {
+                } else if CandidateSpot::of_candidate(c).any(|spot| sent.contains(&spot))
+                    || self
+                        .review_sent_disk
+                        .contains(&(c.rule.clone(), c.range.start, c.range.end))
+                {
                     CandidateState::Sent
                 } else {
                     CandidateState::Pending
@@ -1836,6 +1898,11 @@ impl App {
             end,
             lines,
             revision: self.current_revision_context(),
+            anchor: Some(crate::comment::ReviewAnchor::new(
+                candidate.rule.clone(),
+                candidate.range.clone(),
+                &self.source.content,
+            )),
             text,
         };
         self.comments.push(comment);
@@ -1848,21 +1915,20 @@ impl App {
         let Some(candidate) = self.review_candidates.get(index) else {
             return 0;
         };
-        let (rule, lines) = (candidate.rule.clone(), candidate.lines);
+        let spots: Vec<CandidateSpot> = CandidateSpot::of_candidate(candidate).collect();
         let current = self.current_file_path().to_path_buf();
         let revision = self.current_revision_context();
         let before = self.comments.len();
         self.comments.retain(|c| {
             !(c.file_path == current
                 && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
-                && (c.start, c.end) == lines
-                && crate::review::candidate_comment_rule(&c.text).as_deref() == Some(rule.as_str()))
+                && CandidateSpot::of_comment(c).is_some_and(|spot| spots.contains(&spot)))
         });
         before - self.comments.len()
     }
 
-    /// いまの版に生きている review コメントの (ルール, 行)。
-    fn live_review_comments(&self) -> HashSet<(String, (u32, u32))> {
+    /// いまの版に生きている review コメントの結び目（[`CandidateSpot`]）。
+    fn live_review_comments(&self) -> HashSet<CandidateSpot> {
         let current = self.current_file_path();
         let revision = self.current_revision_context();
         self.comments
@@ -1871,10 +1937,7 @@ impl App {
                 c.file_path == *current
                     && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
             })
-            .filter_map(|c| {
-                let rule = crate::review::candidate_comment_rule(&c.text)?;
-                Some((rule, (c.start, c.end)))
-            })
+            .filter_map(CandidateSpot::of_comment)
             .collect()
     }
 
@@ -1889,11 +1952,39 @@ impl App {
             .comments
             .iter()
             .filter_map(|c| {
-                let rule = crate::review::candidate_comment_rule(&c.text)?;
-                Some((c.file_path.clone(), c.revision.clone(), rule, (c.start, c.end)))
+                let spot = CandidateSpot::of_comment(c)?;
+                Some((c.file_path.clone(), c.revision.clone(), spot))
             })
             .collect();
         self.review_sent.extend(sent);
+        self.persist_review_sent();
+    }
+
+    /// 送った review / lint コメントのうち、**いまのファイルの NOW に結び目で
+    /// 結ばれたもの**を `sent.jsonl` へ追記する。
+    ///
+    /// ほかのファイル・過去の版のコメントは書かない — 鍵になる文書の sha が
+    /// 手元に無い（画面にあるのは今のファイルの NOW だけ）。結び目の無い
+    /// コメントも書かない（範囲が無い）。書けなくても送信は成功のまま
+    /// （[`Self::dismiss_candidate`] と同じ扱い）。
+    fn persist_review_sent(&mut self) {
+        let Some(store) = self.review_dismissed_store.as_ref().map(DismissedStore::sent) else {
+            return;
+        };
+        let current = self.current_file_path().to_path_buf();
+        let sha = crate::semantic::source_digest(&self.source.content);
+        for comment in &self.comments {
+            let Some(anchor) = comment.anchor.as_ref() else {
+                continue;
+            };
+            if comment.file_path != current
+                || comment.revision.is_some()
+                || crate::review::candidate_comment_rule(&comment.text).is_none()
+            {
+                continue;
+            }
+            let _ = store.append(&sha, &anchor.rule, &anchor.range);
+        }
     }
 
     /// **送った印を忘れる** — いまのファイルの NOW が書き換わったとき
@@ -1902,7 +1993,10 @@ impl App {
     pub(crate) fn forget_review_sent(&mut self) {
         let current = self.current_file_path().to_path_buf();
         self.review_sent
-            .retain(|(path, revision, _, _)| !(*path == current && revision.is_none()));
+            .retain(|(path, revision, _)| !(*path == current && revision.is_none()));
+        // ディスクの記録は消さない（sha で鍵をかけてあるので、書き換わった
+        // 版には効かない）。読んだぶんだけを捨てる。
+        self.review_sent_disk.clear();
     }
 
     /// **見届けた reload で、いまの版の review コメントを片付ける。**
@@ -1936,11 +2030,18 @@ impl App {
                     continue;
                 }
             };
-            let range = self
-                .review_candidates
-                .iter()
-                .find(|c| c.rule == rule && c.lines == (comment.start, comment.end))
-                .map(|c| c.range.clone())
+            // 結び目があればその範囲。無ければ（結び目の無い古いコメント）、
+            // 同じルール・同じ行の候補の範囲か、行そのもの。
+            let range = comment
+                .anchor
+                .as_ref()
+                .map(|anchor| anchor.range.clone())
+                .or_else(|| {
+                    self.review_candidates
+                        .iter()
+                        .find(|c| c.rule == rule && c.lines == (comment.start, comment.end))
+                        .map(|c| c.range.clone())
+                })
                 .unwrap_or_else(|| {
                     // 行の頭から、末尾の行の終わり（改行の手前）まで。
                     let line = |n: u32| n.saturating_sub(1) as usize;
@@ -1963,6 +2064,14 @@ impl App {
                 .take((end.saturating_sub(start) + 1) as usize)
                 .collect::<Vec<_>>()
                 .join("\n");
+            // 結び目も同じ差分で写す（位置と抜粋は新しい版で作り直す）。
+            if let Some(anchor) = comment.anchor.take() {
+                comment.anchor = Some(crate::comment::ReviewAnchor::new(
+                    anchor.rule,
+                    moved.clone(),
+                    new_content,
+                ));
+            }
             kept.push(comment);
         }
         self.comments = kept;
@@ -2020,8 +2129,10 @@ impl App {
 
     /// **`A` — Pending を全部 accept する。** 作ったコメントの数を返す。
     ///
-    /// 捨てた候補・送った候補・accept 済みには触らない。まとめての取り消しは
-    /// 作らない — 個々の `a` で戻せる。
+    /// 捨てた候補・送った候補・accept 済みには触らない。1 本でも作ったら、
+    /// 作ったぶんの結び目を [`Self::review_accept_all_undo`] に覚える —
+    /// **直後にもう一度 `A`** を押せばまとめて戻る（`a` / `x` の「同じキーを
+    /// もう一度押せば戻る」と揃えてある）。
     pub(crate) fn accept_all_pending(&mut self) -> usize {
         let pending: Vec<usize> = self
             .candidate_states()
@@ -2030,13 +2141,48 @@ impl App {
             .filter(|(_, state)| state.is_pending())
             .map(|(i, _)| i)
             .collect();
-        let mut made = 0;
+        let mut made = Vec::new();
         for index in pending {
             if self.accept_candidate(index) {
-                made += 1;
+                let c = &self.review_candidates[index];
+                made.push((c.rule.clone(), c.range.start, c.range.end));
             }
         }
-        made
+        let count = made.len();
+        self.review_accept_all_undo = (count > 0).then_some(made);
+        count
+    }
+
+    /// **`A` の直後の `A`** — その `A` で作ったコメントだけを消し、候補を
+    /// Pending に戻す。消した本数を返す。
+    ///
+    /// 消すのは、いまのファイル・いまの版で、結び目が `made` にある review /
+    /// lint コメントだけ。`A` より前に `a` で作ったコメントと人の赤入れは
+    /// 触らない。
+    pub(crate) fn undo_accept_all(&mut self, made: &[DismissedKey]) -> usize {
+        let current = self.current_file_path().to_path_buf();
+        let revision = self.current_revision_context();
+        let before = self.comments.len();
+        self.comments.retain(|c| {
+            let ours = c.file_path == current
+                && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
+                && crate::review::candidate_comment_rule(&c.text).is_some()
+                && c.anchor.as_ref().is_some_and(|a| {
+                    made.contains(&(a.rule.clone(), a.range.start, a.range.end))
+                });
+            !ours
+        });
+        before - self.comments.len()
+    }
+
+    /// フッタの `A` の案内 — 戻せるあいだ（[`Self::review_accept_all_undo`]）は
+    /// `A undo all`、それ以外は `A accept all`。
+    pub(crate) fn accept_all_hint(&self) -> &'static str {
+        if self.review_accept_all_undo.is_some() {
+            "A undo all"
+        } else {
+            "A accept all"
+        }
     }
 
     /// **見た本数と一覧の行数**（読み出しの `3/9`、一覧の題の `(3/9)`）。

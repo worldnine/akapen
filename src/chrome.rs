@@ -672,7 +672,7 @@ pub(crate) fn footer_hint_items(app: &App) -> Vec<FooterHint> {
         items.extend(review_toggle_hints(app.candidate_state(app.overlay_cursor)));
         items.extend([
             hint("e edit"),
-            hint("A accept all"),
+            hint(app.accept_all_hint()),
             hint("Enter select"),
         ]);
         return items;

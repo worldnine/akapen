@@ -178,6 +178,7 @@ mod tests {
             end: 3,
             lines: "ひとつめの段落。".into(),
             revision: None,
+            anchor: None,
             text: text.into(),
         }
     }

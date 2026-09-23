@@ -158,8 +158,9 @@ fn main() -> Result<()> {
                  \x20                   changing an analyser's prompts without\n\
                  \x20                   changing its command line)\n\
                  \x20 --review-dismissed-clear  forget every Review candidate\n\
-                 \x20                   dismissed with x, in every document, and\n\
-                 \x20                   exit (one at a time: x again in the list)\n\
+                 \x20                   dismissed with x or sent with s, in every\n\
+                 \x20                   document, and exit (one dismissal at a\n\
+                 \x20                   time: x again in the list)\n\
                  \x20 --undercurl <auto|on|off> draw the Review underlines as curly\n\
                  \x20                   lines (default auto: on where the terminal\n\
                  \x20                   is known to draw them). $AKAPEN_UNDERCURL\n\
@@ -214,6 +215,11 @@ fn main() -> Result<()> {
             let path = store.path().display().to_string();
             let removed = store.clear()?;
             println!("cleared {removed} dismissed review candidates ({path})");
+            // 送った記録も同じ置き場にあるので、一緒に消す。
+            let sent = store.sent();
+            let sent_path = sent.path().display().to_string();
+            let removed = sent.clear()?;
+            println!("cleared {removed} sent review candidates ({sent_path})");
             Ok(())
         }
         Action::Run(config) => run(*config),
@@ -918,6 +924,11 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
 }
 
 fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option<&mut AppTerminal>) {
+    // `A` の取り消しは Review の一覧の直後の `A` だけ（一覧のキーは
+    // `on_review_overlay_key` が自分で外す）。一覧の外のキーでは外す。
+    if app.overlay != Some(Overlay::Review) {
+        app.review_accept_all_undo = None;
+    }
     // Overlay intercepts its own keys first.
     if app.overlay.is_some() {
         // Review の一覧の `e` だけは端末が要る（エディタのあいだ TUI を
@@ -926,6 +937,7 @@ fn on_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, terminal: Option
             && key == KeyCode::Char(crate::keys::REVIEW_EDIT)
             && modifiers.is_empty()
         {
+            app.review_accept_all_undo = None;
             if let Some(t) = terminal {
                 review_edit_with(app, |app, line| open_editor_at(app, t, line));
             }
@@ -1003,6 +1015,8 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
     // A mouse action cancels a pending `]`/`[` chord: the user moved on,
     // the bracket's default file switch must not fire later.
     app.pending_chord = None;
+    // マウスも「ほかの操作」— `A` の直後ではなくなる。
+    app.review_accept_all_undo = None;
     // **Review の一覧は窓ではない**（本文の下に据え付けてある）。一覧の
     // 上のマウスは一覧を動かし、本文の上のマウスは本文に届く — 本文を
     // 押しても一覧は閉じない（外を押して閉じるのは被さる窓の作法である）。
@@ -3803,6 +3817,7 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
                     end: app.input_end as u32 + 1,
                     lines,
                     revision,
+                    anchor: None,
                     text,
                 });
                 app.flash(format!("comment added ({} total)", app.comments.len()));
@@ -4160,6 +4175,8 @@ mod state_tests;
 #[cfg(test)]
 mod marks_tests;
 
+#[cfg(test)]
+mod review_anchor_tests;
 #[cfg(test)]
 mod review_tests;
 

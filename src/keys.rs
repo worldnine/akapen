@@ -74,7 +74,7 @@ pub(crate) const REVIEW_EDIT: char = 'e';
 /// `?` ヘルプに出る Review の 1 行。文字列そのものが行になる
 /// （[`crate::overlay::help_rows`]）。
 pub(crate) const REVIEW_HINT: &str =
-    "R candidates to fix · in the list: a accept/undo · x dismiss/restore · A accept all · e edit";
+    "R candidates to fix · in the list: a accept/undo · x dismiss/restore · A accept all/undo · e edit";
 
 /// **フォーカス** — マーカーの無い Unit を沈める。
 ///

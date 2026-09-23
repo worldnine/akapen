@@ -177,6 +177,7 @@ use crate::comment::Selection;
             end: end as u32,
             lines: app.source.snippet(start as u32, end as u32),
             revision: None,
+            anchor: None,
             text: text.into(),
         });
     }
@@ -1114,6 +1115,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line3".into(),
             revision: None,
+            anchor: None,
             text: "c1".into(),
         });
         app.comments.push(Comment {
@@ -1122,6 +1124,7 @@ use crate::comment::Selection;
             end: 7,
             lines: "line7".into(),
             revision: None,
+            anchor: None,
             text: "c2".into(),
         });
         on_view_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
@@ -1253,6 +1256,7 @@ use crate::comment::Selection;
                 end: 5,
                 lines: String::new(),
                 revision: None,
+                anchor: None,
                 text: "c1".into(),
             },
             Comment {
@@ -1261,6 +1265,7 @@ use crate::comment::Selection;
                 end: 9,
                 lines: String::new(),
                 revision: None,
+                anchor: None,
                 text: "c2".into(),
             },
         ];
@@ -1286,6 +1291,7 @@ use crate::comment::Selection;
                 end: 5,
                 lines: String::new(),
                 revision: None,
+                anchor: None,
                 text: "c1".into(),
             },
             Comment {
@@ -1294,6 +1300,7 @@ use crate::comment::Selection;
                 end: 6,
                 lines: String::new(),
                 revision: None,
+                anchor: None,
                 text: "c2".into(),
             },
             Comment {
@@ -1302,6 +1309,7 @@ use crate::comment::Selection;
                 end: 9,
                 lines: String::new(),
                 revision: None,
+                anchor: None,
                 text: "c3".into(),
             },
         ];
@@ -1367,6 +1375,7 @@ use crate::comment::Selection;
             end: 10,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "c".into(),
         });
         // The agent rewrites the file down to 7 lines.
@@ -1718,6 +1727,7 @@ use crate::comment::Selection;
             end: 1,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "c".into(),
         });
         on_source_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, None);
@@ -1736,6 +1746,7 @@ use crate::comment::Selection;
             end: 1,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "c".into(),
         });
         on_view_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, None);
@@ -1759,6 +1770,7 @@ use crate::comment::Selection;
             end: 4,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "c1".into(),
         });
         app.comments.push(Comment {
@@ -1767,6 +1779,7 @@ use crate::comment::Selection;
             end: 7,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "c2".into(),
         });
         app.comments.push(Comment {
@@ -1775,6 +1788,7 @@ use crate::comment::Selection;
             end: 7,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "c3".into(),
         });
         on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL, None);
@@ -1949,6 +1963,7 @@ use crate::comment::Selection;
             end: 3,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "card body".into(),
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -2067,6 +2082,7 @@ use crate::comment::Selection;
             end: 2,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "card".into(),
         }];
         let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
@@ -2145,6 +2161,7 @@ use crate::comment::Selection;
             end: 4,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "mid-block".into(),
         }];
         let base = ViewState::render(&source, 60, &highlight, Default::default());
@@ -2466,6 +2483,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "line2".into(),
             revision: None,
+            anchor: None,
             text: "on a".into(),
         });
         app.comments.push(Comment {
@@ -2474,6 +2492,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "fn main".into(),
             revision: None,
+            anchor: None,
             text: "on b".into(),
         });
         on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
@@ -2496,6 +2515,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line3".into(),
             revision: None,
+            anchor: None,
             text: "note".into(),
         });
         // Start on b.rs (index 1); jump via the list back to a.md line 3.
@@ -2534,6 +2554,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line2\nline3".into(),
             revision: Some(revision.clone()),
+            anchor: None,
             text: "on the past".into(),
         });
         on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
@@ -2581,6 +2602,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line2\nline3".into(),
             revision: Some("local:legacyid".into()),
+            anchor: None,
             text: "on the past".into(),
         });
         on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
@@ -2656,6 +2678,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "fn old() {}".into(),
             revision: Some(revision.clone()),
+            anchor: None,
             text: "old fn".into(),
         });
         // a.md (index 0) has no comments, so the first selectable entry
@@ -2688,6 +2711,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "line2".into(),
             revision: Some("local:pruned".into()),
+            anchor: None,
             text: "ghost".into(),
         });
         on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
@@ -2730,6 +2754,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line3".into(),
             revision: None,
+            anchor: None,
             text: "live".into(),
         });
         on_view_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, None);
@@ -2753,6 +2778,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "on a".into(),
         });
         app.comments.push(Comment {
@@ -2761,6 +2787,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "y".into(),
             revision: None,
+            anchor: None,
             text: "on b".into(),
         });
         std::fs::write(&a, "# a\n\nchanged\n").unwrap();
@@ -2853,6 +2880,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "one".into(),
         });
         app.comments.push(Comment {
@@ -2861,6 +2889,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "two".into(),
         });
         app.comments.push(Comment {
@@ -2869,6 +2898,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "y".into(),
             revision: None,
+            anchor: None,
             text: "three".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -2921,6 +2951,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "c".into(),
         });
         assert!(capture(&mut app).contains("▌ 1"), "indicator appears with comments");
@@ -3042,6 +3073,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "c".into(),
         });
         assert!(capture(&mut app, 80).contains("y copy"));
@@ -3064,6 +3096,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "c".into(),
         });
         let click = |row: u16, col: u16| MouseEvent {
@@ -3161,6 +3194,7 @@ use crate::comment::Selection;
             lines: String::new(),
             revision: None,
             text: "c".into(),
+            anchor: None,
         });
         let mut badge_gone = false;
         let mut ys_gone = false;
@@ -3278,6 +3312,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "one".into(),
         });
         app.comments.push(Comment {
@@ -3286,6 +3321,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "two".into(),
         });
         app.comments.push(Comment {
@@ -3294,6 +3330,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "y".into(),
             revision: None,
+            anchor: None,
             text: "three".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -4151,6 +4188,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "c".into(),
         });
         request_quit(&mut app); // arms the confirmation
@@ -4347,6 +4385,7 @@ use crate::comment::Selection;
             end: 3,
             lines: "line3".into(),
             revision: None,
+            anchor: None,
             text: "note".into(),
         });
         // Start on b.rs (index 1), open the comment list.
@@ -4450,6 +4489,7 @@ use crate::comment::Selection;
             end: 5,
             lines: "line3\nline4\nline5".into(),
             revision: None,
+            anchor: None,
             text: "old".into(),
         });
         app.selection = Some(Selection {
@@ -4483,6 +4523,7 @@ use crate::comment::Selection;
             end: 5,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "existing".into(),
         });
         app.selection = Some(Selection {
@@ -4510,6 +4551,7 @@ use crate::comment::Selection;
             end: 3,
             lines: String::new(),
             revision: None,
+            anchor: None,
             text: "old".into(),
         });
         app.selection = Some(Selection::new(2));
@@ -4729,6 +4771,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "a1".into(),
         });
         app.comments.push(Comment {
@@ -4737,6 +4780,7 @@ use crate::comment::Selection;
             end: 1,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "b1".into(),
         });
         app.comments.push(Comment {
@@ -4745,6 +4789,7 @@ use crate::comment::Selection;
             end: 2,
             lines: "x".into(),
             revision: None,
+            anchor: None,
             text: "a2".into(),
         });
         app.overlay = Some(Overlay::Comments);
@@ -4771,6 +4816,7 @@ use crate::comment::Selection;
             end: 5,
             lines: "line3\nline4\nline5".into(),
             revision: None,
+            anchor: None,
             text: "old".into(),
         });
         app.selection = Some(Selection {
@@ -4820,6 +4866,7 @@ use crate::comment::Selection;
             end: 5,
             lines: "line3\nline4\nline5".into(),
             revision: None,
+            anchor: None,
             text: "old".into(),
         });
         replace_view_preserving_cursor(&mut app); // fold the card in
@@ -6013,6 +6060,7 @@ fn a_comment_card_keeps_row_attrs_parallel_to_the_rows() {
         end: 1,
         lines: String::new(),
         revision: None,
+        anchor: None,
         text: "カード".into(),
     }];
     let view = render_view_with_cards(&source, 60, &highlight, &comments, Default::default());
@@ -6051,6 +6099,7 @@ fn a_decoration_below_a_comment_card_still_lands_on_its_own_row() {
         end: 1,
         lines: String::new(),
         revision: None,
+        anchor: None,
         text: "カード".into(),
     }];
     let view = render_view_with_cards(&source, 60, &highlight, &comments, Default::default());

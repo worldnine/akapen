@@ -68,7 +68,8 @@ pub enum Action {
     /// 入っているので、定型を直せば自動で外れる（`crate::semantic_cache`）。
     /// 判定器の中の文面はどちらのモードでもここが唯一の逃げ道である。
     ClearSemanticCache,
-    /// `--review-dismissed-clear`: Review で捨てた記録を全部消して exit 0。
+    /// `--review-dismissed-clear`: Review で捨てた記録と送った記録
+    /// （`sent.jsonl`）を全部消して exit 0。
     ///
     /// `--semantic-cache-clear` と同じ作り（ファイル引数を取らず短絡する）。
     /// 捨てた候補は一覧に薄く残り 1 本ずつ `x` で戻せるが、まとめて

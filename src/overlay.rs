@@ -1147,6 +1147,9 @@ fn review_overlay_jump(app: &mut App) {
 /// 分からなくなる。次へ行くのは j である。
 pub(crate) fn on_review_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
     let total = app.review_candidates.len();
+    // `A` の取り消しは**直後の `A`** だけ。ほかのどのキー（移動も含む）でも
+    // 戻せなくなる。
+    let undo = app.review_accept_all_undo.take();
     match key {
         // 動いたら本文も送る（[`crate::review_dock::follow`]）— 選んだ
         // 候補が本文の中ほどに来るので、`Enter` で飛ばなくても読める。
@@ -1174,11 +1177,18 @@ pub(crate) fn on_review_overlay_key(app: &mut App, key: KeyCode, _modifiers: Key
             after_review_toggle(app, done);
         }
         KeyCode::Char(crate::keys::REVIEW_ACCEPT_ALL) => {
+            if let Some(made) = undo {
+                let removed = app.undo_accept_all(&made);
+                replace_view_preserving_cursor(app);
+                crate::review_dock::follow(app);
+                app.flash(format!("{removed} review comments removed"));
+                return;
+            }
             let made = app.accept_all_pending();
             if made > 0 {
                 replace_view_preserving_cursor(app);
                 crate::review_dock::follow(app);
-                app.flash(format!("{made} comments from review"));
+                app.flash(format!("{made} comments from review · A again to undo"));
             }
         }
         // Esc は層の表を通る（`crate::esc`）— 一覧の Enter で作った選択が
