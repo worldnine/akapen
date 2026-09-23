@@ -266,10 +266,59 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 /// Copy `text` into the system clipboard. Errors mention installing one of
 /// the Linux clipboard tools, since macOS ships pbcopy.
+///
+/// テストのビルドでは下の `test_clipboard` に差し替わる。
+#[cfg(not(test))]
 pub fn copy_to_clipboard(text: &str) -> Result<()> {
     let (cmd, args) = select_tool(CLIPBOARD_TOOLS, which)
         .context("no clipboard tool found (install wl-clipboard, xclip, or xsel)")?;
     copy_via(cmd, args, text)
+}
+
+/// テストの `copy_to_clipboard` — 本物のクリップボードには触らない。
+/// `cargo test` のたびに手元のクリップボードを上書きしないためと、道具の
+/// 無い CI のランナーでもトーストの色がクリップボードに左右されないため。
+#[cfg(test)]
+pub fn copy_to_clipboard(text: &str) -> Result<()> {
+    test_clipboard::copy(text)
+}
+
+/// テスト用のクリップボード。コピーは常に成功する。道具の無い環境の
+/// 失敗は [`test_clipboard::unavailable`] で再現する。
+#[cfg(test)]
+pub(crate) mod test_clipboard {
+    use std::cell::Cell;
+
+    use anyhow::{Result, bail};
+
+    thread_local! {
+        // libtest はテストごとにスレッドを分けるので、並んで走る別の
+        // テストには漏れない。
+        static UNAVAILABLE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn copy(_text: &str) -> Result<()> {
+        if UNAVAILABLE.get() {
+            bail!("no clipboard tool found (test clipboard)");
+        }
+        Ok(())
+    }
+
+    /// 戻り値を持っているあいだ、このスレッドのコピーは道具が無いときと
+    /// 同じく失敗する。
+    #[must_use = "捨てるとその場で元に戻る"]
+    pub(crate) fn unavailable() -> Unavailable {
+        UNAVAILABLE.set(true);
+        Unavailable
+    }
+
+    pub(crate) struct Unavailable;
+
+    impl Drop for Unavailable {
+        fn drop(&mut self) {
+            UNAVAILABLE.set(false);
+        }
+    }
 }
 
 /// How long a clipboard/send child may run before it is killed. A tool
@@ -1017,6 +1066,22 @@ mod tests {
             select_tool(CLIPBOARD_TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(c, _)| c),
             Some("pbcopy")
         );
+    }
+
+    #[test]
+    fn which_wants_an_executable_file_not_just_a_name() {
+        // テストでは copy_to_clipboard が差し替わって道具を探さないので、
+        // 探し方はここで確かめる。
+        use std::os::unix::fs::PermissionsExt;
+        assert!(super::which("sh"));
+        assert!(!super::which("definitely-not-a-real-tool-xyz"));
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("tool");
+        std::fs::write(&tool, "").unwrap();
+        assert!(!super::is_executable(&tool), "present but not executable");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::is_executable(&tool));
+        assert!(!super::is_executable(dir.path()), "a directory is not a tool");
     }
 
     #[test]
