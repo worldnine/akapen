@@ -2175,6 +2175,16 @@ impl App {
         before - self.comments.len()
     }
 
+    /// フッタの `A` の案内 — 戻せるあいだ（[`Self::review_accept_all_undo`]）は
+    /// `A undo all`、それ以外は `A accept all`。
+    pub(crate) fn accept_all_hint(&self) -> &'static str {
+        if self.review_accept_all_undo.is_some() {
+            "A undo all"
+        } else {
+            "A accept all"
+        }
+    }
+
     /// **見た本数と一覧の行数**（読み出しの `3/9`、一覧の題の `(3/9)`）。
     ///
     /// 分母は一覧の行の全部 — 捨てた候補も一覧に残るので数える。分子は

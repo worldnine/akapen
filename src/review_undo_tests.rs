@@ -249,6 +249,19 @@ fn a_that_accepts_nothing_leaves_nothing_to_undo() {
     assert_eq!(app.comments.len(), 3, "a で作ったコメントは A で消えない");
 }
 
+#[test]
+fn the_footer_says_a_undo_all_only_while_the_undo_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    assert!(footer_texts(&app).iter().any(|t| t == "A accept all"));
+    press(&mut app, 'A');
+    let texts = footer_texts(&app);
+    assert!(texts.iter().any(|t| t == "A undo all"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "A accept all"), "{texts:?}");
+    press(&mut app, 'j');
+    assert!(footer_texts(&app).iter().any(|t| t == "A accept all"), "移動したら戻す案内は消える");
+}
+
 // ---- 2. Accepted はコメントから決まる -----------------------------------
 
 #[test]
