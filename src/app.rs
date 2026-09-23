@@ -267,7 +267,7 @@ pub(crate) struct App {
     /// top message (a prompt suppresses it).
     pub(crate) toast_fx: Option<tachyonfx::Effect>,
     /// **マーカーが引かれる演出**（marks モード）。答えが届いた瞬間に
-    /// 立ち、700 ms で終わる（[`crate::effects::marks_reveal_effect`]）。
+    /// 立ち、950 ms で終わる（[`crate::effects::marks_reveal_effect`]）。
     ///
     /// **view モードにも source モードにも乗る。** 琥珀は両方で塗られる
     /// ので、演出だけ view 限定だと「source では効かない機能」になる
@@ -957,6 +957,7 @@ impl App {
         }
         self.marks_fx = Some(crate::effects::marks_reveal_effect(
             self.decoration_styles.mark_bg(),
+            self.decoration_styles.mark_flash_bg(),
             self.decoration_styles.page_bg(),
         ));
     }

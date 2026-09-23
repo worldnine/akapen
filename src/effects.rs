@@ -630,46 +630,27 @@ pub(crate) fn ghost_effect() -> Effect {
 
 // ---- marks モードのマーカーが引かれる演出 ------------------------------
 
-/// 薄く乗るまで（ミリ秒）。答えが届いた瞬間に、光る箇所が**全部同時に**
-/// ページ色から琥珀の半分まで上がる。「どこが光るのか」がまず一望できる。
+/// 段 1（ページ色から琥珀の半分まで、全部同時に上げる）の長さ。
+///
+/// まず「どこが光るのか」が一望できる。
 pub(crate) const MARKS_FADE_MS: u32 = 250;
-/// 線が引かれるまで（ミリ秒）。左→右のスイープで、半分の琥珀が満ちる。
+/// 線が引かれるまで（ミリ秒）。左→右のスイープ。
 pub(crate) const MARKS_SWEEP_MS: u32 = 450;
-/// 演出の全長。**1 秒以内**（2026-09-22 の読み手の注文 3）。判定の到着は
-/// 数秒かかるが、演出はそれとは別物で、待たせるためのものではない。
-pub(crate) const MARKS_REVEAL_MS: u32 = MARKS_FADE_MS + MARKS_SWEEP_MS;
+/// 線が通ったセルが確定色まで乾く長さ。
+pub(crate) const MARKS_COOL_MS: u32 = 250;
+/// 演出の全長（250 + 450 + 250 = 950 ms）。
+///
+/// **1 秒以内**（2026-09-22 の読み手の注文 3）。判定の到着は数秒かかるが、
+/// 演出はそれとは別物で、待たせるためのものではない。
+pub(crate) const MARKS_REVEAL_MS: u32 = MARKS_FADE_MS + MARKS_SWEEP_MS + MARKS_COOL_MS;
 
 /// スイープが通る前の濃さ（琥珀への blend の割合）。
 const MARKS_PRE_SWEEP: f32 = 0.5;
 
-/// **マーカーが引かれる演出。** 2 段:
-///
-/// ```text
-/// 0 ─────────── 250 ms ─────────── 700 ms
-///   薄く全箇所に乗る    線が左→右に引かれる
-/// ```
-///
-/// # どのセルを掴むか — 背景色そのもの
-///
-/// toast が [`CellFilter::BgColor`] でバナーのセルだけを掴んでいるのと
-/// 同じ手で、**琥珀の背景色でフィルタする**。光っているセルは琥珀の背景を
-/// 持っている（`DecorationKind::SemanticMark` は背景しか書かない）ので、
-/// 「今回どこが光ったか」の台帳を別に持たなくてよい。
-///
-/// 副作用として**カーソル行は演出に入らない**。帯が行全体の背景を塗って
-/// マークより優先するので（`docs/gotchas/rendering.md`「カーソル行の
-/// MARKED は帯に隠れる」）、その行のセルは琥珀ではない。静止画で琥珀が
-/// 乗らない行は、動いても乗らない — 見え方が一貫する。
-///
-/// # 色は焼き込まない
-///
-/// `amber` と `page` は `DecorationStyles`（テーマから解決済み）から
-/// 来る。`--light` でも `--theme DarkNeon` でも `--mark-blend` を動かしても
-/// 同じ演出が乗るのはそのためで、ここに色を書くと片方でしか合わなくなる。
 /// フッタ右下の読み出しが**変化の瞬間だけ**明るくなる長さ。
 ///
 /// 300 ms は「目の端で気づくが、読みに来る頃には戻っている」長さである。
-/// マーカーの演出（[`MARKS_REVEAL_MS`] = 700 ms）より短いのは、こちらが
+/// マーカーの演出（[`MARKS_REVEAL_MS`] = 950 ms）より短いのは、こちらが
 /// 「値が変わった」の合図で、あちらは「線が引かれる」という出来事だから。
 pub(crate) const READOUT_FLASH_MS: u32 = 300;
 
@@ -713,25 +694,55 @@ pub(crate) fn readout_flash_effect(bright: Color) -> Effect {
     )
 }
 
-pub(crate) fn marks_reveal_effect(amber: Color, page: Color) -> Effect {
+/// **マーカーが引かれる演出。** 答えが届いた瞬間に走る、3 段の 950 ms:
+///
+/// ```text
+/// 0 ─── 250 ms ───┬───────── 450 ms ─────────┬── 250 ms ──
+///   半分まで一斉に上がる   濃い琥珀の線が左→右に引かれる   後ろが確定色に乾く
+/// ```
+///
+/// 1 つのセルの時間変化は
+/// **ページ → 半分 →（線が通過）`bright` → `amber`** である。
+/// 前線より右は半分で待ち、前線が来た瞬間に一番濃くなり、そこから乾く。
+///
+/// **線だけ濃く、確定は読みやすい濃さのまま。** 読み手の注文（2026-09-23）
+/// で、確定色は amber（0.27）のまま、引かれる線に
+/// [`MARK_FLASH_BLEND`]（0.65）を借りる形になった。以前は線も確定色で、
+/// 「左から右にシュッと引かれる」動きはそのままに線だけを強くしている。
+///
+/// # どのセルを掴むか — 背景色そのもの
+///
+/// toast が [`CellFilter::BgColor`] でバナーのセルだけを掴んでいるのと
+/// 同じ手で、**琥珀の背景色でフィルタする**。光っているセルは琥珀の背景を
+/// 持っている（`DecorationKind::SemanticMark` は背景しか書かない）ので、
+/// 「今回どこが光ったか」の台帳を別に持たなくてよい。
+///
+/// 副作用として**カーソル行は演出に入らない**。帯が行全体の背景を塗って
+/// マークより優先するので（`docs/gotchas/rendering.md`「カーソル行の
+/// MARKED は帯に隠れる」）、その行のセルは琥珀ではない。静止画で琥珀が
+/// 乗らない行は、動いても乗らない — 見え方が一貫する。
+///
+/// # 色は焼き込まない
+///
+/// `amber` / `bright` / `page` は `DecorationStyles`（テーマから解決済み）
+/// から来る。`--light` でも `--theme DarkNeon` でも `--mark-blend` を
+/// 動かしても同じ演出が乗るのはそのためで、ここに色を書くと片方でしか
+/// 合わなくなる。
+pub(crate) fn marks_reveal_effect(amber: Color, bright: Color, page: Color) -> Effect {
     let fade = MARKS_FADE_MS as f32 / MARKS_REVEAL_MS as f32;
+    let cool = MARKS_COOL_MS as f32 / MARKS_REVEAL_MS as f32;
+    // 前線が動ける幅。最後のセルがちょうど演出の終わりに乾き終わる。
+    let sweep = 1.0 - fade - cool;
     let half = lerp_color(page, amber, MARKS_PRE_SWEEP);
     let mut effect = fx::effect_fn_buf(
-        (amber, page, half),
+        (amber, bright, page, half),
         (MARKS_REVEAL_MS, Interpolation::Linear),
-        move |(amber, page, half), ctx, buf| {
+        move |(amber, bright, page, half), ctx, buf| {
             let alpha = ctx.timer.alpha();
             let area = ctx.area;
             if area.width == 0 {
                 return;
             }
-            // 段 2 のスイープが「いまどこまで来ているか」（画面の桁）。
-            let sweep = if alpha <= fade {
-                None
-            } else {
-                let p = (alpha - fade) / (1.0 - fade);
-                Some(area.x as f32 + p * area.width as f32)
-            };
             for y in area.y..area.bottom() {
                 for x in area.x..area.right() {
                     let cell = &mut buf[(x, y)];
@@ -739,19 +750,23 @@ pub(crate) fn marks_reveal_effect(amber: Color, page: Color) -> Effect {
                     if cell.style().bg != Some(*amber) {
                         continue;
                     }
-                    match sweep {
-                        // 段 1: ページ色から半分の琥珀まで、全箇所同時に。
-                        None => {
-                            let t = (alpha / fade).clamp(0.0, 1.0) * MARKS_PRE_SWEEP;
-                            cell.set_bg(lerp_color(*page, *amber, t));
+                    let bg = if alpha <= fade {
+                        // 段 1: ページ色から半分まで、全部同時に。
+                        let t = (alpha / fade).clamp(0.0, 1.0) * MARKS_PRE_SWEEP;
+                        lerp_color(*page, *amber, t)
+                    } else {
+                        // 段 2: 前線がこのセルへ来る時刻。右側は半分で待つ。
+                        let front =
+                            fade + (x as f32 - area.x as f32) / area.width as f32 * sweep;
+                        let age = (alpha - front) / cool;
+                        if age <= 0.0 {
+                            *half
+                        } else {
+                            // 段 3: 通った線は `bright` から確定色へ乾く。
+                            lerp_color(*bright, *amber, age.clamp(0.0, 1.0))
                         }
-                        // 段 2: 通過済みは琥珀のまま（何もしない）、
-                        // これからの所は半分で待つ。
-                        Some(sweep) if (x as f32) > sweep => {
-                            cell.set_bg(*half);
-                        }
-                        Some(_) => {}
-                    }
+                    };
+                    cell.set_bg(bg);
                 }
             }
         },
@@ -761,6 +776,7 @@ pub(crate) fn marks_reveal_effect(amber: Color, page: Color) -> Effect {
     effect.filter(CellFilter::BgColor(amber));
     effect
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -805,6 +821,82 @@ mod tests {
         // The thumb itself is never overwritten by a star.
         for y in (area.y + 1)..area.bottom() - 1 {
             assert_eq!(buf[(thumb_x, y)].symbol(), "▐");
+        }
+    }
+
+    // ---- マーカーが引かれる演出 -----------------------------------------
+
+    /// 琥珀のセルだけを並べた 1 行のバッファ。演出は背景色でセルを選ぶので、
+    /// 描画ループと同じ状態を作る。
+    fn amber_row(area: Rect, amber: Color) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        for x in area.x..area.right() {
+            buf[(x, area.y)].set_bg(amber);
+        }
+        buf
+    }
+
+    fn bg_of(buf: &Buffer, x: u16, y: u16) -> Color {
+        buf[(x, y)].style().bg.expect("a background")
+    }
+
+    /// 2 色のあいだの距離（RGB のマンハッタン）。「どちらに近いか」だけを
+    /// 見るためのもの。
+    fn dist(a: Color, b: Color) -> i32 {
+        let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg_, bb)) = (a, b) else {
+            panic!("RGB")
+        };
+        (ar as i32 - br as i32).abs()
+            + (ag as i32 - bg_ as i32).abs()
+            + (ab as i32 - bb as i32).abs()
+    }
+
+    /// **演出は、半分まで上がってから、濃い琥珀の線が左→右に引かれ、
+    /// 後ろが確定色へ乾く。** 1 つのセルの変化は
+    /// **ページ → 半分 → `bright` → `amber`**。
+    #[test]
+    fn the_reveal_puts_a_bright_line_across_and_settles_behind_it() {
+        let amber = Color::Rgb(90, 69, 33);
+        let bright = Color::Rgb(176, 124, 16);
+        let page = Color::Rgb(30, 30, 46);
+        let half = lerp_color(page, amber, MARKS_PRE_SWEEP);
+        let area = Rect::new(0, 0, 8, 1);
+        let mut fx = marks_reveal_effect(amber, bright, page);
+        let mut step = |ms: u64| {
+            let mut buf = amber_row(area, amber);
+            fx.process(Duration::from_millis(ms), &mut buf, area);
+            buf
+        };
+
+        // 段 1 の終わり: 全部が半分。
+        let buf = step(MARKS_FADE_MS as u64);
+        for x in area.x..area.right() {
+            assert_eq!(bg_of(&buf, x, 0), half, "段 1 は半分まで");
+        }
+
+        // 前線が左端に着いた直後: **左端だけが濃い琥珀**で、右側は半分のまま。
+        let buf = step(1);
+        let left = bg_of(&buf, 0, 0);
+        let right = bg_of(&buf, area.right() - 1, 0);
+        assert!(
+            dist(left, bright) < dist(left, half),
+            "前線の直後が明るくない: {left:?}"
+        );
+        assert_eq!(right, half, "前線の来ていない右端は半分のまま");
+
+        // 途中: 左端はもう確定色へ乾き始め、右端はまだ半分。
+        let buf = step(199);
+        let left = bg_of(&buf, 0, 0);
+        assert!(
+            dist(left, amber) < dist(left, bright),
+            "通った線が乾いていない: {left:?}"
+        );
+        assert_eq!(bg_of(&buf, area.right() - 1, 0), half);
+
+        // 終わり: 全部が確定色。
+        let buf = step(MARKS_REVEAL_MS as u64);
+        for x in area.x..area.right() {
+            assert_eq!(bg_of(&buf, x, 0), amber, "x={x}");
         }
     }
 }

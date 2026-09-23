@@ -14,7 +14,9 @@ use ratatui::style::{Color, Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 use ratatui::text::{Line, Text};
 
-use crate::decoration::{Decoration, DecorationBlend, DecorationKind, DecorationStyles, decorate_row};
+use crate::decoration::{
+    Decoration, DecorationBlend, DecorationKind, DecorationStyles, decorate_row,
+};
 use crate::highlight::{Highlighter, Span};
 use crate::render::{self, Rendered, Segment};
 use crate::source::Source;

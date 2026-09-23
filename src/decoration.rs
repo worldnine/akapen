@@ -232,11 +232,34 @@ pub const MARK_BG_BLEND: f32 = 0.27;
 /// A ceiling on the SHIPPED default, not on `--mark-blend`: the flag is a
 /// knob for looking at alternatives, and silently clamping what the user
 /// typed would make it a useless one. A test holds the default under it.
+///
+/// **It is the ceiling for the RESTING mark only.** The line the reveal
+/// draws is transient (it passes in 450 ms and its wake dries in 250 ms),
+/// so it may go past this — [`MARK_FLASH_BLEND`] does, and that is where
+/// the value is picked instead.
 pub const MARK_BG_BLEND_CEILING: f32 = 0.40;
 
 /// The ceiling is not advice: raising [`MARK_BG_BLEND`] past it stops the
 /// build, not a test run.
 const _: () = assert!(MARK_BG_BLEND <= MARK_BG_BLEND_CEILING);
+
+/// **演出で引かれる線の濃さ**（`Draw` の `bright`）。
+///
+/// 確定色（[`MARK_BG_BLEND`] = 0.27）より濃い。**`MARK_BG_BLEND_CEILING`
+/// を超えてよい唯一の場所**である — 天井は「**マークの上の字が読み続け
+/// られるか**」の天井で、一瞬で通り過ぎる線には当てはまらない（線が
+/// 通った後ろも 250 ms で確定色へ乾く）。
+///
+/// 読み手の注文（2026-09-23、「引かれる線をもっと明るく」）で 0.40 から
+/// 上げた。0.40 / 0.65 / 0.90 を実機に並べて選ばれたのが 0.65 である —
+/// ダークで `rgb(176,124,16)`、その上の字は 2.83:1（確定色では 7.03:1）。
+/// 線は前線の 1 列だけでなく、通った後ろが乾くまでの 250 ms も濃いので、
+/// これ以上上げるとその帯の字が読めなくなる。
+pub const MARK_FLASH_BLEND: f32 = 0.65;
+
+/// **線は確定色の天井を超えていること。** これが崩れると「引かれる線」が
+/// 確定色に紛れて見えなくなるので、テストではなくビルドで止める。
+const _: () = assert!(MARK_FLASH_BLEND > MARK_BG_BLEND_CEILING);
 
 /// How far a [`DecorationKind::Dim`] foreground is moved from its own
 /// color toward the theme background. 0.60 was picked by eye on a real
@@ -269,6 +292,8 @@ impl Default for DecorationBlend {
 pub struct DecorationStyles {
     /// The mark's patch: a background and nothing else.
     mark: Style,
+    /// **演出で引かれる線の色**（[`Self::mark_flash_bg`]）。
+    flash: Color,
     /// Where a dimmed foreground travels toward — the theme's background.
     dim_target: Color,
     /// The foreground a span that declares none actually renders with.
@@ -284,6 +309,8 @@ impl Default for DecorationStyles {
     fn default() -> Self {
         Self {
             mark: Style::default().bg(MARK_BG_DARK),
+            // ダークの紙 rgb(30,30,46) から 0.65 の色。
+            flash: Color::Rgb(0xb0, 0x7c, 0x10),
             dim_target: DIM_TARGET_DARK,
             default_fg: Color::Rgb(0xcd, 0xd6, 0xf4),
             dim_blend: DIM_BLEND,
@@ -295,19 +322,22 @@ impl DecorationStyles {
     /// Resolve both kinds against `highlighter`'s theme at `blend`.
     pub fn from_theme(highlighter: &Highlighter, blend: DecorationBlend) -> Self {
         let default_fg = highlighter.default_fg();
+        let dim_target = match highlighter.theme().settings.background {
+            Some(bg) => Color::Rgb(bg.r, bg.g, bg.b),
+            // No theme background at all: pick the side from the text
+            // color, exactly as `mark_background` does.
+            None => match default_fg {
+                Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => {
+                    DIM_TARGET_DARK
+                }
+                _ => DIM_TARGET_LIGHT,
+            },
+        };
         Self {
             mark: Style::default().bg(mark_background(highlighter, blend.mark)),
-            dim_target: match highlighter.theme().settings.background {
-                Some(bg) => Color::Rgb(bg.r, bg.g, bg.b),
-                // No theme background at all: pick the side from the text
-                // color, exactly as `mark_background` does.
-                None => match default_fg {
-                    Color::Rgb(r, g, b) if r as u32 + g as u32 + b as u32 >= 3 * 128 => {
-                        DIM_TARGET_DARK
-                    }
-                    _ => DIM_TARGET_LIGHT,
-                },
-            },
+            // **演出の線の色。** 確定色より濃い（[`MARK_FLASH_BLEND`]）。
+            flash: mark_background(highlighter, MARK_FLASH_BLEND),
+            dim_target,
             default_fg,
             dim_blend: blend.dim,
         }
@@ -318,14 +348,27 @@ impl DecorationStyles {
         self.mark
     }
 
+    /// **演出で引かれる線の色。**
+    ///
+    /// [`MARK_FLASH_BLEND`]（0.65）の色で、確定色（[`Self::mark_bg`]）より
+    /// 濃い。`marks_reveal_effect` は**この色で線を引き、通った後ろを確定色へ
+    /// 戻す**ので、**「目立たないが読みやすい」確定色を変えずに、引かれる
+    /// 線の瞬間だけ強くする**ことができる（読み手の注文、2026-09-23）。
+    ///
+    /// **焼き込まない** — `--light` でも `--theme` でも同じ式で出る。
+    pub fn mark_flash_bg(&self) -> Color {
+        self.flash
+    }
+
     /// The mark's background color on its own — the amber the paint
-    /// actually writes.
+    /// actually writes, and the color the reveal settles to.
     ///
     /// The marks reveal animation filters the frame by exactly this
-    /// color (`crate::effects::marks_reveal_effect`), which is why it is
-    /// read from here instead of being written into the effect: a theme,
+    /// color (`crate::effects::marks_reveal_effect`), which is why it is read
+    /// from here instead of being written into the effect: a theme,
     /// `--light` and `--mark-blend` all move it, and there must be one
-    /// place that decides.
+    /// place that decides. The bright color the drawn LINE carries is
+    /// [`Self::mark_flash_bg`].
     pub fn mark_bg(&self) -> Color {
         self.mark.bg.unwrap_or(MARK_BG_DARK)
     }
@@ -1074,6 +1117,39 @@ mod tests {
                 (x as i32 - p as i32).abs() < (a as i32 - p as i32).abs()
             };
             assert!(near(r, fr, page.r) && near(g, fg_, page.g) && near(b, fb, page.b));
+        }
+    }
+
+    /// **引かれる線は、確定色より必ず濃い。** それが演出の全体の狙いで、
+    /// これが崩れると「線が引かれる」が見えなくなる。
+    ///
+    /// 天井（[`MARK_BG_BLEND_CEILING`] = 0.40）は**確定色**の話なので、
+    /// 線はそれを超えてよい — 0.40 / 0.65 / 0.90 を実機に並べて 0.65 が
+    /// 選ばれた（読み手の注文、2026-09-23）。
+    #[test]
+    fn the_drawn_line_is_brighter_than_the_resting_mark() {
+        for light in [false, true] {
+            let hl = Highlighter::new(None, light);
+            let styles = DecorationStyles::from_theme(&hl, Default::default());
+            let page = hl.theme().settings.background.expect("a theme background");
+            let page = Color::Rgb(page.r, page.g, page.b);
+            let mark = styles.mark_bg();
+            let flash = styles.mark_flash_bg();
+            assert_eq!(
+                flash,
+                mark_background(&hl, MARK_FLASH_BLEND),
+                "light={light}: 線は式どおり"
+            );
+            // 「紙からどれだけ離れているか」で濃さを比べる。
+            let away = |c: Color| {
+                let (Color::Rgb(r, g, b), Color::Rgb(pr, pg, pb)) = (c, page) else {
+                    panic!("RGB")
+                };
+                (r as i32 - pr as i32).abs()
+                    + (g as i32 - pg as i32).abs()
+                    + (b as i32 - pb as i32).abs()
+            };
+            assert!(away(flash) > away(mark), "light={light}: 線が確定色より濃くない");
         }
     }
 
