@@ -453,7 +453,7 @@ use crate::comment::Selection;
         let rows = help_rows(false, false, true, false, false);
         assert!(rows
             .iter()
-            .any(|(l, k)| *l == "compare" && k.contains("a acknowledge")));
+            .any(|(l, k)| *l == "compare" && k.contains("a seen")));
         let rows = help_rows(false, true, true, false, false);
         assert!(!rows.iter().any(|(l, _)| *l == "compare"));
     }
@@ -1462,6 +1462,14 @@ use crate::comment::Selection;
         assert_eq!(app.cursor, 1, "n lands on the unreviewed block");
 
         on_source_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, None);
+        // 変更を見る側の語は baseline / seen（Review は校正の側の語）。
+        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("seen"));
+        // 見終えたあとの `n` は「baseline から変わっていない」と言う。
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no changes since baseline")
+        );
 
         assert!(app.review_changed.is_empty());
         assert!(app.review_deleted_before.is_empty());
@@ -1503,6 +1511,8 @@ use crate::comment::Selection;
         on_source_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, None);
 
         assert_eq!(app.histories[0].reviewed_content.as_deref(), Some(old));
+        let status = app.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(status.starts_with("baseline set · "), "{status:?}");
         assert!(app.review_changed.contains(&0));
         assert_eq!(app.histories[0].position, 1, "selecting a baseline does not leave the past");
     }

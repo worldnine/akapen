@@ -468,7 +468,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
             .as_deref()
             .map(|note| format!(" · {note}"))
             .unwrap_or_default();
-        app.flash(format!("reloaded · {count} to review{note}"));
+        app.flash(format!("reloaded · {count} unseen{note}"));
     }
     Ok(())
 }

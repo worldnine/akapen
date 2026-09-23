@@ -525,7 +525,7 @@ pub(crate) fn help_rows(
         rows.insert(1, ("file", "]/[ · ^o files"));
         rows.insert(2, ("time", "← older · newer → · hold:scrub · t detail"));
         rows.push(("reload", "r reload · i ignore · e edit"));
-        rows.push(("compare", "n/N next/prev · a acknowledge/set baseline"));
+        rows.push(("compare", "n/N next/prev change · a seen/set baseline"));
     }
     if semantic {
         // Only with `--semantic`: without an annotation these keys refuse,

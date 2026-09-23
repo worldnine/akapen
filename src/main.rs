@@ -176,11 +176,11 @@ fn main() -> Result<()> {
                  keys:\n\
                  \x20 view/source:  j/k scroll, Left/Right time travel, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
                  \x20                v select, c comment, s send, y copy, d delete, e edit,\n\
-                 \x20                r reload, a acknowledge/set baseline, n/F7/]c next difference, ]/[ files,\n\
+                 \x20                r reload, a seen/set baseline, n/F7/]c next difference, ]/[ files,\n\
                  \x20                l comments, Ctrl+o files, Tab source mode\n\
                  \x20 source mode:  j/k move, v select, c comment, s send,\n\
                  \x20                y copy, d delete, e edit, r reload, ^n/^p next comment,\n\
-                 \x20                a acknowledge/set baseline, n/F7/]c next difference, ]/[ files,\n\
+                 \x20                a seen/set baseline, n/F7/]c next difference, ]/[ files,\n\
                  \x20                l comments, Ctrl+o files, Tab view mode (Markdown only)\n\
                  \x20 overlays:     j/k move, Enter jump/switch, d delete (comments),\n\
                  \x20                ? help, Esc/q close, click outside close\n\
@@ -3212,7 +3212,7 @@ fn jump_review_mark(app: &mut App, dir: isize) {
     }
     let targets = review_targets(app);
     if targets.is_empty() {
-        app.flash("no differences from review baseline");
+        app.flash("no changes since baseline");
         return;
     }
     let line = if app.mode == Mode::View {
@@ -3379,7 +3379,7 @@ pub(crate) fn acknowledge_review(app: &mut App, announce: bool) -> bool {
         Ok(None)
     };
     if let Err(error) = result {
-        app.flash_err(format!("review checkpoint failed: {error:#}"));
+        app.flash_err(format!("baseline failed: {error:#}"));
         return false;
     }
     // Acknowledging or choosing a baseline completes the current review
@@ -3389,9 +3389,9 @@ pub(crate) fn acknowledge_review(app: &mut App, announce: bool) -> bool {
     refresh_review_marks(app);
     if announce {
         if let Some(label) = baseline_label {
-            app.flash(format!("review baseline set · {label}"));
+            app.flash(format!("baseline set · {label}"));
         } else {
-            app.flash("reviewed");
+            app.flash("seen");
         }
     }
     true
