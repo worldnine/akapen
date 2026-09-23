@@ -279,7 +279,7 @@ fn the_list_shows_the_line_the_rule_the_score_and_the_head() {
     assert!(screen.contains("review (0/2)"), "タイトル:\n{screen}");
     assert!(screen.contains("L3 · Filler 0.91"), "1 行目:\n{screen}");
     assert!(screen.contains("L5 · Filler 0.55"), "2 行目:\n{screen}");
-    assert!(screen.contains("a:accept"), "キーの案内:\n{screen}");
+    assert!(screen.contains("a accept"), "キーの案内（フッタ）:\n{screen}");
     // 全角は 2 セルを占めるので、空白を落とした形で見る。
     let packed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(packed.contains("ひとつめの段落。"), "Unit の先頭:\n{screen}");
@@ -1012,7 +1012,7 @@ fn the_list_and_the_help_mention_e() {
     deliver(&mut app, "filler", answer([Some(0.9), None, None]));
     crate::overlay::open_review(&mut app);
     let screen = list_screen(&mut app);
-    assert!(screen.contains("e:edit"), "{screen}");
+    assert!(screen.contains("e edit"), "{screen}");
     assert!(crate::keys::REVIEW_HINT.contains("e edit"), "{}", crate::keys::REVIEW_HINT);
 }
 

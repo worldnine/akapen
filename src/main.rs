@@ -30,6 +30,7 @@ mod render;
 mod lint;
 mod review;
 mod review_contract;
+mod review_dock;
 mod review_rules;
 mod semantic;
 mod semantic_cache;
@@ -792,7 +793,12 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
                         render_pending_history(app, true);
                         on_mouse(app, mouse);
                     }
-                    Event::Resize(..) => mark_view_dirty(app),
+                    Event::Resize(..) => {
+                        mark_view_dirty(app);
+                        // 高さだけの変化では view を描き直さない。据え付けの
+                        // 高さが変わると本文の高さも変わるので、ここで送る。
+                        crate::review_dock::follow(app);
+                    }
                     _ => {}
                 }
             }
@@ -961,14 +967,26 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
     // A mouse action cancels a pending `]`/`[` chord: the user moved on,
     // the bracket's default file switch must not fire later.
     app.pending_chord = None;
-    // With an overlay open the mouse drives the overlay only: a click
-    // outside the panel closes it (modal dismiss), a click on an entry
-    // selects it, and the wheel moves the selection (j/k semantics).
-    // Nothing touches the content underneath.
-    if app.overlay.is_some() {
+    // **Review の一覧は窓ではない**（本文の下に据え付けてある）。一覧の
+    // 上のマウスは一覧を動かし、本文の上のマウスは本文に届く — 本文を
+    // 押しても一覧は閉じない（外を押して閉じるのは被さる窓の作法である）。
+    if crate::review_dock::is_open(app) {
+        if let Some(dock) = crate::review_dock::current(app)
+            && mouse.row >= dock.area.y
+            && mouse.row < dock.area.y + dock.area.height
+        {
+            on_review_dock_mouse(app, mouse);
+            return;
+        }
+        // 本文の上: 下の本文の扱いへ落ちる。
+    } else if app.overlay.is_some() {
+        // With an overlay open the mouse drives the overlay only: a click
+        // outside the panel closes it (modal dismiss), a click on an entry
+        // selects it, and the wheel moves the selection (j/k semantics).
+        // Nothing touches the content underneath.
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let (w, h) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+                let (w, h) = crate::app::terminal_size();
                 // 開いている overlay 自身の枠。`m` の popup は小さい箱
                 // なので、70 % パネルで測ると箱の外を押しても行が選ばれる。
                 let panel = crate::overlay::active_overlay_panel(
@@ -1063,7 +1081,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
     // overflows; when everything fits, clicks on the column fall through
     // to the content. Viewport-only scroll, like the wheel: the cursor
     // keeps its absolute position.
-    let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+    let (w, _) = crate::app::terminal_size();
     let viewport = if app.view_active() {
         app.view_viewport_rows()
     } else {
@@ -1146,7 +1164,7 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
             // full path to the clipboard. The hit regions come from the
             // same layout math draw_title uses.
             if mouse.row == 0 {
-                let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+                let (w, _) = crate::app::terminal_size();
                 match title_hit_at(app, w, mouse.column) {
                     Some(TitleHit::CommentCount) => open_overlay(app, Overlay::Comments, 0),
                     Some(TitleHit::FileCount) => {
@@ -1205,6 +1223,37 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) {
     }
 }
 
+/// 据え付けた Review の一覧の上のマウス。行を押せばその候補を選んで
+/// 本文を送り（j/k と同じ）、同じ行の 2 度押しは `Enter`。ホイールは
+/// 一覧のカーソルを動かす。題・出どころ・理由の行は押しても何もしない。
+fn on_review_dock_mouse(app: &mut App, mouse: MouseEvent) {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(idx) = crate::review_dock::entry_at(app, mouse.row) else {
+                app.last_overlay_click = None;
+                return;
+            };
+            let is_double = app
+                .last_overlay_click
+                .is_some_and(|(t, prev)| t.elapsed() < app.double_click_ms && prev == idx);
+            app.last_overlay_click = Some((Instant::now(), idx));
+            app.overlay_cursor = idx;
+            keep_overlay_cursor_visible(app);
+            crate::review_dock::follow(app);
+            if is_double {
+                activate_overlay_selection(app);
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            on_overlay_key(app, KeyCode::Char('j'), KeyModifiers::NONE);
+        }
+        MouseEventKind::ScrollUp => {
+            on_overlay_key(app, KeyCode::Char('k'), KeyModifiers::NONE);
+        }
+        _ => {}
+    }
+}
+
 /// Source-mode wheel scroll: the viewport alone moves. The cursor keeps
 /// its absolute file position — it may scroll off screen, and scrolling
 /// back finds it exactly where it was (herdr-review style). Keyboard j/k,
@@ -1242,7 +1291,7 @@ fn source_row_at(app: &App, content_row: usize, col: usize) -> Option<usize> {
 /// source mode draws no frame, so the whole terminal width is content
 /// except the scrollbar's track on the rightmost column).
 pub(crate) fn source_content_width(app: &App) -> u16 {
-    let (w, _) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+    let (w, _) = crate::app::terminal_size();
     let gutter_cols = 1 + app.source.gutter_width as u16 + 1;
     w.saturating_sub(gutter_cols + 1)
 }
@@ -3392,6 +3441,9 @@ fn rerender_view(app: &mut App) {
         // auto-scrolls to it every frame).
         view.keep_cursor_visible(app.view_viewport_rows());
         app.view = view;
+        // 幅が変わると割合で戻したカーソルは候補の行からずれうる。
+        // 一覧を据え付けているなら、選んだ候補へ送り直す。
+        crate::review_dock::follow(app);
     }
 }
 
@@ -4115,6 +4167,9 @@ mod marks_tests;
 
 #[cfg(test)]
 mod review_tests;
+
+#[cfg(test)]
+mod review_dock_tests;
 
 #[cfg(test)]
 mod mouse_tests;

@@ -47,10 +47,11 @@ pub(crate) enum Overlay {
     /// **Review の候補の一覧**（`R`）。`docs/design/marks-only-and-review-mode.md`
     /// 4 節。
     ///
-    /// **`Comments` と同じ体裁**（70 % パネル・黄色いタイトル・`▸` の
-    /// カーソル・j/k と Enter・Esc で閉じる）である。新しい語彙を足して
-    /// いないのは `MarkFor` と同じ理由で、**既にある作法を覚えている人が
-    /// 何も覚え直さずに使える**ようにするためである。
+    /// **窓ではなく、本文の下に据え付ける**（[`crate::review_dock`]）。
+    /// 被さる窓だと指摘箇所が窓の下に隠れて読めなかった（2026-09-23 の
+    /// 読み手の指摘）。キーは `Comments` と同じ作法（黄色いタイトル・`▸` の
+    /// カーソル・j/k と Enter・Esc で閉じる）で、**既にある作法を覚えている
+    /// 人が何も覚え直さずに使える**ようにしてある。
     ///
     /// **`MarkFor` の隣ではない。** marks の popup は「何を光らせるか」を
     /// 選ぶ箱で、こちらは「直す候補」の台帳である。共有しているのは
@@ -166,7 +167,12 @@ pub(crate) fn visible_cards(app: &App) -> Vec<&Comment> {
 /// scrolls).
 pub(crate) fn keep_overlay_cursor_visible(app: &mut App) {
     let rows = overlay_rows(app);
-    let visible = overlay_visible_rows();
+    // Review の一覧は窓ではなく据え付けで、行数は据え付けの配分が決める。
+    let visible = if app.overlay == Some(Overlay::Review) {
+        crate::review_dock::list_rows(app)
+    } else {
+        overlay_visible_rows()
+    };
     let max_offset = rows.len().saturating_sub(visible);
     let Some(cursor_row) = rows.iter().position(|r| *r == Some(app.overlay_cursor)) else {
         app.overlay_offset = app.overlay_offset.min(max_offset);
@@ -472,7 +478,9 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App) {
         Some(Overlay::MarkFor) => draw_mark_for_overlay(f, app),
         Some(Overlay::Files) => draw_files_overlay(f, app),
         Some(Overlay::Comments) => draw_comments_overlay(f, app),
-        Some(Overlay::Review) => draw_review_overlay(f, app),
+        // 窓ではない — 本文の下に据え付けてあり、`draw` が本文と並べて
+        // 描く（[`crate::review_dock::draw`]）。
+        Some(Overlay::Review) => {}
         Some(Overlay::Timeline) => draw_timeline_overlay(f, app),
         Some(Overlay::Help) => draw_help_overlay(f, app),
         None => {}
@@ -720,8 +728,8 @@ pub(crate) fn overlay_entry_at(app: &App, row: u16) -> Option<usize> {
             // header row (not selectable) then one row per comment.
             overlay_rows(app).get(rel).copied().flatten()
         }
-        // 見出しの行が無いので、行はそのまま添字である。
-        Overlay::Review => (rel < app.review_candidates.len()).then_some(rel),
+        // 据え付けの一覧は自前で測る（窓の 70 % パネルとは位置が違う）。
+        Overlay::Review => crate::review_dock::entry_at(app, row),
     }
 }
 
@@ -1064,10 +1072,11 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
 
 // ---- Review の候補の一覧（`R`） --------------------------------------
 //
-// `docs/design/marks-only-and-review-mode.md` 4 節。`Comments` の一覧の
-// 作法の写しである（70 % パネル・黄色いタイトル・`▸` のカーソル・
-// j/k と Enter・Esc で閉じる）。違うのは行の中身と、accept / dismiss の
-// 2 本のキーだけである。
+// `docs/design/marks-only-and-review-mode.md` 4 節。キーは `Comments` の
+// 一覧の作法の写しである（`▸` のカーソル・j/k と Enter・Esc で閉じる）。
+// 違うのは行の中身と、accept / dismiss の 2 本のキーと、**窓ではなく
+// 本文の下に据え付ける**ことである — 描くのも高さを決めるのも
+// [`crate::review_dock`]。
 
 /// 候補の出どころが 1 本も無いときの 1 行 — **何をすれば候補が出るか**。
 pub(crate) const NO_REVIEW_SOURCE: &str = "no review source — set --lint-cmd or enable a rule";
@@ -1084,6 +1093,9 @@ pub(crate) fn open_review(app: &mut App) {
     app.arm_review();
     open_overlay(app, Overlay::Review, 0);
     keep_overlay_cursor_visible(app);
+    // 候補が手元にあれば（2 度目以降）、本文はすぐ先頭の候補へ。無ければ
+    // 答えが届いたときに送る（[`App::accept_review_analysis`]）。
+    crate::review_dock::follow(app);
 }
 
 /// Enter — 本文の該当行へ飛ぶ。**一覧は開いたままである。**
@@ -1118,32 +1130,41 @@ fn review_overlay_jump(app: &mut App) {
 pub(crate) fn on_review_overlay_key(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
     let total = app.review_candidates.len();
     match key {
+        // 動いたら本文も送る（[`crate::review_dock::follow`]）— 選んだ
+        // 候補が本文の中ほどに来るので、`Enter` で飛ばなくても読める。
         KeyCode::Char('j') | KeyCode::Down => {
             if total > 0 {
                 app.overlay_cursor = (app.overlay_cursor + 1).min(total - 1);
                 keep_overlay_cursor_visible(app);
+                crate::review_dock::follow(app);
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.overlay_cursor = app.overlay_cursor.saturating_sub(1);
             keep_overlay_cursor_visible(app);
+            crate::review_dock::follow(app);
         }
         KeyCode::Enter => activate_overlay_selection(app),
+        // accept はカードを差し込み、本文の行が増える。候補を中ほどに
+        // 置き直す（dismiss は下線が消えるだけだが、同じ道を通す）。
         KeyCode::Char(crate::keys::REVIEW_ACCEPT) => {
             if app.accept_candidate(app.overlay_cursor) {
                 // コメントが本文にカードとして出る（`l` の一覧にも載る）。
                 replace_view_preserving_cursor(app);
+                crate::review_dock::follow(app);
             }
         }
         KeyCode::Char(crate::keys::REVIEW_DISMISS) => {
             if app.dismiss_candidate(app.overlay_cursor) {
                 replace_view_preserving_cursor(app);
+                crate::review_dock::follow(app);
             }
         }
         KeyCode::Char(crate::keys::REVIEW_ACCEPT_ALL) => {
             let made = app.accept_all_pending();
             if made > 0 {
                 replace_view_preserving_cursor(app);
+                crate::review_dock::follow(app);
                 app.flash(format!("{made} comments from review"));
             }
         }
@@ -1192,137 +1213,7 @@ pub(crate) fn review_edit_with(app: &mut App, run: impl FnOnce(&mut App, usize))
     }
     app.overlay = Some(Overlay::Review);
     keep_overlay_cursor_visible(app);
-}
-
-/// 候補の一覧を描く。1 行 = `L42 · Filler 0.87 · <Unit の先頭>`。
-///
-/// **accept / dismiss した行も残る。** 印だけが変わる（`✓` / `–`）ので、
-/// 「9 本のうち 3 本を見た」が一覧の形そのものになる。Pending だけ残す
-/// 切替は作らない（読み手の決定、2026-09-23）。
-pub(crate) fn draw_review_overlay(f: &mut Frame, app: &App) {
-    use ratatui::widgets::Clear;
-    let area = f.area();
-    let panel = overlay_panel(area);
-    f.render_widget(Clear, panel);
-    let dark_gray = Style::default().fg(Color::DarkGray);
-    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let cyan = Style::default().fg(Color::Cyan);
-
-    let (accepted, total) = app.review_counts();
-    // タイトルは `comments (3)` と同じ形。`3/9` は accept 済み / 全候補で、
-    // フッタの読み出しと同じ数である（2 か所で数えない）。
-    let title_text = if app.review_inflight > 0 {
-        " review · analyzing… ".to_string()
-    } else {
-        format!(" review ({accepted}/{total}) ")
-    };
-    let title_fill =
-        "─".repeat(panel.width.saturating_sub(title_text.width() as u16 + 2) as usize);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(title_text, yellow),
-        Span::styled(title_fill, dark_gray),
-    ])];
-
-    if total == 0 {
-        lines.push(Line::from(""));
-        // lint が失敗したなら**「0 件」とは言わない**（形の違う出力は
-        // 「指摘が無い」ではない）。
-        let message = if app.review_inflight > 0 {
-            " asking the analyser…".to_string()
-        } else if let Some(error) = app.review_lint_error.as_deref() {
-            format!(" {error}")
-        } else {
-            " nothing to fix in this document".to_string()
-        };
-        lines.push(Line::from(Span::styled(message, dark_gray)));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(" Esc/q:close", dark_gray)));
-        let block = Block::default().borders(Borders::ALL).border_style(dark_gray);
-        f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
-        return;
-    }
-
-    let inner = panel.width.saturating_sub(2) as usize;
-    let rows = overlay_rows(app);
-    let visible = overlay_visible_rows();
-    let offset = app.overlay_offset.min(rows.len().saturating_sub(visible));
-    for row in rows.iter().skip(offset).take(visible) {
-        let Some(entry) = row else { continue };
-        let Some(candidate) = app.review_candidates.get(*entry) else {
-            continue;
-        };
-        let selected = *entry == app.overlay_cursor;
-        // `L42` は候補の先頭行。範囲の候補も先頭だけを出す — 飛び先が
-        // 分かればよく、桁が揃っている方が 9 本を上から読める。
-        //
-        // Jev のルールは `Filler 0.87`、lint は `<code>` だけ（`<source>/` は
-        // 落とす。一覧の幅は理由の文に回す）。
-        let tag = match &candidate.finding {
-            crate::review::Finding::Rule { score, .. } => {
-                let label = app
-                    .review_rules
-                    .as_ref()
-                    .and_then(|rules| rules.get(&candidate.rule))
-                    .map(|rule| rule.label.clone())
-                    .unwrap_or_else(|| candidate.rule.clone());
-                format!("{label} {score:.2}")
-            }
-            crate::review::Finding::Lint { .. } => candidate
-                .rule
-                .split_once('/')
-                .map_or(candidate.rule.as_str(), |(_, code)| code)
-                .to_string(),
-        };
-        let head = format!(
-            "{}{} L{} · {} · ",
-            if selected { "▸ " } else { "  " },
-            candidate.mark(),
-            candidate.lines.0,
-            tag,
-        );
-        // Unit の先頭は 40 桁で足りるが、lint の理由の文は切ると意味が
-        // 読めないので、パネルの残り幅いっぱいまで使う。
-        let cols = match candidate.finding {
-            crate::review::Finding::Rule { .. } => REVIEW_HEAD_COLS,
-            crate::review::Finding::Lint { .. } => usize::MAX,
-        };
-        let body = crate::review::head_of(
-            &app.source.content,
-            candidate,
-            inner.saturating_sub(head.width()).min(cols),
-        );
-        // 見たものは沈める（`✓` も `–` も）。**残っているのは記録で
-        // あって作業ではない**ので、Pending と同じ明るさで並ぶと、
-        // どこまで進んだのかが読めない。
-        let done = !candidate.is_pending();
-        let head_style = if selected {
-            cyan.add_modifier(Modifier::BOLD)
-        } else if done {
-            dark_gray
-        } else {
-            yellow
-        };
-        let body_style = if selected {
-            Style::default().fg(Color::White)
-        } else if done {
-            dark_gray
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(head, head_style),
-            Span::styled(body, body_style),
-        ]));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " j/k:move  Enter:jump  a:accept  x:dismiss  A:accept all  e:edit  Esc/q:close",
-        dark_gray,
-    )));
-
-    let block = Block::default().borders(Borders::ALL).border_style(dark_gray);
-    f.render_widget(Paragraph::new(Text::from(lines)).block(block), panel);
+    crate::review_dock::follow(app);
 }
 
 /// 一覧に出す Unit の先頭の桁数（読み手の注文、2026-09-23）。

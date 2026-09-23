@@ -5,6 +5,33 @@
 
 ---
 
+### 本文の高さは端末の高さから直に出さない — Review の一覧が下に据わっている
+
+**症状（になるもの）**: `R` の一覧を開いたまま j/k やクリックをすると、
+カーソルが一覧の下に潜る・クリックが 1 行ずれる・スクロールバーの端が合わない。
+
+**原因**: `R` の一覧は窓ではなく**本文の下に据え付けてあり**、開いている間は本文の
+領域が一覧のぶん低い（`src/review_dock.rs`）。端末の高さ（`terminal::size()` /
+`App::terminal_height`）から `- 4` や `- 2` で本文の高さを出すと、一覧のぶんを
+数え損なう。本文の高さは **`App::view_viewport_rows` / `App::source_viewport_rows`**
+を通すこと（両方が `review_dock::body_rows_taken` を引く）。メッセージ行の y は
+`chrome::message_row`、一覧の矩形は `review_dock::split` / `current` が唯一の式。
+
+view では据え付けの題の行が本文の枠の下辺と**同じ行**に乗る（1 行重なる）ので、
+本文が失うのは据え付けの全高より 1 行少ない。source は枠が無いので全高を失う。
+この差を別の場所で計算し直すと 1 行ずれる。
+
+テストは端末の大きさを `crate::app::TEST_TERMINAL_SIZE` で `TestBackend` と揃える。
+`cargo test` は端末の中で走ると本物の大きさを拾うので、揃えないと
+`view_viewport_rows` と描いた本文が別の高さを見る。
+
+**確認したこと**: `src/review_dock_tests.rs` の
+`the_viewport_is_exactly_the_body_that_is_drawn`（view / source × 高さ 20・24・40・60
+で、計算した本文の高さと描いた本文の行数が一致）と
+`a_click_on_the_body_lands_on_the_line_drawn_there_and_keeps_the_list`。
+`timeline.rs` の `terminal_width` など、**幅だけ**を見ている箇所は据え付けの影響を
+受けない（一覧は横幅を取らない）。
+
 ### 横幅変更のフレーム比較は新旧バッファの共通領域だけを見る
 
 **症状**: 日本語を含む文書を表示したまま端末を 120 桁から 40 桁へ縮めると、
