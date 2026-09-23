@@ -15,6 +15,7 @@ mod comment;
 mod config;
 mod decoration;
 mod draw;
+mod edit_map;
 mod effects;
 mod export;
 mod focus;

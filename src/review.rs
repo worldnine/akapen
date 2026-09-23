@@ -165,14 +165,9 @@ pub(crate) fn candidates_for(
             atoms.sort_by_key(|range| range.start);
             let first = atoms.first()?.start;
             let last = atoms.last()?.end;
-            // 範囲の終端は排他。1 バイト戻して「最後に触っている行」を
-            // 取る（`crate::semantic::marked_lines` と同じ理由で、終端が
-            // ちょうど行頭だと触っていない次の行を指す）。
-            let start_line = tui_markdown::line_at(&starts, first) as u32 + 1;
-            let end_line = tui_markdown::line_at(&starts, last.saturating_sub(1)) as u32 + 1;
             Some(Candidate {
                 range: first..last,
-                lines: (start_line, end_line.max(start_line)),
+                lines: lines_at(&starts, &(first..last)),
                 rule: rule.id.clone(),
                 action: rule.action,
                 score,
@@ -191,6 +186,17 @@ pub(crate) fn candidates_for(
             .then(a.rule.cmp(&b.rule))
     });
     out
+}
+
+/// バイト範囲が触っている 1 始まりの行（先頭, 末尾）。
+///
+/// 範囲の終端は排他。1 バイト戻して「最後に触っている行」を取る
+/// （`crate::semantic::marked_lines` と同じ理由で、終端がちょうど行頭だと
+/// 触っていない次の行を指す）。
+pub(crate) fn lines_at(starts: &[usize], range: &Range<usize>) -> (u32, u32) {
+    let start_line = tui_markdown::line_at(starts, range.start) as u32 + 1;
+    let end_line = tui_markdown::line_at(starts, range.end.saturating_sub(1)) as u32 + 1;
+    (start_line, end_line.max(start_line))
 }
 
 /// 一覧に出す Unit の先頭 `cols` 桁。
@@ -285,6 +291,12 @@ impl DismissedStore {
     /// 呼び出し側は失敗を**握りつぶしてよい** — 書けなかったことは、
     /// 画面から候補を消さない理由にならない（次に開くと戻ってくるだけ）。
     pub(crate) fn append(&self, source_sha: &str, candidate: &Candidate) -> Result<()> {
+        self.append_key(source_sha, &candidate.rule, &candidate.range)
+    }
+
+    /// (ルール, 範囲) を 1 件追記する。[`Self::append`] と、差分越しの
+    /// 引き継ぎ（[`Self::carry`]）の共通の口。
+    fn append_key(&self, source_sha: &str, rule: &str, range: &Range<usize>) -> Result<()> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
         fs::DirBuilder::new()
             .recursive(true)
@@ -293,8 +305,8 @@ impl DismissedStore {
             .with_context(|| format!("create {}", dir.display()))?;
         let record = DismissedRecord {
             source_sha: source_sha.to_string(),
-            range: [candidate.range.start, candidate.range.end],
-            rule: candidate.rule.clone(),
+            range: [range.start, range.end],
+            rule: rule.to_string(),
             at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
@@ -311,6 +323,58 @@ impl DismissedStore {
             .with_context(|| format!("append {}", self.path.display()))?;
         Ok(())
     }
+
+    /// **捨てた判断を、見届けた書き換えの向こうへ写す。**
+    ///
+    /// `old_sha` の版で捨てた (ルール, 範囲) のうち、`map` で**中身が
+    /// 1 バイトも変わっていない**ものだけを新しい位置へ写し、`new_sha` の
+    /// 記録として追記する。範囲の中が少しでも変わっていれば写さない —
+    /// 直された文は判定し直す。
+    ///
+    /// 呼ぶのは akapen が前後の版を両方見た reload だけである
+    /// （[`crate::reload::reload_source`]）。閉じている間に変わった
+    /// ファイルには差分の元が無い。
+    ///
+    /// 新しい版に既にある記録（元に戻した版など）は二度書かない。書けな
+    /// かった 1 件は数に入れず先へ進む（[`Self::append`] と同じ理由）。
+    pub(crate) fn carry(
+        &self,
+        old_sha: &str,
+        new_sha: &str,
+        map: &crate::edit_map::EditMap,
+    ) -> Carried {
+        let mut out = Carried::default();
+        if old_sha.eq_ignore_ascii_case(new_sha) {
+            return out;
+        }
+        let already = self.load(new_sha);
+        let mut records: Vec<DismissedKey> = self.load(old_sha).into_iter().collect();
+        // 書く順を決める（HashSet の順は run ごとに変わる）。
+        records.sort();
+        for (rule, start, end) in records {
+            let Some(range) = map.map_range(&(start..end)) else {
+                out.changed += 1;
+                continue;
+            };
+            if already.contains(&(rule.clone(), range.start, range.end)) {
+                out.carried += 1;
+                continue;
+            }
+            if self.append_key(new_sha, &rule, &range).is_ok() {
+                out.carried += 1;
+            }
+        }
+        out
+    }
+}
+
+/// [`DismissedStore::carry`] の数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Carried {
+    /// 新しい位置へ写した本数。
+    pub(crate) carried: usize,
+    /// 範囲の中が変わっていて、写さなかった本数。
+    pub(crate) changed: usize,
 }
 
 // ---- `--review-json` -------------------------------------------------

@@ -55,7 +55,10 @@ pub(crate) fn reload_now(app: &mut App) {
 /// `r` retries manually.
 pub(crate) fn reload_now_auto(app: &mut App) {
     if finish_reload(app, false) {
-        app.flash("auto-reloaded");
+        match app.review_reload_note.clone() {
+            Some(note) => app.flash(format!("auto-reloaded · {note}")),
+            None => app.flash("auto-reloaded"),
+        }
     }
 }
 
@@ -258,6 +261,7 @@ pub(crate) fn ignore_change(app: &mut App) {
 /// cursor fraction.
 /// Triggered by `r` only — never while Input is open.
 pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<()> {
+    app.review_reload_note = None;
     let new_source = Source::load(app.current_file_path().to_path_buf())?;
     if new_source.content == app.source.content {
         return Ok(()); // touched but unchanged
@@ -279,10 +283,34 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
         // messages as files.
         app.comments.retain(|comment| comment.file_path != current);
     }
-    let had_live_comments = app
-        .comments
-        .iter()
-        .any(|comment| comment.file_path == current && comment.revision.is_none());
+    // **見届けた書き換え**（`docs/design/marks-only-and-review-mode.md`
+    // 4 節「直接編集」）。前後の版が両方手元にあるのはここだけなので、
+    // 1 バイトも変わっていない範囲に限って、捨てた判断と accept 済みの
+    // review コメントを新しい位置へ写す。reply は文書を丸ごと差し替える
+    // （コメントも上で落とした）ので写す相手が無い。
+    let mut resolved = 0;
+    if !reply {
+        let map = crate::edit_map::EditMap::between(&old_content, &new_source.content);
+        if let Some(store) = app.review_dismissed_store.as_ref() {
+            store.carry(
+                &crate::semantic::source_digest(&old_content),
+                &crate::semantic::source_digest(&new_source.content),
+                &map,
+            );
+        }
+        resolved = app.settle_review_comments(&map, &new_source.content);
+        if let Some(anchor) = app.review_edit_anchor.take() {
+            app.review_cursor_target = Some(map.map_pos(anchor));
+        }
+    }
+    // 生きている review コメントはもう新しい版に付け直してあるので、
+    // 古い版へ留め置くのは人の赤入れだけである。
+    let pinned_here = |comment: &Comment| {
+        comment.file_path == current
+            && comment.revision.is_none()
+            && crate::review::parse_comment_text(&comment.text).is_none()
+    };
+    let had_live_comments = app.comments.iter().any(pinned_here);
     if had_live_comments
         && let Some(cache) = app.snapshot_cache.as_ref()
     {
@@ -355,9 +383,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
             .histories
             .get(app.current_file_index)
             .and_then(|history| history.context_for_content(&old_content));
-        for comment in app.comments.iter_mut().filter(|comment| {
-            comment.file_path == current && comment.revision.is_none()
-        }) {
+        for comment in app.comments.iter_mut().filter(|comment| pinned_here(comment)) {
             comment.revision = old_context.clone();
         }
     }
@@ -405,14 +431,29 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     app.selection = None;
     app.offset = app.offset.min(app.max_offset(app.source_viewport_rows() as u16));
     app.file_changed = false;
+    app.review_reload_note = resolved_note(resolved);
     if reply {
         // The whole message is new, so cumulative review marks stay off.
         app.flash("reloaded");
     } else {
         let count = app.file_review_count(app.current_file_index);
-        app.flash(format!("reloaded · {count} to review"));
+        let note = app
+            .review_reload_note
+            .as_deref()
+            .map(|note| format!(" · {note}"))
+            .unwrap_or_default();
+        app.flash(format!("reloaded · {count} to review{note}"));
     }
     Ok(())
+}
+
+/// 外した review コメントの本数を知らせる 1 行。0 本なら何も言わない。
+fn resolved_note(resolved: usize) -> Option<String> {
+    match resolved {
+        0 => None,
+        1 => Some("1 review comment resolved by edit".into()),
+        n => Some(format!("{n} review comments resolved by edit")),
+    }
 }
 
 /// Whether `files[i]`'s on-disk state differs from what the session last

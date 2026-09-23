@@ -536,6 +536,16 @@ pub(crate) struct App {
     /// 捨てた候補の置き場。決められない環境では `None`（セッション内
     /// だけ消えて、記録は残らない）。
     pub(crate) review_dismissed_store: Option<DismissedStore>,
+    /// 一覧から `e` で直しに行った候補の、**旧の版での**先頭バイト。
+    /// 見届けた reload が差分で新しい位置へ写し、
+    /// [`App::review_cursor_target`] に置き換える（4 節「直接編集」）。
+    pub(crate) review_edit_anchor: Option<usize>,
+    /// 再解析の答えが揃ったとき、一覧のカーソルを置く新しい版のバイト位置。
+    /// そこを覆うか、そこより後ろの最初の候補に着く。
+    pub(crate) review_cursor_target: Option<usize>,
+    /// 直前の reload で外した review コメントの 1 行（`2 review comments
+    /// resolved by edit`）。自動 reload のフラッシュにも同じ 1 行を添える。
+    pub(crate) review_reload_note: Option<String>,
     /// The decoration styles resolved from the session's theme, for the
     /// SOURCE-mode paint. The rendered view carries its own copy on
     /// [`ViewState`]; source mode has no `ViewState` of its own to hang
@@ -691,6 +701,9 @@ impl App {
             review_decorations: Vec::new(),
             review_dismissed: HashSet::new(),
             review_dismissed_store: None,
+            review_edit_anchor: None,
+            review_cursor_target: None,
+            review_reload_note: None,
             marks_question: None,
             marks_preset: 0,
             marks_share: semantic_reading::marks::DEFAULT_SHARE,
@@ -1418,11 +1431,20 @@ impl App {
         match (message.result, rule) {
             (Ok(document), Some(rule)) => {
                 let dismissed = &self.review_dismissed;
+                let accepted = self.live_review_comments();
                 let fresh: Vec<Candidate> =
                     crate::review::candidates_for(&document, &rule, &self.source.content)
                         .into_iter()
                         .filter(|c| {
                             !dismissed.contains(&(c.rule.clone(), c.range.start, c.range.end))
+                        })
+                        .map(|mut c| {
+                            // いまの版に同じ指示のコメントが生きている（見届けた
+                            // reload で付け直した）なら、もう一度 `a` を押させない。
+                            if accepted.contains(&(c.rule.clone(), c.lines)) {
+                                c.state = CandidateState::Accepted;
+                            }
+                            c
                         })
                         .collect();
                 // 一覧が開いていれば、カーソルの下の候補を覚えておく。
@@ -1450,6 +1472,20 @@ impl App {
                         .position(|c| c.rule == rule && c.range == range)
                 {
                     self.overlay_cursor = index;
+                    crate::overlay::keep_overlay_cursor_visible(self);
+                }
+                // 一覧から直しに行って戻ったところなら、答えが**揃った**
+                // ときに、直した箇所（か、その次）へカーソルを置く。
+                if self.review_inflight == 0
+                    && let Some(target) = self.review_cursor_target.take()
+                    && self.overlay == Some(crate::overlay::Overlay::Review)
+                    && !self.review_candidates.is_empty()
+                {
+                    self.overlay_cursor = self
+                        .review_candidates
+                        .iter()
+                        .position(|c| c.range.end > target)
+                        .unwrap_or(self.review_candidates.len() - 1);
                     crate::overlay::keep_overlay_cursor_visible(self);
                 }
                 self.refresh_review_decorations();
@@ -1531,6 +1567,93 @@ impl App {
         self.review_candidates[index].state = CandidateState::Accepted;
         self.refresh_review_decorations();
         true
+    }
+
+    /// いまの版に生きている review コメントの (ルール, 行)。
+    fn live_review_comments(&self) -> HashSet<(String, (u32, u32))> {
+        let current = self.current_file_path();
+        let revision = self.current_revision_context();
+        self.comments
+            .iter()
+            .filter(|c| {
+                c.file_path == *current
+                    && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
+            })
+            .filter_map(|c| {
+                let (rule, _) = crate::review::parse_comment_text(&c.text)?;
+                Some((rule, (c.start, c.end)))
+            })
+            .collect()
+    }
+
+    /// **見届けた reload で、いまの版の review コメントを片付ける。**
+    /// 外した本数を返す（4 節「直接編集」）。
+    ///
+    /// 範囲の中が 1 バイトでも変わったコメントは外す — 直した箇所への
+    /// 指示を `s` で LLM に届けないためである。変わっていないものは
+    /// `new_content` の新しい位置へ付け直し、NOW のコメントのまま残す。
+    /// **人の書いた赤入れは触らない**（[`crate::review::parse_comment_text`]
+    /// が形で見分ける。留め置きは呼び出し側の今の挙動のまま）。
+    ///
+    /// 範囲は、accept した候補がまだ手元にあればその Unit のバイト範囲、
+    /// 無ければコメントの行そのものである。Unit の範囲の方が狭いので、
+    /// 同じ行の別の文を直しただけなら外れない。
+    pub(crate) fn settle_review_comments(
+        &mut self,
+        map: &crate::edit_map::EditMap,
+        new_content: &str,
+    ) -> usize {
+        let current = self.current_file_path().to_path_buf();
+        let old_starts = tui_markdown::line_starts(&self.source.content);
+        let new_starts = tui_markdown::line_starts(new_content);
+        let old_len = self.source.content.len();
+        let mut resolved = 0;
+        let mut kept = Vec::with_capacity(self.comments.len());
+        for mut comment in std::mem::take(&mut self.comments) {
+            let rule = match crate::review::parse_comment_text(&comment.text) {
+                Some((rule, _)) if comment.file_path == current && comment.revision.is_none() => {
+                    rule
+                }
+                _ => {
+                    kept.push(comment);
+                    continue;
+                }
+            };
+            let range = self
+                .review_candidates
+                .iter()
+                .find(|c| {
+                    c.state == CandidateState::Accepted
+                        && c.rule == rule
+                        && c.lines == (comment.start, comment.end)
+                })
+                .map(|c| c.range.clone())
+                .unwrap_or_else(|| {
+                    // 行の頭から、末尾の行の終わり（改行の手前）まで。
+                    let line = |n: u32| n.saturating_sub(1) as usize;
+                    let start = old_starts.get(line(comment.start)).copied().unwrap_or(old_len);
+                    let end = old_starts
+                        .get(line(comment.end) + 1)
+                        .map_or(old_len, |next| next.saturating_sub(1));
+                    start..end.max(start)
+                });
+            let Some(moved) = map.map_range(&range) else {
+                resolved += 1;
+                continue;
+            };
+            let (start, end) = crate::review::lines_at(&new_starts, &moved);
+            comment.start = start;
+            comment.end = end;
+            comment.lines = new_content
+                .lines()
+                .skip(start.saturating_sub(1) as usize)
+                .take((end.saturating_sub(start) + 1) as usize)
+                .collect::<Vec<_>>()
+                .join("\n");
+            kept.push(comment);
+        }
+        self.comments = kept;
+        resolved
     }
 
     /// **`x` — 候補を捨てる。** 捨てたら `true`。
