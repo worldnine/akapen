@@ -77,3 +77,21 @@ stderr に出てステータス行に載りますが、逆だと akapen の kill
 `the_default_deadline_watches_silence_not_the_wall_clock`。
 実機では stub の Jev（10 秒/リクエスト）に本物のアダプタを繋いで
 **壁時計 70.2 秒**のランが殺されないことを確かめました（旧 60 秒なら死ぬ）。
+
+### 測定で `XDG_DATA_HOME` を移すと、mise の shim が黙って固まる — `--lint-cmd` が `analyzing…` のまま
+
+実データを汚さないように `XDG_DATA_HOME` を scratch へ移して akapen を立てると、
+その下で走る **mise の shim（`python3`・`node`）が CPU を使わずに止まります**。
+`--lint-cmd` の textlint は `#!/usr/bin/env node` なので、変換スクリプトの python を
+実体のパスで呼んでいても node の shim で止まり、一覧は `review · analyzing…` の
+まま 30 秒（無音の見切り）まで何も起きません。akapen の不具合に見えますが、子を
+`ps` で見ると `.../mise/shims/node` が居ます。
+
+測るときは python と node の**実体の bin を `PATH` の先頭**に置きます
+（`mise which node` の親ディレクトリ）。読み手の普段の環境（`XDG_DATA_HOME` を
+動かさない）では起きません。
+
+**確認したこと**: 2026-09-23、branch `lint-cmd` の実測。`XDG_DATA_HOME` だけを移した
+tmux のセッションで `--lint-cmd` を走らせ、`ps` で node の shim の子が 0.08 秒の
+CPU のまま残ることを見た。node の実体を `PATH` の先頭に置くと `R` から 1.45 秒で
+出揃った（`examples/semantic/measurements/review-roundtrip.md`「linter を候補に」）。

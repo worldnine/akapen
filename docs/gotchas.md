@@ -80,6 +80,7 @@
 
 - TUI が生きているあいだの子プロセスは `export::run_child` を通す
 - `--semantic-cmd` の子は壁時計で殺さない — 進捗行が止まると猶予も止まる
+- 測定で `XDG_DATA_HOME` を移すと、mise の shim が黙って固まる — `--lint-cmd` が `analyzing…` のまま
 
 ### [ベンダリングと CI](gotchas/vendoring-ci.md)
 
