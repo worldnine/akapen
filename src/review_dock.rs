@@ -214,7 +214,7 @@ pub(crate) fn follow(app: &mut App) {
     };
     app.selection = None;
     // **文書全体を範囲にする指摘では本文を動かさない。** 本文には下線も
-    // `!` も無く（[`crate::review::Candidate::is_whole_document`]）、送っても
+    // 白抜きの印も無く（[`crate::review::Candidate::is_whole_document`]）、送っても
     // 指す場所が無い。先頭の行へ送ると、一覧の末尾まで読んできた読み手が
     // 文書の頭へ飛ばされる。
     if candidate.is_whole_document(app.source.len()) {
@@ -398,6 +398,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App, dock: Dock) {
 }
 
 /// 一覧。1 行 = `▸ ✓ L42 · Filler 0.87 · <Unit の先頭>`（窓だった頃と同じ）。
+/// 残っている候補の `✓` の位置には、ガターと同じ白抜きの重さ（`E` など）が立つ。
 ///
 /// **選んだ行は本文のカーソル帯と同じ背景で塗る。** 一覧の行と本文の
 /// 行が同じ色で繋がって見え、「どの候補が本文のどこか」を目で結べる。
@@ -438,13 +439,8 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("L{}", candidate.lines.0)
         };
-        let head = format!(
-            " {}{} {} · {} · ",
-            if selected { "▸ " } else { "  " },
-            candidate.mark(),
-            place,
-            tag,
-        );
+        let lead = format!(" {}", if selected { "▸ " } else { "  " });
+        let head = format!(" {place} · {tag} · ");
         let cols = match candidate.finding {
             Finding::Rule { .. } => crate::overlay::REVIEW_HEAD_COLS,
             Finding::Lint { .. } => usize::MAX,
@@ -452,7 +448,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         let body = crate::review::head_of(
             &app.source.content,
             candidate,
-            inner.saturating_sub(head.width()).min(cols),
+            inner.saturating_sub(lead.width() + 1 + head.width()).min(cols),
         );
         // 見たものは沈める（`✓` も `–` も）— 残っているのは記録であって作業ではない。
         let done = !candidate.is_pending();
@@ -463,17 +459,41 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         } else {
             (yellow, Style::default().fg(Color::Gray))
         };
-        lines.push(Line::from(vec![Span::styled(head, head_style), Span::styled(body, body_style)]));
+        // **状態の 1 マス**: 残っている候補は本文のガターと同じ白抜きの
+        // 重さ（`E` / `W` / `I`、[`crate::decoration::ReviewSeverity::badge`]）、
+        // 見たものは `✓` / `–`。1 マスを入れ替えるだけなので桁は増えない。
+        let state = if candidate.is_pending() {
+            candidate.severity().badge(app.decoration_styles.page_bg())
+        } else {
+            (candidate.mark(), head_style)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(lead.clone(), head_style),
+            Span::styled(state.0, state.1),
+            Span::styled(head, head_style),
+            Span::styled(body, body_style),
+        ]));
     }
     f.render_widget(Paragraph::new(lines), area);
-    // 帯は行の端まで（字の無いところも）塗る。
+    // 帯は行の端まで（字の無いところも）塗る。白抜きの地は重さなので、
+    // 帯の上から塗り直す。
     if let Some(rel) = app.overlay_cursor.checked_sub(offset)
         && rel < visible
     {
         let band = Rect { y: area.y + rel as u16, height: 1, ..area };
         f.buffer_mut().set_style(band, Style::default().bg(app.ui_selected_bg));
+        if let Some(candidate) = app.review_candidates.get(app.overlay_cursor)
+            && candidate.is_pending()
+            && let Some(cell) = f.buffer_mut().cell_mut((area.x + LIST_STATE_COL, band.y))
+        {
+            cell.set_style(candidate.severity().badge(app.decoration_styles.page_bg()).1);
+        }
     }
 }
+
+/// 一覧の行で状態の 1 マス（白抜きの重さ / `✓` / `–`）が立つ桁 —
+/// 行頭の余白 1 と `▸ ` の 2 のあと。
+const LIST_STATE_COL: u16 = 3;
 
 #[cfg(test)]
 mod tests {

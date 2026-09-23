@@ -150,10 +150,10 @@ pub(crate) struct DocumentHistory {
     /// Revision whose Markdown is actually displayed. During fast scrubbing
     /// this trails `position` until the render debounce settles.
     pub(crate) rendered_position: usize,
-    /// Durable human-review checkpoint, independent of the displayed
+    /// Durable baseline (the generation the human has seen), independent of the displayed
     /// timeline position and of Git availability.
-    pub(crate) reviewed_id: Option<String>,
-    pub(crate) reviewed_content: Option<String>,
+    pub(crate) baseline_id: Option<String>,
+    pub(crate) baseline_content: Option<String>,
 }
 
 /// A block that existed in the previous revision but not the next one.
@@ -164,18 +164,18 @@ pub(crate) struct DeletedBlock {
     pub(crate) content: String,
 }
 
-/// Cumulative review marks from an acknowledged full document to NOW.
+/// Cumulative change marks from an acknowledged full document to NOW.
 /// Markdown uses semantic blocks; every other text file uses source lines.
-pub(crate) fn review_transition(
+pub(crate) fn baseline_transition(
     _markdown: bool,
-    reviewed: &str,
+    baseline: &str,
     now: &str,
 ) -> (HashSet<usize>, HashSet<usize>) {
-    // Line-granular review marks: a one-cell edit marks one line, never
+    // Line-granular change marks: a one-cell edit marks one line, never
     // the whole block. The block-level "whole rendered block lights"
     // intent was dropped from the spec — the animation path and the
-    // review marks now agree on per-line granularity.
-    let old: Vec<String> = reviewed.lines().map(str::to_string).collect();
+    // change marks now agree on per-line granularity.
+    let old: Vec<String> = baseline.lines().map(str::to_string).collect();
     let new: Vec<String> = now.lines().map(str::to_string).collect();
     let (changed, deleted) = line_transition(&old, &new);
     let last = new.len().saturating_sub(1);
@@ -188,7 +188,7 @@ pub(crate) fn review_transition(
 
 /// Baseline-relative marks plus the baseline text of every change, in one
 /// diff pass: the changed/deleted-position sets are identical to
-/// [`review_transition`], and the returned blocks carry the OLD side of
+/// [`baseline_transition`], and the returned blocks carry the OLD side of
 /// every non-equal op — rewrites included, unlike the position set, which
 /// counts only net deletions. Source mode renders these blocks inline as
 /// red deleted rows (a unified-diff-style old side); view mode and the
@@ -197,16 +197,16 @@ pub(crate) fn review_transition(
 /// Block anchors are NOT clamped: an anchor equal to the new line count
 /// means "deleted after the last line" and renders below it.
 pub(crate) fn comparison_transition(
-    reviewed: &str,
+    baseline: &str,
     now: &str,
 ) -> (HashSet<usize>, HashSet<usize>, Vec<DeletedBlock>) {
     // Diff the raw texts, NOT a lines-rejoined copy: rejoining drops the
     // trailing newline, which turns a pure EOF deletion into a spurious
     // rewrite of the last line (its old text would render as a deleted
-    // row of its own). (`review_transition` keeps the rejoined diff so
+    // row of its own). (`baseline_transition` keeps the rejoined diff so
     // the badge count and its tests stay bit-identical.)
-    let diff = TextDiff::from_lines(reviewed, now);
-    let old: Vec<&str> = reviewed.lines().collect();
+    let diff = TextDiff::from_lines(baseline, now);
+    let old: Vec<&str> = baseline.lines().collect();
     let last = now.lines().count().saturating_sub(1);
     let mut changed = HashSet::new();
     let mut deleted_before = HashSet::new();
@@ -393,8 +393,8 @@ impl DocumentHistory {
             revisions: working,
             position: 0,
             rendered_position: 0,
-            reviewed_id: local.reviewed_id,
-            reviewed_content: local.reviewed_content,
+            baseline_id: local.baseline_id,
+            baseline_content: local.baseline_content,
         }
     }
 
@@ -416,15 +416,15 @@ impl DocumentHistory {
         cache: &SnapshotCache,
     ) -> anyhow::Result<()> {
         let local = cache.acknowledge(path, live)?;
-        self.reviewed_id = local.reviewed_id;
-        self.reviewed_content = local.reviewed_content;
+        self.baseline_id = local.baseline_id;
+        self.baseline_content = local.baseline_content;
         Ok(())
     }
 
     pub(crate) fn acknowledge_in_memory(&mut self, live: &str) {
         let id = crate::snapshot::content_id(live.as_bytes());
-        self.reviewed_id = Some(id);
-        self.reviewed_content = Some(live.to_string());
+        self.baseline_id = Some(id);
+        self.baseline_content = Some(live.to_string());
     }
 
     pub(crate) fn set_baseline(
@@ -434,8 +434,8 @@ impl DocumentHistory {
         cache: &SnapshotCache,
     ) -> anyhow::Result<()> {
         let local = cache.set_baseline(path, content)?;
-        self.reviewed_id = local.reviewed_id;
-        self.reviewed_content = local.reviewed_content;
+        self.baseline_id = local.baseline_id;
+        self.baseline_content = local.baseline_content;
         Ok(())
     }
 
@@ -577,17 +577,17 @@ impl DocumentHistory {
                 base_chronological,
                 self.revisions.len()
             ));
-        } else if self.reviewed_content.is_some() {
+        } else if self.baseline_content.is_some() {
             label.push_str(" · base cached");
         }
         Some(label)
     }
 
     pub(crate) fn baseline_position(&self) -> Option<usize> {
-        let reviewed = self.reviewed_content.as_deref()?;
+        let baseline = self.baseline_content.as_deref()?;
         self.revisions
             .iter()
-            .position(|revision| revision.content == reviewed)
+            .position(|revision| revision.content == baseline)
     }
 }
 
@@ -702,7 +702,7 @@ fn absolutize(path: &Path) -> PathBuf {
 mod tests {
     use super::{
         DocumentHistory, Revision, RevisionSource, anchored_line, head_oid,
-        local_revision_summary, relative_age, review_transition, revision_id, same_revision,
+        local_revision_summary, relative_age, baseline_transition, revision_id, same_revision,
     };
     use crate::snapshot::{CachedFile, CachedSnapshot, SnapshotCache};
     use serde::Deserialize;
@@ -722,8 +722,8 @@ mod tests {
                 pinned: false,
                 parent: Some("720a4450123456789abcdef0123456789abcdef".into()),
             }],
-            reviewed_id: None,
-            reviewed_content: None,
+            baseline_id: None,
+            baseline_content: None,
         };
         let history = DocumentHistory::assemble_timeline("new\n", gits, local);
         let local_revision = &history.revisions[1];
@@ -756,8 +756,8 @@ mod tests {
                 pinned: false,
                 parent: None,
             }],
-            reviewed_id: None,
-            reviewed_content: None,
+            baseline_id: None,
+            baseline_content: None,
         };
         let history = DocumentHistory::assemble_timeline("new\n", gits, local);
         assert_eq!(
@@ -866,8 +866,8 @@ mod tests {
             revisions: vec![revision("now"), revision("old")],
             position: 0,
             rendered_position: 0,
-            reviewed_id: None,
-            reviewed_content: None,
+            baseline_id: None,
+            baseline_content: None,
         };
         assert!(!history.move_by(-1));
         assert!(history.move_by(1));
@@ -889,8 +889,8 @@ mod tests {
             revisions: vec![revision("now"), revision("middle"), revision("oldest")],
             position: 0,
             rendered_position: 0,
-            reviewed_id: None,
-            reviewed_content: None,
+            baseline_id: None,
+            baseline_content: None,
         };
         assert_eq!(history.label().as_deref(), Some("NOW · 3/3"));
         history.move_by(1);
@@ -913,8 +913,8 @@ mod tests {
             revisions: vec![revision("now"), revision("middle"), revision("oldest")],
             position: 0,
             rendered_position: 0,
-            reviewed_id: Some("middle".into()),
-            reviewed_content: Some("middle".into()),
+            baseline_id: Some("middle".into()),
+            baseline_content: Some("middle".into()),
         };
 
         assert!(history.label().unwrap().ends_with("base 2/3"));
@@ -945,27 +945,27 @@ mod tests {
     }
 
     #[test]
-    fn table_review_marks_only_the_row_containing_the_changed_cell() {
+    fn table_change_marks_only_the_row_containing_the_changed_cell() {
         let old = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | two |\n";
         let new = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | changed |\n";
 
-        let (changed, deleted) = review_transition(true, old, new);
+        let (changed, deleted) = baseline_transition(true, old, new);
 
         assert_eq!(changed, [3].into_iter().collect());
         assert!(deleted.is_empty());
     }
 
     #[test]
-    fn table_review_marks_added_and_deleted_rows_individually() {
+    fn table_change_marks_added_and_deleted_rows_individually() {
         let base = "| Key | Value |\n| --- | --- |\n| a | one |\n| b | two |\n";
         let added = "| Key | Value |\n| --- | --- |\n| a | one |\n| new | row |\n| b | two |\n";
         let deleted = "| Key | Value |\n| --- | --- |\n| b | two |\n";
 
-        let (changed, removed) = review_transition(true, base, added);
+        let (changed, removed) = baseline_transition(true, base, added);
         assert_eq!(changed, [3].into_iter().collect());
         assert!(removed.is_empty());
 
-        let (changed, removed) = review_transition(true, base, deleted);
+        let (changed, removed) = baseline_transition(true, base, deleted);
         assert!(changed.is_empty());
         assert_eq!(removed, [2].into_iter().collect());
     }
@@ -1044,7 +1044,7 @@ mod tests {
         assert_eq!(history.revisions.len(), 2);
         assert_eq!(history.revisions[1].source, RevisionSource::Git);
         assert_eq!(history.revisions[1].summary, "committed");
-        assert_eq!(history.reviewed_content.as_deref(), Some("committed\n"));
+        assert_eq!(history.baseline_content.as_deref(), Some("committed\n"));
     }
 
     #[test]
@@ -1070,7 +1070,7 @@ mod tests {
         let cache = SnapshotCache::at(dir.path().join("cache"));
         let history = DocumentHistory::load_cached(&path, "working\n", 10, &cache).unwrap();
 
-        assert_eq!(history.reviewed_content.as_deref(), Some("working\n"));
+        assert_eq!(history.baseline_content.as_deref(), Some("working\n"));
     }
 
     #[derive(Deserialize)]
@@ -1145,8 +1145,8 @@ mod tests {
                 .collect();
             let local = CachedFile {
                 snapshots,
-                reviewed_id: None,
-                reviewed_content: None,
+                baseline_id: None,
+                baseline_content: None,
             };
             let history = DocumentHistory::assemble_timeline(&scenario.live, gits, local);
             let ids: Vec<String> = history

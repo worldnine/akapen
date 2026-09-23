@@ -43,11 +43,11 @@ hunk として UI やコメント出力へ露出しない。
 |---|---|
 | Timeline | ファイルの完全な内容を持つ、順序付きの世代列 |
 | Review | 最後に人間が確認した世代から NOW までの未確認箇所 |
-| Display comparison | review baselineから表示中の世代までの差 |
+| Display comparison | baselineから表示中の世代までの差 |
 | Comments | 特定のファイル・世代・行範囲へ付けた伝言 |
 
-Timeline 上の現在位置、review baseline、コメントの参照先は別々に保持する。
-過去へ移動しただけでは review baseline は動かない。過去で明示的に`a`を押した場合だけ
+Timeline 上の現在位置、baseline、コメントの参照先は別々に保持する。
+過去へ移動しただけでは baseline は動かない。過去で明示的に`a`を押した場合だけ
 その世代をbaselineにする。コメントを付けても確認済みにはならない。
 
 ## 4. 統合タイムライン
@@ -136,13 +136,13 @@ LOCAL first seen → LOCAL 1 → LOCAL 2 → NOW
 
 ## 6. 未確認変更と marks
 
-### 6.1 review baseline
+### 6.1 baseline
 
 ファイルごとに「最後に人間が確認した世代」を一つ保持する。NOWの未確認状態は次の比較
 から求める。
 
 ```text
-review baseline → NOW
+baseline → NOW
 ```
 
 `r` を複数回行っても baseline は動かさず、未確認変更を累積する。途中の編集が元へ
@@ -154,7 +154,7 @@ NOWで`a`を押すと現在のファイルを確認済みにする。過去のLO
 初回観測したLOCALを最初のbaselineとする。Git管理下でも最新COMMITを暗黙のbaselineには
 しない。初回観測より前から存在した変更を確認したい場合は、COMMITへ移動して`a`を押す。
 
-- review baseline を NOW へ移動
+- baseline を NOW へ移動
 - review marks を消す
 - baseline をローカルキャッシュへ永続化
 - 確認済みになった中間 LOCAL をキャッシュ整理の対象にする
@@ -179,7 +179,7 @@ NOWで`a`を押すと現在のファイルを確認済みにする。過去のLO
 表示中の世代が過去なら、同じbaselineを固定したまま次を表示する。
 
 ```text
-review baseline → displayed generation
+baseline → displayed generation
 ```
 
 この比較表示はNOWの未確認状態を変更しない。baselineそのものでは差が0になり、世代
@@ -340,7 +340,7 @@ Revision: local:<フルハッシュ> — akapen local snapshot: uncommitted stat
 - 本文は圧縮した完全なスナップショットとして保存する
 - 内容ハッシュをキーにし、同一内容は一度だけ保存する
 - hunk や diff を永続化しない
-- v0.1 metadata は canonical path、取得時刻、review baseline、コメントによる pin を持つ
+- v0.1 metadata は canonical path、取得時刻、baseline、コメントによる pin を持つ
 - v0.1.1 metadata は各スナップショットに parent（観測時 HEAD oid、git 環境のみ）を持つ
 - 親内容ハッシュによる分岐判定・provenance の保存・別 ancestry の隔離は後続項目とする
 - Git から再現できる本文 blob の即時省略は ancestry 対応時に追加する
@@ -353,7 +353,7 @@ Revision: local:<フルハッシュ> — akapen local snapshot: uncommitted stat
 - 1 ファイルにつき直近 32 LOCAL 世代
 - キャッシュ全体で 256 MiB
 - 同一内容は世代を追加しない
-- 巨大ファイルはキャッシュ対象外、または review baseline と NOW の二世代だけに制限
+- 巨大ファイルはキャッシュ対象外、または baseline と NOW の二世代だけに制限
 
 上限到達時は、古い「確認済み LOCAL」から削除する。
 
@@ -362,7 +362,7 @@ Revision: local:<フルハッシュ> — akapen local snapshot: uncommitted stat
 優先順位は次のとおり。
 
 1. NOW
-2. review baseline
+2. baseline
 3. コメントが付いた世代
 4. 未確認期間中の世代
 5. 直近の確認済み世代
@@ -376,7 +376,7 @@ Revision: local:<フルハッシュ> — akapen local snapshot: uncommitted stat
 実装は次の順で行う。
 
 1. 現在の完全文書タイムラインを provenance 付きの共通モデルへ変更
-2. LOCAL キャッシュと review baseline を追加
+2. LOCAL キャッシュと baseline を追加
 3. reload を LOCAL 世代作成と累積 review marks へ接続
 4. Markdown はブロック単位、その他のテキストは行単位で marks を表示（実装では全ファイル行単位に変更 — §7 参照）
 5. `a` と未確認ナビゲーションを追加

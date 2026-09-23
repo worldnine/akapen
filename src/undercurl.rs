@@ -38,7 +38,7 @@
 //! 同じ）ので、判定は外側の端末についての 4. に任せる — herdr の中の
 //! `TERM_PROGRAM` は herdr を立てた端末のものが残っている。ただし herdr は
 //! **下線の色（`CSI 58`）を落とす**ので、herdr の中では重さの色は下線に
-//! 出ず、ガターの `!` にだけ出る（`docs/gotchas/rendering.md`）。
+//! 出ず、ガターの白抜きの印（地と字の色）にだけ出る（`docs/gotchas/rendering.md`）。
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -325,7 +325,7 @@ mod tests {
     fn review() -> Style {
         Style::default()
             .add_modifier(Modifier::UNDERLINED | CURL_CARRIER)
-            .underline_color(Color::Rgb(210, 57, 73))
+            .underline_color(Color::Red)
     }
 
     #[test]
@@ -333,7 +333,8 @@ mod tests {
         let cells = [cell("a", Style::default()), cell("か", review()), cell("b", Style::default())];
         let curly = paint(&cells, true);
         assert!(curly.contains("\x1b[4m\x1b[4:3m"), "波線は 1 本線の後ろに足す: {curly:?}");
-        assert!(curly.contains("\x1b[58;2;210;57;73m"), "色も出る: {curly:?}");
+        // 重さの色はパレットの名前 — 下線の色もパレット番号で出る（赤 = 1）。
+        assert!(curly.contains("\x1b[58;5;1m"), "色も出る: {curly:?}");
         let plain = paint(&cells, false);
         assert!(!plain.contains("4:3"), "{plain:?}");
         assert!(plain.contains("\x1b[4m"), "{plain:?}");

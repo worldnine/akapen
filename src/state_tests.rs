@@ -449,11 +449,11 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn help_advertises_review_navigation() {
+    fn help_advertises_change_navigation() {
         let rows = help_rows(false, false, true, false, false);
         assert!(rows
             .iter()
-            .any(|(l, k)| *l == "compare" && k.contains("a acknowledge")));
+            .any(|(l, k)| *l == "compare" && k.contains("a seen")));
         let rows = help_rows(false, true, true, false, false);
         assert!(!rows.iter().any(|(l, _)| *l == "compare"));
     }
@@ -1353,7 +1353,7 @@ use crate::comment::Selection;
         writeln!(f, "new message line 2").unwrap();
         assert!(reload_source(&mut app, false).is_ok());
         assert_eq!(app.source.len(), 2, "new content is loaded");
-        assert!(app.review_changed.is_empty(), "reply mode has no review marks");
+        assert!(app.baseline_changed.is_empty(), "reply mode has no change marks");
         assert!(!app.file_changed, "reload clears the pending prompt");
     }
 
@@ -1398,7 +1398,7 @@ use crate::comment::Selection;
         on_source_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, None);
         assert_eq!(app.source.len(), 6, "r replaces the in-memory source");
         assert!(!app.file_changed, "r clears the pending prompt");
-        assert!(app.review_changed.contains(&5), "the new line needs review");
+        assert!(app.baseline_changed.contains(&5), "the new line needs review");
         // A fresh change can be ignored with i.
         app.file_changed = true;
         on_source_key(&mut app, KeyCode::Char('i'), KeyModifiers::NONE, None);
@@ -1449,25 +1449,33 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn acknowledge_clears_review_marks_and_moves_the_baseline() {
+    fn acknowledge_clears_change_marks_and_moves_the_baseline() {
         let (mut app, _dir) = make_app_keep(3, Mode::Source);
         std::fs::write(app.current_file_path(), "line1\nchanged\nline3\n").unwrap();
         reload_source(&mut app, false).unwrap();
-        assert!(!app.review_changed.is_empty());
-        app.review_changed.clear();
-        app.review_changed.insert(1);
+        assert!(!app.baseline_changed.is_empty());
+        app.baseline_changed.clear();
+        app.baseline_changed.insert(1);
         app.comparison_changed.clear();
         app.comparison_changed.insert(1);
         on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
-        assert_eq!(app.cursor, 1, "n lands on the unreviewed block");
+        assert_eq!(app.cursor, 1, "n lands on the unseen block");
 
         on_source_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, None);
+        // 変更を見る側の語は baseline / seen（Review は校正の側の語）。
+        assert_eq!(app.status.as_ref().map(|s| s.0.as_str()), Some("seen"));
+        // 見終えたあとの `n` は「baseline から変わっていない」と言う。
+        on_source_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, None);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.0.as_str()),
+            Some("no changes since baseline")
+        );
 
-        assert!(app.review_changed.is_empty());
-        assert!(app.review_deleted_before.is_empty());
+        assert!(app.baseline_changed.is_empty());
+        assert!(app.baseline_deleted_before.is_empty());
         assert!(app.selection.is_none(), "a leaves source SELECT state");
         assert_eq!(
-            app.histories[0].reviewed_content.as_deref(),
+            app.histories[0].baseline_content.as_deref(),
             Some(app.source.content.as_str())
         );
     }
@@ -1502,8 +1510,10 @@ use crate::comment::Selection;
 
         on_source_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, None);
 
-        assert_eq!(app.histories[0].reviewed_content.as_deref(), Some(old));
-        assert!(app.review_changed.contains(&0));
+        assert_eq!(app.histories[0].baseline_content.as_deref(), Some(old));
+        let status = app.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(status.starts_with("baseline set · "), "{status:?}");
+        assert!(app.baseline_changed.contains(&0));
         assert_eq!(app.histories[0].position, 1, "selecting a baseline does not leave the past");
     }
 
@@ -1525,29 +1535,29 @@ use crate::comment::Selection;
 
         assert_eq!(app.source.lines[0], "old first line");
         assert!(!app.comparison_changed.is_empty());
-        assert!(app.review_changed.is_empty(), "NOW review state remains independent");
-        // Line-granular review marks: only the changed line (0) is marked,
+        assert!(app.baseline_changed.is_empty(), "NOW review state remains independent");
+        // Line-granular change marks: only the changed line (0) is marked,
         // not the whole merged block (the block-level intent was dropped).
         assert_eq!(app.selection.unwrap().range(), (0, 0));
     }
 
     #[test]
-    fn review_count_measures_groups_instead_of_source_lines() {
+    fn unseen_count_measures_groups_instead_of_source_lines() {
         let mut app = make_app(10, Mode::Source);
-        app.review_changed = [1, 2, 5].into_iter().collect();
-        app.review_deleted_before = [0, 2, 8].into_iter().collect();
+        app.baseline_changed = [1, 2, 5].into_iter().collect();
+        app.baseline_deleted_before = [0, 2, 8].into_iter().collect();
 
         assert_eq!(
-            app.file_review_count(0),
+            app.file_unseen_count(0),
             4,
             "one changed block counts once and a deletion at the same anchor is not doubled"
         );
     }
 
     #[test]
-    fn review_navigation_wraps_and_can_select_the_only_mark_under_the_cursor() {
+    fn change_navigation_wraps_and_can_select_the_only_mark_under_the_cursor() {
         let mut app = make_app(3, Mode::Source);
-        app.review_changed.insert(0);
+        app.baseline_changed.insert(0);
         app.comparison_changed.insert(0);
         app.cursor = 0;
 
@@ -1558,7 +1568,7 @@ use crate::comment::Selection;
     }
 
     #[test]
-    fn source_review_range_centers_as_far_as_document_edges_allow() {
+    fn source_change_range_centers_as_far_as_document_edges_allow() {
         let mut app = make_app(20, Mode::Source);
 
         app.center_source_range(7, 9, 5);
@@ -2611,8 +2621,8 @@ use crate::comment::Selection;
                 }],
                 position: 0,
                 rendered_position: 0,
-                reviewed_id: None,
-                reviewed_content: None,
+                baseline_id: None,
+                baseline_content: None,
             },
             DocumentHistory {
                 revisions: vec![
@@ -2635,8 +2645,8 @@ use crate::comment::Selection;
                 ],
                 position: 0,
                 rendered_position: 0,
-                reviewed_id: None,
-                reviewed_content: None,
+                baseline_id: None,
+                baseline_content: None,
             },
         ];
         let revision = app.histories[1].revisions[1].context().unwrap();
@@ -4816,8 +4826,8 @@ use crate::comment::Selection;
             ],
             position: 0,
             rendered_position: 0,
-            reviewed_id: None,
-            reviewed_content: Some("line1\n".into()),
+            baseline_id: None,
+            baseline_content: Some("line1\n".into()),
         }];
         select_history(&mut app, 1);
         assert_eq!(app.histories[0].position, 1);
@@ -4909,8 +4919,8 @@ use crate::comment::Selection;
             ],
             position: 0,
             rendered_position: 0,
-            reviewed_id: None,
-            reviewed_content: Some("line1\n".into()),
+            baseline_id: None,
+            baseline_content: Some("line1\n".into()),
         }];
 
         assert_eq!(
@@ -4957,11 +4967,11 @@ use crate::comment::Selection;
         );
     }
 
-    /// Set the review baseline to `baseline` and recompute marks + layout,
+    /// Set the baseline to `baseline` and recompute marks + layout,
     /// as a reload/ack would. NOW stays what `make_app` wrote.
     fn set_baseline(app: &mut App, baseline: &str) {
-        app.histories[0].reviewed_content = Some(baseline.to_string());
-        refresh_review_marks(app);
+        app.histories[0].baseline_content = Some(baseline.to_string());
+        refresh_baseline_marks(app);
         app.refresh_line_rows();
     }
 

@@ -352,22 +352,26 @@ fn only_the_pending_candidates_are_underlined() {
 
 /// **marks の琥珀とは別の色である。** 同じ色だと、読め（marks）と
 /// 直せ（Review）が同じ印で出る。
+///
+/// 出どころからして違う: 琥珀は紙から作る RGB（本文に重ねる印）、下線は
+/// ターミナルのパレットの名前（枠まわりの合図 — [`ReviewSeverity::color`]）。
 #[test]
 fn the_underline_is_a_different_colour_from_the_marks_amber() {
     for light in [false, true] {
         let highlight = Highlighter::new(None, light);
         let styles = crate::decoration::DecorationStyles::from_theme(&highlight, Default::default());
         let underline = styles.review_underline(ReviewSeverity::Info);
-        assert_ne!(underline, styles.mark_bg(), "light={light}: 琥珀の地色と同じ");
-        assert_ne!(underline, styles.mark_tick(), "light={light}: 目盛りの琥珀と同じ");
-        // 色相まで見る — 琥珀は赤 > 青、Review の青緑は青 > 赤である。
-        let (ratatui::style::Color::Rgb(ur, _, ub), ratatui::style::Color::Rgb(mr, _, mb)) =
-            (underline, styles.mark_tick())
-        else {
-            panic!("両方とも RGB で出るはず");
-        };
-        assert!(ub > ur, "light={light}: Review の下線が青緑でない ({ur},_,{ub})");
-        assert!(mr > mb, "light={light}: marks の目盛りが琥珀でない ({mr},_,{mb})");
+        assert_eq!(underline, ratatui::style::Color::Cyan, "light={light}: パレットの青緑でない");
+        assert!(
+            matches!(styles.mark_bg(), ratatui::style::Color::Rgb(..))
+                && matches!(styles.mark_tick(), ratatui::style::Color::Rgb(..)),
+            "light={light}: 琥珀は紙から作る RGB のまま"
+        );
+        for severity in [ReviewSeverity::Error, ReviewSeverity::Warning, ReviewSeverity::Info] {
+            let c = styles.review_underline(severity);
+            assert_ne!(c, styles.mark_bg(), "light={light}: {severity:?} が琥珀の地色と同じ");
+            assert_ne!(c, styles.mark_tick(), "light={light}: {severity:?} が目盛りの琥珀と同じ");
+        }
     }
 }
 

@@ -893,8 +893,8 @@ fn the_readout_steps_aside_in_the_past() {
         revisions: vec![revision("now"), revision("old")],
         position: 1,
         rendered_position: 1,
-        reviewed_id: None,
-        reviewed_content: None,
+        baseline_id: None,
+        baseline_content: None,
     }];
     assert!(app.is_historical());
 

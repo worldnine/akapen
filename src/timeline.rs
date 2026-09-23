@@ -7,10 +7,10 @@
 //! the state words (`HERE`/`NOW`) replace the footer hints, the axis
 //! replaces the view frame's bottom border (so view mode loses no
 //! content rows at all).
-//! The current revision is `◆`, the review baseline `▮`, LOCAL
+//! The current revision is `◆`, the baseline `▮`, LOCAL
 //! snapshots `●` and COMMITs `◼`, with NOW always at the right edge.
-//! The axis is dim left of the review baseline — reviewed history — and
-//! normal from the baseline to NOW — the unreviewed stretch.
+//! The axis is dim left of the baseline — seen history — and
+//! normal from the baseline to NOW — the unseen stretch.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -32,7 +32,7 @@ pub(crate) enum PointKind {
 }
 
 /// One rendered point on the axis: its column, marker kind, and the two
-/// state flags (current revision, review baseline).
+/// state flags (current revision, baseline).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TimelinePoint {
     pub(crate) col: usize,
@@ -49,11 +49,11 @@ pub(crate) struct TimelineLayout {
     /// (start column, text) of the state words: `HERE` at the current
     /// point and `NOW` at the right edge.
     pub(crate) words: Vec<(usize, String)>,
-    /// The column of the review baseline: the axis left of it is drawn
-    /// dim — the reviewed history behind you — and the stretch from
-    /// the baseline to NOW (the unreviewed accumulation) stands out.
+    /// The column of the baseline: the axis left of it is drawn
+    /// dim — the seen history behind you — and the stretch from
+    /// the baseline to NOW (the unseen accumulation) stands out.
     /// `None` before the first acknowledgement: everything is
-    /// unreviewed, the whole axis reads normally.
+    /// unseen, the whole axis reads normally.
     pub(crate) baseline_col: Option<usize>,
 }
 
@@ -196,8 +196,8 @@ mod tests {
             revisions: revs,
             position: 0,
             rendered_position: 0,
-            reviewed_id: None,
-            reviewed_content: None,
+            baseline_id: None,
+            baseline_content: None,
         }
     }
 
@@ -234,8 +234,8 @@ mod tests {
             revision("r4", RevisionSource::Git),
         ]);
         h.position = 2;
-        h.reviewed_id = Some("r2".into());
-        h.reviewed_content = Some("r2".into());
+        h.baseline_id = Some("r2".into());
+        h.baseline_content = Some("r2".into());
         // 5 revisions into 10 columns already collide (round(4j/9) hits
         // duplicates for j=2..4? no — 5 points, 10 cols, distinct);
         // use a genuinely crowded width instead.
@@ -245,7 +245,7 @@ mod tests {
         assert!(layout.points.iter().any(|p| p.baseline));
         assert!(layout.points.iter().any(|p| p.kind == PointKind::Now));
         // The axis dims off at the baseline column (revision r2, chron
-        // j = 2): reviewed history left, the unreviewed stretch right.
+        // j = 2): seen history left, the unseen stretch right.
         let baseline = layout.points.iter().find(|p| p.baseline).unwrap();
         assert_eq!(layout.baseline_col, Some(baseline.col));
     }
@@ -257,10 +257,10 @@ mod tests {
             revision("r1", RevisionSource::Local),
             revision("r2", RevisionSource::Git),
         ]);
-        // Acknowledging NOW: everything is reviewed, the axis has no
+        // Acknowledging NOW: everything is seen, the axis has no
         // bright stretch.
-        h.reviewed_id = Some("now".into());
-        h.reviewed_content = Some("now".into());
+        h.baseline_id = Some("now".into());
+        h.baseline_content = Some("now".into());
         let layout = layout_timeline(&h, 40).unwrap();
         assert_eq!(layout.baseline_col, Some(39));
     }
@@ -274,8 +274,8 @@ mod tests {
             revision("r3", RevisionSource::Local),
         ]);
         h.position = 1;
-        h.reviewed_id = Some("r2".into());
-        h.reviewed_content = Some("r2".into());
+        h.baseline_id = Some("r2".into());
+        h.baseline_content = Some("r2".into());
         let layout = layout_timeline(&h, 120).unwrap();
         let texts: Vec<&str> = layout.words.iter().map(|(_, t)| t.as_str()).collect();
         // The baseline keeps no word: the ▮ marker and the axis dimming

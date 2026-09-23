@@ -525,7 +525,7 @@ pub(crate) fn help_rows(
         rows.insert(1, ("file", "]/[ · ^o files"));
         rows.insert(2, ("time", "← older · newer → · hold:scrub · t detail"));
         rows.push(("reload", "r reload · i ignore · e edit"));
-        rows.push(("compare", "n/N next/prev · a acknowledge/set baseline"));
+        rows.push(("compare", "n/N next/prev change · a seen/set baseline"));
     }
     if semantic {
         // Only with `--semantic`: without an annotation these keys refuse,
@@ -794,10 +794,10 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
         } else {
             ""
         };
-        let review_count = app.file_review_count(i);
-        // Unreviewed spots: the same `! N` the title bar shows.
-        let review_mark = if review_count > 0 {
-            format!(" ! {review_count}")
+        let unseen_count = app.file_unseen_count(i);
+        // Unseen spots: the same `! N` the title bar shows.
+        let unseen_mark = if unseen_count > 0 {
+            format!(" ! {unseen_count}")
         } else {
             String::new()
         };
@@ -807,14 +807,14 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
         let suffix = unique_suffix(file, &app.files);
         let reserved = 2
             + UnicodeWidthStr::width(changed_mark)
-            + UnicodeWidthStr::width(review_mark.as_str())
+            + UnicodeWidthStr::width(unseen_mark.as_str())
             + UnicodeWidthStr::width(count_str.as_str())
             + mode_tag.len();
         let name = clip_if_needed(&suffix, inner.saturating_sub(reserved));
         lines.push(Line::from(vec![
             Span::styled(format!("{cursor_mark}{name}"), name_style),
             Span::styled(changed_mark, Style::default().fg(Color::Yellow)),
-            Span::styled(review_mark, Style::default().fg(Color::Yellow)),
+            Span::styled(unseen_mark, Style::default().fg(Color::Yellow)),
             Span::styled(count_str, dark_gray),
             Span::styled(mode_tag, dark_gray),
         ]));
@@ -834,7 +834,7 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
 
 /// The document timeline (`t`): every revision, newest first — NOW on
 /// top, then LOCAL snapshots by observation time, then COMMITs. The
-/// current row carries the `◆` marker, the review baseline `▮` with a
+/// current row carries the `◆` marker, the baseline `▮` with a
 /// `· base` tag; j/k (or ←/→) scrub the document behind the panel, Enter
 /// confirms, Esc restores the position the list opened at.
 pub(crate) fn draw_timeline_overlay(f: &mut Frame, app: &App) {

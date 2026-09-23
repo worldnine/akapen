@@ -14,7 +14,7 @@ use crate::highlight::syntax_for;
 use crate::overlay::visible_cards;
 use crate::source::Source;
 use crate::{
-    AppTerminal, acknowledge_review, draw_frame, refresh_review_marks, render_view_with_cards,
+    AppTerminal, mark_seen, draw_frame, refresh_baseline_marks, render_view_with_cards,
     source_content_width, view_render_width,
 };
 
@@ -294,7 +294,7 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     }
     let old_content = app.source.content.clone();
 
-    // Reply mode: each refresh replaces the whole message, so review marks
+    // Reply mode: each refresh replaces the whole message, so change marks
     // would only paint the entire document. The whole message is "new" by
     // definition and snapshots are intentionally disabled in this mode.
     let reply = app.config.reply;
@@ -414,16 +414,16 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
         }
     }
     if reply {
-        app.review_changed.clear();
-        app.review_deleted_before.clear();
+        app.baseline_changed.clear();
+        app.baseline_deleted_before.clear();
         app.comparison_changed.clear();
         app.comparison_deleted_before.clear();
         app.comparison_deleted_blocks.clear();
     } else {
-        refresh_review_marks(app);
+        refresh_baseline_marks(app);
     }
     if from_editor {
-        acknowledge_review(app, false);
+        mark_seen(app, false);
     }
     app.spans = app
         .highlight
@@ -459,16 +459,16 @@ pub(crate) fn reload_source(app: &mut App, from_editor: bool) -> anyhow::Result<
     app.file_changed = false;
     app.review_reload_note = resolved_note(resolved);
     if reply {
-        // The whole message is new, so cumulative review marks stay off.
+        // The whole message is new, so cumulative change marks stay off.
         app.flash("reloaded");
     } else {
-        let count = app.file_review_count(app.current_file_index);
+        let count = app.file_unseen_count(app.current_file_index);
         let note = app
             .review_reload_note
             .as_deref()
             .map(|note| format!(" · {note}"))
             .unwrap_or_default();
-        app.flash(format!("reloaded · {count} to review{note}"));
+        app.flash(format!("reloaded · {count} unseen{note}"));
     }
     Ok(())
 }

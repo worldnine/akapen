@@ -88,7 +88,7 @@ pub(crate) enum Finding {
     Lint {
         /// linter の理由の文。一覧とコメントに出る。
         message: String,
-        /// LSP の severity。下線とガターの `!` の色になる
+        /// LSP の severity。下線の色とガターの白抜きの印になる
         /// （[`Candidate::severity`]、[`crate::decoration::ReviewSeverity`]）。
         severity: Option<u8>,
     },
@@ -135,7 +135,7 @@ pub(crate) const WHOLE_DOCUMENT_SHARE: (usize, usize) = (9, 10);
 pub(crate) const WHOLE_DOCUMENT_MIN_LINES: usize = 3;
 
 impl Candidate {
-    /// **重さ**（下線とガターの `!` の色）。Jev のルールは `Info`（青緑）。
+    /// **重さ**（下線の色とガターの白抜きの印）。Jev のルールは `Info`（青緑）。
     pub(crate) fn severity(&self) -> crate::decoration::ReviewSeverity {
         match &self.finding {
             Finding::Rule { .. } => crate::decoration::ReviewSeverity::Info,
@@ -145,7 +145,7 @@ impl Candidate {
 
     /// **文書全体を範囲にする指摘か**（`total_lines` は文書の行数）。
     ///
-    /// そうなら一覧の**末尾**に回り、本文には下線もガターの `!` も出さない。
+    /// そうなら一覧の**末尾**に回り、本文には下線もガターの白抜きの印も出さない。
     /// 一覧の行は `L1` ではなく「文書全体」と名乗る。閾値は
     /// [`WHOLE_DOCUMENT_SHARE`] と [`WHOLE_DOCUMENT_MIN_LINES`]。
     pub(crate) fn is_whole_document(&self, total_lines: usize) -> bool {

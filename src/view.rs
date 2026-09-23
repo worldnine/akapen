@@ -16,6 +16,7 @@ use ratatui::text::{Line, Text};
 
 use crate::decoration::{
     Decoration, DecorationBlend, DecorationKind, DecorationStyles, ReviewSeverity, decorate_row,
+    review_severity_on_row,
 };
 use crate::highlight::{Highlighter, Span};
 use crate::render::{self, Rendered, Segment};
@@ -819,9 +820,10 @@ impl ViewState {
         glowing: &[bool],
         deleted: &[bool],
         emphasized: &[bool],
-        // **Review の候補が乗っている行**（Pending だけ）。ガターに `!` が
+        // **Review の候補が乗っている行**（Pending だけ）。ガターに白抜きの印が
         // 出る（`docs/design/marks-only-and-review-mode.md` 4 節）。
-        // 値は行でいちばん重い候補の重さで、`!` の色になる。
+        // 値は行でいちばん重い候補の重さで、白抜きの印（`E` / `W` / `I`）になる。
+        // 印を立てるのは下線の乗る描画行だけ（関数の中の `review_row`）。
         review: &[Option<ReviewSeverity>],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
@@ -958,7 +960,35 @@ impl ViewState {
             // keeps marking every member line; this restricts the RENDER
             // to the first row).
             let deleted_row = group_deleted[src] && abs == self.source_starts[src];
-            let review_row = group_review[src];
+            // **範囲の行だけ**に印を立てる。ソース行の旗（`group_review`）は
+            // 段落に畳まれた行の全部に立つので、この描画行に下線が乗るかを
+            // 装飾と同じ規則で問い直す（[`review_severity_on_row`]）。群の
+            // どの行にも下線が乗らない候補（本文に出ない範囲）は、見失わない
+            // よう群の先頭の行に立てる。
+            let review_row = group_review[src].and_then(|group_severity| {
+                let touched = |row: usize| {
+                    self.row_attrs.get(row).and_then(|attrs| {
+                        review_severity_on_row(&self.rows[row], attrs, decorations)
+                    })
+                };
+                if let Some(here) = touched(abs) {
+                    return Some(here);
+                }
+                let first = self.source_starts[src];
+                if abs != first {
+                    return None;
+                }
+                let group_end = self.source_starts[src..]
+                    .iter()
+                    .find(|&&row| row != first)
+                    .copied()
+                    .unwrap_or(self.rows.len());
+                if (first..group_end).any(|row| touched(row).is_some()) {
+                    None
+                } else {
+                    Some(group_severity)
+                }
+            });
             // The selection is a LINE range; the row span is the rows
             // those lines render on (merged rows can share one). The exact
             // gray highlights a span exactly when its byte range
@@ -1022,11 +1052,12 @@ impl ViewState {
             // edge. The cursor glyph is bold LightCyan — it must be
             // findable at a glance (yellow is the comment marker's
             // color).
+            let mut badge = false;
             let (glyph, mut marker_style) = if abs == start {
                 // The cursor glyph keeps its `>` shape but INHERITS the
                 // mark's color (user request): on a changed/deleted row
                 // it reads as the emphasis (Light + BOLD), so a one-line
-                // review mark is not hidden by the cursor. Mark-less
+                // change mark is not hidden by the cursor. Mark-less
                 // rows keep the classic LightCyan.
                 let fg = if deleted_row {
                     // The deletion anchor outranks the change mark (same
@@ -1048,29 +1079,25 @@ impl ViewState {
             } else if marked_row {
                 ("▌", Style::default().fg(Color::Yellow))
             } else if let Some(severity) = review_row {
-                // **Review の候補**（`R`）。`!` は「ここを直せ」で、
-                // `▌` の並びとは形からして違う — コメント（黄色の `▌`）と
-                // 変更（緑の `▌`）は「ここに何かある」だが、候補は
-                // まだ人が承認していない**提案**である。
+                // **Review の候補**（`R`）。重さの色の地に紙の色で字を抜いた
+                // 1 マス（`E` / `W` / `I`、[`ReviewSeverity::badge`]）。塗った
+                // 1 マスは `▌` の並びとは形からして違う — コメント（黄色の
+                // `▌`）と変更（緑の `▌`）は「ここに何かある」だが、候補は
+                // まだ人が承認していない**提案**である。`!` は使わない —
+                // `!` は「まだ見ていない変更」（左上の `! N`）だけの印。
                 //
                 // **コメントより下。** accept した候補はコメントになるので、
                 // 同じ行で両方が立つのは「accept した瞬間」であり、そこは
                 // コメントの印に変わってほしい（4 節「コメント ＝ 人が
                 // 承認した印」）。削除・変更よりは上で、こちらは文書の
                 // 履歴であって校正ではない。
-                //
-                // **色は重さ**（下線と同じ色、[`DecorationStyles::review_underline`]）。
-                (
-                    "!",
-                    Style::default()
-                        .fg(self.decoration_styles.review_underline(severity))
-                        .add_modifier(Modifier::BOLD),
-                )
+                badge = true;
+                severity.badge(self.decoration_styles.page_bg())
             } else if deleted_row {
                 // Deleted blocks are shown by POSITION only (3-1): the
                 // red `▌` marks "a block was deleted here". It uses the
                 // SAME full-height bar as the green change mark, so both
-                // review marks share one visual weight — the color alone
+                // change marks share one visual weight — the color alone
                 // distinguishes add/change (green) from delete (red).
                 // Where the anchor lands on a rewritten line, red WINS on
                 // this first display row and the rest of the area reads
@@ -1105,10 +1132,13 @@ impl ViewState {
             } else {
                 ("│", border_style)
             };
-            if glowing_row {
-                marker_style = marker_style.bg(glow_bg);
-            } else if gutter_hl {
-                marker_style = marker_style.bg(selected_bg);
+            // 白抜きの印は地色そのものが重さなので、帯の色で塗り替えない。
+            if !badge {
+                if glowing_row {
+                    marker_style = marker_style.bg(glow_bg);
+                } else if gutter_hl {
+                    marker_style = marker_style.bg(selected_bg);
+                }
             }
             gutter.push(GutterCell { glyph, style: marker_style });
             // The text column floats one column off each border: a pad on
@@ -1804,7 +1834,7 @@ mod tests {
     }
 
     #[test]
-    fn review_range_can_be_centered_in_the_rendered_viewport() {
+    fn change_range_can_be_centered_in_the_rendered_viewport() {
         let mut view = ViewState {
             rows: vec![vec![]; 20],
             source_starts: (0..20).collect(),
@@ -2450,7 +2480,7 @@ mod tests {
         // User request: the cursor's `>` keeps its shape but inherits
         // the mark's color — changed rows LightGreen, deleted-mark rows
         // LightRed, mark-less rows the classic LightCyan. A one-line
-        // review mark therefore stays readable under the cursor.
+        // change mark therefore stays readable under the cursor.
         let changed = vec![false, true, false, false];
         let deleted = vec![false, false, true, false];
         // Cursor on a changed row.
@@ -2586,7 +2616,7 @@ mod tests {
         assert_eq!(gutter[0].glyph, "▌");
         assert!(
             gutter[0].style.add_modifier.contains(Modifier::BOLD),
-            "the selected review mark is bold"
+            "the selected change mark is bold"
         );
         assert_eq!(gutter[0].style.fg, Some(Color::LightGreen));
         assert_eq!(gutter[1].glyph, "▌", "deleted mark outside the target");
