@@ -1339,6 +1339,12 @@ impl App {
         self.review_candidates.clear();
         self.review_inflight = 0;
         self.refresh_review_decorations();
+        // 一覧が開いたままなら、カーソルを先頭へ戻す。古い添字のままだと、
+        // 新しい答えが届いたとき見てもいない候補を指している。
+        if self.overlay == Some(crate::overlay::Overlay::Review) {
+            self.overlay_cursor = 0;
+            self.overlay_offset = 0;
+        }
         if rules.is_empty() {
             return;
         }
@@ -1419,6 +1425,14 @@ impl App {
                             !dismissed.contains(&(c.rule.clone(), c.range.start, c.range.end))
                         })
                         .collect();
+                // 一覧が開いていれば、カーソルの下の候補を覚えておく。
+                // 並べ替えで前に候補が差し込まれると、添字のままの
+                // カーソルは別の候補を指し、`a` / `x` が見ていない行に
+                // 効く（ルールが 2 本以上のときに報告されたずれ）。
+                let under_cursor = (self.overlay == Some(crate::overlay::Overlay::Review))
+                    .then(|| self.review_candidates.get(self.overlay_cursor))
+                    .flatten()
+                    .map(|c| (c.rule.clone(), c.range.clone()));
                 self.review_candidates.extend(fresh);
                 // **文書順**に並べ直す。ルールは 1 本ずつ別のスレッドで
                 // 返ってくるので、届いた順に足すと順序が run ごとに変わる。
@@ -1429,6 +1443,15 @@ impl App {
                         .then(a.range.end.cmp(&b.range.end))
                         .then(a.rule.cmp(&b.rule))
                 });
+                if let Some((rule, range)) = under_cursor
+                    && let Some(index) = self
+                        .review_candidates
+                        .iter()
+                        .position(|c| c.rule == rule && c.range == range)
+                {
+                    self.overlay_cursor = index;
+                    crate::overlay::keep_overlay_cursor_visible(self);
+                }
                 self.refresh_review_decorations();
                 self.start_readout_flash();
             }

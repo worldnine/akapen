@@ -535,3 +535,122 @@ fn replacing_the_document_clears_the_candidates() {
     assert!(underlined(&app).is_empty(), "下線が残っている");
     assert!(app.review_generation > generation, "世代が上がっていない");
 }
+
+// ---- 7. 一覧のカーソルは候補を指し続ける ---------------------------------
+
+/// `filler` と `preamble` の 2 本が有効なルール一式。
+fn two_rules(dir: &std::path::Path) -> Rules {
+    let path = dir.join("two-rules.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"rules":[
+          {"id":"filler","label":"Filler","action":"delete","threshold":0.5,"enabled":true,"text":"f"},
+          {"id":"preamble","label":"Preamble","action":"delete","threshold":0.5,"enabled":true,"text":"p"}
+        ]}"#,
+    )
+    .unwrap();
+    Rules::discover(Some(&path)).unwrap()
+}
+
+/// **2 本目のルールの答えが一覧を開いたまま届いても、カーソルは同じ候補を
+/// 指す。** 答えは文書順に並べ直されるので、前に候補が差し込まれると
+/// 添字のままのカーソルは別の候補を指し、`a` / `x` が見ていない行に効く
+/// （報告されたずれ）。
+#[test]
+fn the_list_cursor_stays_on_its_candidate_when_another_rule_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let rules = two_rules(dir.path());
+    let mut app = app_with_rules(dir.path(), rules);
+    app.review_inflight = 2;
+    // 1 本目: 3 段落目だけ。
+    deliver(&mut app, "filler", answer([None, None, Some(0.9)]));
+    crate::overlay::open_overlay(&mut app, crate::overlay::Overlay::Review, 0);
+    assert_eq!(app.review_candidates[app.overlay_cursor].lines, (7, 7));
+
+    // 2 本目: 1 段落目と 2 段落目。文書順では 3 段落目の前に入る。
+    deliver(&mut app, "preamble", answer([Some(0.8), Some(0.7), None]));
+    assert_eq!(app.review_candidates.len(), 3);
+    let under = &app.review_candidates[app.overlay_cursor];
+    assert_eq!(
+        (under.lines, under.rule.as_str()),
+        ((7, 7), "filler"),
+        "カーソルは開いたときに見ていた候補に留まる"
+    );
+
+    // `a` は見えている候補に効く。
+    crate::overlay::on_review_overlay_key(
+        &mut app,
+        ratatui::crossterm::event::KeyCode::Char(crate::keys::REVIEW_ACCEPT),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    );
+    assert_eq!(app.comments.len(), 1);
+    assert_eq!((app.comments[0].start, app.comments[0].end), (7, 7));
+    assert_eq!(app.comments[0].text, "review: filler (0.90)");
+}
+
+/// 一覧を開いたまま文書が差し替わったら、カーソルは先頭へ戻る。古い添字
+/// のままだと、次に届いた答えの見てもいない候補を指す。
+#[test]
+fn a_reanalysis_under_the_open_list_puts_the_cursor_back_on_top() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), Some(0.7)]));
+    crate::overlay::open_overlay(&mut app, crate::overlay::Overlay::Review, 2);
+    app.reanalyze_semantics();
+    assert_eq!(app.overlay_cursor, 0);
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), Some(0.7)]));
+    assert_eq!(app.review_candidates[app.overlay_cursor].lines, (3, 3));
+}
+
+// ---- 8. 送る文面に書き換えの契約が乗る ------------------------------------
+
+/// accept したコメントを送ると、文面の先頭に契約と Filler の定義が乗り、
+/// その後ろは既存の整形そのままである。
+#[test]
+fn an_accepted_candidate_sends_the_contract_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([None, Some(0.87), None]));
+    assert!(app.accept_candidate(0));
+    let text = crate::export_text(&app);
+    let contract = crate::review_contract::contract_text();
+    assert!(text.starts_with(contract.trim_end()), "契約が先頭に無い");
+    let filler = app.review_rules.as_ref().unwrap().get("filler").unwrap().text.clone();
+    assert!(text.contains(&filler), "Filler の定義が無い");
+    assert!(text.ends_with(&crate::export::format_all(&app.comments)));
+    assert!(text.contains("review: filler (0.87)"));
+}
+
+/// `--reply` でも同じく先頭に乗る。
+#[test]
+fn the_reply_mode_sends_the_contract_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    app.config.reply = true;
+    deliver(&mut app, "filler", answer([None, Some(0.87), None]));
+    assert!(app.accept_candidate(0));
+    let text = crate::export_text(&app);
+    let contract = crate::review_contract::contract_text();
+    assert!(text.starts_with(contract.trim_end()));
+    assert!(text.ends_with(&crate::export::format_all_reply(&app.comments)));
+}
+
+/// **review コメントが無い送信は 1 バイトも変わらない。** 候補が届いて
+/// いても、accept していなければ契約は乗らない。
+#[test]
+fn a_send_without_an_accepted_candidate_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), None, None]));
+    app.comments.push(crate::comment::Comment {
+        file_path: app.current_file_path().to_path_buf(),
+        start: 5,
+        end: 5,
+        lines: "ふたつめの段落。".into(),
+        revision: None,
+        text: "ここは言い過ぎ".into(),
+    });
+    assert_eq!(crate::export_text(&app), crate::export::format_all(&app.comments));
+    app.config.reply = true;
+    assert_eq!(crate::export_text(&app), crate::export::format_all_reply(&app.comments));
+}
