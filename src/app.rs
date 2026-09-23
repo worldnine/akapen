@@ -1174,7 +1174,16 @@ impl App {
             .find(|readout| readout.width() <= max_cols)
     }
 
-    /// **問いを消す**（Esc）。消したら `true`。
+    /// 問いを消せるか — [`Self::clear_marks_question`] が `true` を返す状態か。
+    ///
+    /// `Esc` の層の表（[`crate::esc`]）とフッタの予告、mark for の `0 Off` の
+    /// 行が同じ問いを読む。消えるものが無いのに予告を出すと嘘になる。
+    pub(crate) fn can_clear_marks_question(&self) -> bool {
+        !self.marks_question_is_fixed()
+            && (self.marks_question.is_some() || self.semantic_doc.is_some())
+    }
+
+    /// **問いを消す**（Esc の marks の段・mark for の `0 Off`）。消したら `true`。
     ///
     /// マーカーも読み出しも消えて、層を渡す前の画面へ戻る。つまみ
     /// （`marks_share`）は残す — 次に問うたときに前の位置から見たい値で、
@@ -1188,10 +1197,7 @@ impl App {
     /// 選び直す道が無いので（`m` / `M` / `/` はどれも `false` を返す）、
     /// 消すと二度と戻せない。
     pub(crate) fn clear_marks_question(&mut self) -> bool {
-        if self.marks_question_is_fixed() {
-            return false;
-        }
-        if self.marks_question.is_none() && self.semantic_doc.is_none() {
+        if !self.can_clear_marks_question() {
             return false;
         }
         self.marks_question = None;
@@ -1360,6 +1366,44 @@ impl App {
         if first || (self.review_candidates.is_empty() && self.review_inflight == 0) {
             self.reanalyze_review();
         }
+    }
+
+    /// 画面に Review の結果（下線・`!`・一覧の中身・解析中の印）があるか。
+    ///
+    /// [`Self::clear_review`] が消すものがあるか、と同じ問いである。
+    pub(crate) fn review_shown(&self) -> bool {
+        self.review_armed
+            && (!self.review_candidates.is_empty()
+                || self.review_inflight > 0
+                || self.review_lint_error.is_some())
+    }
+
+    /// **Review の結果を画面から消す**（Esc）。消したら `true`。
+    ///
+    /// 消すのは**画面の候補だけ**である。dismiss の記録（[`DismissedStore`]）・
+    /// accept で作ったコメント・判定器のキャッシュは触らない — もう一度 `R` を
+    /// 押せば同じ候補がまた出る（キャッシュに当たれば速い）。accept 済みの
+    /// 印はコメントから、捨てた候補は記録から、そのとき復元される。
+    ///
+    /// **起点も戻す**（[`Self::review_armed`]）。戻さないと、次の reload の
+    /// [`Self::reanalyze_review`] が頼んでもいない候補を描き直す。走っている
+    /// 解析は世代を進めて切る（遅れて届く答えは古い世代として捨てられる）。
+    pub(crate) fn clear_review(&mut self) -> bool {
+        if !self.review_shown() {
+            return false;
+        }
+        self.review_armed = false;
+        self.review_generation += 1;
+        self.review_candidates.clear();
+        self.review_inflight = 0;
+        self.review_lint_error = None;
+        self.review_edit_anchor = None;
+        self.review_cursor_target = None;
+        if self.overlay == Some(crate::overlay::Overlay::Review) {
+            self.overlay = None;
+        }
+        self.refresh_review_decorations();
+        true
     }
 
     /// 有効なルールごとに、いま画面にある文書を判定器へ渡す。

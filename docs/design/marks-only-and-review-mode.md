@@ -141,7 +141,9 @@
 **ラベルの誤り 3 件も同じ節にある**（どれも「Atom では正しいが Unit では
 負にできない」形で、直していない）。
 
-**「判断が要る」は 2026-09-22 に `Decide` として入れた**（読み手の判断）。
+**「判断が要る」は 2026-09-22 に `Decide` として入れた**（読み手の判断。
+表示の名前は 2026-09-23 に `Your call` へ変えた — id `decide` と文面は同じ。
+下の「UI」）。
 上の表のとおり**独立は測れていない**（`決まっていないこと` と相関 0.88、
 正解つきの 2 文書目でも 0.90）。
 それでも入れたのは、他の 4 本がどれも文書の側の性質を聞いているのに対し、
@@ -165,11 +167,16 @@
 動いているのはこの形である。
 
 **言葉は全部英語。** `label` は `Essential` / `Settled` / `Unsettled` /
-`Decide` / `Numbers`、自由入力が `Ask`。**Jev へ送る `text` は日本語の
+`Your call` / `Numbers`、自由入力が `Ask`。**Jev へ送る `text` は日本語の
 まま 1 字も変えていない** — 判定品質は文面で決まるので、ここが動けば上の
-実測は根拠でなくなる。label は id を大文字で始めたものにしてある。
-fixture 経路（`--semantic <file>`）は label を持たず id をそのまま出すので、
-両方の経路で同じ字面になる。
+実測は根拠でなくなる。label は id を大文字で始めたものにしてある —
+**`decide` だけは例外で `Your call`**（2026-09-23。`Settled` の hint の
+`decided`・`Unsettled` の hint の `undecided`・名前の `Decide` と、同じ語根が
+3 か所でかぶっていた）。fixture 経路（`--semantic <file>`）は label を持たず
+id をそのまま出すので、`decide` の fixture だけは両経路で字面が違う。
+要求に載るのは `id` と `text` だけで、キャッシュの鍵も `text` の sha なので、
+表示の語を変えても判定もキャッシュも動かない
+（`marks_questions::tests::relabelling_leaves_the_asked_ids_and_texts_untouched`）。
 
 **読み出しはフッタの右端にある**（2026-09-22。1 日のうちにフッタ →
 タイトル行の右 → **フッタの右下**と 2 度動いた。下の「なぜ戻したか」）:
@@ -226,12 +233,43 @@ fixture 経路（`--semantic <file>`）は label を持たず id をそのまま
 | `-` `+` / `<` `>` | つまみ ±1 / ±10 |
 | `f` | **フォーカス** — マーカーの無いところを沈める |
 | `]m` / `[m` | 次・前のマーク行へ飛ぶ |
-| `Esc` | **問いを消す** — マーカーも読み出しも消える |
+| `Esc` | **一番手前の層を 1 枚はがす** — marks はその終わり近く |
+| `m` → `0` | マークを消す（popup の `0 Off`。マークが出ているときだけある行） |
 
-`Esc` には先客がいる（終了確認・選択解除・popup を閉じる・composer の
-取り消し・フォーカスを解く）。問いを消すのはその全部より後で、消すと
-次に問うときに解析をやり直す（＝お金がかかる）からである。fixture 経路
-（`--semantic <file>`）では断る — そこは問いを選び直す道が無い。
+### `Esc` — 一番手前の層から 1 枚ずつはがす（2026-09-23）
+
+`Esc` には先客が何人もいる。**順番は 1 本の表**（`src/esc.rs` の `ORDER`）で、
+view・source・Review の据え付けの一覧の 3 か所の `Esc` がみなそこを通る。
+フッタ右端の予告も同じ表を読むので、予告と実際に消えるものはずれない:
+
+| 順 | 層 | フッタの予告 | フラッシュ |
+| ---: | --- | --- | --- |
+| 1 | 終了の確認（`q`、未送信のコメントあり） | `Esc: cancel quit`（`--esc-quit` なら `Esc: quit`） | `quit cancelled` |
+| 2 | 選択（`v`・一覧の Enter） | `Esc: cancel selection` | `selection cancelled` |
+| 3 | 削除のフォーカス（source の `n` / `N`） | `Esc: cancel deletion focus` | `deletion focus cancelled` |
+| 4 | Review の据え付けの一覧 | `Esc: close list` | `list closed` |
+| 5 | フォーカス（`f`） | `Esc: focus off` | `focus off` |
+| 6 | Review の下線と `!`（候補） | `Esc: clear review` | `review cleared` |
+| 7 | marks（問い・マーカー・読み出し） | `Esc: clear marks` | `marks cleared` |
+| 8 | 終了（`--esc-quit` のときだけ） | `Esc: quit` | — |
+
+- **手前ほど軽い。** 上ほど一時的で、消しても何も失わない。Review と marks は
+  消すと次に出すとき解析をやり直す（キャッシュに当たれば 0 円・一瞬だが、
+  当たらなければお金と数秒）。**Review が marks より手前**なのは、Review が
+  一時的な作業（直す候補を巡る）で、marks は読むための下敷きだからである
+- **Review を消すのは画面の候補だけ。** dismiss の記録・accept で作った
+  コメント・キャッシュは消さない。`R` を押せば同じ候補がまた出て、accept 済みは
+  コメントから、捨てた候補は記録から、前と同じ印で戻る。起点（`review_armed`）も
+  戻すので、次の reload が頼んでいない候補を描き直すことは無い
+- **予告はフッタの右端**（読み出しの右）。何も消すものが無く `Esc` で終了しない
+  設定なら出さない。popup・composer・問いのプロンプトの間も出さない（そちらは
+  `Esc` を自分で取る）。狭いときは**案内の次に退く** — 左の案内を右から落とし
+  （`? help` と位置は残る）、次に予告、それから読み出しが段を下りる。予告は
+  キーの案内であって状態ではないので、読み出しより先に譲る
+- 予告が出口を言うので、選択中の `Esc cancel` と一覧の `Esc close` は案内から
+  外した（同じ状態を 2 か所で言わない）
+- fixture 経路（`--semantic <file>`）では marks の段が立たない — そこは問いを
+  選び直す道が無い。`0 Off` も出ない
 
 ### フォーカス（`f`）— 他を沈めて、マーカーだけ残す
 
@@ -267,8 +305,8 @@ fixture 経路（`--semantic <file>`）は label を持たず id をそのまま
 **直前の押下から 120 ms 以内は捨てる**（沈む / 戻るの点滅よけ）。
 
 沈んだまま**つまみも問いも動く** — 沈んだ状態で問いを変えられるのが
-いちばんの使い道である。Esc の順は 終了確認 → 選択解除 → フォーカス
-解除 → 終了。バッジ `FOCUS` はフッタのモードバッジのスロットで、
+いちばんの使い道である。Esc の順は上の「`Esc` — 一番手前の層から 1 枚ずつ
+はがす」の表。バッジ `FOCUS` はフッタのモードバッジのスロットで、
 **`SELECT` が優先する**（transient な方を先に名乗る。Esc の順と同じ並び）。
 
 ### スクロールバーの目盛りと `]m`
@@ -302,10 +340,11 @@ popup は選んだ 1 本しか呼ばない。**開くだけでは 1 円もかか
 ```text
 ┌────────────────────────────────────────────────────────────┐
 │ mark for ──────────────────────────────────────────────────│
+│  0 Off         clear the marks                             │  ← マークが出ているときだけ
 │▸ 1 Essential   what you would misread if it were dropped   │
-│  2 Settled     decided, agreed, fixed                      │
-│  3 Unsettled   undecided, pending, waiting to be confirmed │
-│  4 Decide      asks you to judge, confirm or choose        │
+│  2 Settled     agreed, fixed, final                        │
+│  3 Unsettled   open, pending, waiting to be confirmed      │
+│  4 Your call   asks you to judge, confirm or choose        │
 │  5 Numbers     deadlines, amounts, quantities              │
 │  / Ask...      type your own question                      │
 │ j/k:move  Enter:ask  Esc:close                             │
@@ -313,7 +352,7 @@ popup は選んだ 1 本しか呼ばない。**開くだけでは 1 円もかか
 ```
 
 **`questions` ではなく `mark for` と名乗る。** marks モードでは
-「question」が**文書の中にある問い**とも読める（`Unsettled` と `Decide` が
+「question」が**文書の中にある問い**とも読める（`Unsettled` と `Your call` が
 まさにそれを光らせる）ので、こちらが持っている問いと同じ語になってしまう。
 最下段の `/ Ask...` は、自由入力があること自体を見せるために行として
 置いてある（以前は `?` ヘルプにしか書いていなかった）。
@@ -1056,7 +1095,7 @@ linter ごとの形を akapen に持ち込まない — 変換はスクリプト
  ▸ ✓ L72 · ja-no-weak-phrase · 弱い表現: …           ← 選んだ行は本文のカーソル帯と同じ色
  ─ textlint/ja-no-weak-phrase · L72 ─────────────  ← 一覧で落とした <source>/ と範囲
    弱い表現: "かも" が使われています。                ← 理由の全文（折り返す）
- REVIEW L72/192 · j/k move · a accept · x dismiss · e edit · Esc close
+ REVIEW L72/192 · j/k move · a accept · x dismiss · e edit     Esc: close list
 ```
 
 | どこ | 何 |

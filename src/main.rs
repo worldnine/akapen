@@ -17,6 +17,7 @@ mod decoration;
 mod draw;
 mod edit_map;
 mod effects;
+mod esc;
 mod export;
 mod focus;
 mod highlight;
@@ -2837,35 +2838,9 @@ pub(crate) fn on_view_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers, 
         KeyCode::Char('?') => {
             open_overlay(app, Overlay::Help, 0);
         }
-        KeyCode::Esc => {
-            // View is the home mode: Esc cancels the quit confirmation
-            // first, then a pending selection (parallel to source mode).
-            // With esc-quit enabled the confirmation is the topmost
-            // layer — Esc closes it for real, like a second q — and
-            // with nothing pending Esc falls through to the quit path.
-            if app.confirm_quit {
-                if app.esc_quit_enabled() {
-                    app.running = false;
-                } else {
-                    app.confirm_quit = false;
-                    app.flash("quit cancelled");
-                }
-            } else if app.selection.take().is_some() {
-                app.flash("selection cancelled");
-            } else if app.clear_focus() {
-                // フォーカスは選択の下、終了の上。選択のほうが
-                // transient なので先に引き取り、沈めたままの画面で
-                // Esc を押した人が終了させられるのは事故なので手前で受ける。
-                app.flash("focus off");
-            } else if app.clear_marks_question() {
-                // **問いを消す**（`crate::keys::MARKS_CLEAR_HINT`）。
-                // 沈めるのを解くより下なのは、消すと次に問うたときに
-                // 解析をやり直す（＝お金がかかる）操作だからである。
-                app.flash("question cleared");
-            } else if app.esc_quit_enabled() {
-                request_quit(app);
-            }
-        }
+        // 一番手前の層を 1 枚はがす。順番は `crate::esc::ORDER` の 1 本で、
+        // source とも Review の据え付けの一覧とも同じ表を通る。
+        KeyCode::Esc => esc::peel(app),
         _ => {}
     }
 }
@@ -3099,7 +3074,7 @@ fn press_focus(app: &mut App) {
     if !app.focused() && !app.can_focus() {
         // 0 本のときに沈めると画面が全部沈む。頼まれたのは「他を沈める」
         // であって「全部沈める」ではないので、断って理由を言う。
-        app.flash("nothing marked yet — m to pick a question");
+        app.flash("nothing marked yet — m to pick what to mark");
         return;
     }
     app.press_focus(Instant::now());
@@ -3123,7 +3098,7 @@ fn adjust_marks_share(app: &mut App, delta: i16) {
             // 数秒後には来る。
             app.flash("analyzing…");
         } else if app.marks_question.is_none() {
-            app.flash("no question yet — m to pick one, / to type one");
+            app.flash("nothing to mark for yet — m to pick, / to ask");
         } else {
             // `--semantic`（fixture）でしか来ない: 層は頼まれているのに
             // provider がこの文書を断った（別の文書の fixture、など）。
@@ -3163,7 +3138,7 @@ fn open_marks_picker(app: &mut App) {
         refuse_marks_question(app);
         return;
     }
-    let cursor = app.marks_preset;
+    let cursor = mark_for_preset_row(app, app.marks_preset);
     open_overlay(app, Overlay::MarkFor, cursor);
 }
 
@@ -3184,9 +3159,9 @@ pub(crate) fn refuse_marks_question(app: &mut App) {
     ) {
         // fixture は 1 つの問いへの答えを固定で持っている。変わった
         // ふりをするより、変わらないと言うほうが正しい。
-        app.flash_err("fixture: the question is fixed");
+        app.flash_err("fixture: what to mark is fixed");
     } else {
-        app.flash_err("marks questions unavailable");
+        app.flash_err("mark for unavailable");
     }
 }
 
@@ -3333,7 +3308,7 @@ fn jump_review_mark(app: &mut App, dir: isize) {
 fn jump_mark(app: &mut App, dir: isize) {
     let targets = app.marks_lines.clone();
     if targets.is_empty() {
-        app.flash("no marks — m to pick a question");
+        app.flash("no marks — m to pick what to mark");
         return;
     }
     let line = if app.mode == Mode::View {
@@ -3575,36 +3550,9 @@ pub(crate) fn on_source_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers
                 app.flash_err("view mode unavailable — not a Markdown file");
             }
         }
-        KeyCode::Esc => {
-            // The quit confirmation is the most urgent state: Esc resolves
-            // it before anything else (a pending selection otherwise
-            // swallows the first Esc and the prompt feels stuck). With
-            // esc-quit enabled the confirmation is the topmost layer —
-            // Esc closes it for real, like a second q — and with nothing
-            // pending Esc falls through to the quit path. Esc never
-            // switches modes — Tab is the one toggle (a mode flip from a
-            // reflexive Esc lost the reading position).
-            if app.confirm_quit {
-                if app.esc_quit_enabled() {
-                    app.running = false;
-                } else {
-                    app.confirm_quit = false;
-                    app.flash("quit cancelled");
-                }
-            } else if app.selection.take().is_some() {
-                app.flash("selection cancelled");
-            } else if app.deletion_focus().is_some() {
-                app.focused_deletion = None;
-                app.flash("deletion focus cancelled");
-            } else if app.clear_focus() {
-                // view と同じ順（選択 → フォーカス → 問いを消す → 終了）。
-                app.flash("focus off");
-            } else if app.clear_marks_question() {
-                app.flash("question cleared");
-            } else if app.esc_quit_enabled() {
-                request_quit(app);
-            }
-        }
+        // view と同じ表（`crate::esc::ORDER`）。Esc はモードを切り替えない
+        // — 切り替えは Tab の 1 本（反射の Esc で読んでいた位置を失った）。
+        KeyCode::Esc => esc::peel(app),
         KeyCode::PageDown => {
             source_move_cursor_display(app, viewport as isize, viewport);
         }
@@ -3767,7 +3715,7 @@ fn cancel_composer(app: &mut App) {
     // （再編集の復帰・「comment cancelled」）はどれも当たらない。
     if app.marks_prompt {
         close_marks_prompt(app);
-        app.flash("question cancelled");
+        app.flash("ask cancelled");
         return;
     }
     app.input.clear();
@@ -3802,7 +3750,7 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
             // 1 行も入らない。
             if app.marks_prompt {
                 if text.is_empty() {
-                    app.flash_err("empty question — not asked (Esc to cancel)");
+                    app.flash_err("empty — nothing asked (Esc to cancel)");
                     return;
                 }
                 close_marks_prompt(app);
@@ -3866,7 +3814,7 @@ fn on_input_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char(c)
             if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' && app.marks_prompt =>
         {
-            app.flash_err("a question is one line");
+            app.flash_err("ask is one line");
         }
         KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) && c == 'j' => {
             app.input.insert(app.input_cursor, '\n');

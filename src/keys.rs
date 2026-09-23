@@ -78,17 +78,21 @@ pub(crate) const REVIEW_HINT: &str =
 /// 2026-09-22 に試して捨てた（`crate::focus`）。
 pub(crate) const MARKS_FOCUS: char = 'f';
 
-/// **問いを消す**（Esc）。マーカーも読み出しも消える。
+/// **マークを消す**（Esc）。マーカーも読み出しも消える。
 ///
-/// `KeyCode::Esc` は char ではないので [`semantic_key`] の表には載らない
-/// — ここに置いてあるのは**順番**である。Esc には先客が何人もいて、
-/// 終了確認 → 選択解除 → フォーカスを解く → **問いを消す** → 終了、の
-/// 順に受ける（popup と composer はそもそも別のハンドラが先に取る）。
-/// いちばん最後に近いのは、消すと解析をやり直す操作だからで、反射で
-/// 押した Esc がそこまで落ちてくることは無い。
+/// `KeyCode::Esc` は char ではないので [`semantic_key`] の表には載らない。
+/// Esc には先客が何人もいて、**一番手前の層から 1 枚ずつはがす**
+/// （順番の表は `crate::esc::ORDER` の 1 本）。marks は終了のすぐ手前で、
+/// フォーカスと Review の後である。いちばん最後に近いのは、消すと解析を
+/// やり直す操作だからで、反射で押した Esc がそこまで落ちてくることは無い。
+/// mark for の popup の `0 Off` も同じものを消す。
+///
+/// **画面では「question」と呼ばない。** marks モードでは「question」が
+/// 文書の中にある問いとも読める（`crate::overlay::Overlay::MarkFor`）ので、
+/// 画面の語は `marks` / `mark for` / `ask` に揃えてある。
 ///
 /// 文字列そのものが `?` ヘルプの行になる（`crate::overlay::help_rows`）。
-pub(crate) const MARKS_CLEAR_HINT: &str = "Esc clear the question (marks and readout go)";
+pub(crate) const MARKS_CLEAR_HINT: &str = "Esc clear marks, after focus and review · m 0 off";
 
 /// `]` / `[` に続けて打つと次・前のマーク行へ飛ぶ。
 ///

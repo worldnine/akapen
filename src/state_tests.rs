@@ -3292,10 +3292,13 @@ use crate::comment::Selection;
         app.selection = Some(Selection::new(3));
         assert!(footer_hints(&app).contains("4–4"));
         assert!(footer_hints(&app).contains("j/k extend"));
-        assert!(
-            footer_hints(&app).contains("Esc cancel"),
-            "the selection state spells out the way out: {}",
-            footer_hints(&app)
+        // The way out of the SELECT state is spelled out once, by the
+        // right-edge preview (`crate::esc`) — not repeated in the hints.
+        assert!(!footer_hints(&app).contains("Esc cancel"), "{}", footer_hints(&app));
+        assert_eq!(
+            crate::esc::preview(&app).as_deref(),
+            Some("Esc: cancel selection"),
+            "the selection state spells out the way out"
         );
         let mut app2 = make_app(10, Mode::Source);
         assert!(footer_hints(&app2).contains("L1/10"));
