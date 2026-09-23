@@ -2243,8 +2243,7 @@ use crate::comment::Selection;
     #[test]
     fn view_s_y_d_are_wired() {
         // The export/delete keys work from the view without a mode switch.
-        // With no comments they flash instead of exporting (and the early
-        // return keeps the test off the real clipboard).
+        // With no comments they flash instead of exporting.
         let mut app = make_app(10, Mode::View);
         on_view_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, None);
         assert!(app.status.is_some(), "s flashes 'no comments yet'");
@@ -4608,6 +4607,24 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn s_without_a_clipboard_tool_still_sends_but_toasts_red() {
+        // テストのクリップボードは差し替えてあって常に成功する
+        // （export::test_clipboard）。道具の無い環境での本番の挙動はここで
+        // 押さえる: コピーは失敗しても送信は届いてコメントは消え、トーストは
+        // 赤でコピーの失敗を伝える。
+        let _no_tool = crate::export::test_clipboard::unavailable();
+        let mut app = make_app(5, Mode::Source);
+        app.config.send_cmd = Some("cat > /dev/null".to_string());
+        add_comment(&mut app, 1, 1, "c");
+        on_source_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, None);
+        assert!(app.comments.is_empty(), "delivered → cleared");
+        let (msg, _, is_err) = app.status.clone().expect("a toast reports the copy");
+        assert!(is_err, "{msg}");
+        assert!(msg.contains("clipboard failed"), "{msg}");
+        assert!(msg.contains("sent via"), "{msg}");
+    }
+
+    #[test]
     fn s_with_failed_send_shows_the_childs_stderr_in_the_toast() {
         // A failing send command's last stderr line is the reason the
         // red toast gives, so the user learns *why* nothing was sent.
@@ -4638,8 +4655,7 @@ use crate::comment::Selection;
     fn overlay_y_copies_comments_without_sending() {
         // Copying the comments moved into the comments overlay (`l` then
         // `y`). It is copy-only: even with --send-cmd configured it must
-        // not deliver, and the comments stay. (No comments → the early
-        // return keeps the test off the real clipboard.)
+        // not deliver, and the comments stay.
         let mut app = make_app(5, Mode::Source);
         app.config.send_cmd = Some("cat > /dev/null".to_string());
         app.overlay = Some(Overlay::Comments);
@@ -4663,8 +4679,7 @@ use crate::comment::Selection;
     #[test]
     fn body_y_on_an_empty_document_flashes() {
         // `y` in the body copies the line/selection as shown. With no
-        // document there is nothing to copy — and the early return keeps
-        // the test off the real clipboard.
+        // document there is nothing to copy.
         let mut app = make_app(0, Mode::Source);
         on_source_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, None);
         assert!(app.status.is_some(), "y flashes 'nothing to copy'");

@@ -1,4 +1,4 @@
-# tui-markdown 0.3.9 — vendored fork の想定差分（変更行数 = 素の diff の '<' + '>' 行数）
+# tui-markdown 0.3.9 — vendored fork の想定差分（変更行数 = diff -d の '<' + '>' 行数）
 # 上の 0.3.9 は【ベンダリング元の上流バージョン】= third_party/tui-markdown/Cargo.toml
 # の [package.metadata] vendored-from。フォーク自身の [package] version とは別物。
 # このファイルは scripts/check-vendor-diff.sh --update で再生成する。手編集はしないこと。

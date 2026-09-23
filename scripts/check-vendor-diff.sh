@@ -17,7 +17,7 @@
 #   1. 上流バージョンが、フォークの Cargo.toml（vendored-from）とマニフェスト
 #      （scripts/vendor-expected.tsv のヘッダ）で一致している
 #   2. vendored src/ のファイル一覧が上流と完全一致（追加・欠落なし）
-#   3. ファイルごとの変更行数（素の diff の '<' + '>' 行数）がマニフェストと
+#   3. ファイルごとの変更行数（diff -d の '<' + '>' 行数）がマニフェストと
 #      1 行単位で一致
 #
 # 使い方:
@@ -100,7 +100,8 @@ if [ -n "$added$deleted" ]; then
 fi
 
 # --- ファイルごとの変更行数を数える ----------------------------------------------
-count_changed() { diff "$1" "$2" 2>/dev/null | grep -cE '^[<>]' || true; }
+# -d（最小差分）: 最小なら行数は一意。素の diff は近似で、GNU diff だと table.rs が 895（最小は 893）になる
+count_changed() { diff -d "$1" "$2" 2>/dev/null | grep -cE '^[<>]' || true; }
 
 declare -A COUNTS
 TOTAL=0
@@ -114,7 +115,7 @@ done <<< "$UP_FILES"
 if [ "$MODE" = update ]; then
   tmp="$MANIFEST.tmp"
   {
-    echo "# tui-markdown $VER — vendored fork の想定差分（変更行数 = 素の diff の '<' + '>' 行数）"
+    echo "# tui-markdown $VER — vendored fork の想定差分（変更行数 = diff -d の '<' + '>' 行数）"
     # 上流バージョンだけを書く。フォーク自身のバージョンはここに焼き込まない
     # （--update を挟まずに上がると、黙って古い値が残るため）。
     echo "# 上の $VER は【ベンダリング元の上流バージョン】= third_party/tui-markdown/Cargo.toml"
