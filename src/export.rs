@@ -60,7 +60,7 @@ fn format_comment_with(
             "{revision}{}\n{}\n{}",
             export_location(comment),
             numbered_snippet(comment),
-            normalize_text(&comment.text)
+            with_place(normalize_text(&comment.text), comment, true)
         )
     } else {
         let quote = quoted_snippet(comment);
@@ -79,7 +79,7 @@ fn format_comment_with(
             }
             None => quote,
         };
-        let text = normalize_text(&comment.text);
+        let text = with_place(normalize_text(&comment.text), comment, false);
         // In a batch, indent the comment 4 spaces so it lives inside the
         // numbered item next to its quote (unambiguous pairing, and the
         // comment's own text cannot collide with the item number).
@@ -97,6 +97,37 @@ fn format_comment_with(
             .map(|revision| format!("Revision: {revision}\n\n"))
             .unwrap_or_default();
         format!("{revision}{quote}\n\n{text}")
+    }
+}
+
+/// 結び目のあるコメント（accept した候補）に、**行の中のどこか**を 1 行
+/// 足す。同じ行に指摘が 2 本あっても、受け手がどちらのことか分かるように
+/// する（`docs/design/marks-only-and-review-mode.md` 4 節「コメントと候補の
+/// 結び目」）。
+///
+/// ```text
+/// 箇所: 72 行目の 26 文字目から「…が効く【かも】しれない。…」
+/// ```
+///
+/// 桁は**文字**で数える（バイトではない）ので、文面にも「文字目」と書く。
+/// `--reply` の形は行番号を持たない（ファイルが無いので指す先が無い）ので、
+/// 抜粋だけを書く。**結び目の無いコメントは 1 バイトも変えない。**
+fn with_place(text: String, comment: &Comment, include_location: bool) -> String {
+    let Some(anchor) = comment.anchor.as_ref().filter(|a| !a.excerpt.is_empty()) else {
+        return text;
+    };
+    let place = if include_location {
+        format!(
+            "箇所: {} 行目の {} 文字目から「{}」",
+            comment.start, anchor.column, anchor.excerpt
+        )
+    } else {
+        format!("箇所: 「{}」", anchor.excerpt)
+    };
+    if text.is_empty() {
+        place
+    } else {
+        format!("{text}\n{place}")
     }
 }
 

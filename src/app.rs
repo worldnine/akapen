@@ -130,7 +130,48 @@ impl AnalysisChannel {
 /// コメントは候補のバイト範囲を持たず、行と本文の形（ルール）だけを持つ
 /// （[`crate::review::candidate_comment_rule`]）。同じ行に同じルールの
 /// 候補が 2 本あれば、2 本は同じコメントを指す。
-pub(crate) type ReviewCommentKey = (PathBuf, Option<String>, String, (u32, u32));
+pub(crate) type ReviewCommentKey = (PathBuf, Option<String>, CandidateSpot);
+
+/// review / lint コメントと候補を結ぶ鍵。
+///
+/// **結び目のあるコメントは (ルール, バイト範囲)** で候補と結ぶ — 同じ行に
+/// 同じルールの候補が 2 本あっても取り違えない。結び目の無いコメント（古い
+/// 経路）は今までどおり (ルール, 行) で結ぶ。候補の側は両方の鍵を持つ
+/// （[`Self::of_candidate`]）ので、どちらの形のコメントとも照合できる。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum CandidateSpot {
+    /// ルールとバイト範囲。
+    Range(String, usize, usize),
+    /// ルールと 1 始まりの行（先頭, 末尾）。
+    Lines(String, (u32, u32)),
+}
+
+impl CandidateSpot {
+    /// コメントの鍵。review / lint の形でない本文（人の赤入れ）は `None`。
+    ///
+    /// ルールは本文から読む — 人が本文を書き換えて review の形でなく
+    /// なったら、結び目が残っていても候補とは結ばない（今までと同じ）。
+    pub(crate) fn of_comment(comment: &Comment) -> Option<Self> {
+        let rule = crate::review::candidate_comment_rule(&comment.text)?;
+        Some(match &comment.anchor {
+            Some(anchor) => Self::Range(rule, anchor.range.start, anchor.range.end),
+            None => Self::Lines(rule, (comment.start, comment.end)),
+        })
+    }
+
+    /// 候補の鍵 — バイト範囲のものと行のものの 2 つ。
+    pub(crate) fn of_candidate(candidate: &crate::review::Candidate) -> impl Iterator<Item = Self> {
+        [
+            Self::Range(
+                candidate.rule.clone(),
+                candidate.range.start,
+                candidate.range.end,
+            ),
+            Self::Lines(candidate.rule.clone(), candidate.lines),
+        ]
+        .into_iter()
+    }
+}
 
 /// `a` / `x` を押した結果（一覧のキーがフラッシュを選ぶ）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1723,13 +1764,13 @@ impl App {
         let accepted = self.live_review_comments();
         let file = self.current_file_path().to_path_buf();
         let revision = self.current_revision_context();
-        let sent: HashSet<(&str, (u32, u32))> = self
+        let sent: HashSet<&CandidateSpot> = self
             .review_sent
             .iter()
-            .filter(|(path, rev, _, _)| {
+            .filter(|(path, rev, _)| {
                 *path == file && crate::history::same_revision(rev.as_deref(), revision.as_deref())
             })
-            .map(|(_, _, rule, lines)| (rule.as_str(), *lines))
+            .map(|(_, _, spot)| spot)
             .collect();
         self.review_candidates
             .iter()
@@ -1739,9 +1780,9 @@ impl App {
                     .contains(&(c.rule.clone(), c.range.start, c.range.end))
                 {
                     CandidateState::Dismissed
-                } else if accepted.contains(&(c.rule.clone(), c.lines)) {
+                } else if CandidateSpot::of_candidate(c).any(|spot| accepted.contains(&spot)) {
                     CandidateState::Accepted
-                } else if sent.contains(&(c.rule.as_str(), c.lines)) {
+                } else if CandidateSpot::of_candidate(c).any(|spot| sent.contains(&spot)) {
                     CandidateState::Sent
                 } else {
                     CandidateState::Pending
@@ -1836,10 +1877,11 @@ impl App {
             end,
             lines,
             revision: self.current_revision_context(),
-            anchor: Some(crate::comment::ReviewAnchor {
-                rule: candidate.rule.clone(),
-                range: candidate.range.clone(),
-            }),
+            anchor: Some(crate::comment::ReviewAnchor::new(
+                candidate.rule.clone(),
+                candidate.range.clone(),
+                &self.source.content,
+            )),
             text,
         };
         self.comments.push(comment);
@@ -1852,21 +1894,20 @@ impl App {
         let Some(candidate) = self.review_candidates.get(index) else {
             return 0;
         };
-        let (rule, lines) = (candidate.rule.clone(), candidate.lines);
+        let spots: Vec<CandidateSpot> = CandidateSpot::of_candidate(candidate).collect();
         let current = self.current_file_path().to_path_buf();
         let revision = self.current_revision_context();
         let before = self.comments.len();
         self.comments.retain(|c| {
             !(c.file_path == current
                 && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
-                && (c.start, c.end) == lines
-                && crate::review::candidate_comment_rule(&c.text).as_deref() == Some(rule.as_str()))
+                && CandidateSpot::of_comment(c).is_some_and(|spot| spots.contains(&spot)))
         });
         before - self.comments.len()
     }
 
-    /// いまの版に生きている review コメントの (ルール, 行)。
-    fn live_review_comments(&self) -> HashSet<(String, (u32, u32))> {
+    /// いまの版に生きている review コメントの結び目（[`CandidateSpot`]）。
+    fn live_review_comments(&self) -> HashSet<CandidateSpot> {
         let current = self.current_file_path();
         let revision = self.current_revision_context();
         self.comments
@@ -1875,10 +1916,7 @@ impl App {
                 c.file_path == *current
                     && crate::history::same_revision(c.revision.as_deref(), revision.as_deref())
             })
-            .filter_map(|c| {
-                let rule = crate::review::candidate_comment_rule(&c.text)?;
-                Some((rule, (c.start, c.end)))
-            })
+            .filter_map(CandidateSpot::of_comment)
             .collect()
     }
 
@@ -1893,8 +1931,8 @@ impl App {
             .comments
             .iter()
             .filter_map(|c| {
-                let rule = crate::review::candidate_comment_rule(&c.text)?;
-                Some((c.file_path.clone(), c.revision.clone(), rule, (c.start, c.end)))
+                let spot = CandidateSpot::of_comment(c)?;
+                Some((c.file_path.clone(), c.revision.clone(), spot))
             })
             .collect();
         self.review_sent.extend(sent);
@@ -1906,7 +1944,7 @@ impl App {
     pub(crate) fn forget_review_sent(&mut self) {
         let current = self.current_file_path().to_path_buf();
         self.review_sent
-            .retain(|(path, revision, _, _)| !(*path == current && revision.is_none()));
+            .retain(|(path, revision, _)| !(*path == current && revision.is_none()));
     }
 
     /// **見届けた reload で、いまの版の review コメントを片付ける。**
@@ -1940,11 +1978,18 @@ impl App {
                     continue;
                 }
             };
-            let range = self
-                .review_candidates
-                .iter()
-                .find(|c| c.rule == rule && c.lines == (comment.start, comment.end))
-                .map(|c| c.range.clone())
+            // 結び目があればその範囲。無ければ（結び目の無い古いコメント）、
+            // 同じルール・同じ行の候補の範囲か、行そのもの。
+            let range = comment
+                .anchor
+                .as_ref()
+                .map(|anchor| anchor.range.clone())
+                .or_else(|| {
+                    self.review_candidates
+                        .iter()
+                        .find(|c| c.rule == rule && c.lines == (comment.start, comment.end))
+                        .map(|c| c.range.clone())
+                })
                 .unwrap_or_else(|| {
                     // 行の頭から、末尾の行の終わり（改行の手前）まで。
                     let line = |n: u32| n.saturating_sub(1) as usize;
@@ -1967,6 +2012,14 @@ impl App {
                 .take((end.saturating_sub(start) + 1) as usize)
                 .collect::<Vec<_>>()
                 .join("\n");
+            // 結び目も同じ差分で写す（位置と抜粋は新しい版で作り直す）。
+            if let Some(anchor) = comment.anchor.take() {
+                comment.anchor = Some(crate::comment::ReviewAnchor::new(
+                    anchor.rule,
+                    moved.clone(),
+                    new_content,
+                ));
+            }
             kept.push(comment);
         }
         self.comments = kept;

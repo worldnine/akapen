@@ -4160,6 +4160,8 @@ mod state_tests;
 mod marks_tests;
 
 #[cfg(test)]
+mod review_anchor_tests;
+#[cfg(test)]
 mod review_tests;
 
 #[cfg(test)]
