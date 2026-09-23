@@ -179,7 +179,7 @@ pub(crate) fn open_editor_at(app: &mut App, terminal: &mut AppTerminal, line: us
     // Mouse capture goes back on only AFTER raw mode is restored, mirroring
     // run()'s startup order.
     let mut init_error = None;
-    match crate::NoBlinkBackend::init() {
+    match crate::NoBlinkBackend::init(terminal.backend().undercurl) {
         Ok(fresh) => *terminal = fresh,
         Err(e) => init_error = Some(e),
     }
@@ -534,6 +534,7 @@ mod handoff_tests {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -599,6 +600,7 @@ mod handoff_tests {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

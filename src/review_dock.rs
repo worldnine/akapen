@@ -212,10 +212,17 @@ pub(crate) fn follow(app: &mut App) {
     let Some(candidate) = app.review_candidates.get(app.overlay_cursor) else {
         return;
     };
+    app.selection = None;
+    // **文書全体を範囲にする指摘では本文を動かさない。** 本文には下線も
+    // `!` も無く（[`crate::review::Candidate::is_whole_document`]）、送っても
+    // 指す場所が無い。先頭の行へ送ると、一覧の末尾まで読んできた読み手が
+    // 文書の頭へ飛ばされる。
+    if candidate.is_whole_document(app.source.len()) {
+        return;
+    }
     let last = app.source.len().saturating_sub(1);
     let start = (candidate.lines.0.saturating_sub(1) as usize).min(last);
     let end = (candidate.lines.1.saturating_sub(1) as usize).min(last).max(start);
-    app.selection = None;
     if app.mode == Mode::View {
         let viewport = app.view_viewport_rows();
         app.view.goto_source_line(start);
@@ -266,6 +273,9 @@ pub(crate) fn detail_lines(app: &App, candidate: &Candidate, width: usize) -> Ve
     out
 }
 
+/// 文書全体を範囲にする指摘の、一覧の行と出どころの行での呼び名。
+pub(crate) const WHOLE_DOCUMENT: &str = "文書全体";
+
 /// 最初の `。` までの 1 文（無ければ全体）。
 fn first_sentence(text: &str) -> &str {
     match text.find('。') {
@@ -276,7 +286,9 @@ fn first_sentence(text: &str) -> &str {
 
 /// 選んだ候補の出どころの 1 行 — 一覧では落とした `<source>/` と、範囲の行。
 fn rule_line(app: &App, candidate: &Candidate) -> String {
-    let lines = if candidate.lines.1 > candidate.lines.0 {
+    let lines = if candidate.is_whole_document(app.source.len()) {
+        format!("{WHOLE_DOCUMENT} L{}–{}", candidate.lines.0, candidate.lines.1)
+    } else if candidate.lines.1 > candidate.lines.0 {
         format!("L{}–{}", candidate.lines.0, candidate.lines.1)
     } else {
         format!("L{}", candidate.lines.0)
@@ -419,11 +431,18 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                 .map_or(candidate.rule.as_str(), |(_, code)| code)
                 .to_string(),
         };
+        // 文書全体を範囲にする指摘は `L1` ではなく「文書全体」と名乗る —
+        // `L1` と書くと 1 行目の指摘に読める。
+        let place = if candidate.is_whole_document(app.source.len()) {
+            WHOLE_DOCUMENT.to_string()
+        } else {
+            format!("L{}", candidate.lines.0)
+        };
         let head = format!(
-            " {}{} L{} · {} · ",
+            " {}{} {} · {} · ",
             if selected { "▸ " } else { "  " },
             candidate.mark(),
-            candidate.lines.0,
+            place,
             tag,
         );
         let cols = match candidate.finding {

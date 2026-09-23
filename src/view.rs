@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 use ratatui::text::{Line, Text};
 
 use crate::decoration::{
-    Decoration, DecorationBlend, DecorationKind, DecorationStyles, decorate_row,
+    Decoration, DecorationBlend, DecorationKind, DecorationStyles, ReviewSeverity, decorate_row,
 };
 use crate::highlight::{Highlighter, Span};
 use crate::render::{self, Rendered, Segment};
@@ -761,8 +761,8 @@ impl ViewState {
         changed: &[bool],
         deleted: &[bool],
         emphasized: &[bool],
-        // Review の候補が乗っている行（Pending だけ）。`!` が出る。
-        review: &[bool],
+        // Review の候補が乗っている行（Pending だけ）と重さ。`!` が出る。
+        review: &[Option<ReviewSeverity>],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
         border_style: Style,
@@ -821,7 +821,8 @@ impl ViewState {
         emphasized: &[bool],
         // **Review の候補が乗っている行**（Pending だけ）。ガターに `!` が
         // 出る（`docs/design/marks-only-and-review-mode.md` 4 節）。
-        review: &[bool],
+        // 値は行でいちばん重い候補の重さで、`!` の色になる。
+        review: &[Option<ReviewSeverity>],
         selection: Option<(usize, usize)>,
         selected_bg: Color,
         glow_bg: Color,
@@ -875,7 +876,24 @@ impl ViewState {
         // Optional target emphasis only styles a mark that is already
         // selected; cursor, selection, and comment priority is untouched.
         let group_emphasized = group_or(emphasized);
-        let group_review = group_or(review);
+        // Review の `!` は重さも運ぶので、OR ではなく max で畳む
+        // （`None` < `Some(_)`、`Some` どうしは重い方）。
+        let group_review = {
+            let mut out = vec![None; self.source_starts.len()];
+            let mut acc: Option<ReviewSeverity> = None;
+            let mut group_start = 0usize;
+            for i in 0..self.source_starts.len() {
+                acc = acc.max(review.get(i).copied().flatten());
+                if i + 1 == self.source_starts.len()
+                    || self.source_starts[i + 1] != self.source_starts[i]
+                {
+                    out[group_start..=i].fill(acc);
+                    acc = None;
+                    group_start = i + 1;
+                }
+            }
+            out
+        };
         let end = (self.offset + viewport).min(self.rows.len());
         let mut start = self.cursor_row();
         let mut c_end = self.cursor_end_row() + 1;
@@ -1029,7 +1047,7 @@ impl ViewState {
                 ("▌", Style::default().fg(Color::Cyan))
             } else if marked_row {
                 ("▌", Style::default().fg(Color::Yellow))
-            } else if review_row {
+            } else if let Some(severity) = review_row {
                 // **Review の候補**（`R`）。`!` は「ここを直せ」で、
                 // `▌` の並びとは形からして違う — コメント（黄色の `▌`）と
                 // 変更（緑の `▌`）は「ここに何かある」だが、候補は
@@ -1040,7 +1058,14 @@ impl ViewState {
                 // コメントの印に変わってほしい（4 節「コメント ＝ 人が
                 // 承認した印」）。削除・変更よりは上で、こちらは文書の
                 // 履歴であって校正ではない。
-                ("!", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                //
+                // **色は重さ**（下線と同じ色、[`DecorationStyles::review_underline`]）。
+                (
+                    "!",
+                    Style::default()
+                        .fg(self.decoration_styles.review_underline(severity))
+                        .add_modifier(Modifier::BOLD),
+                )
             } else if deleted_row {
                 // Deleted blocks are shown by POSITION only (3-1): the
                 // red `▌` marks "a block was deleted here". It uses the

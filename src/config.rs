@@ -192,6 +192,10 @@ pub struct Config {
     /// フラグが無いときは環境変数 [`LINT_CMD_ENV`] を既定にする（空・空白は
     /// 設定していないのと同じ）。**意味層（`--semantic-cmd`）は要らない。**
     pub lint_cmd: Option<String>,
+    /// `--undercurl <auto|on|off>`: Review の下線を波線（`CSI 4:3 m`）に
+    /// するか（[`crate::undercurl`]）。フラグが無ければ環境変数
+    /// [`crate::undercurl::UNDERCURL_ENV`]、それも無ければ `auto`。
+    pub undercurl: crate::undercurl::UndercurlMode,
     /// `--mark-blend <0.0..1.0>` / `--dim-blend <0.0..1.0>`: how strong
     /// the two range-decoration kinds are. `mark` lifts the mark
     /// background off the page toward the text color; `dim` moves a
@@ -320,6 +324,7 @@ impl Config {
         let mut review_rules: Option<PathBuf> = None;
         let mut review_json = false;
         let mut lint_cmd: Option<String> = None;
+        let mut undercurl: Option<crate::undercurl::UndercurlMode> = None;
         let mut decoration_blend = DecorationBlend::default();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -352,6 +357,9 @@ impl Config {
                 "--review-rules" => review_rules = it.next().map(PathBuf::from),
                 "--review-json" => review_json = true,
                 "--lint-cmd" => lint_cmd = it.next(),
+                "--undercurl" => {
+                    undercurl = it.next().map(|v| crate::undercurl::UndercurlMode::parse(&v));
+                }
                 "--mark-blend" => {
                     if let Some(v) = it.next() {
                         decoration_blend.mark = parse_blend("--mark-blend", &v)?;
@@ -391,6 +399,13 @@ impl Config {
             lint_cmd = Some(v);
         }
         let lint_cmd = lint_cmd.filter(|cmd| !cmd.trim().is_empty());
+        // `--undercurl` も同じ作法。フラグが勝つ。
+        let undercurl = undercurl
+            .or_else(|| {
+                env(crate::undercurl::UNDERCURL_ENV)
+                    .map(|v| crate::undercurl::UndercurlMode::parse(&v))
+            })
+            .unwrap_or_default();
         if files.is_empty() {
             bail!(
                 "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>]"
@@ -452,6 +467,7 @@ impl Config {
             review_rules,
             review_json,
             lint_cmd,
+            undercurl,
             decoration_blend,
             decorations,
         })))
@@ -714,6 +730,18 @@ mod tests {
 
     fn parse_with(args: &[&str], env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Action> {
         Config::parse_with_env(args.iter().map(|s| (*s).to_string()), env)
+    }
+
+    #[test]
+    fn undercurl_defaults_to_auto_reads_its_env_and_the_flag_wins() {
+        use crate::undercurl::{UNDERCURL_ENV, UndercurlMode};
+        assert_eq!(cfg(&parse(&["x.md"])).undercurl, UndercurlMode::Auto);
+        assert_eq!(cfg(&parse(&["x.md", "--undercurl", "off"])).undercurl, UndercurlMode::Off);
+        let action = parse_with(&["x.md"], one_var(UNDERCURL_ENV, "on")).unwrap();
+        assert_eq!(cfg(&action).undercurl, UndercurlMode::On);
+        let action =
+            parse_with(&["x.md", "--undercurl", "off"], one_var(UNDERCURL_ENV, "on")).unwrap();
+        assert_eq!(cfg(&action).undercurl, UndercurlMode::Off, "フラグが勝つ");
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::*;
 
 use crate::app::{ReviewAnswer, ReviewMessage};
 use crate::config::{Config, EscQuit};
-use crate::decoration::DecorationKind;
+use crate::decoration::{DecorationKind, ReviewSeverity};
 use crate::highlight::Highlighter;
 use crate::ime::ImeMode;
 use crate::marks_questions::Questions;
@@ -66,6 +66,7 @@ fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -137,7 +138,7 @@ fn deliver(app: &mut App, rule: &str, document: SemanticDocument) {
 fn underlined(app: &App) -> Vec<std::ops::Range<usize>> {
     app.active_decorations()
         .into_iter()
-        .filter(|d| d.kind == DecorationKind::ReviewCandidate)
+        .filter(|d| matches!(d.kind, DecorationKind::ReviewCandidate(_)))
         .map(|d| d.range)
         .collect()
 }
@@ -356,7 +357,7 @@ fn the_underline_is_a_different_colour_from_the_marks_amber() {
     for light in [false, true] {
         let highlight = Highlighter::new(None, light);
         let styles = crate::decoration::DecorationStyles::from_theme(&highlight, Default::default());
-        let underline = styles.review_underline();
+        let underline = styles.review_underline(ReviewSeverity::Info);
         assert_ne!(underline, styles.mark_bg(), "light={light}: 琥珀の地色と同じ");
         assert_ne!(underline, styles.mark_tick(), "light={light}: 目盛りの琥珀と同じ");
         // 色相まで見る — 琥珀は赤 > 青、Review の青緑は青 > 赤である。
@@ -378,10 +379,10 @@ fn the_underline_and_the_amber_survive_each_other() {
     let base = ratatui::style::Style::default();
     let both = styles.patch(
         styles.patch(base, DecorationKind::SemanticMark),
-        DecorationKind::ReviewCandidate,
+        DecorationKind::ReviewCandidate(ReviewSeverity::Warning),
     );
     assert_eq!(both.bg, Some(styles.mark_bg()), "琥珀の地色が残る");
-    assert_eq!(both.underline_color, Some(styles.review_underline()));
+    assert_eq!(both.underline_color, Some(styles.review_underline(ReviewSeverity::Warning)));
     assert!(both.add_modifier.contains(ratatui::style::Modifier::UNDERLINED));
 }
 
@@ -461,6 +462,7 @@ fn review_refuses_the_fixture_route() {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -501,6 +503,7 @@ fn a_session_without_the_layer_has_no_review_at_all() {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -510,7 +513,7 @@ fn a_session_without_the_layer_has_no_review_at_all() {
     let app = App::new(config, source, highlight, view, false);
     assert!(!app.review_enabled());
     assert!(app.review_readouts().is_empty());
-    assert!(app.review_lines().iter().all(|f| !f));
+    assert!(app.review_lines().iter().all(Option::is_none));
     // `?` ヘルプにも出ない。
     let rows = crate::overlay::help_rows(false, false, false, false, false);
     assert!(
@@ -1262,9 +1265,10 @@ fn a_whole_document_diagnostic_does_not_steal_the_cursor_after_an_edit() {
         ],
     );
     assert_eq!(app.review_candidates.len(), 3, "総評も候補");
+    assert_eq!(app.review_candidates[2].rule, "textlint/whole", "総評は末尾");
     crate::overlay::open_review(&mut app);
     app.review_inflight = 0;
-    app.overlay_cursor = 1; // ふたつめ
+    app.overlay_cursor = 0; // ふたつめ
     let editor = editor_script(dir.path(), "NR != n");
     edit_from_the_list(&mut app, &editor);
     let doc = app.source.content.clone();

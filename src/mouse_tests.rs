@@ -36,6 +36,7 @@
                 review_rules: None,
                 review_json: false,
                 lint_cmd: None,
+                undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -91,6 +92,7 @@
                 review_rules: None,
                 review_json: false,
                 lint_cmd: None,
+                undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -160,6 +162,7 @@
                 review_rules: None,
                 review_json: false,
                 lint_cmd: None,
+                undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -312,6 +315,7 @@
                 review_rules: None,
                 review_json: false,
                 lint_cmd: None,
+                undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -359,6 +363,7 @@
                 review_rules: None,
                 review_json: false,
                 lint_cmd: None,
+                undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

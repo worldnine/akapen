@@ -749,13 +749,14 @@ pub(crate) fn footer_hints(app: &App) -> String {
 fn mode_badge(app: &App) -> (String, Style) {
     // 据え付けた一覧がキーを持っているあいだは `REVIEW` を名乗る（窓が
     // 無いので、どこにキーが届くかを示すものがバッジしか無い）。色は本文の
-    // 候補の下線と同じ青緑 — 一覧と下線が同じ機能だと色で結ぶ。
+    // 候補の下線の青緑（重さ info、Jev の候補の色）— 一覧と下線が同じ機能だと
+    // 色で結ぶ。下線は重さで色が分かれるが、バッジは 1 つなので分けない。
     if crate::review_dock::is_open(app) {
         return (
             format!("{:^8}", "REVIEW"),
             Style::default()
                 .fg(Color::Rgb(0, 0, 0))
-                .bg(app.decoration_styles.review_underline()),
+                .bg(app.decoration_styles.review_underline(crate::decoration::ReviewSeverity::Info)),
         );
     }
     match app.mode {
@@ -1356,6 +1357,7 @@ mod footer_tests {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };

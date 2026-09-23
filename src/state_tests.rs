@@ -85,6 +85,7 @@ use crate::comment::Selection;
             review_rules: None,
             review_json: false,
             lint_cmd: None,
+            undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -135,6 +136,7 @@ use crate::comment::Selection;
             review_rules: None,
             review_json: false,
             lint_cmd: None,
+            undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -840,6 +842,7 @@ use crate::comment::Selection;
             review_rules: None,
             review_json: false,
             lint_cmd: None,
+            undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -896,6 +899,7 @@ use crate::comment::Selection;
             review_rules: None,
             review_json: false,
             lint_cmd: None,
+            undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -939,6 +943,7 @@ use crate::comment::Selection;
             review_rules: None,
             review_json: false,
             lint_cmd: None,
+            undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -1922,6 +1927,7 @@ use crate::comment::Selection;
             review_rules: None,
             review_json: false,
             lint_cmd: None,
+            undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2038,6 +2044,7 @@ use crate::comment::Selection;
             review_rules: None,
             review_json: false,
             lint_cmd: None,
+            undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -2344,6 +2351,7 @@ use crate::comment::Selection;
             review_rules: None,
             review_json: false,
             lint_cmd: None,
+            undercurl: Default::default(),
             decoration_blend: Default::default(),
             decorations: Vec::new(),
         };
@@ -6054,6 +6062,7 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: vec![
             mark_at("重要", DecorationKind::SemanticMark),
@@ -6179,6 +6188,7 @@ fn a_dimmed_list_item_dims_its_marker_too() {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: vec![Decoration {
             range: first_item.range.clone(),
@@ -6258,6 +6268,7 @@ fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -6366,6 +6377,7 @@ fn a_marked_line_under_the_cursor_shows_the_band_not_the_amber() {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };
@@ -7230,6 +7242,7 @@ fn the_marks_projection_splits_one_source_line_into_two_styles() {
         review_rules: None,
         review_json: false,
         lint_cmd: None,
+        undercurl: Default::default(),
         decoration_blend: Default::default(),
         decorations: Vec::new(),
     };

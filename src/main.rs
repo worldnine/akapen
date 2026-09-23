@@ -38,6 +38,7 @@ mod snapshot;
 mod source;
 mod theme;
 mod timeline;
+mod undercurl;
 mod view;
 mod yank;
 
@@ -155,6 +156,10 @@ fn main() -> Result<()> {
                  \x20 --semantic-cache-clear  wipe that cache and exit (needed after\n\
                  \x20                   changing an analyser's prompts without\n\
                  \x20                   changing its command line)\n\
+                 \x20 --undercurl <auto|on|off> draw the Review underlines as curly\n\
+                 \x20                   lines (default auto: on where the terminal\n\
+                 \x20                   is known to draw them). $AKAPEN_UNDERCURL\n\
+                 \x20                   is the default when this flag is absent\n\
                  \x20 --mark-blend <f>  how far the MARKED background is lifted off\n\
                  \x20                   the page, 0.0..1.0 (default 0.27)\n\
                  \x20 --dim-blend <f>   how far a DIM foreground is moved toward the\n\
@@ -314,6 +319,18 @@ fn activate_first_file(app: &mut App) {
 #[derive(Debug)]
 pub(crate) struct NoBlinkBackend<W: std::io::Write + Send> {
     inner: CrosstermBackend<W>,
+    /// **セルを書く先**（[`Backend::draw`] だけが使う）。
+    ///
+    /// `inner` の writer は ratatui-crossterm の unstable な API（
+    /// `writer_mut`）でしか触れず、その feature は Cargo.lock に使わない
+    /// バックエンドを引き込む。そこで**同じ stdout の別の handle** を持つ。
+    /// `Stdout` の handle はすべて 1 つの大域のバッファを共有するので、
+    /// `inner` が書くカーソル移動・消去と、ここが書くセルの順序は崩れない
+    /// （`flush` は `inner` の 1 回で両方が出る）。
+    out: W,
+    /// **Review の下線を波線にするか**（`--undercurl`、[`crate::undercurl::resolve`]）。
+    /// 描画の出口（[`Backend::draw`]）だけが読む。
+    pub(crate) undercurl: bool,
 }
 
 impl NoBlinkBackend<std::io::Stdout> {
@@ -321,7 +338,7 @@ impl NoBlinkBackend<std::io::Stdout> {
     /// cursor never becomes visible (the analogue of `ratatui::init()`
     /// plus the no-blink promise). The caller's own guard restores the
     /// terminal on exit.
-    pub(crate) fn init() -> Result<AppTerminal> {
+    pub(crate) fn init(undercurl: bool) -> Result<AppTerminal> {
         ratatui::crossterm::terminal::enable_raw_mode()?;
         let _ = ratatui::crossterm::execute!(
             std::io::stdout(),
@@ -330,6 +347,8 @@ impl NoBlinkBackend<std::io::Stdout> {
         );
         let backend = NoBlinkBackend {
             inner: CrosstermBackend::new(std::io::stdout()),
+            out: std::io::stdout(),
+            undercurl,
         };
         Ok(ratatui::Terminal::new(backend)?)
     }
@@ -342,7 +361,9 @@ impl<W: std::io::Write + Send> Backend for NoBlinkBackend<W> {
     where
         I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
     {
-        self.inner.draw(content)
+        // `CrosstermBackend::draw` の代わりに、波線の印を読み替える出口を
+        // 通す（[`crate::undercurl::draw`]）。
+        crate::undercurl::draw(&mut self.out, content, self.undercurl)
     }
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
         self.inner.hide_cursor()
@@ -436,7 +457,8 @@ fn run(config: Config) -> Result<()> {
         None
     };
 
-    let mut terminal = NoBlinkBackend::init()?;
+    let mut terminal =
+        NoBlinkBackend::init(crate::undercurl::resolve_from_env(config.undercurl))?;
     // From here on the terminal is in raw mode + alternate screen; the
     // guard's Drop restores it on every return path, early or normal.
     let terminal_guard = TerminalGuard;
@@ -4187,3 +4209,5 @@ mod history_animation_tests;
 /// the styles off the rows it emits.
 #[cfg(test)]
 mod source_decoration_tests;
+#[cfg(test)]
+mod review_render_tests;

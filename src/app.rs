@@ -1539,10 +1539,15 @@ impl App {
         // **文書順**に並べ直す。出どころは 1 本ずつ別のスレッドで
         // 返ってくるので、届いた順に足すと順序が run ごとに変わる。
         // Jev のルールと lint の候補も、ここで同じ一覧に文書順で混ざる。
+        //
+        // **文書全体を範囲にする指摘は末尾へ**（[`Candidate::is_whole_document`]）。
+        // 先頭に置くと一覧を開いた最初の候補がいつも総評になり、本文の
+        // どこも指さない候補から読み始めることになる。
+        let total_lines = self.source.len();
         self.review_candidates.sort_by(|a, b| {
-            a.range
-                .start
-                .cmp(&b.range.start)
+            a.is_whole_document(total_lines)
+                .cmp(&b.is_whole_document(total_lines))
+                .then(a.range.start.cmp(&b.range.start))
                 .then(a.range.end.cmp(&b.range.end))
                 .then(a.rule.cmp(&b.rule))
         });
@@ -1599,29 +1604,42 @@ impl App {
     /// Accepted はコメントの印（黄色のバー）に変わり、Dismissed は本文
     /// から消える。下線は「まだ見ていない」という意味なので、見たものに
     /// 残っていると一覧を往復するたびに同じ場所を読み直すことになる。
+    ///
+    /// **文書全体を範囲にする指摘は引かない**（[`Candidate::is_whole_document`]）。
+    /// 全文に線が乗ると、本文のどの指摘の線も見分けられなくなる。
+    ///
+    /// 色は候補の重さ（[`Candidate::severity`]）で分かれる。
     pub(crate) fn refresh_review_decorations(&mut self) {
+        let total_lines = self.source.len();
         self.review_decorations = self
             .review_candidates
             .iter()
-            .filter(|c| c.is_pending())
-            .flat_map(|c| c.atoms.iter().cloned())
-            .map(|range| Decoration {
-                range,
-                kind: crate::decoration::DecorationKind::ReviewCandidate,
+            .filter(|c| c.is_pending() && !c.is_whole_document(total_lines))
+            .flat_map(|c| {
+                let kind = crate::decoration::DecorationKind::ReviewCandidate(c.severity());
+                c.atoms.iter().cloned().map(move |range| Decoration { range, kind })
             })
             .collect();
     }
 
-    /// 候補の乗っているソース行（0 始まり・昇順）— ガターの `!`。
+    /// 候補の乗っているソース行（0 始まり）— ガターの `!` と、その色の
+    /// 重さ（行に乗る候補のうち**いちばん重いもの**）。
     ///
-    /// Pending だけを数える（下線と同じ理由）。
-    pub(crate) fn review_lines(&self) -> Vec<bool> {
-        let mut flags = vec![false; self.source.len()];
-        for candidate in self.review_candidates.iter().filter(|c| c.is_pending()) {
+    /// Pending だけを数え、文書全体を範囲にする指摘は数えない（下線と
+    /// 同じ理由）。
+    pub(crate) fn review_lines(&self) -> Vec<Option<crate::decoration::ReviewSeverity>> {
+        let total_lines = self.source.len();
+        let mut flags = vec![None; total_lines];
+        for candidate in self
+            .review_candidates
+            .iter()
+            .filter(|c| c.is_pending() && !c.is_whole_document(total_lines))
+        {
             let start = (candidate.lines.0.saturating_sub(1)) as usize;
             let end = (candidate.lines.1.saturating_sub(1)) as usize;
+            let severity = candidate.severity();
             for flag in flags.iter_mut().take(end + 1).skip(start) {
-                *flag = true;
+                *flag = (*flag).max(Some(severity));
             }
         }
         flags

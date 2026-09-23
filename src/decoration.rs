@@ -22,6 +22,11 @@
 //!   guess — and a wrong guess bleeds decoration onto the neighbouring
 //!   text. This rule is what keeps table cells and entity references from
 //!   smearing.
+//! - **例外: Review の下線**（[`DecorationKind::ReviewCandidate`]）は、
+//!   上位集合の span に**一部でも触れれば断片ごと**引く（空白だけの断片 —
+//!   折返しの hanging pad — には引かない）。覆うときだけにすると、表の
+//!   セルやタブ行の中の指摘が本文に何も出ない。exact の span は他の kind と
+//!   同じく範囲の文字だけに切る（[`review_touches_superset`]）
 //! - **no** attribution (`None`) → a synthesized span: a quote prefix, a
 //!   table border, padding. It has no source, so it is never decorated.
 //!
@@ -121,9 +126,57 @@ pub enum DecorationKind {
     /// 出るからで、候補の上に琥珀が乗っても両方読める必要がある
     /// （地色を 2 つ重ねると後勝ちで片方が消える）。
     ///
-    /// 色は [`REVIEW_TINT`]。
-    ReviewCandidate,
+    /// 色は**重さ**（[`ReviewSeverity`]）で分ける — [`DecorationStyles::review_underline`]。
+    /// 端末が対応していれば波線になる（[`CURL_CARRIER`]）。
+    ReviewCandidate(ReviewSeverity),
 }
+
+/// **Review の候補の重さ** — 下線とガターの `!` の色を決める。
+///
+/// LSP の `severity`（1 Error / 2 Warning / 3 Information / 4 Hint）を
+/// そのまま写す。linter ごとの段階（textlint の error / warning / info、
+/// lint.py の critical / warn / info）を揃えるのは**変換スクリプトの側**
+/// （`examples/lint/`）で、akapen が覚えるのは LSP の 4 段だけである。
+///
+/// 並びは**軽い順**で、`max` が「その行でいちばん重い候補」になる
+/// （ガターの `!` は行ごとに 1 つしか打てない）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReviewSeverity {
+    Hint,
+    /// Jev のルールの候補と、`severity` を持たない指摘もここ（今までの青緑）。
+    Info,
+    Warning,
+    Error,
+}
+
+impl ReviewSeverity {
+    /// LSP の数値から。**無い・範囲の外は `Info`** — 色分けが入る前の
+    /// 青緑のままにする（重さを言わない linter を勝手に重くしない）。
+    pub fn from_lsp(severity: Option<u8>) -> Self {
+        match severity {
+            Some(1) => Self::Error,
+            Some(2) => Self::Warning,
+            Some(4) => Self::Hint,
+            _ => Self::Info,
+        }
+    }
+}
+
+/// **波線の運び役** — Review の下線のセルに立てる印の [`Modifier`]。
+///
+/// ratatui 0.30 の [`Modifier`] には undercurl が無く（`UNDERLINED` と
+/// `underline_color` だけ）、セルに「この下線は波線」と書く場所が無い。
+/// そこで akapen が**他に使っていない** `RAPID_BLINK` を印に借り、描画の
+/// 出口（`NoBlinkBackend::draw`、`crate::undercurl::draw`）で
+/// 読み替える:
+///
+/// - 波線が使える端末 → `UNDERLINED` と一緒に立っていれば `CSI 4:3 m`
+/// - 使えない端末 → 普通の下線（`CSI 4 m`）
+/// - どちらでも**点滅は出さない**（印は必ず落とす）
+///
+/// 装飾の層は端末を知らない（[`decorate_row`] は純粋なまま）。端末の判定は
+/// 出口の 1 か所だけにある。
+pub const CURL_CARRIER: Modifier = Modifier::RAPID_BLINK;
 
 /// Where the mark background travels TO: a saturated amber, the color a
 /// yellow highlighter leaves on paper.
@@ -161,6 +214,25 @@ const MARK_TINT: Color = Color::Rgb(0xff, 0xb0, 0x00);
 /// 暗いテーマでは暗い紙から、明るいテーマでは白い紙から、同じ式で寄せる
 /// ので、`--light` でも `--theme` を変えても下線は読める。
 const REVIEW_TINT: Color = Color::Rgb(0x00, 0xb4, 0xc8);
+
+/// **error の下線が向かう先** — 赤。
+///
+/// 端末の慣習（赤 = エラー）どおり。紙から [`REVIEW_BLEND`] で寄せるので、
+/// ダークの紙で `rgb(210,57,73)`、明るい紙で `rgb(254,100,109)`。
+const REVIEW_ERROR_TINT: Color = Color::Rgb(0xff, 0x40, 0x50);
+
+/// **warning の下線が向かう先** — 橙。
+///
+/// 慣習の「黄」にしなかったのは、**明るい紙で線が消える**からである。
+/// 黄 `#f0e030` を同じ式で寄せると明るい紙との対比が 1.22:1 で、1 ピクセルの
+/// 線はほぼ見えない。橙 `#ff8000` なら 2.01:1（ダークでは 4.60:1）。
+///
+/// **marks の琥珀（[`MARK_TINT`]、色相 41°）とは色相で 11° しか離れていない**
+/// が、本文で重なるのは琥珀の**地色**（[`MARK_BG_BLEND`] = 0.27 の暗い琥珀）
+/// と線であって、両者の CIELAB の色差はダークで 55、明るい紙で 50 ある
+/// （地色の上の線の対比は 2.55:1 / 1.73:1）。目盛りの琥珀（[`TICK_BLEND`]）
+/// とは 23 前後と近いが、目盛りはスクロールバーの溝にだけ出て本文には来ない。
+const REVIEW_WARNING_TINT: Color = Color::Rgb(0xff, 0x80, 0x00);
 
 /// 下線が紙から [`REVIEW_TINT`] へどれだけ寄るか。
 ///
@@ -383,13 +455,27 @@ impl DecorationStyles {
         crate::view::lerp_color(self.dim_target, MARK_TINT, TICK_BLEND)
     }
 
-    /// **Review の候補の下線の色**（`R`）。
+    /// **Review の候補の下線の色**（`R`）— 重さごと。ガターの `!` も同じ色。
     ///
-    /// [`Self::mark_bg`] / [`Self::mark_tick`] と同じ紙から、別の
-    /// 色相（[`REVIEW_TINT`]）へ寄せたもの。**焼き込んだ色ではない**ので、
+    /// [`Self::mark_bg`] / [`Self::mark_tick`] と同じ紙から、重さごとの
+    /// 色相へ同じ [`REVIEW_BLEND`] で寄せたもの。**焼き込んだ色ではない**ので、
     /// テーマを変えても marks の琥珀との距離が保たれる。
-    pub fn review_underline(&self) -> Color {
-        crate::view::lerp_color(self.dim_target, REVIEW_TINT, REVIEW_BLEND)
+    ///
+    /// | 重さ | 向かう先 | ダークの紙 | 明るい紙 |
+    /// | --- | --- | --- | --- |
+    /// | Error | [`REVIEW_ERROR_TINT`] | `rgb(210,57,73)` | `rgb(254,100,109)` |
+    /// | Warning | [`REVIEW_WARNING_TINT`] | `rgb(210,108,9)` | `rgb(254,151,45)` |
+    /// | Info / Hint | [`REVIEW_TINT`] | `rgb(6,150,169)` | `rgb(50,193,205)` |
+    ///
+    /// Info と Hint は同じ色である（どちらも「直してもよい」側で、見分けが
+    /// 要るほど出ない）。Jev のルールの候補は Info — 色分けの前と同じ青緑。
+    pub fn review_underline(&self, severity: ReviewSeverity) -> Color {
+        let tint = match severity {
+            ReviewSeverity::Error => REVIEW_ERROR_TINT,
+            ReviewSeverity::Warning => REVIEW_WARNING_TINT,
+            ReviewSeverity::Info | ReviewSeverity::Hint => REVIEW_TINT,
+        };
+        crate::view::lerp_color(self.dim_target, tint, REVIEW_BLEND)
     }
 
     /// The paper the mark was lifted FROM — where the reveal fades in
@@ -430,9 +516,12 @@ impl DecorationStyles {
             DecorationKind::Dim => base.fg(self.dim_fg(base.fg)),
             // **下線だけ。** 前景も地色も触らないので、琥珀の上でも、
             // 選択の帯の上でも、syntax highlight の上でも重なって読める。
-            DecorationKind::ReviewCandidate => base
-                .add_modifier(Modifier::UNDERLINED)
-                .underline_color(self.review_underline()),
+            //
+            // 波線の印（[`CURL_CARRIER`]）も一緒に立てる。波線にするか
+            // どうかは描画の出口が決める。
+            DecorationKind::ReviewCandidate(severity) => base
+                .add_modifier(Modifier::UNDERLINED | CURL_CARRIER)
+                .underline_color(self.review_underline(severity)),
         }
     }
 }
@@ -536,7 +625,11 @@ pub fn decorate_row(
                     if d.range.is_empty() {
                         continue;
                     }
-                    if d.range.start <= attr.range.start && d.range.end >= attr.range.end {
+                    let applies = match d.kind {
+                        DecorationKind::ReviewCandidate(_) => review_touches_superset(d, attr, span),
+                        _ => d.range.start <= attr.range.start && d.range.end >= attr.range.end,
+                    };
+                    if applies {
                         style = styles.patch(style, d.kind);
                     }
                 }
@@ -553,6 +646,23 @@ pub fn decorate_row(
         }
     }
     (out_spans, out_attrs)
+}
+
+/// **Review の下線だけは、上位集合の span に一部でも触れれば引く**
+/// （空白だけの断片を除く）。
+///
+/// 交差ルール（覆うときだけ）は marks の地色がにじまないための規則で、
+/// Review にそのまま当てると、表のセル・タブのある行の中の指摘が
+/// **本文に何も出ない**（ガターの `!` だけが立って、どこか分からない）。
+/// 上位集合の span の文字は source の添字で切れないので、範囲の文字だけに
+/// 引くことはできない — それなら**その断片ごと**引く方が、指摘を見失う
+/// よりよい。広すぎる線は 1 つの断片（折返しの 1 行ぶんのセル）で止まる。
+///
+/// **空白だけの断片には引かない。** 折返しの hanging pad は段落の範囲を
+/// 引き継いだ上位集合で、段落をまたぐ指摘（`sentence-length` など）が
+/// 行頭の余白にまで線を引いていた。
+fn review_touches_superset(d: &Decoration, attr: &Attr, span: &Span) -> bool {
+    !span.text.trim().is_empty() && d.range.start < attr.range.end && d.range.end > attr.range.start
 }
 
 /// Split one EXACT span at every decoration edge that falls strictly
