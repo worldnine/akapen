@@ -654,3 +654,190 @@ fn a_send_without_an_accepted_candidate_is_unchanged() {
     app.config.reply = true;
     assert_eq!(crate::export_text(&app), crate::export::format_all_reply(&app.comments));
 }
+
+// ---- 9. 直接編集 — 見届けた reload を越える ------------------------------
+//
+// `docs/design/marks-only-and-review-mode.md` 4 節「直接編集」。候補を
+// LLM に送らず人が `e` で直す流れと、開いたまま LLM が書き換えた流れの
+// どちらも、akapen が前後の版を見届けた reload（`reload_source`）を通る。
+
+/// ディスクの文書を `text` に書き換えて、見届けた reload を通す。
+fn rewrite_and_reload(app: &mut App, text: &str) {
+    std::fs::write(app.current_file_path(), text).unwrap();
+    crate::reload::reload_source(app, false).unwrap();
+}
+
+/// 文書の中の `paragraphs` を 1 段落 = 1 Atom = 1 Unit にした答え。
+fn answer_for(doc: &str, paragraphs: &[&str], scores: &[Option<f32>]) -> SemanticDocument {
+    let atoms: Vec<Atom> = paragraphs
+        .iter()
+        .map(|text| {
+            let at = doc.find(text).unwrap();
+            Atom::new(at..at + text.len(), AtomKind::Sentence)
+        })
+        .collect();
+    let units: Vec<SemanticUnit> = scores
+        .iter()
+        .enumerate()
+        .map(|(i, score)| {
+            let mut unit = SemanticUnit::new(format!("u{i}"), [AtomIndex(i)]);
+            unit.score = *score;
+            unit
+        })
+        .collect();
+    let mut document = SemanticDocument::new(atoms, units);
+    document.question = Some("filler".into());
+    document
+}
+
+/// 2 段落目だけを直し、3 段落目の前に 1 段落足した版。1 段落目は
+/// 1 バイトも変わらず、3 段落目は中身が同じままバイト位置だけが動く。
+const EDITED: &str = "\
+# みだし
+
+ひとつめの段落。
+
+ふたつめを直した。
+
+足した段落。
+
+みっつめの段落。
+";
+
+/// **dismiss は、中身が変わっていない範囲に限って差分を越える。**
+///
+/// 修正前は sha が変わるので捨てた判断が全部外れ、外れがまた出ていた。
+#[test]
+fn a_dismissal_follows_its_unchanged_range_across_a_watched_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.9), Some(0.9)]));
+    // 1 段落目（動かない）・2 段落目（直す）・3 段落目（位置だけ動く）を捨てる。
+    for index in 0..3 {
+        assert!(app.dismiss_candidate(index));
+    }
+
+    rewrite_and_reload(&mut app, EDITED);
+
+    let sha = crate::semantic::source_digest(EDITED);
+    let store = app.review_dismissed_store.clone().unwrap();
+    let carried = store.load(&sha);
+    let range_of = |text: &str| {
+        let at = EDITED.find(text).unwrap();
+        ("filler".to_string(), at, at + text.len())
+    };
+    assert!(carried.contains(&range_of("ひとつめの段落。")), "{carried:?}");
+    assert!(carried.contains(&range_of("みっつめの段落。")), "位置が動いた方も写る: {carried:?}");
+    assert_eq!(carried.len(), 2, "直した 2 段落目は写さない: {carried:?}");
+    // 記録の形は変えない — 本文は 1 バイトも書かない。
+    let raw = std::fs::read_to_string(store.path()).unwrap();
+    for word in ["ひとつめ", "みっつめ", "直した"] {
+        assert!(!raw.contains(word), "{raw}");
+    }
+
+    // 新しい版の答えが届くと、写した 2 本は出ず、直した段落だけが出る。
+    deliver(
+        &mut app,
+        "filler",
+        answer_for(
+            EDITED,
+            &["ひとつめの段落。", "ふたつめを直した。", "みっつめの段落。"],
+            &[Some(0.9), Some(0.9), Some(0.9)],
+        ),
+    );
+    let lines: Vec<(u32, u32)> = app.review_candidates.iter().map(|c| c.lines).collect();
+    assert_eq!(lines, [(5, 5)], "直した段落だけが判定し直される");
+}
+
+/// 閉じている間に変わったファイル（起動時の読み込み・ファイル切替）は
+/// 見届けていないので、何も写さない。写すのは `reload_source` だけである。
+#[test]
+fn a_dismissal_is_not_carried_when_the_document_is_only_reanalysed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), None, None]));
+    assert!(app.dismiss_candidate(0));
+    let store = app.review_dismissed_store.clone().unwrap();
+    let before = std::fs::read_to_string(store.path()).unwrap();
+    app.reanalyze_semantics();
+    assert_eq!(std::fs::read_to_string(store.path()).unwrap(), before);
+}
+
+/// `review_tests` の App に、NOW だけの履歴を持たせる（人の赤入れが
+/// 古い版へ留め置かれるのを確かめるため — 履歴が無いと留め置く先が無い）。
+fn with_history(app: &mut App) {
+    let mut history =
+        crate::history::DocumentHistory::load(&app.files[0], &app.source.content, 0);
+    history.acknowledge_in_memory(&app.source.content);
+    app.histories = vec![history];
+}
+
+/// **直した箇所の accept 済み review コメントは外れ、変わっていない方は
+/// 新しい位置に付け直され、人の赤入れは古い版に留め置かれる。**
+///
+/// 修正前は 3 本とも古い版に留め置かれ、`s` で直した箇所への指示が
+/// LLM に届いていた。
+#[test]
+fn a_watched_reload_resolves_the_review_comments_whose_range_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    with_history(&mut app);
+    deliver(&mut app, "filler", answer([None, Some(0.87), Some(0.9)]));
+    assert!(app.accept_candidate(0), "2 段落目（直す）");
+    assert!(app.accept_candidate(1), "3 段落目（位置だけ動く）");
+    // 人の赤入れ。1 段落目は変わらないが、それでも触らない。
+    app.comments.push(crate::comment::Comment {
+        file_path: app.current_file_path().to_path_buf(),
+        start: 3,
+        end: 3,
+        lines: "ひとつめの段落。".into(),
+        revision: None,
+        text: "ここは言い過ぎ".into(),
+    });
+
+    rewrite_and_reload(&mut app, EDITED);
+
+    let review: Vec<&crate::comment::Comment> = app
+        .comments
+        .iter()
+        .filter(|c| crate::review::parse_comment_text(&c.text).is_some())
+        .collect();
+    assert_eq!(review.len(), 1, "直した 2 段落目のコメントは外れる");
+    let moved = review[0];
+    assert_eq!(moved.text, "review: filler (0.90)");
+    assert_eq!((moved.start, moved.end), (9, 9), "新しい位置へ付け直す");
+    assert_eq!(moved.lines, "みっつめの段落。");
+    assert_eq!(moved.revision, None, "新しい版（NOW）のコメントとして残る");
+
+    let human = app
+        .comments
+        .iter()
+        .find(|c| c.text == "ここは言い過ぎ")
+        .expect("人の赤入れは消さない");
+    assert!(human.revision.is_some(), "人の赤入れは古い版に留め置く（今の挙動）");
+    assert_eq!((human.start, human.end), (3, 3));
+
+    let (message, _, err) = app.status.clone().unwrap();
+    assert!(!err);
+    assert!(message.contains("1 review comment resolved by edit"), "{message}");
+}
+
+/// 付け直したコメントの候補は、新しい版の答えが届いても Pending に戻らない
+/// （もう一度 `a` を押すと同じ指示が 2 本になる）。
+#[test]
+fn a_moved_review_comment_keeps_its_candidate_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    with_history(&mut app);
+    deliver(&mut app, "filler", answer([None, None, Some(0.9)]));
+    assert!(app.accept_candidate(0));
+    rewrite_and_reload(&mut app, EDITED);
+    deliver(
+        &mut app,
+        "filler",
+        answer_for(EDITED, &["みっつめの段落。"], &[Some(0.9)]),
+    );
+    assert_eq!(app.review_candidates.len(), 1);
+    assert_eq!(app.review_candidates[0].state, CandidateState::Accepted);
+    assert!(!app.accept_candidate(0), "同じ指示を 2 本作らない");
+}
