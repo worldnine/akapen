@@ -387,6 +387,8 @@ pub struct DecorationStyles {
     mark: Style,
     /// **演出で引かれる線の色**（[`Self::mark_flash_bg`]）。
     flash: Color,
+    /// **帯の上の琥珀**（[`Self::mark_band_bg`]）。
+    band: Color,
     /// Where a dimmed foreground travels toward — the theme's background.
     dim_target: Color,
     /// The foreground a span that declares none actually renders with.
@@ -404,6 +406,8 @@ impl Default for DecorationStyles {
             mark: Style::default().bg(MARK_BG_DARK),
             // ダークの紙 rgb(30,30,46) から 0.65 の色。
             flash: Color::Rgb(0xb0, 0x7c, 0x10),
+            // ダークの紙 rgb(30,30,46) から天井 0.40 の色。
+            band: Color::Rgb(0x78, 0x58, 0x1b),
             dim_target: DIM_TARGET_DARK,
             default_fg: Color::Rgb(0xcd, 0xd6, 0xf4),
             dim_blend: DIM_BLEND,
@@ -430,6 +434,10 @@ impl DecorationStyles {
             mark: Style::default().bg(mark_background(highlighter, blend.mark)),
             // **演出の線の色。** 確定色より濃い（[`MARK_FLASH_BLEND`]）。
             flash: mark_background(highlighter, MARK_FLASH_BLEND),
+            // **帯の上の琥珀。** 読み続ける色なので演出の線（0.65）ではなく
+            // 確定色の天井（[`MARK_BG_BLEND_CEILING`]）。`--mark-blend` には
+            // 追従しない — 帯の上で要るのは「一段濃い」ことと、字が読めること。
+            band: mark_background(highlighter, MARK_BG_BLEND_CEILING),
             dim_target,
             default_fg,
             dim_blend: blend.dim,
@@ -451,6 +459,35 @@ impl DecorationStyles {
     /// **焼き込まない** — `--light` でも `--theme` でも同じ式で出る。
     pub fn mark_flash_bg(&self) -> Color {
         self.flash
+    }
+
+    /// **カーソル帯・選択帯の上の琥珀** — 天井（[`MARK_BG_BLEND_CEILING`]
+    /// = 0.40）の色。
+    ///
+    /// 帯は行全体の地色を塗るので、以前は帯の下で琥珀の句と普通の句が
+    /// 同じ色になり、「その行だけマークが無い」と読めた（`]m` で飛んだ
+    /// 答えの一文が帯に隠れる）。帯の上では琥珀の句だけをこの色で塗る。
+    /// 確定色（[`Self::mark_bg`]）より一段濃いので、帯の灰色とも、帯の外の
+    /// 琥珀とも見分けがつく。
+    ///
+    /// **焼き込まない** — [`Self::mark_bg`] と同じ紙・同じ [`MARK_TINT`]
+    /// の式で、`--light` でも `--theme` でも動く。
+    pub fn mark_band_bg(&self) -> Color {
+        self.band
+    }
+
+    /// **帯が句に塗る地色。** `bg` はその句が帯より前に持っていた地色で、
+    /// 琥珀（[`Self::mark_bg`]）なら [`Self::mark_band_bg`]、それ以外は
+    /// `band` そのもの。
+    ///
+    /// 色で見分けるのは [`Self::mark_bg`] の文書にあるとおり、演出も同じ
+    /// 色で琥珀を探しているから — 「どれが琥珀か」を決める場所は 1 つ。
+    pub fn band_over(&self, bg: Option<Color>, band: Color) -> Color {
+        if bg == Some(self.mark_bg()) {
+            self.mark_band_bg()
+        } else {
+            band
+        }
     }
 
     /// The mark's background color on its own — the amber the paint
@@ -1419,6 +1456,67 @@ mod tests {
         // 天井の向こうは実際に危ない、というのが天井を置く根拠。
         let beyond = contrast(fg, at(0.55));
         assert!(beyond < 4.5, "0.55 でも {beyond:.1}:1 — 天井の理由が消えた");
+    }
+
+    /// **帯の上の琥珀**（[`DecorationStyles::mark_band_bg`]）— 天井 0.40 の
+    /// 色を式で作り、字が読めることを数値で固定する。
+    ///
+    /// ダーク: 本文 `#cdd6f4` が確定色の上で 6.29:1、帯の上の琥珀
+    /// `rgb(120,88,27)` の上で 4.52:1（AA の 4.5:1 を割らない — 天井の理由
+    /// そのもの）。帯 `rgb(88,91,112)` の上は 4.62:1 で、ほぼ同じ読みやすさ。
+    ///
+    /// ライト: 既定の 0.27 でも 3.54:1 で AA を割っている既知の性質。0.40
+    /// では 3.30:1 と少し下がるが、**その句がこれまで載っていた帯**
+    /// `rgb(210,210,220)`（2.97:1）よりは上がる。その 2 点を固定する。
+    #[test]
+    fn the_amber_under_the_band_is_the_ceiling_and_stays_readable() {
+        fn luminance(c: Color) -> f32 {
+            let Color::Rgb(r, g, b) = c else { panic!("RGB") };
+            let ch = |x: u8| {
+                let x = x as f32 / 255.0;
+                if x <= 0.03928 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+        }
+        fn contrast(a: Color, b: Color) -> f32 {
+            let (x, y) = (luminance(a), luminance(b));
+            let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+            (hi + 0.05) / (lo + 0.05)
+        }
+
+        for light in [false, true] {
+            let hl = Highlighter::new(None, light);
+            let styles = DecorationStyles::from_theme(&hl, Default::default());
+            let deep = styles.mark_band_bg();
+            // 焼き込まない — 確定色と同じ式の、天井の点。
+            assert_eq!(deep, mark_background(&hl, MARK_BG_BLEND_CEILING), "light={light}");
+            // `--mark-blend` を動かしても帯の上の琥珀は天井のまま。
+            let knob = DecorationStyles::from_theme(
+                &hl,
+                DecorationBlend { mark: 0.10, ..Default::default() },
+            );
+            assert_eq!(knob.mark_band_bg(), deep, "light={light}");
+
+            let band = crate::view::selected_bg(light);
+            // 色で見分ける: 琥珀の句だけが濃い琥珀になり、ほかは帯。
+            assert_eq!(styles.band_over(Some(styles.mark_bg()), band), deep);
+            assert_eq!(styles.band_over(None, band), band);
+            assert_eq!(styles.band_over(Some(Color::Rgb(1, 2, 3)), band), band);
+
+            let fg = hl.default_fg();
+            let resting = contrast(fg, styles.mark_bg());
+            let under = contrast(fg, deep);
+            let banded = contrast(fg, band);
+            if light {
+                assert_eq!(deep, Color::Rgb(253, 218, 136));
+                assert!(under > banded, "ライト: 帯の上の琥珀 {under:.2}:1 が帯 {banded:.2}:1 を下回った");
+                assert!(resting - under < 0.3, "ライト: 確定色 {resting:.2}:1 から {under:.2}:1 まで落ちた");
+            } else {
+                assert_eq!(deep, Color::Rgb(120, 88, 27));
+                assert_eq!(deep, DecorationStyles::default().mark_band_bg(), "Default の焼き値が式とずれた");
+                assert!(under >= 4.5, "ダーク: 帯の上の琥珀で {under:.2}:1 — AA を割った");
+            }
+        }
     }
 
     /// **テーマの highlight scope 背景は、もう見ていません。**

@@ -266,7 +266,7 @@ pub(crate) fn title_metrics(app: &App, width: u16) -> TitleMetrics {
     let file_count_w = UnicodeWidthStr::width(file_count.as_str()) as u16;
     // **`esc …` のバッジ**（次の `Esc` で起きること、`crate::esc::badge`）。
     // 語の長さが段ごとに違う（`esc close` の 11 桁から
-    // `esc cancel deletion focus` の 27 桁まで）ので、幅はここで毎回測る。
+    // `esc deselect deletion` の 23 桁まで）ので、幅はここで毎回測る。
     //
     // 狭いときに譲る順（y/s の既存の作法の延長）:
     // 1. y/s の説明が引き下がる（path が TITLE_PATH_FLOOR を割る前に）

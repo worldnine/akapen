@@ -1260,7 +1260,8 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
             }
             for f in frags {
                 let style = if cursor_bg {
-                    f.style.bg(app.ui_selected_bg)
+                    // 琥珀の句は帯の上でも一段濃い琥珀で残す（view と同じ）。
+                    f.style.bg(app.decoration_styles.band_over(f.style.bg, app.ui_selected_bg))
                 } else if changed_bg {
                     f.style.bg(app.ui_changed_bg)
                 } else {

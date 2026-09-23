@@ -1211,7 +1211,9 @@ impl ViewState {
                     let style = if glowing_row {
                         s.style.bg(glow_bg).add_modifier(Modifier::BOLD)
                     } else if span_hl(range) {
-                        s.style.bg(selected_bg)
+                        // 帯の上でも琥珀の句は読める — 一段濃い琥珀で塗る
+                        // （[`DecorationStyles::band_over`]）。ほかは帯のまま。
+                        s.style.bg(self.decoration_styles.band_over(s.style.bg, selected_bg))
                     } else {
                         s.style
                     };
@@ -2766,9 +2768,10 @@ mod decoration_tests {
         assert_eq!(marked[2].1.bg, None);
     }
 
-    /// The priority order: the selection band outranks a semantic mark.
-    /// A marked phrase inside the selection paints the SELECTION
-    /// background, not the mark's.
+    /// The priority order: the selection band outranks the RESTING mark,
+    /// but does not erase it. A marked phrase inside the selection paints
+    /// the deeper amber (`mark_band_bg`), the rest of the row the band —
+    /// so the row still reads as "the mark is here".
     #[test]
     fn the_selection_band_outranks_a_semantic_mark() {
         let (source, view, styles) = view_of(TWO_PARAGRAPHS, 40);
@@ -2786,10 +2789,12 @@ mod decoration_tests {
                 .iter()
                 .any(|(_, s)| s.bg == styles.mark_style().bg)
         );
-        // ...and the selection band paints straight over it.
+        // ...and under the selection band it takes the deeper amber, while
+        // the unmarked phrases take the band.
         let row = painted(&view, Some((line, line)), &decorations, i);
         for (text, style) in &row {
-            assert_eq!(style.bg, Some(SEL_BG), "{text:?} sits in the selection");
+            let want = if text == "重要" { styles.mark_band_bg() } else { SEL_BG };
+            assert_eq!(style.bg, Some(want), "{text:?}");
         }
     }
 
@@ -2849,8 +2854,8 @@ mod decoration_tests {
 
     /// ...but a MARK under the band still splits the row — only `Dim` is
     /// suppressed, because only `Dim` fights the band for the same
-    /// channel. (The band then paints over the mark's background, which
-    /// the priority order requires.)
+    /// channel. (The band then paints the marked phrase in the deeper
+    /// amber and the rest in its own color.)
     #[test]
     fn the_band_suppresses_only_dim_not_the_mark() {
         let (source, view, styles) = view_of(TWO_PARAGRAPHS, 40);
@@ -2867,7 +2872,10 @@ mod decoration_tests {
             banded_plain.len(),
             "mark は帯の下でも span を割る"
         );
-        assert!(banded.iter().all(|(_, s)| s.bg == Some(SEL_BG)));
+        for (text, style) in &banded {
+            let want = if text == "重要" { styles.mark_band_bg() } else { SEL_BG };
+            assert_eq!(style.bg, Some(want), "{text:?}");
+        }
         assert_ne!(styles.mark_style().bg, Some(SEL_BG));
     }
 
