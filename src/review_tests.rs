@@ -535,3 +535,69 @@ fn replacing_the_document_clears_the_candidates() {
     assert!(underlined(&app).is_empty(), "下線が残っている");
     assert!(app.review_generation > generation, "世代が上がっていない");
 }
+
+// ---- 7. 一覧のカーソルは候補を指し続ける ---------------------------------
+
+/// `filler` と `preamble` の 2 本が有効なルール一式。
+fn two_rules(dir: &std::path::Path) -> Rules {
+    let path = dir.join("two-rules.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"rules":[
+          {"id":"filler","label":"Filler","action":"delete","threshold":0.5,"enabled":true,"text":"f"},
+          {"id":"preamble","label":"Preamble","action":"delete","threshold":0.5,"enabled":true,"text":"p"}
+        ]}"#,
+    )
+    .unwrap();
+    Rules::discover(Some(&path)).unwrap()
+}
+
+/// **2 本目のルールの答えが一覧を開いたまま届いても、カーソルは同じ候補を
+/// 指す。** 答えは文書順に並べ直されるので、前に候補が差し込まれると
+/// 添字のままのカーソルは別の候補を指し、`a` / `x` が見ていない行に効く
+/// （報告されたずれ）。
+#[test]
+fn the_list_cursor_stays_on_its_candidate_when_another_rule_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let rules = two_rules(dir.path());
+    let mut app = app_with_rules(dir.path(), rules);
+    app.review_inflight = 2;
+    // 1 本目: 3 段落目だけ。
+    deliver(&mut app, "filler", answer([None, None, Some(0.9)]));
+    crate::overlay::open_overlay(&mut app, crate::overlay::Overlay::Review, 0);
+    assert_eq!(app.review_candidates[app.overlay_cursor].lines, (7, 7));
+
+    // 2 本目: 1 段落目と 2 段落目。文書順では 3 段落目の前に入る。
+    deliver(&mut app, "preamble", answer([Some(0.8), Some(0.7), None]));
+    assert_eq!(app.review_candidates.len(), 3);
+    let under = &app.review_candidates[app.overlay_cursor];
+    assert_eq!(
+        (under.lines, under.rule.as_str()),
+        ((7, 7), "filler"),
+        "カーソルは開いたときに見ていた候補に留まる"
+    );
+
+    // `a` は見えている候補に効く。
+    crate::overlay::on_review_overlay_key(
+        &mut app,
+        ratatui::crossterm::event::KeyCode::Char(crate::keys::REVIEW_ACCEPT),
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    );
+    assert_eq!(app.comments.len(), 1);
+    assert_eq!((app.comments[0].start, app.comments[0].end), (7, 7));
+    assert_eq!(app.comments[0].text, "review: filler (0.90)");
+}
+
+/// 一覧を開いたまま文書が差し替わったら、カーソルは先頭へ戻る。古い添字
+/// のままだと、次に届いた答えの見てもいない候補を指す。
+#[test]
+fn a_reanalysis_under_the_open_list_puts_the_cursor_back_on_top() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = built_in(dir.path());
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), Some(0.7)]));
+    crate::overlay::open_overlay(&mut app, crate::overlay::Overlay::Review, 2);
+    app.reanalyze_semantics();
+    assert_eq!(app.overlay_cursor, 0);
+    deliver(&mut app, "filler", answer([Some(0.9), Some(0.8), Some(0.7)]));
+    assert_eq!(app.review_candidates[app.overlay_cursor].lines, (3, 3));
+}
