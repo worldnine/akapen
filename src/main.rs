@@ -158,8 +158,9 @@ fn main() -> Result<()> {
                  \x20                   changing an analyser's prompts without\n\
                  \x20                   changing its command line)\n\
                  \x20 --review-dismissed-clear  forget every Review candidate\n\
-                 \x20                   dismissed with x, in every document, and\n\
-                 \x20                   exit (one at a time: x again in the list)\n\
+                 \x20                   dismissed with x or sent with s, in every\n\
+                 \x20                   document, and exit (one dismissal at a\n\
+                 \x20                   time: x again in the list)\n\
                  \x20 --undercurl <auto|on|off> draw the Review underlines as curly\n\
                  \x20                   lines (default auto: on where the terminal\n\
                  \x20                   is known to draw them). $AKAPEN_UNDERCURL\n\
@@ -214,6 +215,11 @@ fn main() -> Result<()> {
             let path = store.path().display().to_string();
             let removed = store.clear()?;
             println!("cleared {removed} dismissed review candidates ({path})");
+            // 送った記録も同じ置き場にあるので、一緒に消す。
+            let sent = store.sent();
+            let sent_path = sent.path().display().to_string();
+            let removed = sent.clear()?;
+            println!("cleared {removed} sent review candidates ({sent_path})");
             Ok(())
         }
         Action::Run(config) => run(*config),

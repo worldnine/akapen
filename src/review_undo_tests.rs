@@ -464,6 +464,118 @@ fn clearing_the_store_counts_what_was_dismissed_and_removes_the_file() {
     assert!(reopened.candidate_states().iter().all(|s| *s == CandidateState::Pending));
 }
 
+// ---- 5b. 送った記録（`sent.jsonl`） ---------------------------------------
+
+fn sent_rows(app: &App) -> Vec<serde_json::Value> {
+    let store = app.review_dismissed_store.as_ref().unwrap().sent();
+    std::fs::read_to_string(store.path())
+        .map(|raw| raw.lines().map(|l| serde_json::from_str(l).unwrap()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_sent_candidate_is_still_sent_after_closing_and_reopening_the_same_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    bring_to(&mut app, CandidateState::Sent);
+    drop(app);
+
+    // 開き直す（同じ文書・同じ置き場）。
+    let mut app = three(dir.path());
+    assert_eq!(
+        app.candidate_states(),
+        [CandidateState::Sent, CandidateState::Pending, CandidateState::Pending],
+        "送った候補だけが ✓ のまま"
+    );
+    for key in ['a', 'x'] {
+        press(&mut app, key);
+        assert_eq!(app.candidate_state(0), Some(CandidateState::Sent), "{key} は効かない");
+        assert!(app.comments.is_empty(), "{key}: 二重に送らせない");
+    }
+    assert_eq!(record_count(&app), 0, "送った候補の x は捨てた記録を書かない");
+}
+
+#[test]
+fn a_sent_record_does_not_hold_once_the_file_changes_even_across_a_watched_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    bring_to(&mut app, CandidateState::Sent);
+    // 見届けた reload でも写さない — 1 段落目は 1 バイトも変わっていないが Pending。
+    rewrite_and_reload(&mut app, EDITED);
+    deliver(&mut app, "filler", answer_for(EDITED, &["ひとつめの段落。"], &[Some(0.9)]));
+    assert_eq!(app.candidate_states(), [CandidateState::Pending]);
+    assert_eq!(sent_rows(&app).len(), 1, "新しい版の記録は足さない");
+
+    // 閉じている間に書き換わった文書を開いても効かない。
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    bring_to(&mut app, CandidateState::Sent);
+    drop(app);
+    let mut app = three(dir.path());
+    rewrite_and_reload(&mut app, EDITED);
+    app.load_dismissed();
+    deliver(&mut app, "filler", answer_for(EDITED, &["ひとつめの段落。"], &[Some(0.9)]));
+    assert_eq!(app.candidate_states(), [CandidateState::Pending], "sha が違えば効かない");
+}
+
+#[test]
+fn the_sent_record_carries_no_document_text_and_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    press(&mut app, 'a');
+    app.overlay_cursor = 1;
+    press(&mut app, 'a');
+    crate::clear_sent_comments(&mut app);
+    let rows = sent_rows(&app);
+    assert_eq!(rows.len(), 2);
+    let sha = crate::semantic::source_digest(&app.source.content);
+    for (row, candidate) in rows.iter().zip(&app.review_candidates) {
+        let mut keys: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["at", "range", "rule", "source_sha"], "{row}");
+        assert_eq!(row["source_sha"], sha.as_str());
+        assert_eq!(row["rule"], "filler");
+        assert_eq!(row["range"], serde_json::json!([candidate.range.start, candidate.range.end]));
+    }
+    let store = app.review_dismissed_store.as_ref().unwrap().sent();
+    let raw = std::fs::read_to_string(store.path()).unwrap();
+    assert!(!raw.contains("段落"), "本文は書かない:\n{raw}");
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(store.path()), 0o600);
+    assert_eq!(mode(store.path().parent().unwrap()), 0o700);
+}
+
+#[test]
+fn a_hand_written_comment_is_not_recorded_as_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    app.comments.push(crate::comment::Comment {
+        file_path: app.current_file_path().to_path_buf(),
+        start: 3,
+        end: 3,
+        lines: "ひとつめの段落。".into(),
+        revision: None,
+        anchor: None,
+        text: "ここは言い過ぎ".into(),
+    });
+    crate::clear_sent_comments(&mut app);
+    assert!(sent_rows(&app).is_empty());
+}
+
+#[test]
+fn clearing_the_sent_store_counts_what_was_sent_and_removes_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = three(dir.path());
+    bring_to(&mut app, CandidateState::Sent);
+    let store = app.review_dismissed_store.as_ref().unwrap().sent();
+    assert_eq!(store.clear().unwrap(), 1);
+    assert!(!store.path().exists());
+    assert_eq!(store.clear().unwrap(), 0, "無ければ 0 件");
+    let reopened = three(dir.path());
+    assert_eq!(reopened.candidate_state(0), Some(CandidateState::Pending));
+}
+
 // ---- 6. `Esc` は状態に触らない ------------------------------------------
 
 #[test]

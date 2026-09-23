@@ -406,6 +406,14 @@ impl DismissedStore {
         &self.path
     }
 
+    /// 同じ置き場の、送った記録（`sent.jsonl`）。
+    pub(crate) fn sent(&self) -> SentStore {
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        SentStore {
+            path: dir.join("sent.jsonl"),
+        }
+    }
+
     /// 読めた行を、書かれた順に。
     ///
     /// **読めない行は無かったことにする。** 壊れた 1 行が、捨てた記録を
@@ -468,32 +476,14 @@ impl DismissedStore {
         range: &Range<usize>,
         undo: bool,
     ) -> Result<()> {
-        let dir = self.path.parent().unwrap_or(Path::new("."));
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .with_context(|| format!("create {}", dir.display()))?;
         let record = DismissedRecord {
             source_sha: source_sha.to_string(),
             range: [range.start, range.end],
             rule: rule.to_string(),
-            at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
+            at: unix_now(),
             undo,
         };
-        // 追記のみ。0600 は**作るときにしか効かない**ので、既にある
-        // ファイルの権限はここでは触らない（読み手が緩めたなら読み手の判断）。
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&self.path)
-            .with_context(|| format!("open {}", self.path.display()))?;
-        writeln!(file, "{}", serde_json::to_string(&record)?)
-            .with_context(|| format!("append {}", self.path.display()))?;
-        Ok(())
+        append_line(&self.path, &serde_json::to_string(&record)?)
     }
 
     /// **捨てた判断を、見届けた書き換えの向こうへ写す。**
@@ -575,6 +565,116 @@ impl DismissedStore {
             );
         }
         let removed = latest.values().filter(|dismissed| **dismissed).count();
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(removed),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e).with_context(|| format!("remove {}", self.path.display())),
+        }
+    }
+}
+
+/// 1 行を追記する（[`DismissedStore`] と [`SentStore`] の共通の口）。
+///
+/// ディレクトリは 0700、ファイルは 0600 で作る。0600 は**作るときにしか
+/// 効かない**ので、既にあるファイルの権限はここでは触らない（読み手が
+/// 緩めたなら読み手の判断）。
+fn append_line(path: &Path, line: &str) -> Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    writeln!(file, "{line}").with_context(|| format!("append {}", path.display()))?;
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+// ---- 送った候補の記録 ------------------------------------------------
+
+/// `sent.jsonl` の 1 行。**本文は入らない。** 形は捨てた記録から `undo` を
+/// 除いたもの — 送った指示は取り消せない（もう相手に届いている）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SentRecord {
+    /// 送ったときの文書の sha256（[`crate::semantic::source_digest`]）。
+    source_sha: String,
+    /// 候補のバイト範囲 `[start, end]`（コメントの結び目）。
+    range: [usize; 2],
+    rule: String,
+    /// UNIX 秒。いつ送ったか。
+    at: u64,
+}
+
+/// 送った候補の置き場（追記のみの JSONL）— `dismissed.jsonl` の隣。
+///
+/// 閉じて開き直しても、**同じ文書（sha が同じ）なら**送った候補は `✓` の
+/// まま（[`crate::review::CandidateState::Sent`]）で、`a` / `x` が効かない。
+/// ファイルが書き換われば sha が変わるので効かない。見届けた reload でも
+/// 写さない（送った相手が直したかどうかは、新しい版の候補で決め直す）。
+#[derive(Clone, Debug)]
+pub(crate) struct SentStore {
+    path: PathBuf,
+}
+
+impl SentStore {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn records(&self) -> Vec<SentRecord> {
+        let Ok(text) = fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<SentRecord>(line).ok())
+            .collect()
+    }
+
+    /// この文書について送った (ルール, 範囲)。
+    pub(crate) fn load(&self, source_sha: &str) -> HashSet<DismissedKey> {
+        self.records()
+            .into_iter()
+            .filter(|record| record.source_sha.eq_ignore_ascii_case(source_sha))
+            .map(|record| (record.rule, record.range[0], record.range[1]))
+            .collect()
+    }
+
+    /// 送った記録を 1 件追記する。失敗の扱いは [`DismissedStore::append`] と同じ。
+    pub(crate) fn append(&self, source_sha: &str, rule: &str, range: &Range<usize>) -> Result<()> {
+        let record = SentRecord {
+            source_sha: source_sha.to_string(),
+            range: [range.start, range.end],
+            rule: rule.to_string(),
+            at: unix_now(),
+        };
+        append_line(&self.path, &serde_json::to_string(&record)?)
+    }
+
+    /// **送った記録を全部消す**。戻り値は消した (文書, ルール, 範囲) の数。
+    pub(crate) fn clear(&self) -> Result<usize> {
+        let removed = self
+            .records()
+            .into_iter()
+            .map(|record| {
+                (
+                    record.source_sha.to_ascii_lowercase(),
+                    record.rule,
+                    record.range,
+                )
+            })
+            .collect::<HashSet<_>>()
+            .len();
         match fs::remove_file(&self.path) {
             Ok(()) => Ok(removed),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),

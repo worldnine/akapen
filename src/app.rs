@@ -617,6 +617,10 @@ pub(crate) struct App {
     /// ディスクには書かない — 送った相手が書き換えれば reload で決め直す
     /// （[`App::forget_review_sent`]）ので、次に開いたときには要らない。
     pub(crate) review_sent: HashSet<ReviewCommentKey>,
+    /// **前のセッションまでに送った**候補（`sent.jsonl` のうち、いま画面に
+    /// ある文書の sha のもの）。(ルール, 範囲)。[`App::load_dismissed`] が
+    /// 捨てた記録と同じ時に読み、[`App::forget_review_sent`] が捨てる。
+    pub(crate) review_sent_disk: HashSet<DismissedKey>,
     /// 捨てた候補の置き場。決められない環境では `None`（セッション内
     /// だけ消えて、記録は残らない）。
     pub(crate) review_dismissed_store: Option<DismissedStore>,
@@ -786,6 +790,7 @@ impl App {
             review_results: None,
             review_dismissed: HashSet::new(),
             review_sent: HashSet::new(),
+            review_sent_disk: HashSet::new(),
             review_dismissed_store: None,
             review_edit_anchor: None,
             review_cursor_target: None,
@@ -1568,6 +1573,12 @@ impl App {
             .as_ref()
             .map(|store| store.load(&sha))
             .unwrap_or_default();
+        // 送った記録も同じ時に（同じ置き場・同じ sha で）。
+        self.review_sent_disk = self
+            .review_dismissed_store
+            .as_ref()
+            .map(|store| store.sent().load(&sha))
+            .unwrap_or_default();
     }
 
     /// Review のワーカーが終えたぶんを引き取る。イベントループから 1 tick
@@ -1782,7 +1793,11 @@ impl App {
                     CandidateState::Dismissed
                 } else if CandidateSpot::of_candidate(c).any(|spot| accepted.contains(&spot)) {
                     CandidateState::Accepted
-                } else if CandidateSpot::of_candidate(c).any(|spot| sent.contains(&spot)) {
+                } else if CandidateSpot::of_candidate(c).any(|spot| sent.contains(&spot))
+                    || self
+                        .review_sent_disk
+                        .contains(&(c.rule.clone(), c.range.start, c.range.end))
+                {
                     CandidateState::Sent
                 } else {
                     CandidateState::Pending
@@ -1936,6 +1951,34 @@ impl App {
             })
             .collect();
         self.review_sent.extend(sent);
+        self.persist_review_sent();
+    }
+
+    /// 送った review / lint コメントのうち、**いまのファイルの NOW に結び目で
+    /// 結ばれたもの**を `sent.jsonl` へ追記する。
+    ///
+    /// ほかのファイル・過去の版のコメントは書かない — 鍵になる文書の sha が
+    /// 手元に無い（画面にあるのは今のファイルの NOW だけ）。結び目の無い
+    /// コメントも書かない（範囲が無い）。書けなくても送信は成功のまま
+    /// （[`Self::dismiss_candidate`] と同じ扱い）。
+    fn persist_review_sent(&mut self) {
+        let Some(store) = self.review_dismissed_store.as_ref().map(DismissedStore::sent) else {
+            return;
+        };
+        let current = self.current_file_path().to_path_buf();
+        let sha = crate::semantic::source_digest(&self.source.content);
+        for comment in &self.comments {
+            let Some(anchor) = comment.anchor.as_ref() else {
+                continue;
+            };
+            if comment.file_path != current
+                || comment.revision.is_some()
+                || crate::review::candidate_comment_rule(&comment.text).is_none()
+            {
+                continue;
+            }
+            let _ = store.append(&sha, &anchor.rule, &anchor.range);
+        }
     }
 
     /// **送った印を忘れる** — いまのファイルの NOW が書き換わったとき
@@ -1945,6 +1988,9 @@ impl App {
         let current = self.current_file_path().to_path_buf();
         self.review_sent
             .retain(|(path, revision, _)| !(*path == current && revision.is_none()));
+        // ディスクの記録は消さない（sha で鍵をかけてあるので、書き換わった
+        // 版には効かない）。読んだぶんだけを捨てる。
+        self.review_sent_disk.clear();
     }
 
     /// **見届けた reload で、いまの版の review コメントを片付ける。**
