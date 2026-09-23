@@ -1,15 +1,16 @@
-# marks.tape — marks モードのスクリーンキャスト（VHS）
+# marks.tape — marks モードのスクリーンキャスト（VHS、約 22 秒）
 #
 #   vhs examples/demo/marks.tape        # リポジトリの根から
 #
-# mark for で「要点」を選ぶと琥珀が走り、つまみで本数が増え、自由入力で
-# 文中に無い言葉（automation）で聞くと、答えている一文（CI pipelines and
-# cron jobs）が光る。つまみで 1 本に絞り、f で沈め、Esc で 1 枚ずつ消す。
+# 題材は架空の研究室の夜間バックアップ tidewater の設計メモ
+# （examples/demo/marks/tidewater.md、1 画面に収まる 32 行）。
+# Essential で決定・未決・保存期間に琥珀が引かれ、自由入力で文中に無い言葉
+# で聞くと、要点とは別の場所 — 別棟への複製と、失敗したときの呼び出し —
+# が光る。つまみは既定の 20 % から一度も動かさない。
 #
-# 本物の判定器（Jev）を呼ぶ。先に 1 度 examples/demo/marks-run.sh で同じ
-# 操作をしておくと、答えがキャッシュに入り、録画では待たずに光る。
+# 本物の判定器（Jev）を呼ぶ。隠した区間で同じ操作を 1 度通して答えを
+# キャッシュに入れるので、録る区間は待たずに光る。
 # Requires: vhs、target/release/akapen、Jev の鍵。
-
 Output examples/demo/out/marks.gif
 Output examples/demo/out/marks.mp4
 
@@ -24,56 +25,66 @@ Set TypingSpeed 45ms
 
 Env AKAPEN_OPTS "--ime off"
 
-# --- setup (hidden) --------------------------------------------------------
+# --- 下ごしらえ（録らない）: 同じ操作を 1 度通して答えをキャッシュに入れる --
+#
+# キャッシュの鍵にはコマンド行（この checkout の絶対パス）が入るので、別の
+# checkout で温めたものは当たらない。ここで温めれば、録る区間は待たずに光る。
 Hide
 Type "examples/demo/marks-run.sh /tmp/akapen-marks" Enter
-Wait+Screen@15s /driftwatch/
+Wait+Screen@15s /tidewater/
+Type "m"
+Sleep 800ms
+Type "1"
+Wait+Screen@60s /Essential · 20% +[0-9]/
+Type "/"
+Sleep 300ms
+Type@5ms "Are we covered if the building burns down?"
+Enter
+Wait+Screen@60s /burns down\? · 20% +[0-9]/
+Type "/"
+Sleep 300ms
+Type@5ms "Who gets woken up when it breaks?"
+Enter
+Wait+Screen@60s /breaks\? · 20% +[0-9]/
+Type "q"
+Sleep 1s
+Type "clear; examples/demo/marks-run.sh /tmp/akapen-marks" Enter
+Wait+Screen@15s /tidewater/
 Sleep 1s
 Show
 
-# --- 1. 文書を開いたところ --------------------------------------------------
+# --- 1. 文書を開いたところ（1 画面に収まっている）--------------------------
 Sleep 1.5s
 
-# --- 2. mark for → Essential: 琥珀が走る ------------------------------------
+# --- 2. mark for → Essential: 決定・未決・保存期間に琥珀が引かれる ----------
 Type "m"
-Sleep 1.5s
+Sleep 1.2s
 Type "1"
-Wait+Screen@30s /Essential · [0-9]+%/
-Sleep 3s
+Wait+Screen@30s /Essential · 20% +[0-9]/
+Sleep 2.5s
 
-# --- 3. つまみで本数を増やす -------------------------------------------------
-Type ">"
-Sleep 1.2s
-Type ">"
-Sleep 2s
-
-# --- 4. 自由入力: 文中に無い言葉で聞く --------------------------------------
+# --- 3. 自由入力 1: 文中に無い言葉で聞く（つまみは 20 % のまま）-------------
 Type "/"
-Sleep 800ms
-Type "How do I hook it into automation?"
-Sleep 800ms
+Sleep 600ms
+Type "Are we covered if the building burns down?"
+Sleep 600ms
 Enter
-Wait+Screen@30s /automation\? · [0-9]+%/
-Sleep 1.5s
+Wait+Screen@30s /burns down\? · 20% +[0-9]/
+Sleep 2.5s
 
-# --- 5. つまみを絞って、答えの一文だけにする --------------------------------
-Type "<"
-Sleep 700ms
-Type "<"
-Sleep 700ms
-Type "<"
-Sleep 1s
-
-# --- 6. 答えへ飛び、ほかを沈める --------------------------------------------
-Type "]m"
-Sleep 800ms
-Type "jj"
-Sleep 1s
-Type "f"
-Sleep 3.5s
-
-# --- 7. Esc で 1 枚ずつ消す ---------------------------------------------------
-Escape
-Sleep 1.2s
-Escape
+# --- 4. 自由入力 2: 別の問いで、別の場所が光る ------------------------------
+Type "/"
+Sleep 600ms
+Type "Who gets woken up when it breaks?"
+Sleep 600ms
+Enter
+Wait+Screen@30s /breaks\? · 20% +[0-9]/
 Sleep 2s
+
+# --- 5. ほかを沈めて答えだけ残し、Esc で 1 枚ずつ戻す ------------------------
+Type "f"
+Sleep 2.5s
+Escape
+Sleep 800ms
+Escape
+Sleep 1.5s
