@@ -560,7 +560,7 @@ pub(crate) struct App {
     pub(crate) marks_question: Option<Question>,
     /// 定型を巡っている位置（`m` の環）。自由入力のあとも、ここから続く。
     pub(crate) marks_preset: usize,
-    /// **つまみ** — 上から何 % の Unit を光らせるか（1..=100、既定 20）。
+    /// **つまみ** — 上から何 % の Unit を光らせるか（1..=100、既定 15）。
     /// 読む側の好みなので、文書をまたいで残る。
     pub(crate) marks_share: u8,
     /// composer が**コメントではなく問いの入力**に使われているか（`/`）。

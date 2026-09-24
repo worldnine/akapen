@@ -6441,14 +6441,16 @@ fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
         (cell(row, left).style(), cell(row, right).style())
     };
 
-    // 既定のつまみ（上から 20 %）。前半の一文が核として光り、後半は
-    // 別の Unit で、まだ上位に入っていない。**行の途中で切り替わる。**
-    assert_eq!(app.marks_share, semantic_reading::marks::DEFAULT_SHARE);
+    // つまみ 20 %（fixture の 13 Unit で 3 本 — 3 本目が結論の Unit）。
+    // 前半の一文が核として光り、後半は別の Unit で、まだ上位に入って
+    // いない。**行の途中で切り替わる。**
+    app.marks_share = 20;
+    app.refresh_semantic_decorations();
     let (core, rest) = halves(&mut app, &mut terminal);
     assert_eq!(core.bg, mark_bg, "核は MARKED");
     assert_ne!(rest.bg, mark_bg, "隣の Unit は NORMAL");
     assert!(!rest.add_modifier.contains(ratatui::style::Modifier::DIM));
-    assert_ne!(core, rest, "つまみを触らなくても行の途中で切り替わっている");
+    assert_ne!(core, rest, "核だけが光り、行の途中で切り替わっている");
 
     // フォーカス（`f`）— 同じ行が MARKED と DIM になる。dim は本物の
     // 前景**色**である（SGR 2 は無視する端末が多すぎて頼れない）ので、
@@ -6550,6 +6552,9 @@ fn a_marked_line_under_the_cursor_shows_the_deeper_amber_not_the_band() {
         (cell(row, left).style(), cell(row, right).style())
     };
 
+    // つまみ 20 %（fixture の 13 Unit で 3 本目が結論の Unit）。
+    app.marks_share = 20;
+    app.refresh_semantic_decorations();
     // Cursor on the title: the MARKED half is amber, the NORMAL half is not.
     assert_eq!(app.view.cursor, 0);
     let (essential, detail) = halves(&mut app, &mut terminal);
@@ -7456,8 +7461,10 @@ fn the_marks_projection_splits_one_source_line_into_two_styles() {
         (cell(row, left).style(), cell(row, right).style())
     };
 
-    // 既定のつまみ: 核は MARKED、隣の Unit は NORMAL。
-    assert_eq!(app.marks_share, semantic_reading::marks::DEFAULT_SHARE);
+    // つまみ 20 %（fixture の 13 Unit で 3 本目が結論の Unit）: 核は
+    // MARKED、隣の Unit は NORMAL。
+    app.marks_share = 20;
+    app.refresh_semantic_decorations();
     let (core, rest) = halves(&mut app, &mut terminal);
     assert_eq!(core.bg, mark_bg, "核は source view でも MARKED");
     assert_ne!(rest.bg, mark_bg, "隣の Unit は NORMAL");

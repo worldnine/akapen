@@ -761,10 +761,11 @@ mod tests {
         let line_start = source.find("採用する方式は差分配信である。").unwrap();
         let line_end = line_start + source[line_start..].find('\n').unwrap();
 
-        // 前半は u3 の核、後半は別の Unit（既定のつまみではまだ上位に
-        // 入っていない）— **同じ行の途中で状態が変わる**。
+        // 前半は u3 の核、後半は別の Unit（20 % ではまだ上位に入って
+        // いない）— **同じ行の途中で状態が変わる**。fixture は 13 Unit で、
+        // 20 % の 3 本目が u3 である（既定の 15 % では 2 本で、u3 は光らない）。
         let inside: Vec<(std::ops::Range<usize>, DisplayState)> =
-            marks::mark(&document, marks::DEFAULT_SHARE)
+            marks::mark(&document, 20)
             .into_iter()
             .filter(|(range, _)| range.start >= line_start && range.end <= line_end)
             .collect();
