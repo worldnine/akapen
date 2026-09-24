@@ -6579,17 +6579,25 @@ fn a_marked_line_under_the_cursor_shows_the_deeper_amber_not_the_band() {
     assert_eq!(essential.bg, deep, "カーソル帯の上で MARKED は濃い琥珀");
     assert_eq!(detail.bg, band, "カーソル帯の上で NORMAL は帯のまま");
 
-    // Focus (`f`) on: the band still drops Dim, and focus paints no amber —
-    // so on the band row the lit half and the rest look alike (2026-09-24:
-    // the reader asked for the line to go away while focused).
+    // Focus (`f`) on: no amber anywhere (2026-09-24: the reader asked for
+    // the line to go away while focused), and the cursor band KEEPS the
+    // Dim — sunk toward the band, not the page, so it stays legible. The
+    // lit half keeps the plain foreground, so the row still tells them apart.
+    let plain_fg = detail.fg;
     assert!(app.press_focus(std::time::Instant::now()));
     let (essential, detail) = halves(&mut app, &mut terminal);
     assert_eq!(essential.bg, band, "沈めている間は帯の上でも琥珀を描かない");
     assert_eq!(detail.bg, band);
     assert_eq!(
-        essential.fg, detail.fg,
-        "帯の行は Dim を落とすので、前景も同じ"
+        essential.fg, plain_fg,
+        "光った文はカーソル帯の上でもふつうの明るさ"
     );
+    assert_eq!(
+        detail.fg,
+        Some(styles.sinking_toward(app.ui_selected_bg).dim_fg(plain_fg)),
+        "カーソル帯の上でも沈んだまま（帯の色へ向けて沈む）"
+    );
+    assert_ne!(essential.fg, detail.fg, "カーソル行で区別が消えた");
     assert!(app.clear_focus());
 
     // Leaving the line brings the resting amber back.
@@ -7498,6 +7506,33 @@ fn the_marks_projection_splits_one_source_line_into_two_styles() {
     for style in [core, rest] {
         assert!(!style.add_modifier.contains(ratatui::style::Modifier::DIM));
     }
+
+    // **カーソルをその行に乗せても沈んだまま**（2026-09-24）。source の
+    // カーソル帯でも Dim を外さず、帯の色へ向けて沈める。光った側はふつうの
+    // 前景のまま、琥珀は描かない。
+    let marked_line = app
+        .source
+        .content
+        .lines()
+        .position(|l| l.starts_with("採用する方式は差分配信である。"))
+        .expect("the 結論 line");
+    app.cursor = marked_line;
+    let (core, rest) = halves(&mut app, &mut terminal);
+    assert_eq!(
+        core.bg,
+        Some(app.ui_selected_bg),
+        "カーソル帯の上でも琥珀は描かない"
+    );
+    assert_eq!(
+        core.fg, bright,
+        "光った文はカーソル帯の上でもふつうの明るさ"
+    );
+    assert_eq!(
+        rest.fg,
+        Some(styles.sinking_toward(app.ui_selected_bg).dim_fg(bright)),
+        "カーソル帯の上でも沈んだまま（帯の色へ向けて沈む）"
+    );
+    app.cursor = 0;
 
     // もう一度押せば戻る（トグル）。**auto-repeat よけの門を越えてから**
     // 押す（`crate::focus::REPEAT_GUARD`）。
