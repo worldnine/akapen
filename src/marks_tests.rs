@@ -591,12 +591,13 @@ fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
 
 // ---- 6. フォーカス（`f`） ----------------------------------------------
 
-/// **沈むもの・沈まないものの線引き**（読み手の決定、2026-09-22）。
+/// **沈むもの・沈まないものの線引き**（読み手の決定、2026-09-24）。
 ///
-/// 光った Unit は**丸ごと**残す（核は琥珀、残りの文はそのまま）、見出しは
-/// 残す、それ以外が沈む。ここが投影の全部である。
+/// 光った文（MARKED の Atom）は**ふつうの明るさで、琥珀は描かない**。見出しは
+/// 残す。それ以外は全部沈む — 光った Unit の核でない文も沈む（2026-09-24
+/// までは沈めずに残していた）。ここが投影の全部である。
 #[test]
-fn focus_sinks_the_others_but_spares_the_lit_unit_and_the_headings() {
+fn focus_drops_the_amber_and_sinks_everything_but_the_lit_sentences_and_headings() {
     let mut app = app_with("demo-marks.json");
     let lit_before = marked(&app);
     assert!(!lit_before.is_empty(), "前提: 光っている");
@@ -604,48 +605,109 @@ fn focus_sinks_the_others_but_spares_the_lit_unit_and_the_headings() {
 
     assert!(app.press_focus(std::time::Instant::now()), "沈んだ");
     assert!(app.focused());
-    assert_eq!(
-        marked(&app),
-        lit_before,
-        "**琥珀は 1 本も動かない。** 沈めるのは他所であって、答えではない"
+    assert!(
+        marked(&app).is_empty(),
+        "**琥珀は描かない**（線は消してよい、が読み手の注文）"
     );
-    assert!(dimmed(&app) > 0, "他の Unit が沈んでいない");
+    assert!(dimmed(&app) > 0, "他所が沈んでいない");
 
-    // 沈んだ範囲に、光った Unit の Atom と見出しが 1 つも入っていないこと。
+    // Atom ごとに: 光った文と見出しには装飾が無く、それ以外は沈む。
     let document = app.semantic_doc.as_ref().unwrap();
     let states = semantic_reading::marks::mark(document, app.marks_share);
-    let dim_ranges: Vec<_> = app
-        .semantic_decorations
-        .iter()
-        .filter(|d| d.kind == crate::decoration::DecorationKind::Dim)
-        .map(|d| d.range.clone())
-        .collect();
-    for unit in &document.units {
-        let lit = unit.atoms.iter().any(|atom| {
-            matches!(
-                states.get(atom.0),
-                Some((_, semantic_reading::DisplayState::Marked))
-            )
-        });
-        if !lit {
-            continue;
-        }
-        for atom in &unit.atoms {
-            let range = &document.atoms[atom.0].range;
-            assert!(
-                !dim_ranges.contains(range),
-                "光った Unit の文が沈んだ（核だけ浮いて段落が割れる）: {range:?}"
+    let decorated = |range: &std::ops::Range<usize>| {
+        app.semantic_decorations
+            .iter()
+            .find(|d| &d.range == range)
+            .map(|d| d.kind)
+    };
+    let mut sunk_in_a_lit_unit = 0;
+    for (index, atom) in document.atoms.iter().enumerate() {
+        let lit = matches!(
+            states.get(index),
+            Some((_, semantic_reading::DisplayState::Marked))
+        );
+        let got = decorated(&atom.range);
+        if lit {
+            assert_eq!(
+                got, None,
+                "光った文に装飾が付いた（ふつうの明るさのはず）: {:?}",
+                atom.range
             );
-        }
-    }
-    for atom in &document.atoms {
-        if atom.kind == semantic_reading::AtomKind::Heading {
-            assert!(
-                !dim_ranges.contains(&atom.range),
+        } else if atom.kind == semantic_reading::AtomKind::Heading {
+            assert_eq!(
+                got, None,
                 "見出しが沈んだ（沈んだ本文の中で現在地が読めなくなる）"
             );
+        } else {
+            assert_eq!(
+                got,
+                Some(crate::decoration::DecorationKind::Dim),
+                "光っていない文が沈んでいない: {:?}",
+                atom.range
+            );
+            let in_a_lit_unit = document.units.iter().any(|unit| {
+                unit.atoms.iter().any(|a| a.0 == index)
+                    && unit.atoms.iter().any(|a| {
+                        matches!(
+                            states.get(a.0),
+                            Some((_, semantic_reading::DisplayState::Marked))
+                        )
+                    })
+            });
+            sunk_in_a_lit_unit += usize::from(in_a_lit_unit);
         }
     }
+    assert!(
+        sunk_in_a_lit_unit > 0,
+        "前提: この fixture には光った Unit の核でない文があり、それも沈む"
+    );
+}
+
+/// **溝の目盛りと `]m` はフォーカス中も残る。** 琥珀を描かないだけで、
+/// 台帳は marks の投影から数える（`App::refresh_semantic_decorations`）。
+#[test]
+fn focus_keeps_the_ruler_ticks_and_the_mark_jumps() {
+    let mut app = app_with("demo-marks.json");
+    app.marks_share = 20;
+    app.refresh_semantic_decorations();
+    let lines = app.marks_lines.clone();
+    assert!(lines.len() >= 2, "前提: マーク行が 2 本以上");
+
+    // 溝が立つ高さで、沈める前と後の目盛りを数える。
+    app.config.fx = false;
+    app.marks_fx = None;
+    app.readout_fx = None;
+    let backend = ratatui::backend::TestBackend::new(120, 12);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    let ticks_before = ticks_in_the_track(terminal.backend().buffer());
+    assert!(ticks_before > 0, "前提: 目盛りが出ている");
+
+    assert!(app.press_focus(std::time::Instant::now()));
+    assert!(marked(&app).is_empty(), "前提: 琥珀は描いていない");
+    assert_eq!(app.marks_lines, lines, "沈めたら台帳が変わった");
+    terminal.draw(|f| crate::draw(f, &mut app)).unwrap();
+    assert_eq!(
+        ticks_in_the_track(terminal.backend().buffer()),
+        ticks_before,
+        "沈めたら目盛りが消えた"
+    );
+
+    // `]m` も同じ台帳へ飛ぶ。
+    app.mode = Mode::View;
+    app.view.cursor = lines[0];
+    crate::jump_mark(&mut app, 1);
+    assert_eq!(app.view.cursor, lines[1], "沈めたまま次のマークへ飛べない");
+    assert!(app.focused(), "ジャンプでフォーカスが解けてはいけない");
+
+    // つまみを動かしても、台帳は沈めていないときと同じものになる。
+    assert!(app.nudge_marks_share(30));
+    let focused_lines = app.marks_lines.clone();
+    assert!(app.clear_focus());
+    assert_eq!(
+        app.marks_lines, focused_lines,
+        "沈めているときだけ台帳がずれる"
+    );
 }
 
 /// フォーカスを解けば元に戻る — **元の投影と 1 バイトも違わない**。
@@ -664,11 +726,20 @@ fn leaving_focus_restores_the_plain_marks_projection() {
 fn the_knob_and_the_question_still_work_while_focused() {
     let mut app = app_with("demo-marks.json");
     app.press_focus(std::time::Instant::now());
-    let lit_at_20 = marked(&app).len();
+    // 沈めている間は琥珀を描かないので、光る本数は台帳と読み出しで数える。
+    let lit_before = app.marks_lit().unwrap();
+    let dimmed_before = dimmed(&app);
     assert!(app.nudge_marks_share(50), "つまみが効かない");
     assert!(app.focused(), "つまみでフォーカスが解けてはいけない");
-    assert!(marked(&app).len() > lit_at_20, "光る本数が増えていない");
+    assert!(
+        app.marks_lit().unwrap() > lit_before,
+        "光る本数が増えていない"
+    );
     assert!(dimmed(&app) > 0, "沈んだままであること");
+    assert!(
+        dimmed(&app) < dimmed_before,
+        "光った文が増えたぶん、沈む文が減っていない"
+    );
 }
 
 /// 光る箇所が 1 つも無いときは沈めない — 画面が全部沈むのは
@@ -683,7 +754,7 @@ fn focus_refuses_when_nothing_is_marked() {
     assert!(!app.can_focus());
 }
 
-/// **画面のセルで見る。** 沈めたら本文の前景が動き、琥珀の背景は残る。
+/// **画面のセルで見る。** 沈めたら本文の前景が動き、琥珀の背景は消える。
 /// 旗（`focused()`）だけを見ていると、投影を切り替え忘れても通る。
 #[test]
 fn focus_changes_what_is_painted_not_just_a_flag() {
@@ -723,8 +794,8 @@ fn focus_changes_what_is_painted_not_just_a_flag() {
         .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
         .filter(|&(x, y)| after[(x, y)].bg == amber)
         .count();
-    assert_eq!(amber_before, amber_after, "琥珀のセル数が変わった");
-    assert!(amber_after > 0, "前提: 琥珀が画面に出ている");
+    assert!(amber_before > 0, "前提: 沈める前は琥珀が画面に出ている");
+    assert_eq!(amber_after, 0, "沈めたら琥珀は 1 セルも残らない");
 }
 
 /// `FOCUS` はフッタのモードバッジのスロットに出る。**選択が優先する**。
