@@ -5,37 +5,37 @@
       "id": "essential",
       "label": "Essential",
       "hint": "what you would misread if it were dropped",
-      "text": "下の「対象」は、この文書の中で次に当てはまる箇所である。落とすと文書の要点、結論、制約、未決の論点や宿題などを取り違える可能性が高い。"
+      "text": "Missing `passage` would make a reader misunderstand the document's main point, conclusion, constraints, or open issues."
     },
     {
       "id": "settled",
       "label": "Settled",
       "hint": "agreed, fixed, final",
-      "text": "下の「対象」は、決定・合意・確定した事柄を述べている箇所である。ここを落とすと、読み手は何が決まったのかを取り違える。決めた内容、合意した方針、確定した結論、採用すると述べた案が当てはまる。まだ決まっていない事柄、検討中・保留中の事柄、これから決める予定を述べただけの箇所は当てはまらない。"
+      "text": "`passage` states something that has been decided."
     },
     {
       "id": "unsettled",
       "label": "Unsettled",
       "hint": "open, pending, waiting to be confirmed",
-      "text": "下の「対象」は、まだ決まっていない事柄を述べている箇所である。ここを落とすと、読み手は決まっていないものを決まったと取り違える。未決の論点、保留された事柄、確認待ちの事柄、結論が出ないまま次へ持ち越された事柄が当てはまる。既に決定・合意した事柄、確定した結論を述べただけの箇所は当てはまらない。"
+      "text": "`passage` states something that is still undecided."
     },
     {
       "id": "decide",
       "label": "Your call",
       "hint": "asks you to judge, confirm or choose",
-      "text": "下の「対象」は、読み手に判断・確認・選択を求めている箇所である。ここを落とすと、読み手は自分が下すべき判断・確認・選択を見落とす。書き手が答えを待っている問い、並べられた選択肢、「これでよいか」「どちらにするか」という求め、書き手自身が迷っていて読み手に委ねている書き方が当てはまる。既に決まったことを述べているだけの箇所、実行する人が決まっている作業を挙げただけの箇所は当てはまらない。"
+      "text": "`passage` asks the reader to make a decision, confirm something, or choose."
     },
     {
       "id": "numbers",
       "label": "Numbers",
       "hint": "deadlines, amounts, quantities",
-      "text": "下の「対象」は、期限・金額・数量のいずれかを含んでいる箇所である。ここを落とすと、読み手はいつまでに・いくらで・どれだけ、を取り違える。日付や期日・締切、金額や単価、件数・人数・回数・割合といった具体的な数量が当てはまる。数字を含まない箇所、版番号や見出しの番号のように量も時点も表さない数字だけの箇所は当てはまらない。"
+      "text": "`passage` contains a deadline, an amount of money, or a quantity."
     }
   ],
   "free": {
     "id": "free",
     "label": "Ask",
     "hint": "type your own question",
-    "template": "下の「対象」は、「{q}」について述べている箇所である。ここを落とすと、読み手は「{q}」について知りたいことを取りこぼす。「{q}」という語が出てこなくても、述べている内容が「{q}」のことであれば当てはまる。同じ話題に関連するだけで「{q}」そのものを述べていない箇所は当てはまらない。"
+    "template": "`passage` addresses or answers \"{q}\"."
   }
 }
