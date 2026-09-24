@@ -13,10 +13,20 @@
 //!
 //! # 文面の正本はこのデータファイルである
 //!
-//! 焼き込んだ既定は、段 1 の実測（`examples/semantic/measurements/marks-presets.md`）
-//! で使った文面の**逐語**である。証拠側の `tools/presets.py` から機械的に
-//! 起こした（枠 `――― 対象 ―――` は判定器が本文と一緒に付けるので、
-//! ここには入っていない）。
+//! 焼き込んだ既定は、問いの形の実測（`examples/semantic/measurements/question-form.md`
+//! の追記、形 E1）で使った文面の**逐語**である — ユーザーと合意した短い英語の
+//! 文面の `` `passages[i]` `` を `` `passage` `` に置き換えたもの。証拠側の
+//! `tools/forms.py` から機械的に起こした。**`` `passage` `` という語が文面にある
+//! ことが判定器への合図**で、判定器はその文を instructions の `passage` の欄に
+//! 置いて聞く（`examples/semantic/jev-annotate.py` の `marks_instructions`）。
+//! 語が無い文面（前の版の日本語のファイル）は、判定器が旧い形（枠
+//! `――― 対象 ―――` で本文を埋め込む）で聞く。
+//!
+//! **2026-09-24 までは日本語の長い文面だった**（段 1 の
+//! `examples/semantic/measurements/marks-presets.md` の逐語）。英語の短い文面に
+//! 替えた理由は、Jev の主な学習言語が英語で、公式が「問いは短く」と言っていること、
+//! そして長い文面を文の数だけ繰り返すのが費用の大半だったこと
+//! （`docs/design/jev.md`「公式の書き方と食い違っていたところ」）。
 //!
 //! **設計書 0 節の表はこのファイルの写しである。** 逆ではない。正典を機械的に
 //! 読むテストは置かない — 設計書がテストの fixture になると設計書が伸ばせなく
@@ -43,8 +53,9 @@
 //!
 //! # `hint` は popup にだけ出る英語の 1 行
 //!
-//! `text`（Jev へ送る日本語）は popup に出さない。長すぎるし、UI の言葉は
-//! 全部英語だからである（2026-09-22 の読み手の注文）。`hint` を持たない
+//! `text`（Jev へ送る文面）は popup に出さない。`` `passage` `` を含む判定器向けの
+//! 文で、読み手に見せる言葉ではないからである（UI の言葉は `label` と `hint`。
+//! 2026-09-22 の読み手の注文）。`hint` を持たない
 //! ファイル（読み手が前の版のまま置いているもの）は、popup に label だけが
 //! 並ぶ — 版を上げるほどのことではない。
 
@@ -68,8 +79,7 @@ const USER_FILE: &str = "akapen/marks-questions.json";
 pub(crate) struct Question {
     /// 識別子。要求に載り、応答が echo し、キャッシュの照合に使う。
     pub(crate) id: String,
-    /// ステータス行と popup に出る短い名前。**英語である**
-    /// （UI の言葉は全部英語で、日本語は `text` だけ）。
+    /// ステータス行と popup に出る短い名前。**英語である**（UI の言葉は全部英語）。
     pub(crate) label: String,
     /// popup に label と並べて出す英語の 1 行。無ければ空。
     pub(crate) hint: String,
@@ -186,8 +196,9 @@ impl Questions {
     /// 自由入力の型に `input` を埋めた問い。
     ///
     /// **そのまま埋めない理由**が型にある — 「日程」は主張ではないので
-    /// Noul が評価できない（段 1 の 2 節）。`{q}` を「〜について述べている
-    /// 箇所である」の形に差し込む。
+    /// Noul が評価できない（段 1 の 2 節）。`{q}` を
+    /// `` `passage` addresses or answers "…". `` の形に差し込む（2026-09-24 から。
+    /// それまでは「〜について述べている箇所である」の日本語の型）。
     ///
     /// id は `free` 固定である。文面が変わったことはキャッシュの鍵
     /// （文面の sha）が検出するので、id に入力を混ぜる必要は無い。
@@ -230,13 +241,13 @@ mod tests {
 
     #[test]
     fn every_built_in_label_and_hint_is_ascii() {
-        // UI の言葉は全部英語。日本語は `text`（Jev へ送る文面）だけで、
-        // ここが崩れると 2026-09-22 の「日本語が混ざった」に戻る。
+        // UI の言葉は全部英語。ここが崩れると 2026-09-22 の「日本語が混ざった」に戻る。
         let questions = Questions::built_in().unwrap();
         for q in questions.presets() {
             assert!(q.label.is_ascii(), "label が英語でない: {}", q.label);
             assert!(q.hint.is_ascii(), "hint が英語でない: {}", q.hint);
-            assert!(!q.text.is_ascii(), "text は日本語のまま: {}", q.id);
+            // 2026-09-24 から `text` も英語（形 E1）。判定器への合図の語を含む。
+            assert!(q.text.contains("`passage`"), "text に `passage` が無い: {}", q.id);
         }
         assert!(questions.free_hint().is_ascii());
     }
@@ -258,11 +269,12 @@ mod tests {
             .map(|q| (q.id.as_str(), crate::semantic::source_digest(&q.text)))
             .collect();
         let pinned = [
-            ("essential", "9b377222da7675cca14409c5e731ed62288fc62cc2550edd79e4746cb49df297"),
-            ("settled", "0f13a7ed218e13e814c4c59ee62d2aa3ea3b2456151dcd589d77315a7d2499f2"),
-            ("unsettled", "bda9a76bd2c74985eec9914959b7702934c864ba2e35bc589ff3df3d4d6488d4"),
-            ("decide", "c555c5f1f3e4225640fdae72476907b3e5b4dc2705031ec0d32f7e7da7b7131a"),
-            ("numbers", "e8b270a0941f4f80110e308e703b1bfe9b04e4583a1b655ffe998fb195c61a94"),
+            // 2026-09-24 に形 E1 の英語の文面へ替えた（`question-form.md` の追記）。
+            ("essential", "4a8ef4168b16847dbedb3f997914636aa3ac58543df8ab68ae5dc609720825d3"),
+            ("settled", "84a578c4a53705925aa29f4153035186c058af99ac305c8589f535742bfd5f77"),
+            ("unsettled", "ba3370024b57274af8afc665d93ee43abbb6104dd7b7d64bcbf1a81fbbd07c7c"),
+            ("decide", "10783e2c203fa9359aa839414b7a706da232fbaeef0927a933a09c323a334b0d"),
+            ("numbers", "5274382c8474c26bb322b1892ecab4049e5ab462530e0bbf4c307037ba51ca4a"),
         ];
         let pinned: Vec<(&str, String)> =
             pinned.iter().map(|(id, sha)| (*id, sha.to_string())).collect();
@@ -279,21 +291,17 @@ mod tests {
     }
 
     #[test]
-    fn the_decide_preset_carries_the_design_documents_wording_verbatim() {
-        // 設計書 0 節の定型 2 の逐語。段 1 で独立しなかったことは
-        // モジュールの注に書いてあるが、文面そのものは測ったものである。
+    fn the_decide_preset_carries_the_measured_wording_verbatim() {
+        // 形 E1 で測った文面の逐語（ユーザーと合意した英語の案）。
         let questions = Questions::built_in().unwrap();
         let decide = questions
             .presets()
             .iter()
             .find(|q| q.id == "decide")
             .expect("decide が居ること");
-        assert!(
-            decide.text.starts_with(
-                "下の「対象」は、読み手に判断・確認・選択を求めている箇所である。"
-            ),
-            "{}",
-            decide.text
+        assert_eq!(
+            decide.text,
+            "`passage` asks the reader to make a decision, confirm something, or choose."
         );
     }
 
@@ -309,18 +317,15 @@ mod tests {
     }
 
     #[test]
-    fn the_essential_preset_carries_the_tier_criteria_verbatim() {
+    fn the_essential_preset_carries_the_measured_wording_verbatim() {
         let questions = Questions::built_in().unwrap();
         let essential = &questions.presets()[0];
-        // 旧 `TIER_CRITERIA["essential"]`（2026-09-22 に削除）の逐語。
-        // ここが動いたら段 1 の
-        // 「要点 と既存 ESSENTIAL が AUC 0.81〜0.99 で一致」は根拠でなくなる。
-        assert!(
-            essential.text.contains(
-                "落とすと文書の要点、結論、制約、未決の論点や宿題などを取り違える可能性が高い。"
-            ),
-            "{}",
-            essential.text
+        // 形 E1 で測った文面の逐語。ここが動いたら `question-form.md` の
+        // 「E1 が正解ラベルで R と並んだ」は根拠でなくなる。
+        assert_eq!(
+            essential.text,
+            "Missing `passage` would make a reader misunderstand the document's main point, \
+             conclusion, constraints, or open issues."
         );
     }
 
@@ -331,9 +336,9 @@ mod tests {
         assert_eq!(asked.id, "free");
         assert_eq!(asked.label, "費用の話");
         assert!(!asked.text.contains("{q}"), "{}", asked.text);
-        // 型は入力を 5 回使う（述べている / 取りこぼす / 語が出てこなくても /
-        // 内容がそれであれば / そのものを述べていない）。
-        assert_eq!(asked.text.matches("費用の話").count(), 5);
+        // 型は入力を 1 回使う（2026-09-24 から英語の短い 1 文。公式の
+        // Line-by-line search の「address or answer」を 1 文ぶんにしたもの）。
+        assert_eq!(asked.text, "`passage` addresses or answers \"費用の話\".");
     }
 
     #[test]

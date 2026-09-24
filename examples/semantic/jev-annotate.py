@@ -37,10 +37,29 @@ Jev は question を**並列・独立に**評価するので、全部を 1 リ�
 差し込む連鎖は原理的に無い。
 
 **問いの文面は akapen が送ってくる。** 正本は akapen 側の
-`assets/marks-questions.json` 1 か所で、このスクリプトは枠（[`MARKS_FRAME`]）と
-本文を足すだけの汎用の器である。2 か所に置くとずれる。要求の question に
-入っている `core_floor`（核を聞く Unit の足切り）は**もう使わない**。akapen は
-まだ送ってくるが、読まずに捨てる。
+`assets/marks-questions.json` 1 か所で、このスクリプトは文面とその文を組み合わせる
+だけの汎用の器である。2 か所に置くとずれる。要求の question に入っている
+`core_floor`（核を聞く Unit の足切り）は**もう使わない**。akapen はまだ送って
+くるが、読まずに捨てる。
+
+## 問いの形は 2 つ — 文面に `` `passage` `` があるかで決まる（2026-09-24）
+
+    文面に `passage` がある（いまの定型と自由入力の型）:
+        instructions = {"question": 文面, "passage": その文}       … E1
+    無い（Review のルール・古い akapen・読み手が前の版のまま置いたファイル）:
+        instructions = 文面 + 枠（[`MARKS_FRAME`]）で本文を埋め込む  … R
+
+E1 は Jev の公式の書き方（短い英語の問い、データは構造化した instructions の
+別の欄。`docs/design/jev.md`「公式の書き方と食い違っていたところ」）に寄せた形で、
+正解ラベルで R と並び、費用は R の約半分だった
+（`examples/semantic/measurements/question-form.md` の追記）。R の費用の大半は
+長い日本語の文面を文の数だけ繰り返す部分だった。
+
+**R を残すのは互換のためである。** Review のルール（`assets/review-rules.json`、
+既定で無効）は「下の「対象」は…」の文面のまま、動いている古い akapen は古い定型を
+送ってくる。そういう文面を E1 の欄に入れると「対象」を指す枠が無くなるので、
+いままでどおり枠で包む。見分けは文面に `` `passage` `` という語（バッククォート
+付き）があるかだけで、id も言語も見ない。
 
 ## なぜ文ごとか — Unit の境界も核も Jev に決めさせない（2026-09-24）
 
@@ -241,8 +260,8 @@ PAIR_MARGIN = 2_048
 #:
 #: 32k 枠の半分。ここを下回っていれば、[`TOKENS_PER_BYTE`] が実測の 1.4 倍まで
 #: 過大評価していても真値は 16k を超えず、1 つの question に 14k 以上が残る。
-#: いまの question は文 1 つの Noul（問いの文面 67〜194 字 + その文）で、
-#: 14k に届く文は無い。
+#: いまの question は文 1 つの Noul（短い英語の問い、または旧い形の 67〜194 字の
+#: 文面 + その文）で、14k に届く文は無い。
 #:
 #: **超えたら見積もりでは判定できない。** 0.5 tokens/byte は 65 KB の文書の
 #: state を 32,612 と見積もるが、実レート 0.34〜0.39 での真値は 22〜26k で、
@@ -568,7 +587,14 @@ def question_tokens(question: dict) -> int:
     question は個数ではなくトークンで切る」と同じ理由で、固定の個数は
     どの文書でも正しくない。
     """
-    text = question.get("instructions") or ""
+    instructions = question.get("instructions") or ""
+    # E1 の instructions はオブジェクト（[`marks_questions`]）。送る JSON と
+    # 同じ形で数える — キー名と引用符のぶん、文字列より少し多めに出る（安全側）。
+    text = (
+        instructions
+        if isinstance(instructions, str)
+        else json.dumps(instructions, ensure_ascii=False)
+    )
     for key, value in (question.get("criteria") or {}).items():
         text += key + value
     return QUESTION_OVERHEAD + estimate_tokens(text)
@@ -735,12 +761,28 @@ def send_in_chunks(
 # ---------------------------------------------------------------------------
 
 
-#: 問いの文面に付ける枠。**全問共通**で、段 1 の実測
+#: **旧い形（R）の**、問いの文面に付ける枠。段 1 の実測
 #: （`examples/semantic/measurements/marks-presets.md`）と 1 バイトも違わない。
-#: 文面そのものは akapen が送ってくる（正本は akapen 側の
-#: `assets/marks-questions.json`）。枠だけがここにあるのは、`{body}` を持って
-#: いるのが判定器だからである。
+#: 文面に [`PASSAGE_REF`] が無いときだけ使う（冒頭の「問いの形は 2 つ」）。
+#: 枠がここにあるのは、`{body}` を持っているのが判定器だからである。
 MARKS_FRAME = "\n\n――― 対象 ―――\n{body}\n―――――――――"
+
+#: E1 の文面が文を指す名前。instructions の欄の名前と同じで、文面の中では
+#: バッククォートで囲む（Jev の公式の「Reference specific fields」の書き方）。
+#: **これが文面にあるかで形が決まる**（冒頭の「問いの形は 2 つ」）。
+PASSAGE_REF = "`passage`"
+
+
+def marks_instructions(text: str, body: str) -> str | dict:
+    """1 文ぶんの instructions。文面に [`PASSAGE_REF`] があれば E1、無ければ R。
+
+    E1: `{"question": 文面, "passage": その文}` — 本文を問いの**別の欄**に置く。
+    文面は短い英語の 1 文（`` `passage` states something that has been decided. ``）で、
+    どの文の話かは欄の名前が指す。R: 文面の後ろに枠で本文を埋め込む。
+    """
+    if PASSAGE_REF in text:
+        return {"question": text, "passage": body}
+    return text + MARKS_FRAME.format(body=body)
 
 
 def marks_questions(atoms: list[dict], units: list[int], text: str) -> dict:
@@ -749,9 +791,9 @@ def marks_questions(atoms: list[dict], units: list[int], text: str) -> dict:
     `units` は [`prose_units`] が返す Atom の添字。キーの `u<n>` は Unit の
     通し番号（1 始まり、文書順）で、応答の Unit の `id` と同じである。
 
-    問いの文面は akapen が送ってきたものをそのまま使い、枠と本文だけを
-    付ける。**1 段の問いである**（`docs/design/jev.md`。前の答えを前提に
-    しない）。
+    問いの文面は akapen が送ってきたものをそのまま使い、その文と組み合わせる
+    （[`marks_instructions`]）。**1 段の問いである**（`docs/design/jev.md`。前の
+    答えを前提にしない）。
     """
     return {
         f"marks:u{number}": {
@@ -760,7 +802,7 @@ def marks_questions(atoms: list[dict], units: list[int], text: str) -> dict:
             # （`PROBE_QUESTION` / `REDUNDANCY_PAIR` / `CONTEXT_STAGE1` と
             # 同じ形）。別の名前で送ると HTTP 400
             # 「Noul question must have criteria or instructions」になる。
-            "instructions": text + MARKS_FRAME.format(body=atom_text(atoms[index])),
+            "instructions": marks_instructions(text, atom_text(atoms[index])),
         }
         for number, index in enumerate(units, start=1)
     }

@@ -62,6 +62,33 @@
 `examples/semantic/measurements/marks-presets.md`）。**文面そのものを下に置く** —
 文面が道具の一部なので、ここに無いと次に触る人が同じものを測れない。
 
+**2026-09-24 から、定型と自由入力は英語の短い文面である（形 E1）。** 正本は
+`assets/marks-questions.json`、測ったのは
+[`question-form.md`](../../examples/semantic/measurements/question-form.md) の追記
+（正解ラベルで下の旧い形と並び、費用は約半分）。instructions をオブジェクトにして、
+その文を別の欄に置く:
+
+```json
+{"question": "`passage` states something that has been decided.", "passage": "〈その文〉"}
+```
+
+| 定型 | 文面（`text`） |
+| --- | --- |
+| essential（要点） | `` Missing `passage` would make a reader misunderstand the document's main point, conclusion, constraints, or open issues. `` |
+| settled（決まったこと） | `` `passage` states something that has been decided. `` |
+| unsettled（決まっていないこと） | `` `passage` states something that is still undecided. `` |
+| decide（判断が要る） | `` `passage` asks the reader to make a decision, confirm something, or choose. `` |
+| numbers（数字と日付） | `` `passage` contains a deadline, an amount of money, or a quantity. `` |
+| 自由入力の型 | `` `passage` addresses or answers "{q}". `` |
+
+判定器は**文面に `` `passage` `` があるときだけ**この形で聞き、無ければ下の旧い形
+（枠で本文を埋め込む）で聞く（`examples/semantic/jev-annotate.py` の
+`marks_instructions`）。Review のルール（3 節）と、前の版のまま置いた読み手の
+`marks-questions.json` は旧い形のまま聞かれる。criteria は付けない（付けても
+ラベルの成績は変わらず、揺れと費用が増えた）。
+
+**以下は 2026-09-24 までの文面**（段 1 で測った日本語）。
+
 すべて **Noul**、Unit ごとに 1 問、`state` は文書全文。`{body}` に Unit の本文を
 埋める — 2026-09-24 からは Unit が散文の Atom 1 つなのでその文そのもの（それまでは
 Jev が束ねた Unit の Atom を空白で連結していた）。枠は全問共通:

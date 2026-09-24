@@ -1221,6 +1221,88 @@ class MarksModeTest(unittest.TestCase):
             self.assertIn("――― 対象 ―――", claim)
 
 
+class PassageFormTest(unittest.TestCase):
+    """**問いの形は 2 つ**（2026-09-24、判定器の冒頭の docstring）。
+
+    文面に `` `passage` `` があれば E1 — その文を instructions の `passage` の欄に
+    置く。無ければ R — いままでどおり枠で本文を埋め込む。見分けはこの語だけ。
+    """
+
+    ATOMS = [
+        {"index": 0, "kind": "heading", "text": "# 見出し", "range": [0, 10]},
+        {"index": 1, "kind": "sentence", "text": "決まったことを述べた文。", "range": [12, 48]},
+        {"index": 2, "kind": "sentence", "text": "まだ決まっていない文。", "range": [48, 81]},
+    ]
+    E1 = "`passage` states something that has been decided."
+    R = "下の「対象」は、決定・合意・確定した事柄を述べている箇所である。"
+
+    def test_a_text_naming_passage_puts_the_sentence_in_its_own_field(self):
+        asked = jev.marks_questions(self.ATOMS, [1, 2], self.E1)
+        self.assertEqual(
+            [q["instructions"] for q in asked.values()],
+            [
+                {"question": self.E1, "passage": "決まったことを述べた文。"},
+                {"question": self.E1, "passage": "まだ決まっていない文。"},
+            ],
+        )
+        for q in asked.values():
+            self.assertEqual(q["type"], "noul")
+            self.assertNotIn("criteria", q, "E1 は criteria を付けない（測った形）")
+
+    def test_a_text_without_passage_keeps_the_frame(self):
+        # Review のルール・古い akapen・前の版のファイル。**枠を外さない。**
+        asked = jev.marks_questions(self.ATOMS, [1], self.R)
+        self.assertEqual(
+            asked["marks:u1"]["instructions"],
+            self.R + jev.MARKS_FRAME.format(body="決まったことを述べた文。"),
+        )
+
+    def test_passage_without_backticks_is_not_the_signal(self):
+        # 合図はバッククォート付きの語だけ。地の文の passage では切り替わらない。
+        text = "The passage below states something that has been decided."
+        asked = jev.marks_questions(self.ATOMS, [1], text)
+        self.assertIsInstance(asked["marks:u1"]["instructions"], str)
+
+    def test_the_built_in_questions_all_take_the_passage_form(self):
+        # akapen 側の正本（焼き込みの既定）と判定器の約束。どれかが語を失うと、
+        # その問いだけ黙って旧い形に戻る。
+        data = json.loads((HERE / "../../assets/marks-questions.json").read_text())
+        for preset in data["presets"]:
+            self.assertIn(jev.PASSAGE_REF, preset["text"], preset["id"])
+        free = data["free"]["template"].replace("{q}", "費用の話")
+        self.assertIn(jev.PASSAGE_REF, free)
+
+    def test_an_object_instruction_is_counted_as_the_json_it_is_sent_as(self):
+        body = "決まったことを述べた文。" * 20
+        question = {"type": "noul", "instructions": {"question": self.E1, "passage": body}}
+        counted = jev.question_tokens(question)
+        sent = json.dumps(question["instructions"], ensure_ascii=False)
+        self.assertEqual(counted, jev.QUESTION_OVERHEAD + jev.estimate_tokens(sent))
+        # 同じ本文を枠で埋め込んだ R の問いと同じ桁（本文が大半を占める）。
+        framed = {"type": "noul", "instructions": self.R + jev.MARKS_FRAME.format(body=body)}
+        self.assertLess(abs(counted - jev.question_tokens(framed)), counted // 2)
+
+    def test_the_passage_form_reaches_jev_as_an_object(self):
+        seen = []
+
+        def watching(state, chunk, model, timeout):
+            seen.extend(q["instructions"] for k, q in chunk.items() if k.startswith("marks:"))
+            return {"answers": {k: {"noul": 0.5} for k in chunk}}
+
+        request = {
+            "version": jev.VERSION,
+            "source": "# 見出し\n\n決まったことを述べた文。まだ決まっていない文。\n",
+            "atoms": self.ATOMS,
+            "question": {"id": "settled", "text": self.E1, "core_floor": 0.20},
+        }
+        out = with_fake_ask(watching, lambda: jev.annotate(request, "m", 1.0))
+        self.assertEqual([u["atoms"] for u in out["units"]], [[1], [2]])
+        self.assertEqual(
+            [i["passage"] for i in seen], ["決まったことを述べた文。", "まだ決まっていない文。"]
+        )
+        self.assertTrue(all(i["question"] == self.E1 for i in seen))
+
+
 def with_fake_ask(fake, body):
     """[`ask_jev`] を差し替えて `body()` を呼ぶ（API は叩かない）。"""
     real = jev.ask_jev
