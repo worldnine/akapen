@@ -546,6 +546,25 @@ impl DecorationStyles {
         crate::view::lerp_color(fg, self.dim_target, self.dim_blend)
     }
 
+    /// **帯の地の上で沈める**ための写し — 沈む先をページ色から `band` に
+    /// 替えただけで、沈む度合い（`dim_blend`）は同じ。
+    ///
+    /// フォーカス中はカーソル帯・変更の帯・history glow の行でも Dim を残す
+    /// （選択帯だけは外す。`view.rs` の `visible_text_with_glow` と
+    /// `draw.rs` の `build_rows`）。そのとき**ページ色へ沈めたままだと、
+    /// 帯の地とほぼ同じ色になって消える**（実測、既定のテーマで
+    /// カーソル帯の上のコントラスト比: ダーク 1.20:1・ライト 1.18:1）。
+    /// 帯の色へ沈めると ダーク 1.98:1・ライト 1.48:1 に戻り、ページの上で
+    /// 沈んだ文字（2.94:1・1.63:1）と同じく「読めるが退いている」になる。
+    /// 光った文は帯の上でもふつうの明るさ（4.62:1・2.97:1）なので、
+    /// 区別も残る（テストは `sinking_toward_the_band_keeps_the_cursor_row_legible`）。
+    pub fn sinking_toward(&self, band: Color) -> Self {
+        Self {
+            dim_target: band,
+            ..*self
+        }
+    }
+
     /// `base` with `kind` applied. Patching, not replacing: everything
     /// the kind does not own — the other of fg/bg, and every modifier
     /// already on `base` — survives.
@@ -1519,6 +1538,60 @@ mod tests {
         }
     }
 
+    /// **フォーカス中のカーソル帯の上で、沈んだ文字が溶けない**（2026-09-24）。
+    ///
+    /// 帯の行でも Dim を残すようにしたとき、ページ色へ沈めたままだと
+    /// カーソル帯の地とほぼ同じ色になった（ダーク 1.20:1・ライト 1.18:1）。
+    /// 帯の色へ沈める写し（[`DecorationStyles::sinking_toward`]）で、
+    /// ページの上で沈んだ文字に近い読みやすさへ戻っていること、光った文
+    /// （ふつうの前景）とは区別が付くことを見る。
+    #[test]
+    fn sinking_toward_the_band_keeps_the_cursor_row_legible() {
+        fn luminance(c: Color) -> f32 {
+            let Color::Rgb(r, g, b) = c else { panic!("RGB") };
+            let ch = |x: u8| {
+                let x = x as f32 / 255.0;
+                if x <= 0.03928 { x / 12.92 } else { ((x + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+        }
+        fn contrast(a: Color, b: Color) -> f32 {
+            let (x, y) = (luminance(a), luminance(b));
+            let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+            (hi + 0.05) / (lo + 0.05)
+        }
+
+        for light in [false, true] {
+            let hl = Highlighter::new(None, light);
+            let styles = DecorationStyles::from_theme(&hl, Default::default());
+            let fg = hl.default_fg();
+            let page = styles.page_bg();
+            let on_page = contrast(styles.dim_fg(Some(fg)), page);
+            for band in [
+                crate::view::selected_bg(light),
+                crate::view::changed_bg(light),
+                crate::view::history_glow_bg(light),
+            ] {
+                let toward_page = contrast(styles.dim_fg(Some(fg)), band);
+                let toward_band = contrast(styles.sinking_toward(band).dim_fg(Some(fg)), band);
+                let lit = contrast(fg, band);
+                assert!(
+                    toward_band > toward_page,
+                    "light={light} {band:?}: 帯へ沈めた {toward_band:.2}:1 がページへ沈めた {toward_page:.2}:1 以下"
+                );
+                // ページの上で沈んだ文字の 6 割を下回らない（ダーク 2.94 → 1.76、ライト 1.63 → 0.98）。
+                assert!(
+                    toward_band >= on_page * 0.6,
+                    "light={light} {band:?}: 帯の上で沈んだ文字 {toward_band:.2}:1 が、ページの上 {on_page:.2}:1 より退きすぎ"
+                );
+                assert!(
+                    lit > toward_band * 1.5,
+                    "light={light} {band:?}: 光った文 {lit:.2}:1 と沈んだ文 {toward_band:.2}:1 の区別が付かない"
+                );
+            }
+        }
+    }
+
     /// **テーマの highlight scope 背景は、もう見ていません。**
     /// 前に `MARK_SCOPES`（`markup.highlight` / `markup.mark` /
     /// `markup.quote.highlight` / `region.yellowish`）のループが
@@ -1778,3 +1851,4 @@ mod sanitize_tests {
         }
     }
 }
+

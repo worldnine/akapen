@@ -569,10 +569,14 @@ pub(crate) struct App {
     /// 再編集・スナップショット）には触らない。確定と取り消しの 2 か所だけが
     /// この旗を見る。
     pub(crate) marks_prompt: bool,
-    /// **フォーカス**（`f`）— マーカーの無い Unit を沈めているか。
+    /// **フォーカス**（`f`）— 光った文と見出しのほかを沈め、琥珀を消しているか。
     pub(crate) marks_focus: Focus,
-    /// マーカーの乗っているソース行（昇順）。**溝の目盛りと `]m` の
+    /// 光っている文のソース行（昇順）。**溝の目盛りと `]m` の
     /// ジャンプが同じここを見る。** 装飾を作り直すたびに更新される。
+    ///
+    /// **フォーカス中も同じ行である。** フォーカスは琥珀を描かないが、
+    /// 台帳は描いた装飾ではなく marks の投影から数える
+    /// （[`App::refresh_semantic_decorations`]）。
     pub(crate) marks_lines: Vec<usize>,
     /// [`App::semantic_doc`] projected onto the current budget: the
     /// decoration list the paint consumes, cached so a frame does no
@@ -1065,19 +1069,26 @@ impl App {
     /// **つまみを動かす費用はこれで全部である** — 手元の Unit に
     /// `marks::mark` を 1 回。解析も描画も provider も通らない。
     pub(crate) fn refresh_semantic_decorations(&mut self) {
-        self.semantic_decorations = match self.semantic_doc.as_ref() {
-            // フォーカス中だけ投影が変わる。答えもつまみも同じままで、
-            // **沈める分を足すだけ**である（`crate::semantic::focus_decorations_for`）。
-            Some(document) if self.marks_focus.is_on() => {
-                crate::semantic::focus_decorations_for(document, self.marks_share)
-            }
-            Some(document) => crate::semantic::marks_decorations_for(document, self.marks_share),
-            None => Vec::new(),
+        let Some(document) = self.semantic_doc.as_ref() else {
+            self.semantic_decorations = Vec::new();
+            self.marks_lines = Vec::new();
+            return;
         };
+        let marks = crate::semantic::marks_decorations_for(document, self.marks_share);
         // 行の台帳はここでだけ作る（装飾が変わった瞬間 = 目盛りとジャンプ先が
         // 変わった瞬間）。フレームごとに数え直さない。
-        self.marks_lines =
-            crate::semantic::marked_lines(&self.source.content, &self.semantic_decorations);
+        //
+        // **描く列ではなく marks の投影から数える。** フォーカスは琥珀を
+        // 描かないので、描く列から数えると目盛りも `]m` も消える。
+        self.marks_lines = crate::semantic::marked_lines(&self.source.content, &marks);
+        // フォーカス中だけ描き方が変わる。答えもつまみも同じままで、
+        // 光った文と見出しのほかを沈め、琥珀は描かない
+        // （`crate::semantic::focus_decorations_for`）。
+        self.semantic_decorations = if self.marks_focus.is_on() {
+            crate::semantic::focus_decorations_for(document, self.marks_share)
+        } else {
+            marks
+        };
     }
 
     // ---- marks ---------------------------------------------------------

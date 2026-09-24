@@ -725,6 +725,8 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
         // sees them, so toggling a decoration cannot re-parse the
         // markdown.
         &decorations,
+        // フォーカス中はカーソル帯でも沈んだまま（選択帯だけ外す）。
+        app.focused(),
     );
     if composing {
         let full_width = content.width as usize;
@@ -1184,10 +1186,26 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         } else {
             gutter_style
         };
-        let effective: &[crate::decoration::Decoration] = if cursor_bg || changed_bg {
-            &undimmed
+        // **フォーカス中は選択帯の行だけ Dim を外す**（view と同じ、2026-09-24）。
+        // カーソル帯と変更の帯では沈んだまま、帯の色へ向けて沈める
+        // （`DecorationStyles::sinking_toward` — ページ色へ沈めると帯に溶ける）。
+        let band_bg = if cursor_bg {
+            Some(app.ui_selected_bg)
+        } else if changed_bg {
+            Some(app.ui_changed_bg)
         } else {
-            &decorations
+            None
+        };
+        let drop_dim = if app.focused() {
+            selected
+        } else {
+            band_bg.is_some()
+        };
+        let effective: &[crate::decoration::Decoration] =
+            if drop_dim { &undimmed } else { &decorations };
+        let sunk_on_band = match band_bg {
+            Some(bg) if !drop_dim => app.decoration_styles.sinking_toward(bg),
+            _ => app.decoration_styles,
         };
         for (k, (frags, frag_attrs)) in wrapped.iter().enumerate() {
             // The decoration goes on FIRST, so the bands below still win.
@@ -1199,13 +1217,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
                 std::borrow::Cow::Borrowed(frags.as_slice())
             } else {
                 std::borrow::Cow::Owned(
-                    crate::decoration::decorate_row(
-                        frags,
-                        frag_attrs,
-                        effective,
-                        &app.decoration_styles,
-                    )
-                    .0,
+                    crate::decoration::decorate_row(frags, frag_attrs, effective, &sunk_on_band).0,
                 )
             };
             let frags = decorated.as_ref();

@@ -781,6 +781,7 @@ impl ViewState {
             HISTORY_GLOW_BG_DARK,
             border_style,
             &[],
+            false,
         )
     }
 
@@ -808,6 +809,7 @@ impl ViewState {
             HISTORY_GLOW_BG_DARK,
             Style::default(),
             decorations,
+            false,
         )
     }
 
@@ -830,6 +832,10 @@ impl ViewState {
         glow_bg: Color,
         border_style: Style,
         decorations: &[Decoration],
+        // **沈めているか**（marks のフォーカス、`f`）。立っていると、カーソル帯と
+        // history glow の行でも Dim を外さず、帯の色へ向けて沈める
+        // （[`DecorationStyles::sinking_toward`]）。選択帯の行だけは従来どおり外す。
+        sink_under_bands: bool,
     ) -> (Text<'static>, Vec<GutterCell>) {
         if self.rows.is_empty() {
             return (Text::default(), Vec::new());
@@ -1176,7 +1182,32 @@ impl ViewState {
             // on a row that merges several source lines, selecting one of
             // them un-dims the whole row. The band is the transient state
             // and the one the user is looking at, so it wins wholesale.
-            let banded = glowing_row || gutter_hl;
+            //
+            // **フォーカス中（`sink_under_bands`）は選択帯の行だけ外す**
+            // （2026-09-24、読み手の決定）。カーソル帯で外すと、沈めている間は
+            // 琥珀も無いので、カーソル行だけ光った文と周りの区別が消える。
+            // 残した Dim は帯の色へ向けて沈める — ページ色へ沈めたままだと
+            // 帯の地に溶けて読めない（[`DecorationStyles::sinking_toward`]）。
+            let band_bg = if glowing_row {
+                Some(glow_bg)
+            } else if gutter_hl {
+                Some(selected_bg)
+            } else {
+                None
+            };
+            let banded = if sink_under_bands {
+                in_sel_row
+            } else {
+                band_bg.is_some()
+            };
+            let sunk_on_band: DecorationStyles;
+            let styles: &DecorationStyles = match band_bg {
+                Some(bg) if !banded => {
+                    sunk_on_band = self.decoration_styles.sinking_toward(bg);
+                    &sunk_on_band
+                }
+                _ => &self.decoration_styles,
+            };
             let undimmed: Vec<Decoration>;
             let effective: &[Decoration] = if !banded {
                 decorations
@@ -1192,9 +1223,7 @@ impl ViewState {
                 std::borrow::Cow::Borrowed(self.rows[abs].as_slice())
             } else {
                 let attrs = self.row_attrs.get(abs).map(|a| a.as_slice()).unwrap_or(&[]);
-                std::borrow::Cow::Owned(
-                    decorate_row(&self.rows[abs], attrs, effective, &self.decoration_styles).0,
-                )
+                std::borrow::Cow::Owned(decorate_row(&self.rows[abs], attrs, effective, styles).0)
             };
             let mut off = 0usize;
             let mut content: Vec<ratatui::text::Span> = row
@@ -2572,6 +2601,7 @@ mod tests {
             glow,
             Style::default(),
             &[],
+            false,
         );
         let row = view.source_starts[2];
         assert!(

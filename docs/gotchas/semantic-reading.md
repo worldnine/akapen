@@ -383,7 +383,8 @@ cargo run -p semantic-reading --example decorate-report -- frozen.md answer.json
 ### `boundary_rule` は段落の切れ目を見ていない — 空行を跨ぐ SAME は規則 2 だけが出す
 
 > **過去の話（2026-09-24 に `boundary_rule` ごと消した）。** 段落の切れ目を
-> 使うなら、いまは focus の沈めない範囲の側の話です（設計書の DIM の節）。
+> 使う場所はいまありません（focus も 2026-09-24 に「光った文だけ明るく残す」に
+> 決め直し、段落で沈めない範囲を取る案は要らなくなった。設計書の DIM の節）。
 
 `plan_boundaries` に渡る情報には**空行が入っています**（`range` の隙間の `\n` の
 数）。しかし `boundary_rule` はそれを 1 度も読みません。

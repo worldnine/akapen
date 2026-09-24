@@ -437,8 +437,12 @@ pub(crate) fn decoration_kind(state: DisplayState) -> Option<DecorationKind> {
 
 /// 現在のつまみでの decoration 列（[`marks::mark`]）。
 ///
-/// **MARKED しか返さない**（DIM が 1 つも無い）。沈める分を足すのは
+/// **MARKED しか返さない**（DIM が 1 つも無い）。フォーカスの描き方は
 /// [`focus_decorations_for`] の仕事である。
+///
+/// **溝の目盛りと `]m` の台帳（[`marked_lines`]）は、フォーカス中もこの列から
+/// 数える。** フォーカスは琥珀を描かないので、描いている列から数えると
+/// 目盛りもジャンプ先も消える。
 ///
 /// **この関数から解析へ到達する経路は無い。** つまみを
 /// 1 ポイント動かすたびに走るのはここだけで、`marks::mark` は純粋関数である。
@@ -454,56 +458,40 @@ pub(crate) fn marks_decorations_for(document: &SemanticDocument, share: u8) -> V
 
 /// **フォーカスの** decoration 列（`f`）。
 ///
-/// marks の投影（[`marks::mark`]）の上に、akapen 側で沈める分を足しただけの
+/// marks の投影（[`marks::mark`]）から、akapen 側で描き方を変えただけの
 /// ものである。**`marks.rs` には 1 行も入れていない** — フォーカスは
 /// 読み手の操作であって判定ではないので、判定器の語彙を増やす理由が無い。
 ///
-/// # 何を沈め、何を沈めないか（読み手の決定、2026-09-22）
+/// # 何を沈め、何を沈めないか（読み手の決定、2026-09-24）
 ///
 /// | | どうなるか | なぜ |
 /// | --- | --- | --- |
-/// | 光った Unit の核 | 琥珀のまま | マーカーそのもの |
-/// | **光った Unit の、核でない文** | **沈めない** | 核だけ浮くと段落が割れて読めない。光っている箇所は丸ごと残す |
+/// | 光った文（MARKED の Atom） | **ふつうの明るさ。琥珀は描かない** | 周りが沈むので、線が無くても浮く。線を消すのは読み手の注文 |
 /// | **見出し** | **沈めない** | 沈んだ本文の中で現在地を読むのに要る |
-/// | それ以外の Unit の Atom | 沈む（[`DecorationKind::Dim`]） | フォーカスの本体 |
-/// | どの Unit にも属さない Atom | 沈む | 上と同じ扱い（見出しは上で除いてある） |
+/// | それ以外 | 沈む（[`DecorationKind::Dim`]） | フォーカスの本体 |
+///
+/// つまり**光った文と見出しには装飾を返さず、残り全部に DIM を返す**。
+/// MARKED の Atom を琥珀にしないので、この列には
+/// [`DecorationKind::SemanticMark`] が 1 つも無い — 溝の目盛りと `]m` の
+/// 台帳（[`marked_lines`]）はこの列からではなく、[`marks_decorations_for`]
+/// から数えること（`App::refresh_semantic_decorations`）。
+///
+/// **2026-09-24 まで**は琥珀を残し、「光った Unit の核でない文」も沈めずに
+/// 残していた。Unit が散文の Atom 1 つになってその行が空振りしていたのを、
+/// 「線が入った箇所だけ明るくする。そのとき線は消してよい」（読み手）で
+/// 線ごと整理し直した。演出は付けない（読み手の決定）。
 ///
 /// **沈めるのは読み手が自分で押した結果である**（判決ではない）。外れても
-/// 誰も傷つかないので、`f` を離せば戻る 1 本の描画で足りる
+/// 誰も傷つかないので、`f` をもう一度押せば戻る 1 本の描画で足りる
 /// （`docs/design/marks-only-and-review-mode.md` 1 節「判決」）。
 ///
 /// `marks_decorations_for` と同じく、**この関数から解析へ到達する経路は無い**。
 pub(crate) fn focus_decorations_for(document: &SemanticDocument, share: u8) -> Vec<Decoration> {
-    let states = marks::mark(document, share);
-    // 光った Unit の Atom（核もそれ以外も）を集める。`marks::mark` は
-    // 核にしか MARKED を付けないので、Unit が光ったかどうかは
-    // 「その Unit の Atom に MARKED が 1 つでもあるか」で読める。
-    let mut spared = vec![false; states.len()];
-    for unit in &document.units {
-        let lit = unit
-            .atoms
-            .iter()
-            .any(|atom| matches!(states.get(atom.0), Some((_, DisplayState::Marked))));
-        if !lit {
-            continue;
-        }
-        for atom in &unit.atoms {
-            if let Some(slot) = spared.get_mut(atom.0) {
-                *slot = true;
-            }
-        }
-    }
-    states
+    marks::mark(document, share)
         .into_iter()
         .enumerate()
         .filter_map(|(index, (range, state))| {
             if state == DisplayState::Marked {
-                return Some(Decoration {
-                    range,
-                    kind: DecorationKind::SemanticMark,
-                });
-            }
-            if spared[index] {
                 return None;
             }
             if document
