@@ -5,8 +5,8 @@ akapen examples/semantic/demo.md --semantic examples/semantic/demo-marks.json
 ```
 
 view モードで `m` が問いの popup（`M` は逆回り）、`/` で自由入力。`-` / `+`（`=` も可）が
-つまみ ±1、`<` / `>` が ±10 で、現在値はステータス行に `MARK 20% · 3 · Essential`
-として出る。
+つまみ ±1、`<` / `>` が ±10 で、現在値はフッタの右端に `Essential · 15% 2`
+として出る（既定のつまみは 15 %。この fixture は 13 Unit なので 2 本）。
 
 判定器を繋いで試すなら、**架空の議事録** `showcase.md` が向いている（決定事項・
 要確認・宿題・継続議題・費用と日程の表・引用・コードブロックを 1 本に入れてある。
@@ -59,11 +59,16 @@ Unit `u4` に属する。
 
 | つまみ | 前半「採用する方式は差分配信である。」 | 後半「詳細は付録にまとめた。」 |
 | ---- | -------------------------------------- | ------------------------------ |
+| 15%（既定） | NORMAL（3 本目なので、まだ光らない） | NORMAL                  |
 | 20%  | MARKED                                 | NORMAL                         |
 | 50%  | MARKED                                 | MARKED                         |
 | `f`  | MARKED                                 | 沈む（20 % のとき）            |
 
 **行の途中で表示状態が切り替わる**のがこの層の看板である。
+
+**この fixture は旧い形のまま置いてある** — Unit が複数の Atom を束ね、その中の
+核だけが光る（2026-09-24 まで判定器が返していた形）。いまの判定器は散文の Atom
+1 つを Unit にするので、核は Atom そのものになる。プロトコルはどちらの形も運ぶ。
 
 つまみを上げると光る集合は**入れ子で広がる**（一度光ったものは消えない）。
 `demo-marks.json` の目安:
@@ -71,6 +76,7 @@ Unit `u4` に属する。
 | つまみ | 光る本数 |
 | ---- | ---: |
 | 1%   | 1 |
+| 15%（既定） | 2 |
 | 20%  | 3 |
 | 50%  | 7 |
 | 100% | 7（足切りが上限を作る） |
@@ -88,12 +94,12 @@ akapen examples/semantic/demo.md \
 ```
 
 `annotate-doc.py` は Jev を呼ばない**決定論的な参照実装**である。目的は
-API キー無しでパイプライン全体を端から端まで動かせることで、判断そのものは
+API キー無しでパイプライン全体を端から端まで動かせることで、Unit の作り方は
+本番の判定器と同じ（散文の Atom 1 つが Unit 1 つ、見出し・コード・表のヘッダ行は
+Unit を持たない）、判断そのものは
 
 ```text
-見出し               -> 0.90
 見出し直後の 1 Atom  -> 0.70
-code block / table   -> 0.05
 それ以外             -> 0.30
 直前の文と語が重なる -> スコアを半分に
 ```
@@ -110,24 +116,28 @@ akapen → コマンド（stdin、JSON 1 行）:
 {"version": 1,
  "source": "<文書全文>",
  "question": {"id": "essential", "text": "<問いの文面>", "core_floor": 0.2},
- "atoms": [{"index": 0, "kind": "heading", "range": {"start": 0, "end": 12}, "text": "## 見出し"}]}
+ "atoms": [{"index": 0, "kind": "heading", "range": {"start": 0, "end": 12}, "text": "## 見出し"},
+           {"index": 1, "kind": "sentence", "range": {"start": 14, "end": 38}, "text": "本文の一文。"}]}
 ```
 
 **`question` は必ず載る。** 文面は akapen が持って送るので（正本は
 `assets/marks-questions.json`）、コマンドは文面を知らない汎用の器でよい。
 問いの無い要求を受け取ったコマンドは、黙って別のものを返さず**明確な
-エラーで終わる**こと。
+エラーで終わる**こと。`core_floor`（核を聞く Unit の足切り）は読まなくてよい —
+本番の判定器も 2026-09-24 から読み捨てている。
 
 コマンド → akapen（stdout、JSON）:
 
 ```json
 {"version": 1, "question": "essential",
- "units": [{"id": "u1", "atoms": [0], "score": 0.94, "core_atoms": [0]}]}
+ "units": [{"id": "u1", "atoms": [1], "score": 0.94, "core_atoms": [1]}]}
 ```
 
 `score` は「いまの問いにどれだけ答えているか」（0.0〜1.0）、`core_atoms` は
-「この Unit のどこだけ読めば要点が取れるか」。`question` は要求の id の echo で、
-キャッシュの読み戻しの照合に使う。
+「この Unit の中で光らせる Atom」（いまの判定器は Unit が Atom 1 つなので、その
+Atom 自身を明示する）。`question` は要求の id の echo で、キャッシュの読み戻しの
+照合に使う。**すべての Atom を Unit で覆う必要は無い** — どの Unit にも属さない
+Atom（見出しなど）は NORMAL のまま表示される。
 
 **コマンドは range を返さない。** 返すのは Atom の index だけで、
 `SemanticDocument` は akapen 自身の `atomize()` の出力から組み立てられる。
@@ -274,88 +284,48 @@ export TYPESAFE_API_KEY=sk-…
 （保存のコマンドもその 1 行に入る）。鍵は stdout にも stderr にも出さない。`TYPESAFE_BASE_URL` / `TYPESAFE_DEFAULT_MODEL`
 も SDK と同じ名前で効く（`--model` / `--timeout` でも指定できる）。
 
-### 3 ラウンド構成
-
-スコアの question は Unit について聞くものだが、Unit は境界判定の答えから
-生まれる。**1 ラウンドでは原理的に組めない。**
+### 1 ラウンド — 散文の Atom ごとに Noul 1 問
 
 ```text
-ラウンド1  state=文書全文, questions={ 散文どうしの境界を Choice } → Unit を確定
-             （**キャッシュに当たれば 0 問**）
-ラウンド2  state=文書全文, questions={ Unit ごとに、いまの問いへの Noul }
-             → 誰の核を聞くかが確定
-ラウンド3  state=文書全文, questions={ 足切りを超えた Unit の核(Choice) }
-             （**狭い問いではこのラウンドごと消える**）
+state=文書全文, questions={ 散文の Atom ごとに、いまの問いへの Noul } → スコアが確定
 ```
 
-ラウンド 3 は畳めない。Jev は question を**並列・独立に**評価するので、
-ラウンド 2 の時点では「どの Unit が足切りを超えるか」をまだ誰も知らない。
+**Unit = 散文の Atom 1 つ**（文・リスト項目・引用・表のデータ行）。見出し・
+コードブロック・表のヘッダ行には Unit を作らない（スコアを聞かず、光らない）。
+各 Unit の `core_atoms` はその Atom を明示する。問いの数は散文の Atom の数に
+等しく、大きな文書は予算（64k と 32k の 2 つの制約）に合わせて数リクエストに
+分ける。**1 段である**（設計書「Jev への問いは 1 段に保つ」）。
 
-**どのラウンドも 1 段である**（設計書「Jev への問いは 1 段に保つ」）。前の
-答えを次の問いの前提に差し込む連鎖は無く、ラウンド 3 が前の答えを使うのは
-「どの Unit に聞くか」の絞り込みだけである。
+**2026-09-24 までは 3 ラウンドだった** — 散文どうしの境界を Choice で聞いて
+Unit を束ね（答えは `~/.cache/akapen/semantic/boundaries/v1/` にキャッシュし、
+同時に走るプロセスは `flock` で 1 本に絞った）、Unit ごとに Noul、足切りを
+越えた Unit の中で光らせる一文（核）を Choice で選ぶ。文ごとの方が正解ラベルの
+取りこぼしが少なく、費用が 14 % 安く、揺れも小さいので切り替えた。戻すと何が
+戻ってくるかは `jev-annotate.py` の冒頭、測定は
+[`measurements/unit-granularity.md`](measurements/unit-granularity.md) /
+[`core-question.md`](measurements/core-question.md) /
+[`unit-per-atom.md`](measurements/unit-per-atom.md)。
 
-**境界は問いをまたいでキャッシュする。** akapen 側のキャッシュは
-(コマンド行, 文書, 問い) で引くので、問いを変えればこのスクリプトがもう一度
-起きる。そのとき境界のラウンドまで回し直すと「境界を 1 回取る」が成り立たない
-ので、判定器は境界の答えを `~/.cache/akapen/semantic/boundaries/v1/` に別に
-持つ（**本文は 1 バイトも入らない**。0600/0700）。同じ文書を同時に解析する
-プロセスどうし（TUI の `R` は Review のルールを同時に起こす）は、隣の
-`<digest>.lock` の `flock` で順番に境界を見るので、聞くのは 1 本だけである。
+判定器はもう問いをまたいだ状態を持たず、キャッシュの置き場に何も書かない。
+akapen 側のプロトコルは 1 往復（atoms in / units out）のままである。
 
-akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、ラウンドの
-数はこのスクリプトの内部事情である。
+### 応答の `jev` は記録用
 
-### 境界は「構造は聞かない。散文どうしだけ聞く」
-
-設計書「Jevに判断させないもの: **syntax parsing**」のとおり、見出し・コード
-ブロック・リスト項目・引用が絡む境界は**パーサが既に知っている**。demo.md の
-境界 26 件のうち 17 件がそれで、Jev に聞くと質問を浪費したうえ誤りが増えた。
-
-| 方式 | 人が手で書いた注釈と一致 | 質問数 |
-| ---- | ---------------- | ------ |
-| 全部 Jev に聞く（文面 v1「話題が同じか」） | 20/26 | 26 |
-| 全部 Jev に聞く（文面 v2「一緒に読む必要があるか」） | 17/26 | 26 |
-| 構造ルール + 散文だけ v2 | **21/26** | **9** |
-
-（上 2 行はプローブでの実測、最下行はこのスクリプトでの実測。内訳は構造ルール
-15/17・Jev 6/9。外したのは文書冒頭のタイトル、コードブロックを含む段落、
-散文どうし 3 件。）
-
-ローカルの構造ルールは上から順に当てる。
-
-| # | 条件 | 判定 |
-| - | ---- | ---- |
-| 1 | 次が `heading` | NEW_UNIT |
-| 2 | 現在が `heading` | SAME_UNIT（見出しは直後の内容に付く） |
-| 3 | どちらかが `code_block` / `table` | NEW_UNIT（単独の Unit）。ただし**次が `table_row` なら SAME_UNIT** — 表は行へ割れても 1 Unit |
-| 4 | どちらも `list_item` | SAME_UNIT |
-| 5 | どちらも `sentence` | **Jev に聞く** |
-| 6 | それ以外 | NEW_UNIT（既定。引用と散文の間など） |
-
-規則 4 と、規則 2 が規則 3 に勝つこと（`## 見出し` + コードブロックは 1 つの
-Unit）と、`block_quote` が規則 6 で単独になることは、**demo.md に現れないので
-測っていない**。箇条書きを 1 つにまとめるのは、著者が既にまとまりとして束ねた
-構造であり、半分だけ DIM になったリストは読み物として壊れるため。
-
-### confidence は記録するだけ
-
-`conf < 0.5 なら NEW_UNIT に倒す`は**採用していない**。実測で閾値が値の真上に
-乗り、実行ごとに答えが揺れた。捨てもせず、返す JSON に載せる。
+判定器は応答に `jev` を足す。1 リクエストごとの実測（`round` / `questions` /
+`elapsed_s` / `usage`）と予算、送れなかった question があればそのキーである。
 
 ```json
 {"version": 1, "question": "essential",
- "units": [{"id": "u3", "atoms": [3, 4], "score": 0.82, "core_atoms": [4],
-            "jev": {"score": 0.82, "core_choice": "atom:4",
-                    "core_confidence": 0.9}}],
- "jev": {"rounds": [{"questions": 9, "elapsed_s": 0.73, "usage": {…}}],
-         "boundaries": [{"after_atom": 4, "decision": "new_unit", "by": "jev",
-                         "confidence": 0.8}],
-         "boundaries_cached": false, "core_floor": 0.2}}
+ "units": [{"id": "u1", "atoms": [1], "core_atoms": [1], "score": 0.82}],
+ "jev": {"rounds": [{"questions": 89, "elapsed_s": 1.15, "usage": {…}, "round": "marks"}],
+         "budget": {"state_tokens": 4580, "state_tokens_by": "estimate", "whole": 58908, "pair": 26140},
+         "question": "essential"}}
 ```
 
 `jev` は akapen のプロトコルに無いフィールドで、**読み飛ばされる**（未知の
-フィールドは拒否しない）。使い道は実測してから決める。
+フィールドは拒否しない。akapen は 1 つも読んでいない）。2026-09-24 までは
+境界の判定（`boundaries`）と `boundaries_cached`・`core_floor`・核の記録も
+載っていた。
 ここから下にあった**実測の記録は [`measurements/`](measurements/) へ移した**。
 何を測ったかは下の「実測の索引」にある。**DIM 版（Reading Budget）の実測も
 そのまま残してある** — 2026-09-22 に削除した機能の記録で、各ファイルの冒頭に
@@ -363,15 +333,11 @@ Unit）と、`block_quote` が規則 6 で単独になることは、**demo.md �
 
 ### `--dry-run`
 
-API を叩かず、送る 3 ラウンドのリクエスト（`state` / `model` / `questions`）を
-そのまま出す。後のラウンドは前のラウンドの答えに依存するので仮定を置く
-（`assumptions` にも載る）。
-
-- ラウンド 1: **キャッシュは見ない**（当たれば 0 問になるが、形として知りたい
-  のは「当たらなかったとき何を送るか」である）
-- ラウンド 2: **Jev に聞く境界はすべて `new_unit` だった**と仮定する
-- ラウンド 3: **すべての Unit が足切りを越えた**と仮定する。本番では越えた
-  Unit にしか聞かないので、実際に送る question はこれより少ない
+API を叩かず、送るリクエスト（`state` / `model` / `questions`）をそのまま出す。
+ラウンドは 1 本で前の答えに依存しないので、**問いは本番と同じ**である。違いうるのは
+`state` のトークン数の出どころだけで（見積もりの 0.5 tokens/byte は大きな文書で
+本番より多くチャンクを割る。`--state-tokens` で実測値を渡せる）、`assumptions` に
+そう書いてある。
 
 **要求に問いが載っていないと断る。** 問いの文面が question の大きさをそのまま
 決めるので、載せずに出した数字は本番の予測にならない。
@@ -393,7 +359,8 @@ python3 examples/semantic/jev-annotate.py --dry-run < request.json | jq '.rounds
 python3 -m unittest discover -s examples/semantic -p 'test_*.py'
 ```
 
-見ているのは構造ルール / 核の選び方 / `--dry-run` が送るリクエストの形 /
+見ているのは Unit の作り方（散文の Atom 1 つ、核はその Atom）/ ラウンドが
+スコアの 1 本だけでキャッシュに何も書かないこと / `--dry-run` が送るリクエストの形 /
 リクエスト分割 / 鍵の取り出し（環境変数 → キーチェーン → 停止）/ HTTP エラーの
 文面の 6 つで、判定の質は [`measurements/`](measurements/) の実測の表で見る。
 
@@ -469,6 +436,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | **marks モードを実装して**実機の議事録で測ったとき（定型 4 本 ＋ 自由入力 1 本）。節ごとの妥当性が段 1 と小数第 2 位まで並ぶこと、つまみの本数、1 問 0.31 円・2.2 秒、境界のキャッシュが question を 30 % 減らすこと、DIM 版が従来どおりであること | [`measurements/marks-mode.md`](measurements/marks-mode.md) |
 | **marks に Unit は要るか** — Jev の境界と核をやめて文ごと（Unit = Atom）に聞く案 B と現行 A を比べた（6 文書 × 5 問 × 2 案 × 2 ラン、コードは変えていない）。ラベルに対する AUC・精度・取りこぼし、光る場所の重なりと差の内訳、業務議事録の節の中央値、見出しの無い文書、費用、focus の沈めない範囲の見積り | [`measurements/unit-granularity.md`](measurements/unit-granularity.md) |
 | **核の問いに「いまの問い」を入れる**（`CORE_INSTRUCTIONS` を枠にして問いの文面を挟む）— 前回の A の境界を固定して直した核（A'）だけを走らせ、A・B と並べた（6 文書 × 5 問 × 2 ラン）。取りこぼしの減り方と残りの形（1 Unit 1 文の制限）、光る場所の重なり、見出しの無い文書、費用、核が変わった率、業務議事録と `b1` の食い違い 82 行を人が判定する表 | [`measurements/core-question.md`](measurements/core-question.md) |
+| **判定器を文ごと（1 文 = 1 Unit）にした**あとの通しと、つまみの既定を 20 % から 15 % にした根拠 — 前回の応答から A' の 20 % と同じ本数になる share を数えた表（Jev を呼ばない）、新しい判定器で 6 文書 × 5 問 × 1 ラン（ラウンド・問いの数・スコアの並び・光る本数・費用）、akapen での確認 | [`measurements/unit-per-atom.md`](measurements/unit-per-atom.md) |
 | **Review の 1 周**（段階 2、`showcase-slop.md`）— 選別から `s`・書き換え・差分の受け入れまで。キー数と往復時間、書き換えの前後での数字・語・`[要: …]` 印の出入り、指示の範囲の外の変化、ラベルとの照合 | [`measurements/review-roundtrip.md`](measurements/review-roundtrip.md) |
 
 **バイト数と Unit 数は分割前の値。** この README と `docs/gotchas.md` は

@@ -12,8 +12,15 @@
 **この文書には削除前の記述が残っています。** Reading Tier の 4 段、
 Reading Budget と `READ n%`、二段台帳、下限、冗長の負け、前提の閉包、
 見出し復元に触れている項目は、**当時の記録として読んでください** — その
-コードはもうありません。境界・核・キャッシュ・鍵・分割の項目はそのまま
-生きています。
+コードはもうありません。キャッシュ・鍵・分割の項目はそのまま生きています。
+
+**2026-09-24 に境界と核のラウンドも外しました。** Unit は散文の Atom 1 つで、
+判定器が聞くのはスコアの 1 ラウンドだけです（理由は
+[`../design/semantic-reading-layer.md`](../design/semantic-reading-layer.md) の
+「Semantic Unit」と判定器の冒頭）。**境界の規則・境界キャッシュ・核の question に
+触れている項目も当時の記録です** — `boundary_rule` / `plan_boundaries` /
+`list_marker_indent` / `core_questions` / 境界キャッシュと `flock` のコードは
+もうありません。各項目の頭に「過去の話」と書いてあります。
 
 削った理由は 1 つです。**System 1 らしさが無かった。** 判決（DIM）を
 正しくするために、System 1 的な部品を何段も重ねて System 2 的な出力を
@@ -329,6 +336,13 @@ cargo run -p semantic-reading --example decorate-report -- frozen.md answer.json
 
 ### `state` が大きい文書は境界を 1 つも聞けない — 比率より先に `jev.unsent` を見る
 
+> **過去の話（境界の問いは 2026-09-24 に無くなった）。** 崖そのものは残って
+> います — いまの question（文 1 つの Noul）も同じ 32k の予算に乗り、`state` が
+> 32k 枠を使い切る文書では送れなかった文がスコアを持たずに光らなくなります。
+> **比率を読む前に `jev.unsent` を見る**作法はそのままで、いまの形は
+> `{"marks": ["marks:u12", …]}` です（全部送れなかったときは判定器が止まる）。
+> 下の `CORE_QUESTION_MARGIN` はいま `PAIR_MARGIN` という名前です。
+
 1 つの question の大きさを縛るのは `state + その question <= 32k`
 （`STATE_PLUS_QUESTION_LIMIT`）で、`jev-annotate.py` が 1 question に割く予算は
 **`32,768 − state − 2,048`** です。`state` が 30k を超えると、この予算は
@@ -368,6 +382,9 @@ cargo run -p semantic-reading --example decorate-report -- frozen.md answer.json
 
 ### `boundary_rule` は段落の切れ目を見ていない — 空行を跨ぐ SAME は規則 2 だけが出す
 
+> **過去の話（2026-09-24 に `boundary_rule` ごと消した）。** 段落の切れ目を
+> 使うなら、いまは focus の沈めない範囲の側の話です（設計書の DIM の節）。
+
 `plan_boundaries` に渡る情報には**空行が入っています**（`range` の隙間の `\n` の
 数）。しかし `boundary_rule` はそれを 1 度も読みません。
 
@@ -400,9 +417,9 @@ cargo run -p semantic-reading --example decorate-report -- frozen.md answer.json
 311/314 件という、いま思えばあり得ない内訳でしたが）。
 
 `source.encode()` でバイト列にしてから `rfind(b"\n", 0, start)` してください。
-[`list_marker_indent`](../../examples/semantic/jev-annotate.py) がそうしています。
-`plan_boundaries` が `source` を受け取ってその場で 1 度だけ `encode()` するのも
-同じ理由で、境界ごとに `encode()` すると文書の長さ × 境界数になります。
+2026-09-24 に消した判定器の `list_marker_indent` がそうしていました。そこで
+`plan_boundaries` が `source` を 1 度だけ `encode()` していたのも同じ理由で、
+境界ごとに `encode()` すると文書の長さ × 境界数になります。
 
 **`text` は使ってよい。** アダプタが source を自分で切り出さずに済むように
 `RequestAtom` が `text` を載せているので（`crates/semantic-reading/src/protocol.rs`）、
@@ -704,8 +721,14 @@ mtime を見る案も、シェル文字列の中からパスを推測するこ�
 問いつきの項目は `<sha(source)>.q<sha(問いの文面)>.json` と
 いう名前なので、**定型の文面を直せば自動で外れます**
 （`assets/marks-questions.json`、`SemanticCache::entry_path`）。
-外れないのは判定器の中の文面（核の Choice など）の方で、そちらはどちらの
-モードでも上の逃げ道が要ります。
+外れないのは判定器の中の文面（いまは枠の `MARKS_FRAME` だけ。2026-09-24 までは
+核の Choice も）の方で、そちらはどちらのモードでも上の逃げ道が要ります。
+
+**判定器の作りを変えたときも同じです**（2026-09-24、文ごとへの切り替え）。
+既に開いたことのある (文書, 問い) は、`--semantic-cache-clear` を打つまで
+**古い Unit（Jev が束ねた段落ほど）と古い核のまま**光ります。つまみの既定
+（15 %）は akapen 側なのですぐ効くので、古い項目に新しい既定が掛かり、光る本数が
+前より少なく見えます。
 
 **確認したこと**: `src/semantic_cache.rs` の `analyzer_dir`（キーが
 `sha256(コマンド行)` のディレクトリであること）と、テスト
@@ -715,6 +738,12 @@ mtime を見る案も、シェル文字列の中からパスを推測するこ�
 `Action::ClearSemanticCache`。
 
 ### `atomize` を変えたら境界キャッシュ — あちらは Atom の**添字**で持っている
+
+> **過去の話（2026-09-24 に判定器の境界キャッシュを消した）。** 判定器は
+> もう `~/.cache/akapen/semantic/boundaries/` を読みも書きもしません。古い
+> 項目が残っていても害は無く、`akapen --semantic-cache-clear` で一緒に消えます。
+> 後半の「akapen 側の項目は `atomize` の変更で壊れないが当たり続ける」は
+> いまも生きています。
 
 2026-09-22、表を行ごとの Atom へ割るときに気づきました。キャッシュは 2 か所に
 あり、**`atomize` の変更に強いのは片方だけ**です。
@@ -769,8 +798,9 @@ instructions: marks:u1"}
 で**ラウンドごと落ちます**。Choice の `criteria` と対になる名前として
 `claim` を選びたくなりますが、ありません。
 
-**気づきにくいのは、落ちるのが 2 ラウンド目だから**です。境界（Choice）は
-通るので、進捗行は「48 questions in 1.40s」と出てから 400 になります。
+**気づきにくいのは、落ちるのが 2 ラウンド目だから**です（当時は境界のラウンドが
+先にありました。2026-09-24 からはスコアのラウンドしか無いので、いまは 1 本目で
+落ちます）。境界（Choice）は通るので、進捗行は「48 questions in 1.40s」と出てから 400 になります。
 **新しい question の型を足したら、まず 1 問だけ投げて形を確かめること。**
 
 **確認したこと**: `examples/semantic/jev-annotate.py` の `marks_questions`
