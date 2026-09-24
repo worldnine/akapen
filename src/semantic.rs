@@ -761,10 +761,11 @@ mod tests {
         let line_start = source.find("採用する方式は差分配信である。").unwrap();
         let line_end = line_start + source[line_start..].find('\n').unwrap();
 
-        // 前半は u3 の核、後半は別の Unit（既定のつまみではまだ上位に
-        // 入っていない）— **同じ行の途中で状態が変わる**。
+        // 前半は u3 の核、後半は別の Unit（20 % ではまだ上位に入って
+        // いない）— **同じ行の途中で状態が変わる**。fixture は 13 Unit で、
+        // 20 % の 3 本目が u3 である（既定の 15 % では 2 本で、u3 は光らない）。
         let inside: Vec<(std::ops::Range<usize>, DisplayState)> =
-            marks::mark(&document, marks::DEFAULT_SHARE)
+            marks::mark(&document, 20)
             .into_iter()
             .filter(|(range, _)| range.start >= line_start && range.end <= line_end)
             .collect();
@@ -823,25 +824,35 @@ mod tests {
         // いないので、Atom 列は atomize の出力と 1 バイトも違わない。
         assert_eq!(document.atoms, atomize(&source));
         assert!(!document.atoms.is_empty());
-        // 参照実装は Atom 1 つにつき Unit 1 つを返す。
-        assert_eq!(document.units.len(), document.atoms.len());
+        // 参照実装は本番の判定器と同じく、散文の Atom 1 つにつき Unit 1 つを
+        // 返す。見出し・コード・表のヘッダ行には Unit を作らない。
+        let prose = document
+            .atoms
+            .iter()
+            .filter(|atom| {
+                !matches!(
+                    atom.kind,
+                    AtomKind::Heading | AtomKind::CodeBlock | AtomKind::Table
+                )
+            })
+            .count();
+        assert_eq!(document.units.len(), prose);
+        assert!(document.units.len() < document.atoms.len(), "見出しのある文書");
         assert!(document.validate().is_ok());
 
         // 応答は問いの id を echo している。
         assert_eq!(document.question.as_deref(), Some("essential"));
-        // 見出しは高く、その直後が次に高いという素朴な規則が実際に効いて
-        // いる（no-op ではない）。
-        let score_of = |atom: usize| {
+        // 見出しの直後が高いという素朴な規則が実際に効いている（no-op では
+        // ない）。見出しそのものはどの Unit にも属さない。
+        let unit_of = |atom: usize| {
             document
                 .units
                 .iter()
                 .find(|unit| unit.atoms.contains(&AtomIndex(atom)))
-                .unwrap()
-                .score
-                .unwrap()
         };
+        let score_of = |atom: usize| unit_of(atom).unwrap().score.unwrap();
         assert_eq!(document.atoms[0].kind, AtomKind::Heading);
-        assert!(score_of(0) > score_of(1));
+        assert!(unit_of(0).is_none(), "見出しは Unit を持たない");
         assert!(score_of(1) > score_of(2));
         // つまみを動かすと実際に表示状態が変わる（層として生きている）。
         let wide = marks_decorations_for(&document, 100);

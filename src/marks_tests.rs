@@ -291,11 +291,12 @@ fn the_knob_stops_at_both_ends() {
 
 #[test]
 fn the_default_knob_is_the_measured_one() {
-    // 段 1 の 6 節: ラン間でいちばん動かないのが上位 20 %。
-    assert_eq!(marks::DEFAULT_SHARE, 20);
+    // Unit = 散文の Atom 1 つにしたときに決め直した値
+    // （examples/semantic/measurements/unit-per-atom.md）。
+    assert_eq!(marks::DEFAULT_SHARE, 15);
     let app = app_with("demo-marks.json");
-    assert_eq!(app.marks_share, 20);
-    assert_eq!(app.marks_lit(), Some(3), "13 Unit の 20 % = 3 本");
+    assert_eq!(app.marks_share, 15);
+    assert_eq!(app.marks_lit(), Some(2), "13 Unit の 15 % = 2 本");
 }
 
 // ---- 4. 0 本の許容 ------------------------------------------------------
@@ -982,6 +983,10 @@ fn ticks_in_the_track(buf: &ratatui::buffer::Buffer) -> usize {
 #[test]
 fn no_track_no_ticks() {
     let mut app = app_with("demo-marks.json");
+    // 3 本目（結論の一文）まで光らせる。既定の 15 % では 2 本とも冒頭に
+    // あって、12 行の溝ではつまみの影に入る。
+    app.marks_share = 20;
+    app.refresh_semantic_decorations();
     // 本文が全部入る高さ。
     let tall = (app.view.rows.len() + 10) as u16;
     let backend = ratatui::backend::TestBackend::new(120, tall);

@@ -15,53 +15,79 @@ Atom の index だけなので、このスクリプトが壊れた位置を返�
 
 ---
 
-## ラウンド構成 — 3 つ、どれも 1 段
+## ラウンドは 1 つ — 散文の Atom ごとに Noul 1 問
 
-スコアの question は Unit について聞くものだが、Unit は境界判定の答えから
-生まれる。**1 ラウンドでは原理的に組めない。**
+    state=文書全文, questions={ 散文の Atom ごとに、いまの問いへの Noul }
+      → スコアが確定する。光るのはスコアを付けた Atom そのもの
 
-    ラウンド1  state=文書全文, questions={ 散文どうしの境界を Choice }
-                 → Unit を確定（**キャッシュに当たれば 0 問**）
-    ラウンド2  state=文書全文, questions={ Unit ごとに、いまの問いへの Noul }
-                 → 誰の核を聞くかが確定
-    ラウンド3  state=文書全文, questions={ 足切りを超えた Unit の核(Choice) }
-                 → 光る箇所が確定（**狭い問いではこのラウンドごと消える**）
+**Unit = 散文の Atom 1 つ**（[`PROSE_KINDS`]: 文・リスト項目・引用・表の
+データ行）。見出し・コードブロック・表のヘッダ行には **Unit を作らない** —
+スコアを聞かず、光ることもない。応答がすべての Atom を覆わなくてよいことは
+akapen 側が約束している（`crates/semantic-reading/src/document.rs` の
+`validate`。どの Unit にも属さない Atom は NORMAL のまま表示される）。
 
-Jev は question を**並列・独立に**評価するので、ラウンド 2 の時点では
-「どの Unit が足切りを超えるか」をまだ誰も知らない。だから畳めない。
+各 Unit の `core_atoms` は `[その Atom]` と**明示する**。省いても「絞り込み
+無し ＝ Unit 全体が核」で光り方は同じだが、`[]`（核を持たない ＝ 光らない）と
+取り違えないよう、3 値のどれを言っているかを字面に出す
+（`crates/semantic-reading/src/unit.rs` の `has_core` / `is_core`）。
 
-**どのラウンドも 1 段である**（設計書「Jev への問いは 1 段に保つ」）。前の
-答えを次の問いの**前提に差し込む**連鎖は無い — ラウンド 3 が前の答えを使うのは
-「どの Unit に聞くか」の絞り込みだけで、question に入るのはいまの問いの文面と
-Unit の本文だけである（問いの文面は akapen が送ってきた入力で、前の答えではない）。
+Jev は question を**並列・独立に**評価するので、全部を 1 リクエストで聞ける
+（大きな文書は [`send_in_chunks`] が分ける）。**1 段である**（設計書「Jev への
+問いは 1 段に保つ」）— ラウンドが 1 つなので、前の答えを次の問いの前提に
+差し込む連鎖は原理的に無い。
 
 **問いの文面は akapen が送ってくる。** 正本は akapen 側の
-`assets/marks-questions.json` 1 か所で、このスクリプトは枠（スコアは
-`MARKS_FRAME`、核は `CORE_FRAME`）と本文を足すだけの汎用の器である。
-2 か所に置くとずれる。
+`assets/marks-questions.json` 1 か所で、このスクリプトは枠（[`MARKS_FRAME`]）と
+本文を足すだけの汎用の器である。2 か所に置くとずれる。要求の question に
+入っている `core_floor`（核を聞く Unit の足切り）は**もう使わない**。akapen は
+まだ送ってくるが、読まずに捨てる。
 
-akapen 側のプロトコルは 1 往復（atoms in / units out）のままで、3 ラウンドは
-このスクリプトの内部事情である。
+## なぜ文ごとか — Unit の境界も核も Jev に決めさせない（2026-09-24）
+
+2026-09-24 までは 3 ラウンドだった。散文どうしの境界を Jev に Choice で聞いて
+Unit を組み（答えはキャッシュし、同時に走るプロセスは flock で 1 本に絞る）、
+Unit ごとに Noul を聞き、足切りを越えた Unit の中で光らせる一文（核）を
+Choice で選ぶ。Unit も境界の問いも DIM 版の都合で作ったもので、marks だけに
+なってから 2 本の実測で測り直した
+（`examples/semantic/measurements/unit-granularity.md` / `core-question.md`、
+切り替えたあとの通しと既定のつまみは `unit-per-atom.md`）:
+
+- 文ごと（B）は、核の問いを直した 3 ラウンド（A'）より正解ラベルの取りこぼしが
+  少ない（`showcase`、つまみ 100 % で本数を揃えて 0 件対 8 件）。A' の 8 件の
+  うち 7 件は「1 Unit から光るのは 1 文だけ」の制限で、核の問いをどう直しても
+  減らない
+- 実物（業務議事録・web 記事）で A' と B が食い違った印を人が判定すると、
+  **どちらか片方だけが光らせた印も全部「要る」**だった。精度は同じ
+- 費用は 14 % 安く（境界と核のラウンドで state を送り直さない）、ランごとの
+  揺れも小さい（境界の揺れも核の Choice の揺れも無い）
+- 弱点: 見出しの無い文書で、元は見出しだった行が光る率は A' 7.3 % 対 B 12.8 %
+
+**Unit を Jev に決めさせる形へ戻すと、次のものが一緒に戻ってくる:**
+
+- 1 Unit から光るのは 1 文だけになる。問いに答えている文が同じ Unit に 2 つ
+  あると片方は光らない（`showcase` の取りこぼしの大半がこれだった）
+- 光らせる一文を選ぶ問い（核の Choice）が要る。その文面がいまの問いを
+  見ていないと、numbers で光った Unit でも「要点」の文が光る（2026-09-24 の
+  朝まで実際にそうだった）
+- 境界の問いは、見出しの無い文書では境界の 7〜9 割に及ぶ。問いを変えるたびに
+  聞き直さないためのキャッシュと、Review のルールが同時に起こすプロセスどうしの
+  排他（flock）が要る（`docs/gotchas/semantic-reading.md` に過去の地雷として
+  残してある）
+- つまみの既定が合わなくなる（`crates/semantic-reading/src/marks.rs` の
+  `DEFAULT_SHARE` は、Unit = 散文の Atom を分母にして決め直した値）
+
+**focus は劣化したまま置いてある。** focus は「光った Unit の核でない文を
+沈めない」で、1 文の Unit には沈めずに残す文が無い — 光った文と見出しの
+ほかは全部沈む。後回しにした既知の劣化で、設計書の focus の節に書いてある。
 
 ## context window は 2 つの制約で縛られている
 
 公式値は「**64k tokens per request; 32k tokens for `state` plus the longest
 question**」（`docs.typesafe.ai/models.md`）。**後者を見落とすと、合計が 64k に
 収まっているのに 400 で落ちる** — 実測でも state 30k + question 3k（合計 33k）
-が失敗した。核 question は Unit の全散文 Atom を選択肢として引用するので
-ここに当たりうる。上限は [`RequestBudget`] が state の大きさから毎回計算する。
-
-## 境界は「構造は聞かない。散文どうしだけ聞く」
-
-設計書「Jevに判断させないもの: syntax parsing」のとおり、見出し・コードブロック
-・リスト項目・引用が絡む境界は**パーサが既に知っている**。実測（demo.md の境界
-26 件）でも、全部 Jev に聞くと質問を浪費したうえ誤りが増えた。
-
-    全部 Jev に聞く（文面 v1）   20/26   質問 26
-    全部 Jev に聞く（文面 v2）   17/26   質問 26
-    構造ルール + 散文だけ v2     18/22   質問 13   ← この方針を採用
-
-ローカルの構造ルールは [`boundary_rule`] にある。
+が失敗した。いまの question は文 1 つの Noul なので、ここに当たるのは state
+だけで 32k 枠の大半を使う文書である。上限は [`RequestBudget`] が state の
+大きさから毎回計算する。
 
 ## 鍵は環境変数、無ければ macOS のキーチェーン
 
@@ -87,22 +113,14 @@ mac の人は akapen を起動するシェルの環境に鍵を持ち込む必�
 from __future__ import annotations
 
 import argparse
-import contextlib
-import hashlib
 import json
 import os
-import pathlib
 import re
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-
-try:
-    import fcntl
-except ImportError:  # Windows。境界の排他（[`boundary_turn`]）が効かないだけで、解析は走る
-    fcntl = None
 
 VERSION = 1
 
@@ -139,8 +157,8 @@ USER_AGENT = f"akapen-jev-annotate/{VERSION}"
 #: - ラウンドは 3 本ではない。probe / boundary / tier / core /
 #:   redundancy_gate / context1 / pick / context3 / pick2 の **9 種**あり、
 #:   チャンクに割られてリクエストは 12〜41 本になる（**この数字は 2026-09-22 に
-#:   削除した DIM 版の実測である**。いまは probe / boundary / marks / core の
-#:   4 種で、境界がキャッシュに当たれば 2 種になる）
+#:   削除した DIM 版の実測である**。いまは probe と marks の 2 種で、probe は
+#:   大きな文書でしか飛ばない。2026-09-24 に境界と核のラウンドも外した）
 #: - akapen はもうプロセスを壁時計で殺さない。最後の出力からの**無音時間**で
 #:   見ていて（`src/semantic.rs` の `COMMAND_IDLE_TIMEOUT` = 30 秒）、
 #:   進捗が続くかぎり待つ。Python の起動コストは実測で 0.1〜0.2 秒しかなく、
@@ -158,102 +176,6 @@ USER_AGENT = f"akapen-jev-annotate/{VERSION}"
 #: 何も救われない。
 DEFAULT_TIMEOUT = 20.0
 
-#: 意味境界の criteria。
-#:
-#: 「話題が同じか」ではなく「**拾い読みするとき一緒に読む必要があるか**」を
-#: 聞いている。話題の同一性を聞く文面（旧 v1「片方だけ読むと意味が欠ける」）は
-#: `採用する方式は差分配信である。| 詳細は付録にまとめた。` を同一 Unit に
-#: まとめてしまい、**行の途中で表示状態が切り替わるという製品の看板を消した**。
-#: 実測でも v1 20/26 → v2 17/26（構造ルール併用で 18/22）と、この文面の方が
-#: 境界の質が良い。
-BOUNDARY_CRITERIA = {
-    "same_unit": "この 2 つは読む優先度が同じで切り離せない。片方だけ残しても意味を成さない。",
-    "new_unit": "この 2 つは読む優先度が違いうる。片方を飛ばしても、もう片方の要点は失われない。",
-}
-
-SAME, NEW = "same_unit", "new_unit"
-
-#: 核（MARKED を絞る先）を選ばせる question の枠。**いまの問いの文面は
-#: ここに無い** — [`CORE_FRAME`] で後ろに付ける（[`core_instructions`]）。
-#:
-#: **Unit の本文をここに書かない。** 選択肢そのものが Unit の全文になるので、
-#: instructions にも本文を入れると同じテキストを 2 回送ることになり、
-#: context window（実測の天井 ≒65,536 tokens）を無駄に食う。
-#:
-#: 「重要な部分はどれか」とは聞かない。それだと「どれも重要」という答え方が
-#: できてしまい、Unit を丸ごと光らせていた元の状態に戻る。**1 つへ強制的に
-#: 倒す問い方**でなければならない（「いちばんよく当てはまる」）。
-#:
-#: ## いまの問いで聞く（2026-09-24）
-#:
-#: 核は光る Unit の中をさらに同じ軸で絞る操作である。**軸を揃えるのが筋**で、
-#: 揃える先は**スコアを付けたのと同じ問い**である。スコアのラウンドは Unit を
-#: 「対象」として問いの文面に照らしているので、核は Unit の各部分を「対象」と
-#: して**同じ文面**に照らす。
-#:
-#: 旧文面は「このまとまりの中で、これを読み飛ばすと要点を失うのはどれか」で
-#: **問いにかかわらず固定**だった。「軸を揃えている」つもりで、揃っていたのは
-#: 定型の essential だけだった — numbers で光った Unit でも、核は数字を含まない
-#: 「要点」の文を選ぶ。`showcase` のラベルでは、つまみ 100 % でも取りこぼした
-#: 14 件（numbers 9・decide 3・unsettled 2）が全部「Unit は光っているが核が
-#: 同じ Unit の別の文」だった（`examples/semantic/measurements/unit-granularity.md`
-#: 1 節）。この文面に直すと 8 件（5・1・2）に減り、残りのうち 7 件は核の選んだ
-#: 文も問いに答えている — 1 Unit から光るのは 1 文なので、もう片方が光らない
-#: （`core-question.md`）。Review のルール（Filler など）も同じ経路を通るので、
-#: 旧文面は「中身の無い文」で光った Unit の中から「要点の文」を選ばせていた
-#: （こちらは測っていない）。
-#:
-#: **1 段のままである。** 問いの文面は akapen が送ってきた入力であって、
-#: 前のラウンドの答えではない。前の答えが決めるのは「どの Unit に聞くか」
-#: だけで、そこは変えていない。**問いごとの文面をここに書かない**のも同じで、
-#: 正本は akapen 側の `assets/marks-questions.json` 1 か所のまま、判定器は枠を
-#: 持つだけである。
-#:
-#: 問いの文面はどれも「下の「対象」は、…」で始まる（[`MARKS_FRAME`] と組む
-#: Noul の主張の形）。枠の側で「それぞれを「対象」として」と先に言うので、
-#: 同じ文面が Choice の中でもそのまま読める。括弧を問いの文面と同じ「」に
-#: しているのはそのためである。
-#:
-#: ## 損失ベースは問いの文面の側に残っている
-#:
-#: 旧々文面は「このまとまりから **1 か所だけ**読むとしたら、どこを読めば要点が
-#: 取れるか」で、後続をまとめる**導入文**や節の**主題そのもののラベル**が
-#: 選ばれた。**Jev は問いに正しく答えていた** — 「1 か所だけ読んで概要を
-#: 掴む」なら導入文が正解である。欲しいのは「概要への入口」ではなく「**落と
-#: すと取り違える中身**」で、2026-09-21 に損失の言い方へ変えた（前任者
-#: `corequestion` の実測の引き継ぎで、ここで取り直した数字ではない）。
-#: 定型とルールの文面はどれも「ここを落とすと…取り違える / 失わない」という
-#: 損失の言い方をしているので、問いの文面をそのまま入れれば損失ベースも
-#: そのまま残る。枠に「1 か所だけ読むなら」を戻さないこと。
-#:
-#: 問いの文面のぶん question は長くなる（定型とルールで 67〜194 字、実測で
-#: 核の question 1 問あたり約 165 tokens）。32k の側（[`core_fits`]）はそれも
-#: 数える。実測は `examples/semantic/measurements/core-question.md`。
-CORE_INSTRUCTIONS = (
-    "次の選択肢は、この文書の中の連続した 1 つのまとまりを構成する各部分の"
-    "本文である。それぞれを「対象」として下の説明に照らしたとき、"
-    "**いちばんよく当てはまる**のはどれか。"
-)
-
-#: 核の question で問いの文面を挟む枠。[`MARKS_FRAME`] と同じ形で、中身が
-#: Unit の本文ではなく問いの文面になる。
-CORE_FRAME = "\n\n――― 説明 ―――\n{text}\n―――――――――"
-
-
-def core_instructions(text: str) -> str:
-    """核の question の instructions — 枠 + いまの問いの文面。
-
-    **スコアのラウンドと同じ文面を入れる**（[`marks_questions`] が Noul に
-    入れているもの）。Unit の本文は入れない — 選択肢がそれである。
-    """
-    return CORE_INSTRUCTIONS + CORE_FRAME.format(text=text)
-
-#: 1 question に並べる選択肢の上限。これを超える Unit には核を聞かない
-#: （核が空 = 絞り込み無し = Unit 全体が MARKED という従来の表示に戻る）。
-#:
-#: **この値では切れていない** — 45.6 KB の実文書でいちばん大きい Unit でも
-#: Atom は 96 個だった。上限に当たる文書を測っていないので、当たったときの
-#: 振る舞いを「安全側（従来どおり）」に倒してあるだけである。
 #: 1 リクエスト全体のトークン上限。Jev の context window の**1 つ目の**制約。
 #:
 #: 公式値は「64k tokens per request」（`docs.typesafe.ai/models.md`）＝ 65,536。
@@ -279,10 +201,11 @@ STATE_PLUS_QUESTION_LIMIT = 32_768
 
 #: バイト数からトークン数を見積もる係数。**多めに出る側へ倒してある。**
 #:
-#: 実測（2026-09-21、4 文書の state）は 0.34〜0.39 tokens/byte、核 question の
-#: 選択肢本文は 0.496 tokens/byte だった。上限の判定に使うので、**足りないより
-#: 多く見積もる方が安全**である（見積もりが小さすぎると上限を超えた question を
-#: 送って 400 で落ちる）。日本語と英語が混ざる文書で最も高かった 0.496 を丸めた。
+#: 実測（2026-09-21、4 文書の state）は 0.34〜0.39 tokens/byte、核 question
+#: （2026-09-24 に外した）の選択肢本文 ＝ 文の本文は 0.496 tokens/byte だった。
+#: 上限の判定に使うので、**足りないより多く見積もる方が安全**である（見積もりが
+#: 小さすぎると上限を超えた question を送って 400 で落ちる）。日本語と英語が
+#: 混ざる文書で最も高かった 0.496 を丸めた。
 TOKENS_PER_BYTE = 0.5
 
 #: question 1 つあたりの器（型と criteria のキー名）の実測値。
@@ -296,28 +219,29 @@ TOKENS_PER_BYTE = 0.5
 #: 実レートが 0.376 tokens/byte しかないためで、**上限の判定には安全側**である。
 QUESTION_OVERHEAD = 68
 
-#: リクエスト全体の予算から引く安全マージン。内訳は [`CORE_QUESTION_MARGIN`]
+#: リクエスト全体の予算から引く安全マージン。内訳は [`PAIR_MARGIN`]
 #: と同じ（見積もり誤差と、公式値と実測の切れ目のずれ）。
 REQUEST_MARGIN = 2_048
 
-#: 核 question の予算から引く安全マージン。内訳:
+#: `state` + question 1 つの予算（32k の側）から引く安全マージン。内訳:
 #:
-#: - question の定型文と criteria のキー名（実測で 1 question あたり 68 tokens、
-#:   選択肢 1 つにつき数 tokens）
+#: - question の定型文と criteria のキー名（実測で 1 question あたり 68 tokens）
 #: - [`TOKENS_PER_BYTE`] の見積もり誤差。state が大きいほど絶対値で効く
 #: - 公式値 32k と実測の切れ目のずれ（state 20k + question 12k = 32,305 は
 #:   通り、合計 35k は落ちた。境界は 32,768 付近だが厳密には詰めていない）
 #:
-#: 45.6 KB の実文書（state 実測 17,561 tokens）で最大の Unit は選択肢 82 個・
-#: question 実測 5,469 tokens。この値でも予算 7,895 に収まる。
-CORE_QUESTION_MARGIN = 2_048
+#: 2026-09-24 まではいちばん大きい question が核の Choice（Unit の全散文を
+#: 選択肢に並べる。45.6 KB の実文書で選択肢 82 個・実測 5,469 tokens）で、
+#: 名前も `CORE_QUESTION_MARGIN` だった。いまの question は文 1 つの Noul
+#: なので、ここに当たるのは state だけで 32k 枠の大半を使う文書である。
+PAIR_MARGIN = 2_048
 
 #: state のトークン数を**実測しに行く**閾値（見積もりがこれを超えたら測る）。
 #:
 #: 32k 枠の半分。ここを下回っていれば、[`TOKENS_PER_BYTE`] が実測の 1.4 倍まで
 #: 過大評価していても真値は 16k を超えず、1 つの question に 14k 以上が残る。
-#: 実測でいちばん大きかった question は 5,469 tokens（45.6 KB の文書の 96 Atom
-#: の Unit）なので、3 倍近い余裕がある。
+#: いまの question は文 1 つの Noul（問いの文面 67〜194 字 + その文）で、
+#: 14k に届く文は無い。
 #:
 #: **超えたら見積もりでは判定できない。** 0.5 tokens/byte は 65 KB の文書の
 #: state を 32,612 と見積もるが、実レート 0.34〜0.39 での真値は 22〜26k で、
@@ -334,25 +258,19 @@ PROBE_QUESTION = {
     "state-probe": {"type": "noul", "instructions": "この文書は日本語で書かれている。"}
 }
 
-#: 単独の Unit にする Atom 種別。中身は散文ではないので、隣の散文と読む優先度を
-#: 共有しない。
+#: **Unit を作る** Atom の種別 — **散文だけ**（[`prose_units`]）。
 #:
-#: **`table` は表のヘッダ行**（＋区切り行）である。表の入口は必ずヘッダなので、
-#: これが規則 3 に当たることで表は周囲から切れる。データ行（`table_row`）は
-#: ここに入れない — 入れると表が行ごとに割れる（[`boundary_rule`] の規則 3）。
-STANDALONE_KINDS = frozenset({"code_block", "table"})
-
-#: 核（ラウンド 3 の選択肢）になれる Atom の種別 — **散文だけ**。
-#: 見出し・コードブロック・テーブルは「1 か所だけ読むならどこか」の答えに
-#: ならない（[`core_candidates`]）。
+#: 見出し・コードブロック・表のヘッダ行（`table`）には Unit を作らない —
+#: スコアを聞かず、光らない。見出しは中身を持たず、コード例は要点の言い換えでは
+#: なく、ヘッダ行は列の名前を挙げても中身を言ったことにならない。種別は構文の
+#: 話なので、設計書「Jev に判断させないもの: **syntax parsing**」のとおりここで
+#: 落とす。3 ラウンドの頃もこれらは核の候補に入れておらず、文ごとに聞いた測定
+#: （`unit-granularity.md` の B）でも一度も光っていない — 外しても光り方は
+#: 変わらず、問いの数だけが減る。
 #:
-#: **引用（`block_quote`）は散文なので入る。** 2026-09-22 まで外れていたが、
-#: 外す理由（要点の言い換えではない）はコードと表の話で、引用には当たらない。
-#: 引用だらけの文書では、引用を含む Unit の核が空になり**一度も光らなかった**
-#: （marks では核の無い Unit は光らない）。
-#: **表のデータ行（`table_row`）も入る**（2026-09-22）。表は 1 つの Unit の
-#: ままだが、核はその中の 1 行まで下りる。ヘッダ行（`table`）は入れない —
-#: 列の名前を挙げても中身を言ったことにならないので、見出しと同じ扱いである。
+#: **引用（`block_quote`）は散文なので入る。** 2026-09-22 まで外れていて、
+#: 引用だらけの文書では一度も光らなかった。**表のデータ行（`table_row`）も
+#: 入る** — 表の中身は行単位で光る。
 PROSE_KINDS = frozenset({"sentence", "list_item", "block_quote", "table_row"})
 
 
@@ -361,170 +279,8 @@ class JevError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# 境界 — 構造ルールと、散文どうしだけの question
+# Unit — 散文の Atom 1 つ
 # ---------------------------------------------------------------------------
-
-
-#: 行頭マーカー（`-` / `*` / `+` / `1.` / `3)`）を捕まえる正規表現。
-#:
-#: `crates/semantic-reading/src/atomize.rs` の `marker_len` と同じ規則である。
-#: `atomize` は list item の Atom を**マーカーから**始めるので、この正規表現に
-#: 当たるかどうかが「項目の 1 文目か、それとも継続文か」をそのまま分ける。
-LIST_MARKER = re.compile(r"[-*+]|\d+[.)]")
-
-
-def list_marker_indent(source: bytes, atom: dict) -> int | None:
-    """list_item の Atom が**項目の先頭**なら、その行頭インデント幅を返す。
-
-    返り値が `None` なら、その Atom は項目の先頭ではない — 同じ項目の 2 文目
-    以降（継続文）か、そもそもマーカーが読めなかった場合である。
-
-    **`range` はバイト位置なので `source` もバイト列で受ける。** Python の
-    文字列添字は符号位置なので、日本語の文書では全 Atom がずれる（実測: 45.6 KB
-    の文書で 372/372 件が不一致）。`docs/gotchas.md` にも書いた。
-
-    判別は構造だけで行う。設計書「Jev に判断させないもの: **syntax parsing**」の
-    とおり、ここに Jev は出てこない。手がかりは 2 つ:
-
-    - `atomize` は項目の Atom を**マーカーから**始める（`- 一つ目。` /
-      `1. 一文目。`）。継続文にはマーカーが無い（`二文目。`）
-    - 行頭から Atom の先頭までが引用符と空白だけなら、その Atom は行頭に立って
-      いる。途中から始まっていれば、それは同じ行の 2 文目である
-
-    引用マーカーは**インデントとして数えない**。CommonMark の `>` は「`>` と、
-    その直後の空白 1 つ」までが引用の印なので、そこまでを読み飛ばして数え直す。
-    こうしないと `> - 一つ目` の指標が 1 になり、引用の中のリストが丸ごと
-    「子項目」に見える。
-
-    インデント幅は 0 か否かだけを見る（[`boundary_rule`] の規則 4）ので、タブ幅の
-    厳密さは要らない。
-    """
-    start = atom["range"]["start"]
-    line_start = source.rfind(b"\n", 0, start) + 1
-    prefix = source[line_start:start].decode("utf-8", "replace")
-    if prefix.strip(" \t>"):
-        # 行の途中から始まっている = 同じ行の 2 文目。
-        return None
-    lead = prefix + (atom.get("text") or "")
-    i = indent = 0
-    while i < len(lead):
-        char = lead[i]
-        if char == ">":
-            # 引用の印は `>` と直後の空白 1 つ。そこまではインデントではない。
-            i += 1
-            if i < len(lead) and lead[i] == " ":
-                i += 1
-            indent = 0
-        elif char == " ":
-            indent += 1
-            i += 1
-        elif char == "\t":
-            indent += 4
-            i += 1
-        else:
-            break
-    return indent if LIST_MARKER.match(lead, i) else None
-
-
-def boundary_rule(
-    current_kind: str | None,
-    next_kind: str | None,
-    next_indent: int | None = None,
-) -> tuple[str | None, str]:
-    """隣り合う 2 つの Atom の境界を、構造だけで決められるなら決める。
-
-    `next_indent` は後ろの Atom が項目の先頭なら [`list_marker_indent`] が返す
-    インデント幅、そうでなければ `None`。規則 4 だけがこれを見る。
-
-    返り値は `(SAME / NEW / None, 理由)`。`None` は「構造では決まらないので
-    Jev に聞く」を意味する。
-
-    設計書「Jevに判断させないもの: syntax parsing」に従い、**パーサが既に
-    知っていることは聞かない**。実測でも、構造が絡む境界を Jev に聞くと質問を
-    浪費したうえ誤りが増えた。
-
-    規則は上から順に当てる（順序に意味がある）:
-
-    1. 次が heading         -> NEW  見出しは必ず新しいまとまりを始める
-    2. 現在が heading       -> SAME 見出しは直後の内容に付く
-    3. どちらかが code_block / table -> NEW  単独の Unit にする
-       （ただし**次が table_row なら SAME** — 表は行へ割れても 1 Unit）
-    4. どちらも list_item   -> 別項目なら NEW / 同じ項目の中なら SAME
-    5. どちらも sentence    -> None Jev に聞く
-    6. それ以外             -> NEW  既定（引用と散文の間など）
-
-    規則 1 と 2 の順序は「見出しの直前」が「見出しの直後」に勝つということで、
-    これがないと見出しが前の段落に吸われる。
-
-    **規則 2 が規則 3 に勝つ**ことも意図的で、`## 設定例` + コードブロックは
-    1 つの Unit になる（見出しだけの Unit は単独では Tier を判定しづらい）。
-    ただし **この組み合わせは測っていない** — demo.md に出てこない。
-
-    ## 規則 3 — 表は行へ割れても 1 つの Unit のまま
-
-    `atomize` は 2026-09-22 から表を行ごとの Atom へ割る（ヘッダ行 ＋ 区切り行
-    が `table`、データ行が `table_row`）。**それでも表は 1 つの Unit である。**
-    表は 1 つのまとまりで、行に下りるのは核だけ（[`core_candidates`]）である。
-
-    そのために「**次が `table_row` なら SAME**」を規則 3 の先に置く。表の入口は
-    必ずヘッダ行（`table`）なので、表の手前の境界は規則 3 の standalone に当たって
-    NEW になり、表の中だけがつながる。
-
-        本文。           ← ここで NEW（次が table = standalone）
-        | 列 a | 列 b |  ← 表の枕
-        | --- | --- |
-        | 値 1 | 値 2 |  ← SAME（次が table_row）
-        | 値 3 | 値 4 |  ← SAME
-        後文。           ← ここで NEW（規則 6 の既定）
-
-    **「両方が表の種別なら SAME」と書いてはいけない。** 空行だけを挟んで表が
-    2 つ並ぶと、後ろの表のヘッダも「表の種別」なので 2 つの表が 1 Unit へ融合する。
-    見るのは**次**だけである。
-
-    ## 規則 4 — 箇条書きは項目ごとに割る。ただし**トップレベルだけ**
-
-    以前はリスト項目どうしを一律 SAME にしていた。それだと箇条書きが丸ごと
-    1 Unit になり、**10 個の決定事項が全部同じ Tier**になる。しょうもない
-    決定事項が個別に沈めない。
-
-    いま割るのは**トップレベルの項目の切れ目だけ**である。
-
-        - 決定A          ← ここで NEW
-          - 詳細A1       ← 親に SAME（インデント > 0）
-          - 詳細A2       ← 親に SAME
-        - 決定B          ← ここで NEW（インデント 0）
-          二文目。       ← 同じ項目の中なので SAME（マーカーが無い）
-
-    子項目を割らないのは、ユーザーの言う「決定事項」が**親項目＋その詳細の
-    束**だからである。そこで割ると、下の「半分だけ DIM のリスト」が親と子の
-    あいだで起きる。
-
-    規則 6 の引用の扱い（block_quote どうしは NEW になる）は**測っていない**。
-    判断の根拠は、引用は自己完結した挿入で、「引用した」こと自体が周囲の散文と
-    読む優先度が違うという著者の表明である、というもの。連続する引用は別々の
-    引用なので規則 6 で NEW になる。
-
-    **半分だけ DIM のリストは、依然として起こしてはいけない。** いま起こらない
-    のは、割る単位を「親 + その子 + 継続文」に揃えているからで、規則 4 を
-    さらに細かくするなら、まずそこを測ること。
-    """
-    if next_kind == "heading":
-        return NEW, "rule:next_is_heading"
-    if current_kind == "heading":
-        return SAME, "rule:current_is_heading"
-    if next_kind == "table_row":
-        return SAME, "rule:same_table"
-    if current_kind in STANDALONE_KINDS or next_kind in STANDALONE_KINDS:
-        return NEW, "rule:standalone_block"
-    if current_kind == "list_item" and next_kind == "list_item":
-        if next_indent == 0:
-            return NEW, "rule:new_list_item"
-        if next_indent is None:
-            return SAME, "rule:same_list_item"
-        return SAME, "rule:nested_list_item"
-    if current_kind == "sentence" and next_kind == "sentence":
-        return None, "jev"
-    return NEW, "rule:default"
 
 
 def atom_text(atom: dict) -> str:
@@ -532,91 +288,21 @@ def atom_text(atom: dict) -> str:
     return (atom.get("text") or "").strip()
 
 
-def plan_boundaries(atoms: list[dict], source: str) -> list[dict]:
-    """すべての境界について、構造で決まったか Jev に聞くかを並べる。
+def prose_units(atoms: list[dict]) -> list[int]:
+    """Unit にする Atom の添字（文書順）。**Atom 1 つが Unit 1 つになる。**
 
-    要素は `{"after_atom": i, "decision": SAME/NEW/None, "by": 理由}`。
-    `decision` が `None` のものだけがラウンド 1 の question になる。
+    [`PROSE_KINDS`] に入り、本文が空でない Atom だけ。本文が空の Atom は
+    Jev に見せても判断材料が無く、光らせる中身も無い（実測の 6 文書には
+    1 つも無かった）。
 
-    `source` が要るのは規則 4 のためだけである — 項目のインデントは Atom の
-    `range` の**手前**（行頭からマーカーまで）にあるので、Atom だけでは読めない。
-    `range` はバイト位置なので、ここで 1 度だけバイト列にして渡す。
+    **境界は聞かない**（冒頭の「なぜ文ごとか」）。構造のルールも Jev も
+    使わず、種別だけで決まる。
     """
-    raw = source.encode()
-    plan = []
-    for i in range(len(atoms) - 1):
-        following = atoms[i + 1]
-        decision, why = boundary_rule(
-            atoms[i].get("kind"),
-            following.get("kind"),
-            list_marker_indent(raw, following)
-            if following.get("kind") == "list_item"
-            else None,
-        )
-        # 本文が空の Atom は Jev に見せても判断材料が無い。既定側へ倒す。
-        if decision is None and not (atom_text(atoms[i]) and atom_text(atoms[i + 1])):
-            decision, why = NEW, "rule:empty_text"
-        plan.append({"after_atom": i, "decision": decision, "by": why})
-    return plan
-
-
-def boundary_questions(atoms: list[dict], plan: list[dict]) -> dict:
-    """ラウンド 1 の questions（構造で決まらなかった境界だけ）。"""
-    questions = {}
-    for entry in plan:
-        if entry["decision"] is not None:
-            continue
-        i = entry["after_atom"]
-        questions[f"boundary:{i}"] = {
-            "type": "choice",
-            "instructions": (
-                "この文書を拾い読みするとき、次の 2 つの連続する部分は"
-                "必ず一緒に読まなければならないか、それとも片方だけ飛ばせるか。\n\n"
-                f"――― 前 ―――\n{atom_text(atoms[i])}\n"
-                f"――― 後 ―――\n{atom_text(atoms[i + 1])}\n―――――――――"
-            ),
-            "criteria": dict(BOUNDARY_CRITERIA),
-        }
-    return questions
-
-
-def apply_boundary_answers(plan: list[dict], answers: dict) -> None:
-    """ラウンド 1 の答えを plan へ書き戻す（`confidence` も残す）。
-
-    答えが無い / criteria に無い値だった question は**失敗させる**。既定へ
-    倒さないのは、黙って埋めた境界が「それらしく見えるが間違っている注釈」に
-    なるため（プロトコル側の「部分適用は何もしないより悪い」と同じ理由）。
-    """
-    for entry in plan:
-        if entry["decision"] is not None:
-            continue
-        key = f"boundary:{entry['after_atom']}"
-        entry["decision"] = choice_of(answers, key, BOUNDARY_CRITERIA)
-        entry["confidence"] = confidence_of(answers, key)
-
-
-def group_units(atoms: list[dict], plan: list[dict]) -> list[list[int]]:
-    """境界の答えから Unit（Atom index の並び）を組む。"""
-    if not atoms:
-        return []
-    units = [[0]]
-    for entry in plan:
-        index = entry["after_atom"] + 1
-        if entry["decision"] == SAME:
-            units[-1].append(index)
-        else:
-            units.append([index])
-    return units
-
-
-# ---------------------------------------------------------------------------
-# Tier と redundancy
-# ---------------------------------------------------------------------------
-
-
-def unit_body(atoms: list[dict], indices: list[int]) -> str:
-    """Unit の本文。Tier / redundancy の question に埋める対象。"""
-    return " ".join(filter(None, (atom_text(atoms[i]) for i in indices)))
+    return [
+        index
+        for index, atom in enumerate(atoms)
+        if atom.get("kind") in PROSE_KINDS and atom_text(atom)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -631,170 +317,11 @@ def answer_of(answers: dict, key: str) -> dict:
     return answer
 
 
-def choice_of(answers: dict, key: str, criteria: dict) -> str:
-    got = answer_of(answers, key).get("choice")
-    if not isinstance(got, str) or got not in criteria:
-        raise JevError(f"Jev returned an unknown choice for {key}: {got!r}")
-    return got
-
-
-def confidence_of(answers: dict, key: str) -> float | None:
-    """`confidence` は**無くてよい**ので、答えが丸ごと無いときも None を返す。
-
-    `choice` / `noul` と違ってここで黙って埋めているわけではない — 記録用の
-    付加情報で、判定には使っていない（`docs/gotchas/open-questions.md`
-    未解決 3）。送れなかった question の Unit もこの経路を通るので、
-    落とさないこと。
-    """
-    answer = answers.get(key)
-    if not isinstance(answer, dict):
-        return None
-    got = answer.get("confidence")
-    return float(got) if isinstance(got, (int, float)) else None
-
-
 def noul_of(answers: dict, key: str) -> float:
     got = answer_of(answers, key).get("noul")
     if not isinstance(got, (int, float)):
         raise JevError(f"Jev returned no noul for {key}: {got!r}")
     return float(got)
-
-
-# ---------------------------------------------------------------------------
-# Unit の組み立て
-# ---------------------------------------------------------------------------
-
-
-def wants_core(unit: dict) -> bool:
-    """この Unit に核を聞く意味があるか — **足切りを越えたなら聞く。**
-
-    核は「Unit の中で落とすと取り違える部分」で、つまみには依存しない
-    （つまみはこのスクリプトから見えないし、見る必要もない）。越えなかった
-    Unit は光らないので、核を聞いても答えが画面に出ない。
-
-    旗は [`marks_annotate`] が立てる（`score >= core_floor`）。**`reading_tier`
-    を内部の運び屋に使っていたのを 2026-09-22 にやめた** — フィールドが
-    ワイヤから消えたのに、判定器の中だけで生き残っているのは読み違えのもと
-    である。
-    """
-    return bool(unit.get("wants_core"))
-
-
-def core_candidates(atoms: list[dict], unit: dict) -> dict:
-    """核の選択肢。**散文の Atom だけ**を候補にする。
-
-    `heading` / `code_block` / `table` は「このまとまりから 1 か所だけ読むなら
-    どこか」の答えにならない。見出しは中身を持たないし、コード例や表は要点の
-    言い換えではない。種別は構文の話なので、設計書「Jev に判断させないもの:
-    **syntax parsing**」のとおりここで落とす — 実測でも、候補に見出しがあると
-    Jev は見出しを選んだ（demo.md の `## 結論` / `## 制約`）。
-
-    **引用（`block_quote`）は落とさない。** 引用は散文で、要点そのものを
-    述べていることがある。落としていたのは上の規則に巻き込まれた事故で、
-    引用の多い文書では核が空のまま Unit が一度も光らなかった。
-
-    本文が空の Atom は選択肢にしない（選ばれても光らせる中身が無い）。
-    """
-    return {
-        f"atom:{i}": atom_text(atoms[i])
-        for i in unit["atoms"]
-        if atom_text(atoms[i]) and atoms[i].get("kind") in PROSE_KINDS
-    }
-
-
-def core_fits(options: dict, budget: RequestBudget, text: str) -> bool:
-    """この選択肢の集合が 1 question として送れるか（見積もり）。
-
-    見るのは `pair`（32k の側）である。**`whole` ではない** — 核 question が
-    大きすぎて落ちるのは「1 リクエストに何個並ぶか」の問題ではなく、
-    「`state` とこの question の 2 つだけで 32k を超える」問題だからで、
-    そこは分割で救えない（[`RequestBudget`]）。1 リクエストに並べきれない
-    ぶんは [`plan_chunks`] が別のリクエストへ回す。
-
-    **送るのと同じ instructions で見積もる**（[`core_instructions`]）。問いの
-    文面を抜いて数えると、そのぶん小さく出て 32k の側を踏み越える。
-    """
-    question = {"type": "choice", "instructions": core_instructions(text), "criteria": options}
-    return question_tokens(question) <= budget.pair
-
-
-def assign_lone_cores(atoms: list[dict], units: list[dict]) -> None:
-    """候補が 1 つしかない Unit の核を、聞かずに決める。
-
-    絞り込んだ結果 1 つになった場合に**聞かないだけ**だと、核が空のまま
-    Unit 全体（見出しを含む）が MARKED に戻ってしまう。候補が 1 つなら答えは
-    決まっているので、question を使わずにそれを核にする。
-
-    実測ではこれで核の question が 33〜89% 減った（design.md は 19 Unit 中
-    17 が聞かずに決まった）。
-
-    """
-    for unit in units:
-        if not wants_core(unit):
-            continue
-        options = core_candidates(atoms, unit)
-        if len(options) == 1:
-            index = int(next(iter(options)).split(":")[1])
-            unit["core_atoms"] = [index]
-            unit["jev"]["core_choice"] = f"atom:{index}"
-            unit["jev"]["core_by"] = "rule:only_prose_atom"
-
-
-def core_questions(
-    atoms: list[dict], units: list[dict], budget: RequestBudget, text: str
-) -> dict:
-    """ラウンド 3 の questions のうち核の分。
-
-    選択肢は Unit を構成する散文 Atom の本文そのもので、キーは `atom:<index>`。
-    instructions は枠といまの問いの文面 `text`（[`core_instructions`]）で、
-    **スコアのラウンドと同じ文面**である。
-
-    **候補が 1 つの Unit には聞かない** — 答えが決まっているので
-    [`assign_lone_cores`] が先に埋めている。**散文が 1 つも無い Unit にも
-    聞かない**。このとき核は空のままで Unit 全体が MARKED になるが、実測では
-    4 文書のいずれにも「MARKED になる Atom 2 個以上の Unit で散文が 0 個」は
-    無かった。
-
-    **予算を超える Unit にも聞かない**（[`core_fits`]）。核が無ければ Unit
-    全体が MARKED になる — 絞り込めないだけで、注釈としては壊れない安全側の
-    振る舞いである。
-    """
-    instructions = core_instructions(text)
-    questions = {}
-    for unit in units:
-        if not wants_core(unit):
-            continue
-        options = core_candidates(atoms, unit)
-        if len(options) < 2 or not core_fits(options, budget, text):
-            continue
-        questions[f"core:{unit['id']}"] = {
-            "type": "choice",
-            "instructions": instructions,
-            "criteria": options,
-        }
-    return questions
-
-
-def apply_core_answers(units: list[dict], questions: dict, answers: dict) -> None:
-    """ラウンド 3 の答えを `core_atoms` として書き戻す。
-
-    **核は 1 Unit につき 1 つだけ**にしてある。Choice が返すのは 1 つで、
-    `probabilities` を閾値で切って複数採る案は採らない — 閾値を判定に使うのは
-    以前の実測で不安定だった（`docs/design/jev.md`「confidence の閾値ガードは
-    不採用」）。同じ轍を踏むなら、まず閾値の安定性を実測してからになる。
-
-    答えが無い / criteria に無い値だった question は [`choice_of`] が失敗
-    させる。境界や Tier と同じで、黙って埋めない。
-    """
-    for unit in units:
-        key = f"core:{unit['id']}"
-        question = questions.get(key)
-        if question is None:
-            continue
-        choice = choice_of(answers, key, question["criteria"])
-        unit["core_atoms"] = [int(choice.split(":")[1])]
-        unit["jev"]["core_choice"] = choice
-        unit["jev"]["core_confidence"] = confidence_of(answers, key)
 
 
 # ---------------------------------------------------------------------------
@@ -881,7 +408,7 @@ KEYCHAIN_SERVICE = "typesafe-jev"
 #: [`api_key`] が一度取り出した鍵。**ここから先へ出さない。**
 #:
 #: [`ask_jev`] が 1 リクエストごとに [`api_key`] を呼ぶので、覚えないと
-#: 1 ラン（実測で 20 前後のリクエスト）のあいだ `security` を叩き続ける。
+#: 1 ラン（大きな文書では数本のリクエスト）のあいだ `security` を叩き続ける。
 _api_key: str | None = None
 
 
@@ -1016,10 +543,9 @@ def round_record(payload: dict, count: int) -> dict:
 # ---------------------------------------------------------------------------
 # 予算とリクエスト分割
 #
-# **ここはどのラウンドからも使う。** ラウンド 2 専用にしないこと — ラウンド 1
-# （境界）もラウンド 3（redundancy と核）も同じ崖を持っている。実測の見積もり
-# では 58 KB の `examples/semantic/README.md` は 3 ラウンドとも天井の 2 倍を
-# 超える。1 つのラウンドだけ直すと、次の文書で別のラウンドが落ちる。
+# いまのラウンドはスコアの 1 本だけだが、ここはラウンドの事情を知らない
+# 汎用の道具として置いてある。問いを足すときも同じ 2 つの崖（64k と 32k）を
+# 持つので、足したラウンドもここを通すこと。
 # ---------------------------------------------------------------------------
 
 
@@ -1032,13 +558,14 @@ def question_tokens(question: dict) -> int:
     """question 1 つのトークン数の見積もり。
 
     器（[`QUESTION_OVERHEAD`]）＋ instructions と criteria のテキスト。
-    criteria の**キーも数える** — `atom:123` のようなキーは選択肢の個数だけ
-    並ぶので、選択肢が多い核 question では無視できない。
+    criteria の**キーも数える** — Choice の選択肢はその個数だけキーが並ぶ
+    ので、選択肢の多い question では無視できない（いまの Noul は criteria を
+    持たないが、器としてはどちらも同じに数える）。
 
-    **個数で切らずにこれで切る。** 同じ 10 個の question でも、`demo.md` の
-    Unit なら 2,000 tokens、45 KB の文書の大きな Unit なら 20,000 tokens に
-    なる。`docs/gotchas/open-questions.md`「核の question は個数ではなく
-    トークンで切る」と同じ理由で、固定の個数はどの文書でも正しくない。
+    **個数で切らずにこれで切る。** 同じ 10 個の question でも、短い文と
+    表の長い行では何倍も違う。`docs/gotchas/open-questions.md`「核の
+    question は個数ではなくトークンで切る」と同じ理由で、固定の個数は
+    どの文書でも正しくない。
     """
     text = question.get("instructions") or ""
     for key, value in (question.get("criteria") or {}).items():
@@ -1067,7 +594,7 @@ class RequestBudget:
         #: 少なく出る。実測で 7 % ずれた）。
         self.probe: dict | None = None
         self.whole = REQUEST_LIMIT - REQUEST_MARGIN - state_tokens
-        self.pair = STATE_PLUS_QUESTION_LIMIT - CORE_QUESTION_MARGIN - state_tokens
+        self.pair = STATE_PLUS_QUESTION_LIMIT - PAIR_MARGIN - state_tokens
 
     @classmethod
     def estimated(cls, state: str) -> "RequestBudget":
@@ -1123,14 +650,14 @@ def plan_chunks(questions: dict, budget: RequestBudget) -> tuple[list[dict], lis
     返り値は `(チャンクの列, 送れなかった question のキー)`。
 
     切り方は**入力の順のまま**の貪欲詰めである。並べ替えない —
-    question のキーは Unit や境界の番号を持っていて、順序が変わると
+    question のキーは Unit の番号を持っていて、順序が変わると
     デバッグのとき突き合わせられなくなる。答えはキーで戻すので、分け方が
     答えを変えることはない。
 
     **`pair` を超える question は誰にも送れない。** 分割はリクエストの数を
     増やすだけで `state` を小さくしないので、`state + その question` が 32k を
     超える question は、チャンクを 1 つにしても救えない。呼び手がそれぞれの
-    落とし先を決める（[`annotate`] を見ること）。
+    落とし先を決める（[`marks_annotate`] を見ること）。
     """
     chunks: list[dict] = []
     dropped: list[str] = []
@@ -1181,8 +708,7 @@ def send_in_chunks(
     ## 取りこぼさない
 
     マージで、**同じキーが 2 つのチャンクから返ってきたら失敗させる**。
-    答えが足りないほうは各ラウンドの [`choice_of`] / [`noul_of`] が捕まえる
-    （どちらも黙って埋めない）。
+    答えが足りないほうは [`noul_of`] が捕まえる（黙って埋めない）。
     """
     answers: dict = {}
     records: list[dict] = []
@@ -1215,221 +741,12 @@ def send_in_chunks(
 #: いるのが判定器だからである。
 MARKS_FRAME = "\n\n――― 対象 ―――\n{body}\n―――――――――"
 
-#: 境界のキャッシュの置き場（`~/.cache/akapen/semantic/boundaries/v1/`）。
-#:
-#: **問いを変えるたびに境界を取り直さないため**にある。akapen 側のキャッシュは
-#: (コマンド行, 文書, 問い) で引くので、問いが変わればこのプロセスがもう一度
-#: 起きる — そのとき境界のラウンドまで回し直すと、設計書 0 節の「境界を 1 回
-#: 取る（キャッシュ）」が成り立たない。
-#:
-#: **中身に本文は入らない。** Atom の添字と境界の判定（`same_unit` /
-#: `new_unit`）と理由だけである。それでも節の切れ目は業務文書を語るので、
-#: `docs/gotchas/public-repo.md` の扱いに合わせてホームの下・0600/0700 に置く。
-BOUNDARY_CACHE_VERSION = 1
 
+def marks_questions(atoms: list[dict], units: list[int], text: str) -> dict:
+    """スコアのラウンド — **散文の Atom ごとに Noul 1 問**。
 
-def atoms_fingerprint(atoms: list[dict]) -> str:
-    """Atom 列の指紋 — `(kind, start, end)` の並びの sha256。
-
-    **境界のキャッシュは Atom の添字で持っている。** `atomize` が変われば
-    添字は全部ずれるので、文書が同じでも古い判定を当ててはいけない。当てると
-    節の切れ目が 1 つずつずれた、**それらしく見えて間違った注釈**になる。
-
-    件数の一致（[`load_boundaries`]）だけでは足りない。`atomize` の変更が
-    その文書で Atom 数を変えないことがある（2026-09-22 の表の行割りでも、
-    データ行が 1 行の表は 1 → 1 のままである）。そのとき長さは合い、位置だけが
-    ずれる。
-
-    **鍵ではなく payload に入れて照合する。** 版のディレクトリを手で上げる方式に
-    しなかったのは、次に `atomize` を触る人が上げ忘れたら同じ事故が戻るからで、
-    指紋なら誰も憶えていなくても自動で外れる。指紋を持たない古い項目は
-    [`load_boundaries`] が外す。
-
-    **本文は入れない。** 種別とバイト位置だけである（キャッシュの中身の約束を
-    変えない）。`range` は形を決め打ちせず JSON のまま混ぜる — ワイヤの形は
-    `{"start": …, "end": …}` だが、ここで読み違えても外れが増えるだけで済む
-    ようにしておく。
-    """
-    material = "\n".join(
-        f"{atom.get('kind')}:{json.dumps(atom.get('range'), sort_keys=True)}"
-        for atom in atoms
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def cache_root() -> pathlib.Path | None:
-    """解析キャッシュの根。akapen（`src/semantic_cache.rs`）と同じ規則。
-
-    `AKAPEN_CACHE_DIR` も `XDG_CACHE_HOME` と同じく**親**である — akapen は
-    どちらでも `<それ>/akapen/semantic` に置く。`AKAPEN_CACHE_DIR` を根と
-    読むと境界だけが `<それ>/semantic` へずれ、`--semantic-cache-clear` が
-    消し残す。
-    """
-    for name in ("AKAPEN_CACHE_DIR", "XDG_CACHE_HOME"):
-        value = os.environ.get(name)
-        if value:
-            return pathlib.Path(value) / "akapen"
-    home = os.environ.get("HOME")
-    return pathlib.Path(home) / ".cache" / "akapen" if home else None
-
-
-def boundary_cache_path(source: str) -> pathlib.Path | None:
-    root = cache_root()
-    if root is None:
-        return None
-    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    return (
-        root
-        / "semantic"
-        / "boundaries"
-        / f"v{BOUNDARY_CACHE_VERSION}"
-        / f"{digest}.json"
-    )
-
-
-def load_boundaries(source: str, plan: list[dict], atoms: list[dict]) -> bool:
-    """キャッシュした境界を `plan` へ流し込む。当たれば `True`。
-
-    **読めない項目は「外れ」である**（akapen 側のキャッシュと同じ作法）。
-    Atom の数が合わない項目も、**Atom 列の指紋が合わない項目も**外れにする —
-    別の割り方の境界を当てるよりは、もう一度聞くほうが安い
-    （[`atoms_fingerprint`]）。指紋を持たない古い項目もここで落ちる。
-    """
-    path = boundary_cache_path(source)
-    if path is None:
-        return False
-    try:
-        cached = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if cached.get("atoms") != atoms_fingerprint(atoms):
-        return False
-    decisions = cached.get("decisions")
-    if not isinstance(decisions, list) or len(decisions) != len(plan):
-        return False
-    if any(decision not in (SAME, NEW) for decision in decisions):
-        return False
-    for entry, decision in zip(plan, decisions):
-        entry["decision"] = decision
-        entry["by"] = entry["by"] or "cache"
-    return True
-
-
-def save_boundaries(source: str, plan: list[dict], atoms: list[dict]) -> None:
-    """境界の判定を残す。書けなくても解析は続ける（次にもう一度払うだけ）。"""
-    path = boundary_cache_path(source)
-    if path is None:
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temp = path.with_suffix(f".tmp-{os.getpid()}")
-        payload = {
-            "version": BOUNDARY_CACHE_VERSION,
-            "atoms": atoms_fingerprint(atoms),
-            "decisions": [entry["decision"] for entry in plan],
-        }
-        # 0600 で作ってから rename。一瞬でも 0644 のファイルを作らない。
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False)
-        os.replace(temp, path)
-    except OSError:
-        return
-
-
-#: 境界の番を待つ上限（秒）。**永久に待たないためにある。**
-#:
-#: 番を持っている側が死ねば `flock` はその場で外れるので、ふつうはこの上限に
-#: 届かない。届くのは、相手が生きたまま境界のラウンドを 2 分より長く回している
-#: とき — そのときは待つのをやめて自分で聞く（重複を払うだけで、答えは同じ）。
-#: 推定の最悪（大文書の 74 秒）より長く、akapen の天井
-#: （`src/semantic.rs` の `COMMAND_BACKSTOP` = 600 秒）より十分短い。
-BOUNDARY_WAIT_LIMIT = 120.0
-
-#: 番が空いたかを見る間隔（秒）。**待ちの上乗せはこの間隔だけ**である —
-#: 待っている側は、相手の境界のラウンド（`showcase-slop.md` で 0.35〜0.46 秒）を
-#: 自分で回す代わりに待つので、差は「空いてから気づくまで」しかない。
-#: 50 ms では `R` の中央値が 0.1 秒ほど伸びて見えた。10 ms なら 1 秒の待ちで
-#: 100 回の `flock` で、費用は無視できる。
-BOUNDARY_WAIT_POLL = 0.01
-
-#: 待っている間に生存信号を出す間隔（秒）。akapen の無音の上限
-#: （`COMMAND_IDLE_TIMEOUT` = 30 秒）より短くないと、待っているだけの子が
-#: 固まった子として殺される。
-BOUNDARY_WAIT_SAY_EVERY = 5.0
-
-
-def say(line: str) -> None:
-    """stderr へ 1 行。akapen への生存信号（[`progress`] と同じ作法で、失敗は黙る）。"""
-    try:
-        print(f"{stderr_prefix()}{line}", file=sys.stderr, flush=True)
-    except (AttributeError, ValueError, OSError):
-        pass
-
-
-@contextlib.contextmanager
-def boundary_turn(source: str):
-    """**境界のラウンドは文書 1 版につき 1 プロセスずつ**回す — その番を取る。
-
-    akapen は要求 1 つにつきこのスクリプトを 1 プロセス起こし、Review の
-    ルールは**同時に**起こす（`src/app.rs` の `reanalyze_review`）。reload では
-    marks と Review が、問いを差し替えたときは古い解析と新しい解析が重なる。
-    キャッシュが空のまま重なると、全員が境界のラウンドを聞いていた
-    （2026-09-23、`showcase-slop.md` で 39 + 39 問）。
-
-    番は境界キャッシュの隣の `<digest>.lock` に対する `flock` で、
-    **読む → 無ければ聞く → 書く** の間だけ持つ。後から来た側は番が空くのを
-    待ち、空いたらキャッシュを読んで 0 問で抜ける。
-
-    - **待つのは境界だけ。** probe はこの外（前）で済ませ、スコアと核の
-      ラウンドは番を放してから回す。別の文書は別の番なので互いに待たない
-    - **相手が落ちても待ち続けない。** `flock` はプロセスが死ねば外れ、
-      例外で抜けても `finally` で外れる。空いたのにキャッシュが無ければ、
-      待っていた側が自分で聞く。上限（[`BOUNDARY_WAIT_LIMIT`]）を過ぎたら
-      番を取らずに聞く
-    - **番のファイルは消さない。** 消すと、古いファイルを掴んだ側と新しく
-      作った側が同時に番を持てる（`flock` はファイルではなく inode に付く）。
-      中身は空で、キャッシュと同じく 0600（ディレクトリは 0700）
-    - 番が取れない環境（`fcntl` が無い、置き場が作れない）は、今までどおり
-      各自が聞く。**解析は止めない**
-    """
-    path = boundary_cache_path(source)
-    fd = None
-    if fcntl is not None and path is not None:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
-        except OSError:
-            fd = None
-    if fd is None:
-        yield
-        return
-    try:
-        started = time.monotonic()
-        said = started
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                pass
-            except OSError:
-                break  # 番の仕組みそのものが使えない。各自で聞く
-            now = time.monotonic()
-            if now - started >= BOUNDARY_WAIT_LIMIT:
-                say(f"boundaries: gave up waiting after {now - started:.0f}s, asking myself")
-                break
-            if now - said >= BOUNDARY_WAIT_SAY_EVERY:
-                said = now
-                say(f"boundaries: waiting for another run ({now - started:.0f}s)")
-            time.sleep(BOUNDARY_WAIT_POLL)
-        yield
-    finally:
-        os.close(fd)  # 閉じれば flock は外れる
-
-
-def marks_questions(atoms: list[dict], units: list[list[int]], text: str) -> dict:
-    """スコアのラウンド — **Unit ごとに Noul 1 問**。
+    `units` は [`prose_units`] が返す Atom の添字。キーの `u<n>` は Unit の
+    通し番号（1 始まり、文書順）で、応答の Unit の `id` と同じである。
 
     問いの文面は akapen が送ってきたものをそのまま使い、枠と本文だけを
     付ける。**1 段の問いである**（`docs/design/jev.md`。前の答えを前提に
@@ -1442,141 +759,67 @@ def marks_questions(atoms: list[dict], units: list[list[int]], text: str) -> dic
             # （`PROBE_QUESTION` / `REDUNDANCY_PAIR` / `CONTEXT_STAGE1` と
             # 同じ形）。別の名前で送ると HTTP 400
             # 「Noul question must have criteria or instructions」になる。
-            "instructions": text + MARKS_FRAME.format(body=unit_body(atoms, indices)),
+            "instructions": text + MARKS_FRAME.format(body=atom_text(atoms[index])),
         }
-        for number, indices in enumerate(units, start=1)
+        for number, index in enumerate(units, start=1)
     }
 
 
 def marks_annotate(request: dict, question: dict, model: str, timeout: float) -> dict:
-    """解析の本体 — 境界 → スコア → 核 の 3 ラウンド。**唯一の入口である。**
+    """解析の本体 — 散文の Atom ごとに Noul 1 問の 1 ラウンド。**唯一の入口である。**
 
     **run キャップは掛けない。** 1 本のリストの項目が全部光るのは「答えが
     全部光る」で正しい — **問いが既に選んでいる**ためである。量はつまみが
     受け持つ（`measurements/marks-mode.md`）。
 
-    **問いの連鎖は無い。** 核のラウンドは「どの Unit に聞くか」を前の答えで
-    絞るだけで、question に入るのはスコアと同じ問いの文面と Unit の本文だけ
-    である（設計書「Jev への問いは 1 段」。[`core_instructions`]）。
+    **送れなかった question の Unit はスコアを持たない**（光らない）。
+    Unit そのものは残す — 応答の Unit の並びは、送れたかどうかに
+    かかわらず散文の Atom の並びと同じである。
     """
     state = request.get("source") or ""
     atoms = request.get("atoms") or []
     text = question.get("text")
     if not isinstance(text, str) or not text.strip():
         raise JevError("the request carries a question with no text")
-    core_floor = question.get("core_floor")
-    core_floor = float(core_floor) if isinstance(core_floor, (int, float)) else 1.0
+    # `question["core_floor"]` は読まない。核のラウンドはもう無い（冒頭の
+    # docstring）。akapen がまだ送ってくるので、あっても無くても同じに動く。
 
     budget = measure_state_tokens(state, model, timeout)
     rounds = [budget.probe] if budget.probe else []
-    unsent: dict[str, list[str]] = {}
+    units = prose_units(atoms)
 
-    def ask(questions: dict, label: str) -> dict:
-        answers, records, dropped = send_in_chunks(state, questions, budget, model, timeout)
-        for record in records:
-            record["round"] = label
-        rounds.extend(records)
-        if dropped:
-            unsent[label] = dropped
-        return answers
-
-    # --- ラウンド 1: 境界（キャッシュに当たれば 0 問）-------------------
-    #
-    # **番を取ってから読む**（[`boundary_turn`]）。同じ文書を同時に解析して
-    # いる別のプロセスが境界を聞いている最中なら、その答えを待って読む。
-    plan = plan_boundaries(atoms, state)
-    with boundary_turn(state):
-        cached = load_boundaries(state, plan, atoms)
-        if not cached:
-            questions = boundary_questions(atoms, plan)
-            if questions:
-                answers = ask(questions, "boundary")
-                for entry in plan:
-                    key = f"boundary:{entry['after_atom']}"
-                    if entry["decision"] is None and key not in answers:
-                        entry["decision"], entry["by"] = NEW, "rule:question_too_large"
-                apply_boundary_answers(plan, answers)
-            save_boundaries(state, plan, atoms)
-    units = group_units(atoms, plan)
-
-    # --- ラウンド 2: 問いへのスコア（Unit ごとに Noul 1 問）-------------
-    #
     # **1 つも送れなかったら失敗させる。** 全部が「スコア無し」の応答は、
     # akapen 側では 0 本と区別が付かない（`marks::has_scores`）。そこは
     # 「答えている箇所が無い」という意味を持つ場所なので、送れなかったことを
     # そこへ混ぜてはならない。
     questions = marks_questions(atoms, units, text)
-    answers = dict(ask(questions, "marks"))
-    unanswered = set(unsent.get("marks", ()))
+    answers, records, dropped = send_in_chunks(state, questions, budget, model, timeout)
+    for record in records:
+        record["round"] = "marks"
+    rounds.extend(records)
+    unanswered = set(dropped)
     if questions and len(unanswered) == len(questions):
         raise JevError(
             "Document too large for Jev — shrink it. Splitting cannot help: "
             f"state alone is {budget.state_tokens} tokens, leaving "
             f"{max(budget.pair, 0)} of the 32k budget, so not one question fits."
         )
-    scores = [
-        None if f"marks:u{n}" in unanswered else noul_of(answers, f"marks:u{n}")
-        for n in range(1, len(units) + 1)
-    ]
-
-    # --- ラウンド 3: 核（足切りを超えた Unit にだけ）---------------------
-    #
-    # **狭い問いではこのラウンドごと消える。** 足切りを超える Unit が無ければ
-    # question が 0 本になり、リクエストも 0 回である（設計書の費用の項）。
-    #
-    # `wants_core` は**この旗だけ**を見る。ワイヤに出ないので、名前も
-    # ワイヤのフィールドを借りない（2026-09-22 まで `reading_tier` を
-    # 内部の運び屋にしていた）。
-    #
-    # **Unit ごとの経路だけを通す。** 足切りを超えた Unit はそれぞれ核を持つ
-    # （候補が 1 つなら [`assign_lone_cores`] が聞かずに埋める）。散文の候補が
-    # 0 本の Unit と、選択肢が予算を超えた Unit だけが核を持たないままになる。
-    provisional = [
-        {
-            "id": f"u{n}",
-            "atoms": list(ix),
-            "wants_core": scores[n - 1] is not None and scores[n - 1] >= core_floor,
-            "core_atoms": [],
-            "jev": {"score": scores[n - 1]},
-        }
-        for n, ix in enumerate(units, start=1)
-    ]
-    questions = core_questions(atoms, provisional, budget, text)
-    if questions:
-        third = ask(questions, "core")
-        for key in unsent.get("core", ()):
-            questions.pop(key, None)
-        answers.update(third)
-    assign_lone_cores(atoms, provisional)
-    apply_core_answers(provisional, questions, answers)
 
     built = []
-    for position, unit in enumerate(provisional):
-        score = scores[position]
-        out = {
-            "id": unit["id"],
-            "atoms": unit["atoms"],
-            "jev": unit["jev"],
-        }
-        if score is not None:
-            out["score"] = score
-        # 足切りを越えなかった Unit は核を聞いていない。`core_atoms` を
-        # 省くと「絞り込み無し」＝ Unit 全体が核になるが、スコアが低いので
-        # 光らない。**空で埋める**のは、つまみを 100 % まで上げたときに
-        # 核を持たない Unit が丸ごと光らないようにするためである。
-        out["core_atoms"] = list(unit.get("core_atoms") or [])
+    for number, index in enumerate(units, start=1):
+        key = f"marks:u{number}"
+        out = {"id": f"u{number}", "atoms": [index], "core_atoms": [index]}
+        if key not in unanswered:
+            out["score"] = noul_of(answers, key)
         built.append(out)
 
     report = {
         "rounds": rounds,
-        "boundaries": plan,
         "budget": budget.record(),
         "question": question.get("id"),
-        "core_floor": core_floor,
-        "boundaries_cached": cached,
     }
-    if unsent:
-        report["unsent"] = unsent
+    if dropped:
+        report["unsent"] = {"marks": dropped}
     return {
         "version": VERSION,
         "question": question.get("id"),
@@ -1588,55 +831,38 @@ def marks_annotate(request: dict, question: dict, model: str, timeout: float) ->
 def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
     """API を叩かずに、送るリクエストの形を出す。
 
-    後のラウンドは前のラウンドの答えに依存するので、仮定を置いて組む。
-
-    - ラウンド 1: 境界。**キャッシュは見ない**（当たれば 0 問になるが、
-      形として知りたいのは「当たらなかったとき何を送るか」である）
-    - ラウンド 2: スコア。Unit ごとに Noul 1 問で、仮定は「Jev に聞く境界は
-      すべて NEW_UNIT だった」だけ（構造ルールで決まった境界はそのまま効く）
-    - ラウンド 3: 核。**すべての Unit が足切りを越えた**と仮定する。本番では
-      越えた Unit にしか聞かないので、実際に送る question はこれより少ない。
-      **狭い問いではこのラウンドごと消える**
+    ラウンドはスコアの 1 本だけで、前の答えに依存する問いが無いので、
+    **答えについての仮定は置かない**。本番と違いうるのは state のトークン数の
+    出どころだけで、それは戻り値の `assumptions` に書く（形だけ見て
+    「これが本番で送るチャンク数だ」と読まれると困るため）。
 
     **問いが要る。** 問いを持たない要求は本番と同じく断る — 形だけ見たい
     場合でも、問いの文面が question の大きさをそのまま決めるので、載せずに
     出した数字は本番の予測にならない。
-
-    仮定は戻り値の `assumptions` にも載せる — 形だけ見て「これが本番で送る
-    question 数だ」と読まれると困るため。
     """
     atoms = request.get("atoms") or []
     state = request.get("source") or ""
     question = request.get("question")
     if not isinstance(question, dict) or not isinstance(question.get("text"), str):
         raise JevError("--dry-run needs a request that carries a question")
-    text = question["text"]
 
-    plan = plan_boundaries(atoms, state)
-    first = boundary_questions(atoms, plan)
-    for entry in plan:
-        if entry["decision"] is None:
-            entry["decision"] = NEW
-    units = group_units(atoms, plan)
     budget = (
         RequestBudget(state_tokens, measured=True)
         if state_tokens is not None
         else RequestBudget.estimated(state)
     )
-    second = marks_questions(atoms, units, text)
-    # 全 Unit が足切りを越えた場合の核。
-    above_floor = [
-        {"id": f"u{number}", "atoms": indices, "wants_core": True, "jev": {}}
-        for number, indices in enumerate(units, start=1)
-    ]
-    third = core_questions(atoms, above_floor, budget, text)
-
-    rounds = []
-    for number, questions in enumerate((first, second, third), start=1):
-        chunks, dropped = plan_chunks(questions, budget)
-        rounds.append(
+    questions = marks_questions(atoms, prose_units(atoms), question["text"])
+    chunks, dropped = plan_chunks(questions, budget)
+    return {
+        "assumptions": [
+            "when the state token count is an estimate (0.5 tokens/byte) this "
+            "splits into more chunks than production, which measures the count "
+            "on large documents (--state-tokens passes a measured value in)",
+        ],
+        "budget": budget.record(),
+        "rounds": [
             {
-                "round": number,
+                "round": "marks",
                 "state": state,
                 "model": model,
                 "questions": questions,
@@ -1649,20 +875,7 @@ def dry_run(request: dict, model: str, state_tokens: int | None = None) -> dict:
                     "unsent": dropped,
                 },
             }
-        )
-    return {
-        "assumptions": [
-            "round 1 ignores the boundary cache, which would make it 0 questions",
-            "round 2 assumes every boundary Jev is asked about is new_unit",
-            "round 3 assumes every Unit scored above the core floor "
-            "(production asks only the ones that did, so it sends fewer "
-            "questions; a narrow question drops the round entirely)",
-            "when the state token count is an estimate (0.5 tokens/byte) this "
-            "splits into more chunks than production, which measures the count "
-            "on large documents (--state-tokens passes a measured value in)",
         ],
-        "budget": budget.record(),
-        "rounds": rounds,
     }
 
 
@@ -1710,9 +923,8 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the shape of the rounds without calling the API "
-        "(round 2 assumes every boundary is new_unit, round 3 that every "
-        "Unit scored above the core floor)",
+        help="print the shape of the request without calling the API "
+        "(one Noul per prose Atom, the same as production)",
     )
     parser.add_argument(
         "--state-tokens",

@@ -13,7 +13,7 @@ stdin から
 を受け取り、stdout へ
 
     {"version": 1, "question": "essential",
-     "units": [{"id": "u1", "atoms": [0], "score": 0.9, "core_atoms": [0]}]}
+     "units": [{"id": "u2", "atoms": [1], "score": 0.7, "core_atoms": [1]}]}
 
 を返す。**range は返さない** — 返すのは Atom の index だけで、位置の
 管理は akapen 側に残る。これがこのプロトコルの安全性の芯で、外部コマンド
@@ -24,18 +24,19 @@ stdin から
 設計（`docs/design/jev.md`）はここには無い。**問いの文面は読まない** —
 どの問いで呼ばれても同じスコアを返す。
 
-判断規則（完全に決定論的）:
+**Unit の作り方は本番の判定器（`jev-annotate.py`）と同じ約束に乗る**
+（2026-09-24）: 散文の Atom（文・リスト項目・引用・表のデータ行）1 つが
+Unit 1 つで、各 Unit の `core_atoms` はその Atom 自身を明示する。見出し・
+コードブロック・表のヘッダ行には Unit を作らない ＝ スコアを持たず光らない。
+複数の Atom を 1 Unit に束ねる判断は、本番でももうしていない。
 
-    heading                  -> 0.90
-    heading 直後の 1 Atom    -> 0.70
-    code block / table       -> 0.05
+判断規則（完全に決定論的。散文の Atom にだけ付ける）:
+
+    見出しの直後の 1 Atom    -> 0.70
     それ以外                 -> 0.30
 
 そのうえで、直前までに出た Atom と語が大きく重なる文はスコアを半分に
-する（言い直しは答えとして弱い、という素朴な代用）。核は Atom 1 つ
-なのでその Atom 自身で、散文でない Atom（見出し・コード・表）は核を
-持たない ＝ 光らない。Atom 1 つが Unit 1 つで、意味境界の判断（複数
-Atom を 1 Unit に束ねる）はしていない — そこは Jev の仕事である。
+する（言い直しは答えとして弱い、という素朴な代用）。
 
 **`question` の無い要求は断る。** 問いを持たない解析はこの層に無い
 （2026-09-22 に DIM 版を削除した）。
@@ -54,9 +55,8 @@ REDUNDANCY_THRESHOLD = 0.6
 #: 言い直しとみなした Atom のスコアに掛ける係数。
 REDUNDANCY_PENALTY = 0.5
 
-#: 核（MARKED を絞る先）の候補になる Atom の種別。akapen 側の
-#: `PROSE_KINDS` と同じ考え方で、見出し・コード・表は「ここだけ読めば
-#: 要点が取れる」の答えにならない。
+#: Unit を作る Atom の種別。`jev-annotate.py` の `PROSE_KINDS` と同じで、
+#: 見出し・コード・表のヘッダ行には Unit を作らない。
 PROSE_KINDS = frozenset({"sentence", "list_item", "block_quote", "table_row"})
 
 #: redundancy を見るときに無視する、内容を持たない語。
@@ -91,18 +91,12 @@ def overlap(a: set[str], b: set[str]) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
-def score_for(atom: dict, previous_kind: str | None) -> float:
-    """その Atom のスコア（問いにどれだけ答えているか、の代用）。
+def score_for(previous_kind: str | None) -> float:
+    """散文の Atom のスコア（問いにどれだけ答えているか、の代用）。
 
-    見出しは文書の骨格なので高く、その直後の 1 文は見出しが名指した話の
-    本体なので次に高い。コードと表は低い。**問いの文面は見ていない** —
-    この参照実装は判断をしない。
+    見出しの直後の 1 文は見出しが名指した話の本体なので高く、それ以外は
+    低い。**問いの文面は見ていない** — この参照実装は判断をしない。
     """
-    kind = atom.get("kind")
-    if kind == "heading":
-        return 0.90
-    if kind in ("code_block", "table"):
-        return 0.05
     if previous_kind == "heading":
         return 0.70
     return 0.30
@@ -128,28 +122,28 @@ def annotate(request: dict) -> dict:
     for atom in atoms:
         index = atom["index"]
         text = atom.get("text", "")
-        score = score_for(atom, previous_kind)
-
-        # 直前までに出た Atom のうち、語の重なりがいちばん大きいもの。
         bag = words(text)
-        if atom.get("kind") not in ("heading", "code_block"):
+
+        # 散文で本文のある Atom だけが Unit になる（`jev-annotate.py` の
+        # `prose_units` と同じ）。散文でない Atom も「直前までに出た語」には
+        # 数える — 見出しをなぞっただけの文は言い直しとみなす。
+        if atom.get("kind") in PROSE_KINDS and text.strip():
+            score = score_for(previous_kind)
+            # 直前までに出た Atom のうち、語の重なりがいちばん大きいもの。
             best = max((overlap(bag, other) for other in previous), default=0.0)
             if best >= REDUNDANCY_THRESHOLD:
                 score *= REDUNDANCY_PENALTY
-
-        # 核は「この Unit のどこを読むか」。Atom 1 つの Unit なので、
-        # 散文ならその Atom 自身、そうでなければ **核を持たない**
-        # （`[]` は「絞り込み無し」ではない。プロトコルの 3 値）。
-        core = [index] if atom.get("kind") in PROSE_KINDS and text.strip() else []
-
-        units.append(
-            {
-                "id": f"u{index + 1}",
-                "atoms": [index],
-                "score": round(score, 2),
-                "core_atoms": core,
-            }
-        )
+            # 核は Atom 自身を**明示する**。省いても 1 Atom の Unit なら
+            # 光り方は同じだが、`[]`（核を持たない ＝ 光らない）と取り違え
+            # ないよう、プロトコルの 3 値のどれかを字面に出す。
+            units.append(
+                {
+                    "id": f"u{index + 1}",
+                    "atoms": [index],
+                    "score": round(score, 2),
+                    "core_atoms": [index],
+                }
+            )
         previous.append(bag)
         previous_kind = atom.get("kind")
 
