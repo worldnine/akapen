@@ -440,6 +440,46 @@ Tier は tie-break 次第になった）。
 
 ---
 
+## 公式の書き方と食い違っていたところ（2026-09-24）
+
+2026-09-24 に公式ドキュメントの原文（索引は <https://docs.typesafe.ai/llms.txt>）を
+読み直すと、いまの判定器の問いの作りは次の 4 か所で公式の書き方と食い違っていた。
+**段 1（1・2・4 と cookbook の形、criteria の有無）は測った** —
+[`../../examples/semantic/measurements/question-form.md`](../../examples/semantic/measurements/question-form.md)。
+3 は段 2 として残してある。
+
+| # | 公式の書き方（原文の要点） | 出典 | いまの判定器 |
+| --- | --- | --- | --- |
+| 1 | **問いは短く。** "Keep questions short." 背景や例は文に書き込まず、構造化した instructions / criteria の別の欄に置く。1 問は "a judgment a knowledgeable person makes in a second" | <https://docs.typesafe.ai/concepts/how-to-build-with-system-one.md>「Use structure in the questions」、<https://docs.typesafe.ai/primitives.md> | 67〜194 字の日本語 1 文に定義・例・除外を全部入れている |
+| 2 | **英語が主な学習言語。** "English is the primary training language and where accuracy is currently best." CJK は受け付けるが精度が落ちる | <https://docs.typesafe.ai/models.md>「Language support」、<https://docs.typesafe.ai/concepts/state.md> | 問いも本文も日本語 |
+| 3 | **state は問いに要る分だけ。** "Accuracy falls as the state grows with content unrelated to the decision."（context rot） | <https://docs.typesafe.ai/model-jaggedness/jev-1.13.md> 5 番「Large state full of irrelevant detail」 | 毎回文書全文（**段 2 で測る**） |
+| 4 | **state を名前付きの JSON にして、問いからはパスで指す。** "name it in the `instructions` with a dot-and-index path to its key, including the backticks" | <https://docs.typesafe.ai/primitives.md>「Reference specific fields」 | 本文を問いに埋め込み、文の数だけ繰り返している（費用の 7 割） |
+
+ほかに 2 つ:
+
+- **Line-by-line search**（<https://docs.typesafe.ai/cookbooks/semantic_find.md>）が marks とほぼ同じ課題を解いている —
+  行 ID を付けた全文を state に 1 回、Choice 1 本（選択肢は行 ID、説明は null、最大 255 個）＋ 答えがあるかの
+  Noul 1 本。"Choice probabilities always add up to 1, so some line ranks first even when the document doesn't answer
+  the question" なので、在るかは Noul で別に聞く
+- **Noul の `criteria` は任意。** "try your questions with and without `criteria` and keep whichever gives better
+  answers on your documents"（<https://docs.typesafe.ai/primitives/noul.md>「Writing a Noul question」）
+
+### 測ってわかったこと（段 1）
+
+- **パスで指す形（4）は、長い配列では添字を引けなかった。** `{"passages": [...]}` を state にして
+  `` `passages[i]` `` を指すと、HTTP 400 にはならずそれらしいスコアが返るが、添字 15 あたりから先はスコアが
+  その文と無関係になり、前の方ほど高くなる傾きだけが残った。公式の例（`items[i]`）は 8 項目で、jaggedness の
+  文書は "`jev-1.13` does not count reliably. This covers … items in a long list" と書いている。**配列の添字で指すのは、
+  数えさせているのと同じ**である。名前の付いたキーで指す形は未検証
+- **Line-by-line search の Choice は、当てはまる文が多い問いでも数本にしか確率を置かない**（確率は小数第 2 位まで）。
+  「どこがいちばん答えているか」を指すのには正しいが、k 本を光らせる marks の代わりにはならなかった
+- 英語と日本語、criteria あり / なしの差は、パスで指す形ではパスが引けていないので判断できなかった。
+  Line-by-line search では英語の方が確率を狭く置き、ラン間で安定したが、正解ラベルでの成績は同じだった
+- **判定器の問いは、いまの形（本文を埋め込む長い日本語の Noul）のまま**にしてある。上の 4 つが「公式に反している」
+  のは確かだが、測った代わりの形はどれも正解ラベルで及ばなかった
+
+---
+
 ## akapen 側の接続
 
 akapen 本体には HTTP クライアントも async ランタイムも入れない。Jev は

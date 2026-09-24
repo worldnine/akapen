@@ -437,6 +437,7 @@ akapen 自身が解析できない大きさへすぐ戻る。
 | **marks に Unit は要るか** — Jev の境界と核をやめて文ごと（Unit = Atom）に聞く案 B と現行 A を比べた（6 文書 × 5 問 × 2 案 × 2 ラン、コードは変えていない）。ラベルに対する AUC・精度・取りこぼし、光る場所の重なりと差の内訳、業務議事録の節の中央値、見出しの無い文書、費用、focus の沈めない範囲の見積り | [`measurements/unit-granularity.md`](measurements/unit-granularity.md) |
 | **核の問いに「いまの問い」を入れる**（`CORE_INSTRUCTIONS` を枠にして問いの文面を挟む）— 前回の A の境界を固定して直した核（A'）だけを走らせ、A・B と並べた（6 文書 × 5 問 × 2 ラン）。取りこぼしの減り方と残りの形（1 Unit 1 文の制限）、光る場所の重なり、見出しの無い文書、費用、核が変わった率、業務議事録と `b1` の食い違い 82 行を人が判定する表 | [`measurements/core-question.md`](measurements/core-question.md) |
 | **判定器を文ごと（1 文 = 1 Unit）にした**あとの通しと、つまみの既定を 20 % から 15 % にした根拠 — 前回の応答から A' の 20 % と同じ本数になる share を数えた表（Jev を呼ばない）、新しい判定器で 6 文書 × 5 問 × 1 ラン（ラウンド・問いの数・スコアの並び・光る本数・費用）、akapen での確認 | [`measurements/unit-per-atom.md`](measurements/unit-per-atom.md) |
+| **問いの形を Jev 公式の書き方に寄せて比べた**（段 1。state は全文のまま）— 短い問い・英語・criteria あり / なし・`passages[i]` のパス参照・Line-by-line search（Choice + 在るかの Noul）の 6 形を、いまの形と並べた（3 文書 × 5 問 × 2 ラン、コードは変えていない）。ラベルの AUC・揃えた本数での精度と取りこぼし、光る場所の重なり、スコアの分布、費用、Choice の確率の散り方、**パスが添字 15 あたりから引けないこと**、食い違い 192 行を人が判定する表 | [`measurements/question-form.md`](measurements/question-form.md) |
 | **Review の 1 周**（段階 2、`showcase-slop.md`）— 選別から `s`・書き換え・差分の受け入れまで。キー数と往復時間、書き換えの前後での数字・語・`[要: …]` 印の出入り、指示の範囲の外の変化、ラベルとの照合 | [`measurements/review-roundtrip.md`](measurements/review-roundtrip.md) |
 
 **バイト数と Unit 数は分割前の値。** この README と `docs/gotchas.md` は
