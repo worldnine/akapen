@@ -476,6 +476,8 @@ pub(crate) struct App {
     pub(crate) ui_selected_bg: Color,
     pub(crate) ui_changed_bg: Color,
     pub(crate) ui_deleted_bg: Color,
+    pub(crate) ui_changed_emph_bg: Color,
+    pub(crate) ui_deleted_emph_bg: Color,
     pub(crate) ui_history_glow_bg: Color,
     pub(crate) ui_border: Color,
     pub(crate) ui_history_border: Color,
@@ -775,6 +777,8 @@ impl App {
             ui_selected_bg: selected_bg(light),
             ui_changed_bg: changed_bg(light),
             ui_deleted_bg: deleted_bg(light),
+            ui_changed_emph_bg: crate::view::changed_emph_bg(light),
+            ui_deleted_emph_bg: crate::view::deleted_emph_bg(light),
             ui_history_glow_bg: history_glow_bg(light),
             ui_border: border_color(light),
             ui_history_border: history_border_color(light),
@@ -2398,6 +2402,18 @@ impl App {
             .map(|block| block.content.as_str())
             .collect();
         (!parts.is_empty()).then(|| parts.join("\n"))
+    }
+
+    /// 行 `idx`（表示中の文書の行）の行内の強調: 書き換えペアの新側で、変わった
+    /// バイト範囲。強調の無い行は空。
+    pub(crate) fn new_line_emphasis(&self, idx: usize) -> &[std::ops::Range<usize>] {
+        self.comparison_deleted_blocks
+            .iter()
+            .find_map(|b| {
+                idx.checked_sub(b.anchor)
+                    .and_then(|i| b.new_emphasis.get(i))
+            })
+            .map_or(&[], Vec::as_slice)
     }
 
     pub(crate) fn deleted_blocks_at(&self, idx: usize) -> (Vec<&DeletedBlock>, Vec<&DeletedBlock>) {

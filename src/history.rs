@@ -5,6 +5,7 @@
 //! Markdown source that can be rendered normally.
 
 use std::collections::HashSet;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -158,10 +159,123 @@ pub(crate) struct DocumentHistory {
 
 /// A block that existed in the previous revision but not the next one.
 /// It is rendered dimly at `anchor` for a moment before being collapsed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DeletedBlock {
     pub(crate) anchor: usize,
     pub(crate) content: String,
+    /// 行内の強調（source モードの diff ペア）。`content` の行ごとに、その行の中で
+    /// 変わったバイト範囲。空の行は強調しない。書き換えのペアにしか付かない。
+    pub(crate) old_emphasis: Vec<Vec<Range<usize>>>,
+    /// 同じ書き換えの新側: `anchor` から始まる新しい行ごとの、変わったバイト範囲。
+    pub(crate) new_emphasis: Vec<Vec<Range<usize>>>,
+}
+
+/// これを超えて変わった書き換えペアは強調しない（行ごと書き直したか、関係ない
+/// 行どうしを組にしただけ — どちらも帯全体がすでにそう言っている）。
+const EMPHASIS_MAX_CHANGED: f64 = 0.5;
+/// 行内の強調に回す行の長さの上限（バイト）。これより長い行は帯だけ。
+const EMPHASIS_MAX_LINE: usize = 8 * 1024;
+/// 変わった範囲どうしの間に残った一致がこの文字数以下なら、つないで 1 つにする
+/// （日本語の文字差分は、書き換えた句の途中の助詞 1 字が偶然一致して細切れになる）。
+const EMPHASIS_BRIDGE_CHARS: usize = 2;
+
+/// 行を差分の単位に切る: ASCII の英数字の連なりは 1 語、それ以外は 1 文字ずつ。
+/// 英文は語単位、日本語は文字単位で比べることになる。
+fn emphasis_tokens(line: &str) -> Vec<&str> {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if word(c) {
+            while chars.peek().is_some_and(|&(_, d)| word(d)) {
+                chars.next();
+            }
+        }
+        let end = chars.peek().map_or(line.len(), |&(j, _)| j);
+        out.push(&line[i..end]);
+        start = end;
+    }
+    debug_assert_eq!(start, line.len());
+    out
+}
+
+/// 書き換えペア 1 組の行内の強調: (旧行の変わった範囲, 新行の変わった範囲)。
+/// 変わった部分が多すぎるペアは両側とも空を返す（[`EMPHASIS_MAX_CHANGED`]）。
+pub(crate) fn intraline_emphasis(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    if old.is_empty() || new.is_empty() || old.len() > EMPHASIS_MAX_LINE || new.len() > EMPHASIS_MAX_LINE {
+        return (Vec::new(), Vec::new());
+    }
+    let old_tokens = emphasis_tokens(old);
+    let new_tokens = emphasis_tokens(new);
+    let deadline = std::time::Instant::now() + DIFF_DEADLINE;
+    let ops = similar::capture_diff_slices_deadline(
+        similar::Algorithm::Myers,
+        &old_tokens,
+        &new_tokens,
+        Some(deadline),
+    );
+    // トークンの位置 → バイト位置。
+    let offsets = |tokens: &[&str]| {
+        let mut v = Vec::with_capacity(tokens.len() + 1);
+        let mut at = 0;
+        v.push(0);
+        for t in tokens {
+            at += t.len();
+            v.push(at);
+        }
+        v
+    };
+    let old_at = offsets(&old_tokens);
+    let new_at = offsets(&new_tokens);
+    let mut old_ranges: Vec<Range<usize>> = Vec::new();
+    let mut new_ranges: Vec<Range<usize>> = Vec::new();
+    // 直前の不一致の後に来た、短い一致（つなぐ候補）。
+    let mut bridge: Option<(Range<usize>, Range<usize>)> = None;
+    let push = |ranges: &mut Vec<Range<usize>>, r: Range<usize>| {
+        if r.is_empty() {
+            return;
+        }
+        match ranges.last_mut() {
+            Some(last) if last.end >= r.start => last.end = last.end.max(r.end),
+            _ => ranges.push(r),
+        }
+    };
+    for op in &ops {
+        let (o, n) = (op.old_range(), op.new_range());
+        let o = old_at[o.start]..old_at[o.end];
+        let n = new_at[n.start]..new_at[n.end];
+        if op.tag() == DiffTag::Equal {
+            let short = new[n.clone()].chars().count() <= EMPHASIS_BRIDGE_CHARS
+                && !new[n.clone()].contains(char::is_whitespace);
+            let after_change = !old_ranges.is_empty() || !new_ranges.is_empty();
+            bridge = (short && after_change).then_some((o, n));
+            continue;
+        }
+        // 不一致の続き: 間の短い一致ごと 1 つの範囲にする。
+        if let Some((bo, bn)) = bridge.take() {
+            if let Some(last) = old_ranges.last_mut()
+                && last.end == bo.start
+            {
+                last.end = bo.end;
+            }
+            if let Some(last) = new_ranges.last_mut()
+                && last.end == bn.start
+            {
+                last.end = bn.end;
+            }
+        }
+        push(&mut old_ranges, o);
+        push(&mut new_ranges, n);
+    }
+    let changed = |ranges: &[Range<usize>], line: &str| {
+        let bytes: usize = ranges.iter().map(|r| r.len()).sum();
+        bytes as f64 / line.len() as f64
+    };
+    if changed(&old_ranges, old).max(changed(&new_ranges, new)) > EMPHASIS_MAX_CHANGED {
+        return (Vec::new(), Vec::new());
+    }
+    (old_ranges, new_ranges)
 }
 
 /// Cumulative change marks from an acknowledged full document to NOW.
@@ -207,7 +321,8 @@ pub(crate) fn comparison_transition(
     // the badge count and its tests stay bit-identical.)
     let diff = TextDiff::from_lines(baseline, now);
     let old: Vec<&str> = baseline.lines().collect();
-    let last = now.lines().count().saturating_sub(1);
+    let new: Vec<&str> = now.lines().collect();
+    let last = new.len().saturating_sub(1);
     let mut changed = HashSet::new();
     let mut deleted_before = HashSet::new();
     let mut blocks = Vec::new();
@@ -224,12 +339,22 @@ pub(crate) fn comparison_transition(
             deleted_before.insert(new_range.start.min(last));
         }
         if !old_range.is_empty() {
+            let old_lines = old.get(old_range.clone()).unwrap_or_default();
+            // 書き換えは先頭から min(旧, 新) 行をペアにする（gutter と同じ組み方）。
+            // ペアになった行だけ、行の中で変わった範囲を持つ。
+            let pairs = old_range.len().min(new_range.len());
+            let mut old_emphasis = vec![Vec::new(); old_lines.len()];
+            let mut new_emphasis = vec![Vec::new(); pairs];
+            for i in 0..pairs {
+                if let (Some(o), Some(n)) = (old_lines.get(i), new.get(new_range.start + i)) {
+                    (old_emphasis[i], new_emphasis[i]) = intraline_emphasis(o, n);
+                }
+            }
             blocks.push(DeletedBlock {
                 anchor: new_range.start,
-                content: old
-                    .get(old_range)
-                    .map(|lines| lines.join("\n"))
-                    .unwrap_or_default(),
+                content: old_lines.join("\n"),
+                old_emphasis,
+                new_emphasis,
             });
         }
     }
@@ -255,6 +380,7 @@ fn line_transition(old: &[String], new: &[String]) -> (HashSet<usize>, Vec<Delet
                     .get(old_range.clone())
                     .map(|lines| lines.join("\n"))
                     .unwrap_or_default(),
+                ..Default::default()
             });
         }
     }
@@ -703,10 +829,69 @@ mod tests {
     use super::{
         DocumentHistory, Revision, RevisionSource, anchored_line, head_oid,
         local_revision_summary, relative_age, baseline_transition, revision_id, same_revision,
+        comparison_transition, intraline_emphasis,
     };
     use crate::snapshot::{CachedFile, CachedSnapshot, SnapshotCache};
     use serde::Deserialize;
     use std::process::Command;
+
+    /// 範囲を本文の断片に戻す（読みやすい比較のため）。
+    fn pieces<'a>(line: &'a str, ranges: &[std::ops::Range<usize>]) -> Vec<&'a str> {
+        ranges.iter().map(|r| &line[r.clone()]).collect()
+    }
+
+    #[test]
+    fn intraline_emphasis_marks_only_the_rewritten_words() {
+        // 英文は語単位: 変わった語だけが範囲になる。
+        let (old, new) = ("the quick brown fox jumps over", "the quick red fox jumps over");
+        let (o, n) = intraline_emphasis(old, new);
+        assert_eq!(pieces(old, &o), ["brown"]);
+        assert_eq!(pieces(new, &n), ["red"]);
+        // 日本語は文字単位。
+        let (old, new) = ("今日は会議を開くことにした。", "今日は打ち合わせを開くことにした。");
+        let (o, n) = intraline_emphasis(old, new);
+        assert_eq!(pieces(old, &o), ["会議"]);
+        assert_eq!(pieces(new, &n), ["打ち合わせ"]);
+    }
+
+    #[test]
+    fn intraline_emphasis_bridges_a_short_accidental_match() {
+        // 書き換えた句の途中で「の」1 字が偶然一致しても、範囲は 1 つにつながる。
+        let (old, new) = (
+            "明日までに設計の方針を変えることにする",
+            "明日までに実装の順番を変えることにする",
+        );
+        let (o, n) = intraline_emphasis(old, new);
+        assert_eq!(pieces(old, &o), ["設計の方針"]);
+        assert_eq!(pieces(new, &n), ["実装の順番"]);
+    }
+
+    #[test]
+    fn intraline_emphasis_skips_a_wholesale_rewrite() {
+        // 半分より多く変わったペアは強調しない（帯全体がすでにそう言っている）。
+        assert_eq!(
+            intraline_emphasis("alpha beta gamma", "one two three four"),
+            (Vec::new(), Vec::new())
+        );
+        // 片側が空（純粋な追加・削除）も強調しない。
+        assert_eq!(intraline_emphasis("", "new"), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn comparison_blocks_carry_emphasis_for_paired_lines_only() {
+        // 旧 2 行 → 新 1 行の書き換え: 先頭の 1 組だけがペアになり強調を持つ。
+        let baseline = "keep\nthe quick brown fox jumps\nextra old line\nend\n";
+        let now = "keep\nthe quick red fox jumps\nend\n";
+        let (_, _, blocks) = comparison_transition(baseline, now);
+        assert_eq!(blocks.len(), 1);
+        let b = &blocks[0];
+        assert_eq!(b.anchor, 1);
+        assert_eq!(b.old_emphasis.len(), 2, "one entry per old line");
+        assert_eq!(pieces("the quick brown fox jumps", &b.old_emphasis[0]), ["brown"]);
+        assert!(b.old_emphasis[1].is_empty(), "the unpaired old line is not emphasized");
+        assert_eq!(b.new_emphasis.len(), 1);
+        assert_eq!(pieces("the quick red fox jumps", &b.new_emphasis[0]), ["red"]);
+    }
 
     #[test]
     fn local_summary_comes_from_fixed_cache_values() {

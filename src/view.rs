@@ -37,6 +37,11 @@ const CHANGED_BG_LIGHT: Color = Color::Rgb(218, 238, 224);
 /// old and new content of a rewrite read as one matched pair.
 const DELETED_BG_DARK: Color = Color::Rgb(61, 35, 35);
 const DELETED_BG_LIGHT: Color = Color::Rgb(238, 218, 218);
+/// 行内の強調: diff ペアの帯の中で、実際に変わった文字の地。帯と同じ色相で一段濃い。
+const CHANGED_EMPH_BG_DARK: Color = Color::Rgb(46, 102, 70);
+const CHANGED_EMPH_BG_LIGHT: Color = Color::Rgb(168, 218, 182);
+const DELETED_EMPH_BG_DARK: Color = Color::Rgb(112, 48, 48);
+const DELETED_EMPH_BG_LIGHT: Color = Color::Rgb(240, 172, 172);
 const HISTORY_GLOW_BG_DARK: Color = Color::Rgb(70, 73, 88);
 const HISTORY_GLOW_BG_LIGHT: Color = Color::Rgb(218, 220, 228);
 const HISTORY_BORDER_DARK: Color = Color::Rgb(170, 150, 215);
@@ -57,6 +62,16 @@ pub fn changed_bg(light: bool) -> Color {
 /// (green band) are the same kind of mark in opposing colors.
 pub fn deleted_bg(light: bool) -> Color {
     if light { DELETED_BG_LIGHT } else { DELETED_BG_DARK }
+}
+
+/// 新しい行の中で変わった文字の地（[`changed_bg`] の帯の上に敷く）。
+pub fn changed_emph_bg(light: bool) -> Color {
+    if light { CHANGED_EMPH_BG_LIGHT } else { CHANGED_EMPH_BG_DARK }
+}
+
+/// 削除行の中で変わった文字の地（[`deleted_bg`] の帯の上に敷く）。
+pub fn deleted_emph_bg(light: bool) -> Color {
+    if light { DELETED_EMPH_BG_LIGHT } else { DELETED_EMPH_BG_DARK }
 }
 
 /// A deliberately visible neutral flash, separate from diff's semantic
