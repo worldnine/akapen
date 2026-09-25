@@ -155,6 +155,65 @@ pub(crate) struct DocumentHistory {
     /// timeline position and of Git availability.
     pub(crate) baseline_id: Option<String>,
     pub(crate) baseline_content: Option<String>,
+    /// 最後に git から読んだもの（[`GitRead`]）。`r` で読み直すときに
+    /// 使い回す。組み立てたタイムラインからは生の列を取り戻せないので、
+    /// 別に持つ。git を読まずに組んだ履歴（テスト）は `None`。
+    pub(crate) git: Option<GitRead>,
+}
+
+/// 最後に git から読んだもの — リポジトリの根・そのときの HEAD・版の列。
+///
+/// **`r` のたびに `git log` と `cat-file` を起こさないために持つ**
+/// （[`DocumentHistory::replace_from_cache`]）。`git log` の答えは HEAD と
+/// 路で決まり、HEAD はコミット・checkout・reset・amend で必ず動くので、
+/// HEAD が同じあいだは版の列も同じである。読み直しで起こす git は 5 本から
+/// 2 本（HEAD と、索引に載っているかの確認）になる。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GitRead {
+    /// リポジトリの根。git の外なら `None`。
+    root: Option<PathBuf>,
+    /// 読んだときの HEAD。索引に載っていない文書でも HEAD そのもの
+    /// （LOCAL の parent に使うかは [`GitRead::parent`] が決める）。
+    head: Option<String>,
+    /// 何本まで読んだか。
+    limit: usize,
+    /// [`load_git_revisions_in`] の答え（重複除去の前の完全な列）。
+    revisions: Vec<Revision>,
+}
+
+impl GitRead {
+    /// `path` の git の側を読む。`previous` が同じ根・同じ HEAD・同じ本数で
+    /// 読んだものなら、版の列はそれを使い回す。
+    fn read(path: &Path, limit: usize, previous: Option<GitRead>) -> Self {
+        // 根は同じ路なら変わらない。前が git の外だったときだけ引き直す
+        // （開いたあとで `git init` された文書を拾うため）。
+        let root = match previous.as_ref().and_then(|previous| previous.root.clone()) {
+            Some(root) => Some(root),
+            None => repo_root(path),
+        };
+        let head = root.as_deref().and_then(rev_parse_head);
+        let revisions = match previous {
+            Some(previous)
+                if head.is_some()
+                    && previous.root == root
+                    && previous.head == head
+                    && previous.limit == limit =>
+            {
+                previous.revisions
+            }
+            _ => load_git_revisions_in(root.as_deref(), path, limit),
+        };
+        Self { root, head, limit, revisions }
+    }
+
+    /// LOCAL の観測に付ける parent（[`head_oid`] と同じ答え）。索引に
+    /// 載っていない文書は git の血統に無いので `None`。
+    fn parent(&self, path: &Path) -> Option<String> {
+        let (Some(root), Some(head)) = (self.root.as_deref(), self.head.as_ref()) else {
+            return None;
+        };
+        is_tracked(root, path).then(|| head.clone())
+    }
 }
 
 /// A block that existed in the previous revision but not the next one.
@@ -398,17 +457,19 @@ impl DocumentHistory {
     /// Load Git anchors and the bounded LOCAL cache into one newest-first
     /// document timeline. Cache failure is returned so the caller can fall
     /// back to Git-only history without making the file unreadable.
+    ///
+    /// 本番の読み直しは前の git の読みを使い回す
+    /// [`Self::replace_from_cache`] を通るので、これを呼ぶのはテストだけである。
+    #[cfg(test)]
     pub(crate) fn load_cached(
         path: &Path,
         live: &str,
         limit: usize,
         cache: &SnapshotCache,
     ) -> anyhow::Result<Self> {
-        // リポジトリの根は 1 回だけ引く（HEAD と履歴の両方が要る）。
-        let root = repo_root(path);
-        let local = cache.record_with_parent(path, live, head_oid_in(root.as_deref(), path))?;
-        let gits = load_git_revisions_in(root.as_deref(), path, limit);
-        Ok(Self::assemble_timeline(live, gits, local))
+        let git = GitRead::read(path, limit, None);
+        let local = cache.record_with_parent(path, live, git.parent(path))?;
+        Ok(Self::with_git(live, git, local))
     }
 
     pub(crate) fn open_cached(
@@ -417,21 +478,26 @@ impl DocumentHistory {
         limit: usize,
         cache: &SnapshotCache,
     ) -> anyhow::Result<Self> {
-        let root = repo_root(path);
-        let local = cache.open_with_parent(path, live, head_oid_in(root.as_deref(), path))?;
-        let gits = load_git_revisions_in(root.as_deref(), path, limit);
-        Ok(Self::assemble_timeline(live, gits, local))
+        let git = GitRead::read(path, limit, None);
+        let local = cache.open_with_parent(path, live, git.parent(path))?;
+        Ok(Self::with_git(live, git, local))
     }
 
     fn load_with_local(path: &Path, live: &str, limit: usize, local: CachedFile) -> Self {
-        let gits = load_git_revisions_in(repo_root(path).as_deref(), path, limit);
-        Self::assemble_timeline(live, gits, local)
+        Self::with_git(live, GitRead::read(path, limit, None), local)
+    }
+
+    /// 読んだ git の側と LOCAL からタイムラインを組み、git の側を持っておく。
+    fn with_git(live: &str, git: GitRead, local: CachedFile) -> Self {
+        let mut history = Self::assemble_timeline(live, &git.revisions, local);
+        history.git = Some(git);
+        history
     }
 
     /// gits（newest-first）と LOCAL スナップショットを一つの血統順タイムラインに
     /// 組み立てる純粋な配置。`load_with_local` の実体で、fixture テストは実 git を
     /// 立てずに fixture の gits / snapshots を直接渡して検証する。
-    fn assemble_timeline(live: &str, git_revisions: Vec<Revision>, local: CachedFile) -> Self {
+    fn assemble_timeline(live: &str, git_revisions: &[Revision], local: CachedFile) -> Self {
         let mut working = vec![Revision {
             id: None,
             short_id: "now".to_string(),
@@ -526,9 +592,15 @@ impl DocumentHistory {
             rendered_position: 0,
             baseline_id: local.baseline_id,
             baseline_content: local.baseline_content,
+            git: None,
         }
     }
 
+    /// 書き換わった文書で組み直す（`r`・`e` から戻ったとき）。
+    ///
+    /// git の側は**前に読んだものを使い回す**（[`GitRead`]）。HEAD が同じなら
+    /// `git log` も `cat-file` も起こさない。キャッシュに書けなければ
+    /// `self` は元のまま（git の側も戻す）で、呼び手は git だけの履歴へ落ちる。
     pub(crate) fn replace_from_cache(
         &mut self,
         path: &Path,
@@ -536,8 +608,17 @@ impl DocumentHistory {
         limit: usize,
         cache: &SnapshotCache,
     ) -> anyhow::Result<()> {
-        *self = Self::load_cached(path, live, limit, cache)?;
-        Ok(())
+        let git = GitRead::read(path, limit, self.git.take());
+        match cache.record_with_parent(path, live, git.parent(path)) {
+            Ok(local) => {
+                *self = Self::with_git(live, git, local);
+                Ok(())
+            }
+            Err(e) => {
+                self.git = Some(git);
+                Err(e)
+            }
+        }
     }
 
     pub(crate) fn acknowledge(
@@ -877,12 +958,13 @@ fn repo_root(path: &Path) -> Option<PathBuf> {
 /// 観測時点の HEAD commit oid。git 環境でなければ None（= 非 git は従来の観測順のまま）。
 /// 失敗（非 git・git エラー・untracked）はすべて None に落とす（soft failure が既存の方針）。
 pub(crate) fn head_oid(path: &Path) -> Option<String> {
-    head_oid_in(repo_root(path).as_deref(), path)
+    let root = repo_root(path)?;
+    let head = rev_parse_head(&root)?;
+    is_tracked(&root, path).then_some(head)
 }
 
-/// [`head_oid`] を、引いてある根（[`repo_root`] の答え）で。
-fn head_oid_in(root: Option<&Path>, path: &Path) -> Option<String> {
-    let root = root?;
+/// `root` の HEAD の oid。生まれる前の HEAD（コミットが 1 本も無い）なら `None`。
+fn rev_parse_head(root: &Path) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -893,22 +975,26 @@ fn head_oid_in(root: Option<&Path>, path: &Path) -> Option<String> {
         return None;
     }
     let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // untracked なファイルは git の血統に載っていない。gits 側に一致する
-    // コミットが無い以上 parent を付けても orphan 扱いになるだけなので、
-    // 「観測時点の血統」という意味でも None が正直。
+    (!oid.is_empty()).then_some(oid)
+}
+
+/// `path` が `root` の索引に載っているか。
+///
+/// untracked なファイルは git の血統に載っていない。gits 側に一致する
+/// コミットが無い以上 parent を付けても orphan 扱いになるだけなので、
+/// 「観測時点の血統」という意味でも None が正直。
+fn is_tracked(root: &Path, path: &Path) -> bool {
     let absolute = absolutize(path);
-    let rel = absolute.strip_prefix(root).ok()?;
-    let tracked = Command::new("git")
+    let Ok(rel) = absolute.strip_prefix(root) else {
+        return false;
+    };
+    Command::new("git")
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--error-unmatch", "--"])
         .arg(rel)
         .output()
-        .ok()?;
-    if !tracked.status.success() {
-        return None;
-    }
-    (!oid.is_empty()).then_some(oid)
+        .is_ok_and(|tracked| tracked.status.success())
 }
 
 fn absolutize(path: &Path) -> PathBuf {
@@ -1008,7 +1094,7 @@ mod tests {
             baseline_id: None,
             baseline_content: None,
         };
-        let history = DocumentHistory::assemble_timeline("new\n", gits, local);
+        let history = DocumentHistory::assemble_timeline("new\n", &gits, local);
         let local_revision = &history.revisions[1];
         assert_eq!(
             local_revision.summary,
@@ -1042,7 +1128,7 @@ mod tests {
             baseline_id: None,
             baseline_content: None,
         };
-        let history = DocumentHistory::assemble_timeline("new\n", gits, local);
+        let history = DocumentHistory::assemble_timeline("new\n", &gits, local);
         assert_eq!(
             history.revisions[1].summary,
             "akapen local snapshot: uncommitted state captured 1970-01-01T00:00:00Z \
@@ -1151,6 +1237,7 @@ mod tests {
             rendered_position: 0,
             baseline_id: None,
             baseline_content: None,
+            git: None,
         };
         assert!(!history.move_by(-1));
         assert!(history.move_by(1));
@@ -1174,6 +1261,7 @@ mod tests {
             rendered_position: 0,
             baseline_id: None,
             baseline_content: None,
+            git: None,
         };
         assert_eq!(history.label().as_deref(), Some("NOW · 3/3"));
         history.move_by(1);
@@ -1198,6 +1286,7 @@ mod tests {
             rendered_position: 0,
             baseline_id: Some("middle".into()),
             baseline_content: Some("middle".into()),
+            git: None,
         };
 
         assert!(history.label().unwrap().ends_with("base 2/3"));
@@ -1299,6 +1388,53 @@ mod tests {
         // 途中で切れた出力は読めない（全体を `None` にして `git show` に戻る）。
         assert_eq!(parse_batch(b"aaa blob 9\nshort\n", 1), None);
         assert_eq!(parse_batch(b"", 1), None);
+    }
+
+    #[test]
+    fn reloading_reuses_the_git_versions_until_head_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "akapen@example.invalid"]);
+        git(&["config", "user.name", "akapen test"]);
+        std::fs::write(&path, "# Doc\n\nfirst\n").unwrap();
+        git(&["add", "doc.md"]);
+        git(&["commit", "-qm", "first"]);
+        let cache = SnapshotCache::at(dir.path().join("cache"));
+        let mut history =
+            DocumentHistory::open_cached(&path, "# Doc\n\nfirst\n", 10, &cache).unwrap();
+        // 使い回したかを見分ける印を、持っている列に付けておく。
+        history.git.as_mut().unwrap().revisions[0].summary = "reused".into();
+
+        // 外の書き換え（HEAD は同じ）: git を読まずに前の列で組み直す。
+        std::fs::write(&path, "# Doc\n\nedited\n").unwrap();
+        history.replace_from_cache(&path, "# Doc\n\nedited\n", 10, &cache).unwrap();
+        let summaries: Vec<&str> =
+            history.revisions.iter().map(|r| r.summary.as_str()).collect();
+        assert!(summaries.contains(&"reused"), "{summaries:?}");
+
+        // コミットしたら HEAD が動くので読み直す（新しいコミットが載り、印は消える）。
+        git(&["commit", "-qam", "second"]);
+        history.replace_from_cache(&path, "# Doc\n\nedited\n", 10, &cache).unwrap();
+        let summaries: Vec<&str> =
+            history.revisions.iter().map(|r| r.summary.as_str()).collect();
+        assert!(!summaries.contains(&"reused"), "{summaries:?}");
+        assert_eq!(
+            history.git.as_ref().unwrap().revisions.iter().map(|r| r.summary.as_str()).collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+        // parent は今の HEAD（索引に載っている文書なので付く）。
+        assert_eq!(history.git.as_ref().unwrap().parent(&path), head_oid(&path));
+        assert!(head_oid(&path).is_some());
     }
 
     #[test]
@@ -1483,7 +1619,7 @@ mod tests {
                 baseline_id: None,
                 baseline_content: None,
             };
-            let history = DocumentHistory::assemble_timeline(&scenario.live, gits, local);
+            let history = DocumentHistory::assemble_timeline(&scenario.live, &gits, local);
             let ids: Vec<String> = history
                 .revisions
                 .iter()

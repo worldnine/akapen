@@ -189,10 +189,15 @@ pub(crate) fn open_editor_at(app: &mut App, terminal: &mut AppTerminal, line: us
         app.flash_err(format!("terminal re-init failed: {e}"));
     }
 
+    // **読み直す前に 1 枚描く。** 入り直した代替画面は白紙で、読み直し
+    // （git・キャッシュ・ハイライト・描き直し）の 0.1〜0.2 秒のあいだ
+    // 何も出ていなかった。エディタに入る前の画面を先に戻しておき、
+    // 読み直しが済んだら書き換わった版で描き直す（`r` と同じ見え方）。
+    let _ = draw_frame(terminal, app);
+
     after_editor(app, &editor, status);
 
-    // Draw immediately — the alternate screen was just re-entered and is
-    // blank. The fresh terminal is guaranteed to be in the correct state.
+    // The fresh terminal is guaranteed to be in the correct state.
     let _ = draw_frame(terminal, app);
 }
 

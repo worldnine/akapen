@@ -2644,6 +2644,7 @@ use crate::comment::Selection;
                 rendered_position: 0,
                 baseline_id: None,
                 baseline_content: None,
+                git: None,
             },
             DocumentHistory {
                 revisions: vec![
@@ -2668,6 +2669,7 @@ use crate::comment::Selection;
                 rendered_position: 0,
                 baseline_id: None,
                 baseline_content: None,
+                git: None,
             },
         ];
         let revision = app.histories[1].revisions[1].context().unwrap();
@@ -4944,6 +4946,7 @@ use crate::comment::Selection;
             rendered_position: 0,
             baseline_id: None,
             baseline_content: Some("line1\n".into()),
+            git: None,
         }];
         select_history(&mut app, 1);
         assert_eq!(app.histories[0].position, 1);
@@ -5037,6 +5040,7 @@ use crate::comment::Selection;
             rendered_position: 0,
             baseline_id: None,
             baseline_content: Some("line1\n".into()),
+            git: None,
         }];
 
         assert_eq!(
