@@ -1092,6 +1092,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
             out.extend(deleted_block_lines(
                 app,
                 &block.content,
+                &block.old_emphasis,
                 width,
                 full_width,
                 deletion_lit,
@@ -1168,7 +1169,17 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         // `hang` is 0 — with which `wrap_spans_tagged` IS `wrap_spans`,
         // plus the attribution.
         let line = &app.spans[idx];
-        let wrapped = wrap_spans_tagged(&line.spans, &line.attrs, width, 0);
+        // 行内の強調: 書き換えペアの新側で、実際に変わった範囲の地を一段濃くする。
+        // 折り返す前に span を範囲の境で割っておく（折り返しは本文を変えない）。
+        let emphasis = if added { app.new_line_emphasis(idx) } else { &[] };
+        let emphasized;
+        let (line_spans, line_attrs) = if emphasis.is_empty() {
+            (line.spans.as_slice(), line.attrs.as_slice())
+        } else {
+            emphasized = emphasize_spans(&line.spans, &line.attrs, emphasis, app.ui_changed_emph_bg);
+            (emphasized.0.as_slice(), emphasized.1.as_slice())
+        };
+        let wrapped = wrap_spans_tagged(line_spans, line_attrs, width, 0);
         // The cursor glyph is bold — it must be findable at a glance
         // (yellow is the comment marker's color), same as view mode. Its
         // color inherits the change mark under it. Mark-less rows keep the
@@ -1271,7 +1282,10 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
                 ));
             }
             for f in frags {
-                let style = if cursor_bg {
+                // 行内の強調はカーソル帯の上でも残す（どこが直ったかを見る場所だから）。
+                let style = if !emphasis.is_empty() && f.style.bg == Some(app.ui_changed_emph_bg) {
+                    f.style
+                } else if cursor_bg {
                     // 琥珀の句は帯の上でも一段濃い琥珀で残す（view と同じ）。
                     f.style.bg(app.decoration_styles.band_over(f.style.bg, app.ui_selected_bg))
                 } else if changed_bg {
@@ -1309,6 +1323,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
             out.extend(deleted_block_lines(
                 app,
                 &block.content,
+                &block.old_emphasis,
                 width,
                 full_width,
                 deletion_lit,
@@ -1364,6 +1379,51 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
     (Text::from(out), composer_cursor)
 }
 
+/// `spans`（1 行分、本文をそのまま連ねたもの）を `ranges`（行頭からのバイト範囲）の
+/// 境で割り、範囲の中の span の地を `bg` にする。帰属は exact なら切り分け、
+/// そうでなければそのまま写す。本文の連結が変わらないので折り返しの行数も変わらない。
+pub(crate) fn emphasize_spans(
+    spans: &[HiSpan],
+    attrs: &[Option<tui_markdown::Attr>],
+    ranges: &[std::ops::Range<usize>],
+    bg: Color,
+) -> (Vec<HiSpan>, Vec<Option<tui_markdown::Attr>>) {
+    let mut out = Vec::with_capacity(spans.len() + ranges.len() * 2);
+    let mut out_attrs = Vec::with_capacity(out.capacity());
+    let mut at = 0usize; // 行頭からのバイト位置
+    for (span, attr) in spans.iter().zip(attrs) {
+        let text = span.text.as_str();
+        let end = at + text.len();
+        // この span の中の切れ目: 範囲の端のうち span の内側にあるもの。
+        let mut cuts: Vec<usize> = ranges
+            .iter()
+            .flat_map(|r| [r.start, r.end])
+            .filter(|&c| c > at && c < end && text.is_char_boundary(c - at))
+            .collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut from = at;
+        for to in cuts.into_iter().chain(std::iter::once(end)) {
+            let piece = &text[from - at..to - at];
+            let inside = ranges.iter().any(|r| r.start <= from && to <= r.end);
+            out.push(HiSpan {
+                text: piece.to_string(),
+                style: if inside { span.style.bg(bg) } else { span.style },
+            });
+            out_attrs.push(attr.as_ref().map(|a| {
+                if a.exact {
+                    a.slice(from - at, to - at, true)
+                } else {
+                    a.clone()
+                }
+            }));
+            from = to;
+        }
+        at = end;
+    }
+    (out, out_attrs)
+}
+
 /// The rows one deleted block paints: per baseline line, a red `▌` mark
 /// and a blank number column on the first wrapped row (the line has no
 /// number in the displayed document), a gutter-width indent on
@@ -1379,6 +1439,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
 fn deleted_block_lines(
     app: &App,
     content: &str,
+    emphasis: &[Vec<std::ops::Range<usize>>],
     width: usize,
     full_width: usize,
     focused: bool,
@@ -1410,14 +1471,19 @@ fn deleted_block_lines(
     };
     let mut out = Vec::new();
     let mut first_row = true;
-    for line in content.split('\n') {
-        let wrapped = wrap_spans(
-            &[HiSpan {
-                text: line.to_string(),
-                style: text_style,
-            }],
-            width,
-        );
+    for (i, line) in content.split('\n').enumerate() {
+        let plain = [HiSpan {
+            text: line.to_string(),
+            style: text_style,
+        }];
+        // 行内の強調: 旧側で変わった範囲の地を一段濃い赤にする（点灯中も残す）。
+        let wrapped = match emphasis.get(i) {
+            Some(ranges) if !ranges.is_empty() => {
+                let (spans, _) = emphasize_spans(&plain, &[None], ranges, app.ui_deleted_emph_bg);
+                wrap_spans(&spans, width)
+            }
+            _ => wrap_spans(&plain, width),
+        };
         for (k, frags) in wrapped.iter().enumerate() {
             let mut spans: Vec<Span> = Vec::new();
             if k == 0 {

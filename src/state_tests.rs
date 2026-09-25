@@ -5148,6 +5148,44 @@ use crate::comment::Selection;
     }
 
     #[test]
+    fn rewritten_words_are_emphasized_inside_the_diff_pair() {
+        let mut app = make_app(3, Mode::Source);
+        app.source.content = "line1\nthe quick red fox jumps\nline3\n".into();
+        app.spans = app
+            .highlight
+            .highlight_with(&app.source.content, syntax_for(&app.files[0]));
+        app.cursor = 0;
+        set_baseline(&mut app, "line1\nthe quick brown fox jumps\nline3\n");
+        let find = |line: &ratatui::text::Line, text: &str| {
+            line.spans
+                .iter()
+                .find(|s| s.content.as_ref() == text)
+                .map(|s| s.style.bg)
+        };
+
+        let (text, _) = build_rows(&app, 30, 75);
+        // Rows: line1 | deleted "brown" row | changed "red" row | line3.
+        assert_eq!(text.lines.len(), 4);
+        assert_eq!(find(&text.lines[1], "brown"), Some(Some(app.ui_deleted_emph_bg)));
+        assert_eq!(find(&text.lines[2], "red"), Some(Some(app.ui_changed_emph_bg)));
+        // 変わっていない部分は帯のまま。
+        assert!(
+            text.lines[2]
+                .spans
+                .iter()
+                .filter(|s| s.content.contains("quick"))
+                .all(|s| s.style.bg == Some(app.ui_changed_bg)),
+            "unchanged text stays on the plain band"
+        );
+
+        // カーソル帯の上でも強調は残る。
+        app.cursor = 1;
+        let (text, _) = build_rows(&app, 30, 75);
+        assert_eq!(find(&text.lines[1], "brown"), Some(Some(app.ui_deleted_emph_bg)));
+        assert_eq!(find(&text.lines[2], "red"), Some(Some(app.ui_changed_emph_bg)));
+    }
+
+    #[test]
     fn wrapped_changed_and_deleted_rows_carry_the_mark_on_every_row() {
         let mut app = make_app(2, Mode::Source);
         // Both the current line 2 (changed, green) and its deleted
@@ -5162,6 +5200,7 @@ use crate::comment::Selection;
         app.comparison_deleted_blocks = vec![history::DeletedBlock {
             anchor: 1,
             content: "X".repeat(160),
+            ..Default::default()
         }];
         app.ensure_row_cache(75);
         app.refresh_line_rows();

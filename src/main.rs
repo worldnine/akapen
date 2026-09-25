@@ -2408,6 +2408,7 @@ fn ghost_blocks(
                 anchor.min(new_lines.len())
             },
             content,
+            ..Default::default()
         });
     }
     blocks

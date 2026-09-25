@@ -68,6 +68,7 @@
             &[history::DeletedBlock {
                 anchor: 0,
                 content: "## Gone\n\nold text".into(),
+                ..Default::default()
             }],
             &highlight,
             Path::new("doc.md"),
