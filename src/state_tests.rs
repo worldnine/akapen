@@ -7223,11 +7223,15 @@ fn an_external_command_annotates_the_document_without_blocking_the_loop() {
     // 戻ってきた時点ではまだ答えは無い — これが「固まらない」の中身。
     assert!(app.semantic_doc.is_none(), "解析はまだ走っているだけ");
     assert_eq!(app.semantic_inflight, Some(1));
-    // 読み出しは黙らずに「解析中」と言う。
+    // 読み出しは黙らずに「解析中」と言い、待ちの印が回る（描き直しも
+    // 印の間隔に上がる）。
     let readout = app.marks_readout(60).expect("読み出しが出ること").text();
     assert!(readout.contains("analyzing"), "{readout}");
+    assert!(readout.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c)), "{readout}");
+    assert!(app.waiting(), "答え待ちのあいだは描き直しを速める");
 
     pump_until_idle(&mut app, "最初の解析");
+    assert!(!app.waiting(), "答えが来たら普段の間隔に戻る");
     let document = app.semantic_doc.as_ref().expect("注釈が入ること");
     assert_eq!(
         document.atoms,

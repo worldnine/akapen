@@ -404,8 +404,11 @@ impl DocumentHistory {
         limit: usize,
         cache: &SnapshotCache,
     ) -> anyhow::Result<Self> {
-        let local = cache.record_with_parent(path, live, head_oid(path))?;
-        Ok(Self::load_with_local(path, live, limit, local))
+        // リポジトリの根は 1 回だけ引く（HEAD と履歴の両方が要る）。
+        let root = repo_root(path);
+        let local = cache.record_with_parent(path, live, head_oid_in(root.as_deref(), path))?;
+        let gits = load_git_revisions_in(root.as_deref(), path, limit);
+        Ok(Self::assemble_timeline(live, gits, local))
     }
 
     pub(crate) fn open_cached(
@@ -414,12 +417,14 @@ impl DocumentHistory {
         limit: usize,
         cache: &SnapshotCache,
     ) -> anyhow::Result<Self> {
-        let local = cache.open_with_parent(path, live, head_oid(path))?;
-        Ok(Self::load_with_local(path, live, limit, local))
+        let root = repo_root(path);
+        let local = cache.open_with_parent(path, live, head_oid_in(root.as_deref(), path))?;
+        let gits = load_git_revisions_in(root.as_deref(), path, limit);
+        Ok(Self::assemble_timeline(live, gits, local))
     }
 
     fn load_with_local(path: &Path, live: &str, limit: usize, local: CachedFile) -> Self {
-        let gits = load_git_revisions(path, limit);
+        let gits = load_git_revisions_in(repo_root(path).as_deref(), path, limit);
         Self::assemble_timeline(live, gits, local)
     }
 
@@ -580,21 +585,27 @@ impl DocumentHistory {
     }
 }
 
-fn load_git_revisions(path: &Path, limit: usize) -> Vec<Revision> {
+/// `root`（[`repo_root`] の答え）の中で `path` のコミット済みの版を新しい順に
+/// 最大 `limit` 本。git の外なら空。
+///
+/// **git の起動は 2 回に収める**（`log` と `cat-file --batch`）。版ごとに
+/// `git show` を起こしていた頃は 1 本 15 ms 前後かかり、19 コミットの文書で
+/// 起動と再読み込みのたびに 0.3 秒、64 本なら 1 秒を払っていた。
+fn load_git_revisions_in(root: Option<&Path>, path: &Path, limit: usize) -> Vec<Revision> {
     let mut revisions = Vec::new();
 
-    let Some(root) = repo_root(path) else {
+    let Some(root) = root else {
         return revisions;
     };
     let abs = absolutize(path);
-    let Ok(rel) = abs.strip_prefix(&root) else {
+    let Ok(rel) = abs.strip_prefix(root) else {
         return revisions;
     };
     let format = "%H%x1f%h%x1f%ct%x1f%s";
     let output = Command::new("git")
         .arg("-C")
-        .arg(&root)
-        .args(["log", "--follow", &format!("--format={format}"), "--"])
+        .arg(root)
+        .args(["log", "--follow", &format!("-n{limit}"), &format!("--format={format}"), "--"])
         .arg(rel)
         .output();
     let Ok(output) = output else {
@@ -604,44 +615,126 @@ fn load_git_revisions(path: &Path, limit: usize) -> Vec<Revision> {
         return revisions;
     }
 
-    for line in String::from_utf8_lossy(&output.stdout).lines().take(limit) {
-        // The commit time sits BEFORE the free-form subject, so a
-        // subject can never corrupt it.
-        let mut fields = line.splitn(4, '\x1f');
-        let (Some(id), Some(short_id), Some(commit_secs), Some(summary)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
+    struct Commit<'a> {
+        id: &'a str,
+        short_id: &'a str,
+        summary: &'a str,
+        timestamp_ms: Option<u64>,
+    }
+    let log = String::from_utf8_lossy(&output.stdout);
+    let commits: Vec<Commit> = log
+        .lines()
+        .take(limit)
+        .filter_map(|line| {
+            // The commit time sits BEFORE the free-form subject, so a
+            // subject can never corrupt it.
+            let mut fields = line.splitn(4, '\x1f');
+            let (Some(id), Some(short_id), Some(commit_secs), Some(summary)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                return None;
+            };
+            let timestamp_ms = commit_secs.parse::<u64>().ok().map(|secs| secs * 1000);
+            Some(Commit { id, short_id, summary, timestamp_ms })
+        })
+        .collect();
+    let rel = rel.to_string_lossy();
+    let specs: Vec<String> = commits.iter().map(|c| format!("{}:{rel}", c.id)).collect();
+    // `cat-file --batch` が使えない（改行を含むパス・古い git・出力が読めない）
+    // ときは、版ごとの `git show` に戻る。遅いが、読める版は同じである。
+    let blobs = read_blobs(root, &specs)
+        .unwrap_or_else(|| specs.iter().map(|spec| show_blob(root, spec)).collect());
+
+    for (commit, blob) in commits.iter().zip(blobs) {
+        // 無い版（`--follow` が改名の前へ辿った先など）は飛ばす。
+        let Some(bytes) = blob else {
             continue;
         };
-        let timestamp_ms = commit_secs.parse::<u64>().ok().map(|secs| secs * 1000);
-        let spec = format!("{id}:{}", rel.to_string_lossy());
-        let Ok(shown) = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["show", "--no-ext-diff", &spec])
-            .output()
-        else {
-            continue;
-        };
-        if !shown.status.success() {
-            continue;
-        }
-        let Ok(content) = String::from_utf8(shown.stdout) else {
+        let Ok(content) = String::from_utf8(bytes) else {
             continue;
         };
         if revisions.last().is_some_and(|r| r.content == content) {
             continue;
         }
         revisions.push(Revision {
-            id: Some(id.to_string()),
-            short_id: short_id.to_string(),
-            summary: summary.to_string(),
+            id: Some(commit.id.to_string()),
+            short_id: commit.short_id.to_string(),
+            summary: commit.summary.to_string(),
             content,
             source: RevisionSource::Git,
-            timestamp_ms,
+            timestamp_ms: commit.timestamp_ms,
         });
     }
     revisions
+}
+
+/// `specs`（`<commit>:<path>`）の blob を `git cat-file --batch` 1 本で読む。
+/// 並びは `specs` と同じで、無いものは `None`。読めなければ全体が `None`。
+fn read_blobs(root: &Path, specs: &[String]) -> Option<Vec<Option<Vec<u8>>>> {
+    use std::io::Write;
+    use std::process::Stdio;
+    // 入力は 1 行 1 本なので、改行を含むパスは渡せない。
+    if specs.iter().any(|spec| spec.contains('\n')) {
+        return None;
+    }
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    let input: String = specs.iter().map(|spec| format!("{spec}\n")).collect();
+    // 入力は別のスレッドで書く。出力のパイプが詰まると git は入力を
+    // 読むのをやめるので、同じスレッドで書き切ってから読むと止まりうる。
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output().ok()?;
+    writer.join().ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_batch(&output.stdout, specs.len())
+}
+
+/// `git cat-file --batch` の出力を blob の列へ。
+///
+/// 1 本ごとに `<oid> <type> <size>\n<中身>\n`、無ければ `<spec> missing\n`
+/// （`ambiguous` も同じ形）。blob でないもの（ディレクトリだった版）も `None`。
+fn parse_batch(mut out: &[u8], count: usize) -> Option<Vec<Option<Vec<u8>>>> {
+    let mut blobs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let newline = out.iter().position(|&b| b == b'\n')?;
+        let header = std::str::from_utf8(&out[..newline]).ok()?;
+        out = &out[newline + 1..];
+        // spec は空白を含みうるので、後ろから切る。
+        let mut fields = header.rsplitn(3, ' ');
+        let last = fields.next()?;
+        if matches!(last, "missing" | "ambiguous") {
+            blobs.push(None);
+            continue;
+        }
+        let kind = fields.next()?;
+        let size: usize = last.parse().ok()?;
+        let body = out.get(..size)?;
+        blobs.push((kind == "blob").then(|| body.to_vec()));
+        // 中身の後ろの改行まで進む。
+        out = out.get(size + 1..)?;
+    }
+    Some(blobs)
+}
+
+/// 1 本だけ `git show` で読む（[`read_blobs`] が使えないときの道）。
+fn show_blob(root: &Path, spec: &str) -> Option<Vec<u8>> {
+    let shown = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", "--no-ext-diff", spec])
+        .output()
+        .ok()?;
+    shown.status.success().then_some(shown.stdout)
 }
 
 impl DocumentHistory {
@@ -784,10 +877,15 @@ fn repo_root(path: &Path) -> Option<PathBuf> {
 /// 観測時点の HEAD commit oid。git 環境でなければ None（= 非 git は従来の観測順のまま）。
 /// 失敗（非 git・git エラー・untracked）はすべて None に落とす（soft failure が既存の方針）。
 pub(crate) fn head_oid(path: &Path) -> Option<String> {
-    let root = repo_root(path)?;
+    head_oid_in(repo_root(path).as_deref(), path)
+}
+
+/// [`head_oid`] を、引いてある根（[`repo_root`] の答え）で。
+fn head_oid_in(root: Option<&Path>, path: &Path) -> Option<String> {
+    let root = root?;
     let output = Command::new("git")
         .arg("-C")
-        .arg(&root)
+        .arg(root)
         .args(["rev-parse", "HEAD"])
         .output()
         .ok()?;
@@ -799,10 +897,10 @@ pub(crate) fn head_oid(path: &Path) -> Option<String> {
     // コミットが無い以上 parent を付けても orphan 扱いになるだけなので、
     // 「観測時点の血統」という意味でも None が正直。
     let absolute = absolutize(path);
-    let rel = absolute.strip_prefix(&root).ok()?;
+    let rel = absolute.strip_prefix(root).ok()?;
     let tracked = Command::new("git")
         .arg("-C")
-        .arg(&root)
+        .arg(root)
         .args(["ls-files", "--error-unmatch", "--"])
         .arg(rel)
         .output()
@@ -829,7 +927,7 @@ mod tests {
     use super::{
         DocumentHistory, Revision, RevisionSource, anchored_line, head_oid,
         local_revision_summary, relative_age, baseline_transition, revision_id, same_revision,
-        comparison_transition, intraline_emphasis,
+        comparison_transition, intraline_emphasis, parse_batch,
     };
     use crate::snapshot::{CachedFile, CachedSnapshot, SnapshotCache};
     use serde::Deserialize;
@@ -1184,6 +1282,58 @@ mod tests {
         assert_eq!(history.revisions[1].summary, "second");
         assert_eq!(history.revisions[1].content, "# Doc\n\nsecond\n");
         assert_eq!(history.revisions[2].content, "# Doc\n\nfirst\n");
+    }
+
+    #[test]
+    fn the_batch_output_is_read_blob_by_blob_in_order() {
+        // 中身の改行・空の blob・無い版・ディレクトリだった版を、並びを崩さずに。
+        let out = b"aaa blob 7\nx\ny\n z\n\n\
+                    c0:dir/a b.md missing\n\
+                    bbb blob 0\n\n\
+                    ccc tree 3\nabc\n";
+        let blobs = parse_batch(out, 4).unwrap();
+        assert_eq!(
+            blobs,
+            vec![Some(b"x\ny\n z\n".to_vec()), None, Some(Vec::new()), None]
+        );
+        // 途中で切れた出力は読めない（全体を `None` にして `git show` に戻る）。
+        assert_eq!(parse_batch(b"aaa blob 9\nshort\n", 1), None);
+        assert_eq!(parse_batch(b"", 1), None);
+    }
+
+    #[test]
+    fn a_path_with_spaces_and_a_rename_read_the_same_versions_as_git_show() {
+        // `--follow` は改名の前まで辿るが、版は今の名前で引くので改名前の
+        // 版は無い（`git show` の頃と同じ）。空白を含む名前も 1 本で引ける。
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "akapen@example.invalid"]);
+        git(&["config", "user.name", "akapen test"]);
+        std::fs::write(dir.path().join("old.md"), "# Doc\n\nbefore the rename\n").unwrap();
+        git(&["add", "old.md"]);
+        git(&["commit", "-qm", "first"]);
+        git(&["mv", "old.md", "my doc.md"]);
+        git(&["commit", "-qm", "rename"]);
+        let path = dir.path().join("my doc.md");
+        std::fs::write(&path, "# Doc\n\nafter\n").unwrap();
+        git(&["commit", "-qam", "edit"]);
+        std::fs::write(&path, "# Doc\n\nworking\n").unwrap();
+
+        let history = DocumentHistory::load(&path, "# Doc\n\nworking\n", 10);
+        let summaries: Vec<&str> =
+            history.revisions.iter().map(|r| r.summary.as_str()).collect();
+        assert_eq!(summaries[1..], ["edit", "rename"], "{summaries:?}");
+        assert_eq!(history.revisions[1].content, "# Doc\n\nafter\n");
+        assert_eq!(history.revisions[2].content, "# Doc\n\nbefore the rename\n");
     }
 
     #[test]

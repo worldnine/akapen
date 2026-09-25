@@ -318,7 +318,7 @@ pub(crate) fn draw(f: &mut Frame, app: &App, dock: Dock) {
     // 引き直すと枠の色（履歴の色・演出）と食い違う。
     let (decided, total) = app.review_counts();
     let title_text = if app.review_inflight > 0 {
-        " review · analyzing… ".to_string()
+        format!(" review · {} ", app.busy_text(app.review_since))
     } else {
         format!(" review ({decided}/{total}) ")
     };

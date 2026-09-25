@@ -483,6 +483,35 @@ fn kept(text: impl Into<String>) -> FooterHint {
     FooterHint { text: text.into(), keep: true }
 }
 
+/// 待ちの印のコマ（点字の 8 コマ。どれも幅 1 なので、回っても行は揺れない）。
+const SPINNER: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+
+/// 待ちの印の 1 コマの長さ。イベントループは待ちのあいだ、この間隔で
+/// 描き直す（[`App::waiting`]）。
+pub(crate) const SPINNER_FRAME_MS: u64 = 80;
+
+/// 経過秒を足し始めるまで。linter は温まっていて 2〜3 秒、初回は 10 秒
+/// ほどかかる。
+const SPINNER_ELAPSED_AFTER_SECS: u64 = 2;
+
+/// **待ちの印** — 外部コマンド（linter・意味解析）の答えを待っているあいだの
+/// `⠹ analyzing…`。
+///
+/// 点字のコマが回り、2 秒を越えたら経過秒が付く（`⠹ analyzing… 3s`）。
+/// 止まっているのではなく待っているのだと、コマと数字の進みで分かる。
+/// コマは描いた回数ではなく**待ち始めからの経過**で決める — 描く間隔が
+/// 揺れても（入力の連打・重い描画）回る速さは変わらない。
+pub(crate) fn busy_text(since: std::time::Instant, now: std::time::Instant) -> String {
+    let elapsed = now.saturating_duration_since(since);
+    let frame = SPINNER[(elapsed.as_millis() / u128::from(SPINNER_FRAME_MS)) as usize % SPINNER.len()];
+    let secs = elapsed.as_secs();
+    if secs >= SPINNER_ELAPSED_AFTER_SECS {
+        format!("{frame} analyzing… {secs}s")
+    } else {
+        format!("{frame} analyzing…")
+    }
+}
+
 /// **フッタ右下の読み出し** — `Essential · 20%` と、座布団に乗る本数。
 ///
 /// 2 つに割れているのは**色が違う**からである。問いの名前と % は薄い灰
@@ -1171,7 +1200,8 @@ mod footer_layout_tests {
     //! 1 段縮める → 読み出しごと引き下がる。`? help` と位置は最後まで残り、
     //! 読み出しの側は**座布団の本数**が最後まで残る。
 
-    use super::{FooterHint, Readout, footer_layout};
+    use super::{FooterHint, Readout, SPINNER_FRAME_MS, busy_text, footer_layout};
+    use std::collections::HashSet;
     use unicode_width::UnicodeWidthStr;
 
     /// バッジの幅（`VIEW` などは全部 8 桁）。
@@ -1344,6 +1374,27 @@ mod footer_layout_tests {
         assert_eq!(r.count(), "");
         assert!(!r.cushioned());
         assert!(r.dim.contains("analyzing"));
+    }
+
+    #[test]
+    fn the_busy_mark_turns_with_time_and_adds_seconds_after_two() {
+        use std::time::{Duration, Instant};
+        let since = Instant::now();
+        let at = |ms: u64| busy_text(since, since + Duration::from_millis(ms));
+        // コマは経過で進み、8 コマで一周する。
+        assert_eq!(at(0), "⠋ analyzing…");
+        assert_eq!(at(SPINNER_FRAME_MS), "⠙ analyzing…");
+        assert_eq!(at(SPINNER_FRAME_MS * 8), "⠋ analyzing…");
+        // どのコマでも幅は同じ（行が揺れない）。
+        let widths: HashSet<usize> =
+            (0..8).map(|i| at(SPINNER_FRAME_MS * i).width()).collect();
+        assert_eq!(widths.len(), 1, "{widths:?}");
+        // 2 秒を越えたら経過秒が付く。
+        assert!(!at(1_999).ends_with('s'), "{}", at(1_999));
+        assert!(at(2_000).ends_with(" 2s"), "{}", at(2_000));
+        assert!(at(12_345).ends_with(" 12s"), "{}", at(12_345));
+        // 時計が戻っても（since が now より後）落ちない。
+        assert_eq!(busy_text(since + Duration::from_secs(1), since), "⠋ analyzing…");
     }
 
     #[test]

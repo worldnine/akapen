@@ -107,6 +107,9 @@ impl SnapshotCache {
     /// also the initial baseline.
     ///
     /// 互換ラッパ。parent を知らない既存の観測は None として記録する。
+    /// 本番の呼び手は [`Self::acknowledge`] だけだったが、いまは
+    /// [`Self::observe`] を直に呼ぶので、残るのはテストだけである。
+    #[cfg(test)]
     pub(crate) fn record(&self, path: &Path, content: &str) -> Result<CachedFile> {
         self.record_with_parent(path, content, None)
     }
@@ -122,6 +125,21 @@ impl SnapshotCache {
         content: &str,
         parent: Option<String>,
     ) -> Result<CachedFile> {
+        let (_, index, trimmed) = self.observe(path, content, parent)?;
+        self.gc_if_needed(trimmed)?;
+        self.materialize(&index)
+    }
+
+    /// [`Self::record_with_parent`] の索引の側だけ — 観測を索引に書き、
+    /// 書いた索引と、per-file の刈り込みで版が外れたかを返す。GC と
+    /// 本文の展開は呼び手がする（開くときと既読にするときは、この後で
+    /// 索引をもう一度書き換えてから 1 回だけ）。
+    fn observe(
+        &self,
+        path: &Path,
+        content: &str,
+        parent: Option<String>,
+    ) -> Result<(PathBuf, FileIndex, bool)> {
         self.ensure_dirs()?;
         let canonical = canonical_path(path);
         let mut index = self.load_index(&canonical)?.unwrap_or_else(|| FileIndex {
@@ -157,10 +175,9 @@ impl SnapshotCache {
         if index.baseline.is_none() {
             index.baseline = Some(id);
         }
-        trim_file_index(&mut index, self.max_file_snapshots);
+        let trimmed = trim_file_index(&mut index, self.max_file_snapshots);
         self.save_index(&canonical, &index)?;
-        self.gc_global()?;
-        self.materialize(&index)
+        Ok((canonical, index, trimmed))
     }
 
     /// Start a new UI session for a file. Comment pins belong to the
@@ -174,17 +191,13 @@ impl SnapshotCache {
         content: &str,
         parent: Option<String>,
     ) -> Result<CachedFile> {
-        let _ = self.record_with_parent(path, content, parent)?;
-        let canonical = canonical_path(path);
-        let mut index = self
-            .load_index(&canonical)?
-            .context("snapshot index disappeared while opening")?;
+        let (canonical, mut index, observed_trim) = self.observe(path, content, parent)?;
         for snapshot in &mut index.snapshots {
             snapshot.pinned = false;
         }
-        trim_file_index(&mut index, self.max_file_snapshots);
+        let trimmed = trim_file_index(&mut index, self.max_file_snapshots);
         self.save_index(&canonical, &index)?;
-        self.gc_global()?;
+        self.gc_if_needed(observed_trim || trimmed)?;
         self.materialize(&index)
     }
 
@@ -199,15 +212,11 @@ impl SnapshotCache {
 
     /// Move the durable baseline to `content`.
     pub(crate) fn acknowledge(&self, path: &Path, content: &str) -> Result<CachedFile> {
-        let _ = self.record(path, content)?;
-        let canonical = canonical_path(path);
-        let mut index = self
-            .load_index(&canonical)?
-            .context("snapshot index disappeared while acknowledging")?;
+        let (canonical, mut index, observed_trim) = self.observe(path, content, None)?;
         index.baseline = Some(content_id(content.as_bytes()));
-        trim_file_index(&mut index, self.max_file_snapshots);
+        let trimmed = trim_file_index(&mut index, self.max_file_snapshots);
         self.save_index(&canonical, &index)?;
-        self.gc_global()?;
+        self.gc_if_needed(observed_trim || trimmed)?;
         self.materialize(&index)
     }
 
@@ -229,7 +238,7 @@ impl SnapshotCache {
         self.write_blob(&id, content)?;
         index.baseline = Some(id);
         self.save_index(&canonical, &index)?;
-        self.gc_global()?;
+        self.gc_if_needed(false)?;
         self.materialize(&index)
     }
 
@@ -259,9 +268,9 @@ impl SnapshotCache {
         if index.baseline.is_none() {
             index.baseline = Some(id);
         }
-        trim_file_index(&mut index, self.max_file_snapshots);
+        let trimmed = trim_file_index(&mut index, self.max_file_snapshots);
         self.save_index(&canonical, &index)?;
-        self.gc_global()?;
+        self.gc_if_needed(trimmed)?;
         Ok(())
     }
 
@@ -368,6 +377,34 @@ impl SnapshotCache {
             baseline_id: index.baseline.clone(),
             baseline_content,
         })
+    }
+
+    /// 全索引を読む GC（[`Self::gc_global`]）を、要るときだけ走らせる。
+    ///
+    /// 要るのは 2 つ: per-file の刈り込みで索引から外れた版がある（その blob は
+    /// 孤児になりうる）か、`blobs/` の総量が上限を超えている。総量は孤児も
+    /// 含むので参照されている分の上界で、これが上限以下なら追い出す版は無い。
+    ///
+    /// **全索引を読むのは重い** — 434 本で 80 ms かかり、開くたびに 2 回、
+    /// 再読み込みのたびに 1 回払っていた。`blobs/` の stat は 840 個で 4 ms。
+    fn gc_if_needed(&self, trimmed: bool) -> Result<()> {
+        if trimmed || self.blobs_total() > self.max_cache_bytes {
+            return self.gc_global();
+        }
+        Ok(())
+    }
+
+    /// `blobs/` にある圧縮済みの本文の総バイト数（孤児を含む）。
+    fn blobs_total(&self) -> u64 {
+        let Ok(entries) = fs::read_dir(self.root.join("blobs")) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("gz"))
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|meta| meta.len())
+            .sum()
     }
 
     /// Enforce the global byte limit by deleting the oldest seen,
@@ -531,7 +568,9 @@ fn dedupe_snapshots(index: &mut FileIndex) {
     index.snapshots = unique;
 }
 
-fn trim_file_index(index: &mut FileIndex, limit: usize) {
+/// 外した版があれば `true`（その blob は孤児になりうる）。
+fn trim_file_index(index: &mut FileIndex, limit: usize) -> bool {
+    let before = index.snapshots.len();
     while index.snapshots.len() > limit {
         let baseline_pos = index
             .baseline
@@ -550,6 +589,7 @@ fn trim_file_index(index: &mut FileIndex, limit: usize) {
         let Some(removable) = removable else { break };
         index.snapshots.remove(removable);
     }
+    index.snapshots.len() < before
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
@@ -703,6 +743,31 @@ mod tests {
             2,
             "unreferenced compressed bodies are swept"
         );
+    }
+
+    #[test]
+    fn opening_an_unchanged_file_under_the_limit_does_not_sweep_the_whole_cache() {
+        // 全索引を読む掃除は、刈り込みが起きたか総量が上限を超えたときだけ。
+        // 開くたびに払うと、キャッシュが育つほど文書が出るのが遅くなる
+        // （索引 434 本で 1 回 80 ms、開くたびに 2 回）。孤児はその次の
+        // 掃除まで残るが、総量の上界には数えてある。
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        fs::write(&file, "zero").unwrap();
+        let root = dir.path().join("cache");
+        let cache = SnapshotCache::with_limits(root.clone(), 32, u64::MAX);
+        cache.open_with_parent(&file, "zero", None).unwrap();
+        let orphan = root.join("blobs").join("orphan.gz");
+        fs::write(&orphan, b"x").unwrap();
+
+        cache.open_with_parent(&file, "zero", None).unwrap();
+        cache.record(&file, "one").unwrap();
+        assert!(orphan.exists(), "上限の内側では全体を舐めない");
+
+        // 上限を越えたら（孤児を含む総量で測る）掃除が走り、孤児も消える。
+        let tight = SnapshotCache::with_limits(root.clone(), 32, 1);
+        tight.open_with_parent(&file, "one", None).unwrap();
+        assert!(!orphan.exists(), "上限を越えたら全体を掃除する");
     }
 
     #[test]
