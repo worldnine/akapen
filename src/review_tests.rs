@@ -948,6 +948,11 @@ fn e_in_the_list_edits_the_candidate_and_lands_on_the_next_one() {
     assert!(app.review_inflight > 0, "再解析を頼んでいる");
     let screen = list_screen(&mut app);
     assert!(screen.contains("analyzing"), "解析中と分かる:\n{screen}");
+    assert!(
+        screen.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c)),
+        "一覧の題で待ちの印が回る:\n{screen}"
+    );
+    assert!(app.waiting());
 
     let doc = app.source.content.clone();
     deliver(

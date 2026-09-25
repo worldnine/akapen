@@ -572,9 +572,10 @@ fn run(config: Config) -> Result<()> {
     // (`activate_first_file` is what puts `app.source` in place.)
     app.reanalyze_semantics();
     // Command mode always runs in ASCII so j/k etc. are never swallowed by
-    // the IME. The first attempt may no-op while the helper compiles on
-    // first run; the event loop retries until it sticks.
-    app.ime_forced = app.ime_session.force_ascii();
+    // the IME. **最初の画面を描いてから**切り替える（イベントループが
+    // 描いた直後に試す）: ヘルパーを 2 回（get と abc）起こすので 0.15 秒
+    // ほどかかり、ここで呼ぶとその分だけ文書が出るのが遅れる。初回は
+    // ヘルパーのコンパイル中で空振りしうるが、ループが効くまで試し直す。
     if app.source.len() > HUGE_FILE {
         app.flash(format!(
             "warning: {} lines — view mode keeps the whole render in memory",
@@ -807,7 +808,14 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
         // While an effect animates, tick fast enough for smooth frames
         // (the idle cadence of 10 fps would cut a 450 ms stream into 4-5
         // jumps); otherwise keep the lazy 100 ms poll.
-        let tick = if app.has_active_fx() { FX_TICK_MS } else { TICK_MS };
+        // 外部コマンドの答え待ちのあいだは、待ちの印が回る間隔で描く。
+        let tick = if app.has_active_fx() {
+            FX_TICK_MS
+        } else if app.waiting() {
+            crate::chrome::SPINNER_FRAME_MS
+        } else {
+            TICK_MS
+        };
         if event::poll(Duration::from_millis(tick))? {
             for _ in 0..MAX_EVENTS_PER_FRAME {
                 if !event::poll(Duration::ZERO)? {

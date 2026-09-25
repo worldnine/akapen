@@ -529,6 +529,9 @@ pub(crate) struct App {
     /// any. Drives the `analyzing…` readout and is cleared when THAT
     /// generation's answer (or a newer one) arrives.
     pub(crate) semantic_inflight: Option<u64>,
+    /// [`App::semantic_inflight`] が立った時刻。待ちの印のコマと経過秒の
+    /// 起点である（[`crate::chrome::busy_text`]）。
+    pub(crate) semantic_since: Option<Instant>,
     /// The worker threads' end of the line. Created with the source (so
     /// a session without `--semantic-cmd` never allocates one) and kept
     /// for the whole session: each analysis clones the sender, and the
@@ -607,6 +610,8 @@ pub(crate) struct App {
     pub(crate) review_generation: u64,
     /// いま走っているルールの本数。`Review · analyzing…` の出所である。
     pub(crate) review_inflight: usize,
+    /// Review の解析を頼んだ時刻（[`App::semantic_since`] と同じ役）。
+    pub(crate) review_since: Option<Instant>,
     /// **遅延の起点を越えたか。** `R` の最初の 1 打が立てる。marks の
     /// [`App::semantic_armed`] と同じ理由（開いただけの文書に解析費用を
     /// 払わない）で、**別の旗である** — marks を使ったからといって
@@ -790,6 +795,7 @@ impl App {
             semantic_doc: None,
             semantic_generation: 0,
             semantic_inflight: None,
+            semantic_since: None,
             semantic_results: None,
             semantic_armed: false,
             marks_questions: None,
@@ -799,6 +805,7 @@ impl App {
             review_candidates: Vec::new(),
             review_generation: 0,
             review_inflight: 0,
+            review_since: None,
             review_armed: false,
             review_results: None,
             review_dismissed: HashSet::new(),
@@ -940,6 +947,7 @@ impl App {
                 let tx = channel.tx.clone();
                 let source = self.source.content.clone();
                 self.semantic_inflight = Some(generation);
+                self.semantic_since = Some(Instant::now());
                 std::thread::spawn(move || {
                     let result = provider
                         .analyze(&source, &question)
@@ -1231,7 +1239,8 @@ impl App {
             // 解析中だけは**問いの名前から落とす**。まだ 1 本も光っていない
             // ので「なぜ光っているか」は無く、要るのは「待っている」の方。
             let asking = question.unwrap_or_else(|| "…".to_string());
-            return state(vec![format!("{asking} · analyzing…"), "analyzing…".to_string()]);
+            let busy = self.busy_text(self.semantic_since);
+            return state(vec![format!("{asking} · {busy}"), busy]);
         }
         if self.marks_has_scores() == Some(false) {
             return state(vec![
@@ -1548,6 +1557,7 @@ impl App {
         self.load_dismissed();
         let generation = self.review_generation;
         self.review_inflight = rules.len() + usize::from(lint.is_some());
+        self.review_since = Some(Instant::now());
         if let Some(provider) = provider {
             for rule in rules {
                 let provider = provider.clone();
@@ -2226,7 +2236,7 @@ impl App {
             return Vec::new();
         }
         if self.review_inflight > 0 {
-            return vec!["Review · analyzing…".to_string()];
+            return vec![format!("Review · {}", self.busy_text(self.review_since))];
         }
         let (decided, total) = self.review_counts();
         if total == 0 {
@@ -2676,6 +2686,22 @@ impl App {
 
     pub(crate) fn is_historical(&self) -> bool {
         self.history().is_some_and(|history| history.position > 0)
+    }
+
+    /// **外部コマンドの答えを待っているか**（意味解析・Review の linter と
+    /// ルール）。待っているあいだ、イベントループは待ちの印が回る間隔
+    /// （[`crate::chrome::SPINNER_FRAME_MS`]）で描き直す。
+    ///
+    /// `--no-fx` でも止めない — 印は飾りではなく「まだ終わっていない」と
+    /// いう状態の表示である。
+    pub(crate) fn waiting(&self) -> bool {
+        self.semantic_inflight.is_some() || (self.review_armed && self.review_inflight > 0)
+    }
+
+    /// 待ちの印（`⠹ analyzing… 3s`）。起点が無ければ今から数える。
+    pub(crate) fn busy_text(&self, since: Option<Instant>) -> String {
+        let now = Instant::now();
+        crate::chrome::busy_text(since.unwrap_or(now), now)
     }
 
     /// Whether any tachyonfx effect is currently animating (toast fade,
