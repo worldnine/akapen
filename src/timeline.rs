@@ -198,6 +198,7 @@ mod tests {
             rendered_position: 0,
             baseline_id: None,
             baseline_content: None,
+            git: None,
         }
     }
 

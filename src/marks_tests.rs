@@ -967,6 +967,7 @@ fn the_readout_steps_aside_in_the_past() {
         rendered_position: 1,
         baseline_id: None,
         baseline_content: None,
+        git: None,
     }];
     assert!(app.is_historical());
 
