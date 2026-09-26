@@ -164,7 +164,7 @@ tmux は専用のソケット（`-L akapen-yourcall`）と専用の設定（`you
   初版の 3 本はつまみの上限と同じ数だが、4 位は 0.69 / 0.48 と離れていて、
   直した版の 0 本はつまみではなく足切り（0.20）で決まっている
 - Your call は数字の `4` で直接選ばず、`m` のダイアログを 1 秒ほど見せてから `j` で
-  `▸` を 1 行ずつ（0.4 秒）`4 Your call` まで動かし、一拍置いて `Enter` で選ぶ。
+  `❯` を 1 行ずつ（0.4 秒）`4 Your call` まで動かし、一拍置いて `Enter` で選ぶ。
   何を選んだかが見る人に分かるように
 - `r` で読み込むと、選んでいた問い（Your call）がそのまま直した版に当て直される。
   もう一度選び直す必要は無い
@@ -174,7 +174,7 @@ tmux は専用のソケット（`-L akapen-yourcall`）と専用の設定（`you
 | 秒 | 操作 | 上: akapen | 下: agent |
 | --- | --- | --- | --- |
 | 0–1 | 開いたまま | 計画書（判断を求める所は見た目では分からない） | `waiting for review comments from akapen…` |
-| 1–4 | `m` → `j` `j` `j` → `Enter` | ダイアログの `▸` が `1 Essential` から `4 Your call` へ 1 行ずつ | 同上 |
+| 1–4 | `m` → `j` `j` `j` → `Enter` | ダイアログの `❯` が `1 Essential` から `4 Your call` へ 1 行ずつ | 同上 |
 | 4–6 | （待つ） | `asking: Your call` → Your call · 20% **3**。判断を求める 3 行の、問いの文に琥珀 | 同上 |
 | 6–14 | `]m` `c` 答え `Enter` × 3 | 3 行の下にコメントのカード | 同上 |
 | 14–15 | `s` | `copied 3 comment(s) · sent via ./agent.sh` | `3 comment(s) received` と、行番号つきの答え 3 つ |

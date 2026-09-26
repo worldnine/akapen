@@ -793,7 +793,7 @@ fn draw_view(f: &mut Frame, area: Rect, app: &mut App) {
     // visible window.
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, frame);
-    // The marker column rides the frame's left border: `>` on the cursor
+    // The marker column rides the frame's left border: `❯` on the cursor
     // row, `▌` on marked rows, the border's `│` everywhere else. Written
     // over the border cells after the frame, so a marker replaces the
     // border glyph in place; the selection background extends over it,
@@ -1011,7 +1011,7 @@ fn source_tick_rows(app: &App, track: usize) -> Vec<usize> {
 /// a band straddling the top edge is trimmed to its visible tail, so the
 /// screen never drifts from the row math (`keep_cursor_visible`, the
 /// scrollbar, and the mouse mapping all count in display rows).
-/// Selected lines get the selection background; the cursor line a `>` marker.
+/// Selected lines get the selection background; the cursor line a `❯` marker.
 /// While the composer is open, also returns where the terminal cursor should
 /// sit inside it (body-relative column/row), so the real bar cursor (and the
 /// macOS IME's inline composition window) renders inside the bar.
@@ -1080,7 +1080,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         // anchor line is the cursor line or inside the selection — an
         // `n`-landed rewrite lights old and new content as one block, and
         // j/k passing the anchor lights its deletion too. `n`'s
-        // pure-deletion focus additionally moves the `>` glyph onto the
+        // pure-deletion focus additionally moves the `❯` glyph onto the
         // first deleted row and renders the (untouched) anchor line as an
         // ordinary line — two cursor bands would fight the eye.
         let deletion_focused = app.deletion_focus() == Some(idx);
@@ -1115,7 +1115,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         // 競合することは無い。
         let review_line = review_lines.get(idx).copied().flatten();
         let cursor_mark = if is_cursor {
-            ">"
+            CURSOR_GLYPH
         } else if let Some(severity) = review_line {
             severity.letter()
         } else if added {
@@ -1126,7 +1126,7 @@ pub(crate) fn build_rows(app: &App, height: u16, content_width: u16) -> (Text<'s
         // The cursor line gets the same calm DarkGray background as view
         // mode (text colors untouched — a full-row reversal was fatiguing
         // and clashed with the syntax highlighting). A selected row shares
-        // the background; the `>` marker keeps the cursor visible at the
+        // the background; the `❯` marker keeps the cursor visible at the
         // selection edge. Changed lines (since the baseline) get a restrained
         // green background.
         let cursor_bg = is_cursor || selected;
@@ -1432,7 +1432,7 @@ pub(crate) fn emphasize_spans(
 /// rows: no selection or comment treatment applies. While `n`'s deletion
 /// focus is on the block (`focused`), the rows take the cursor's own
 /// visual language — bright red text on the DarkGray cursor band running
-/// the full pane width, with the `>` glyph on the first row when this
+/// the full pane width, with the `❯` glyph on the first row when this
 /// block leads the focused set (`cursor_glyph`). The row count must
 /// match [`crate::app::deleted_block_rows`] — same per-line [`wrap_spans`]
 /// at the same width.
@@ -1487,7 +1487,7 @@ fn deleted_block_lines(
         for (k, frags) in wrapped.iter().enumerate() {
             let mut spans: Vec<Span> = Vec::new();
             if k == 0 {
-                let mark = if cursor_glyph && first_row { ">" } else { "▌" };
+                let mark = if cursor_glyph && first_row { CURSOR_GLYPH } else { "▌" };
                 spans.push(Span::styled(mark, mark_style));
                 spans.push(Span::styled(
                     " ".repeat(app.source.gutter_width + 1),

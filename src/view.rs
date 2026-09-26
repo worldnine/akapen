@@ -465,8 +465,13 @@ pub fn scroll_offset_drag(
     Some(thumb * max_pos / thumb_max)
 }
 
+/// カーソルの印。本文のガター（view / source）、一覧のたぐい（file picker・
+/// コメント一覧・問いのダイアログ・Review の一覧）、`ASK ❯ ` の見出しまで、
+/// 「いまここ」を指す記号はこれ 1 つに揃える。1 セル幅。
+pub(crate) const CURSOR_GLYPH: &str = "❯";
+
 /// A 1-column marker cell drawn over the frame's left border (see
-/// [`ViewState::visible_text`]): `>` marks the cursor row, `▌` a
+/// [`ViewState::visible_text`]): `❯` marks the cursor row, `▌` a
 /// comment-covered row, a red `▌` a deleted block's position
 /// mark (3-1); rows with no marker reproduce the border's `│`, so the
 /// column reads as the frame itself.
@@ -744,7 +749,7 @@ impl ViewState {
     /// The rows visible in a `viewport`-tall window starting at `offset`, as
     /// a ratatui `Text`, plus the matching marker column (one [`GutterCell`]
     /// per visible row). The marker column is drawn over the frame's left
-    /// border by the caller (see `draw_view`): `>` marks the cursor row, a
+    /// border by the caller (see `draw_view`): `❯` marks the cursor row, a
     /// yellow `▌` a comment-covered row (`marked` is indexed by source
     /// line), a red `▌` a deleted block's position mark
     /// (`deleted`, 3-1); rows without a marker carry the border's `│`.
@@ -758,7 +763,7 @@ impl ViewState {
     /// the whole rendered document (which matters for the 100k-line files
     /// the view keeps in memory).
     /// Build the visible window (rows [`Self::offset`..]) and the marker
-    /// column (`>` cursor marker, `▌` comment marker, `│` elsewhere) and
+    /// column (`❯` cursor marker, `▌` comment marker, `│` elsewhere) and
     /// the selection highlight. Every row is wrapped in a 1-column pad on
     /// each side, so the text column floats off both borders; the pads
     /// carry the highlight background on cursor/selection rows, keeping
@@ -933,7 +938,7 @@ impl ViewState {
         let ghosts = self.ghost_rows(selection, end);
         // The cursor line's visual home: when its ghost was painted on a
         // BORROWED row (a closing fence shares the last code row, so the
-        // ghost sits one below), the `>` marker and the cursor band follow
+        // ghost sits one below), the `❯` marker and the cursor band follow
         // the ghost — the marker must point at the row that shows the
         // line, not at a neighbour's content.
         if let Some((&g, _)) = ghosts.iter().find(|&(_, &l)| l == self.cursor)
@@ -1063,7 +1068,7 @@ impl ViewState {
             let gutter_hl = cursor_row || in_sel_row;
             let mut spans: Vec<ratatui::text::Span> = Vec::new();
             // The marker column rides the frame's left border (drawn by
-            // `draw_view` over the border cells): `>` marks the cursor
+            // `draw_view` over the border cells): `❯` marks the cursor
             // line's FIRST display row (parallel to source mode, where the
             // marker sits on the first wrapped row only), `▌` a
             // comment-covered row, a red `▌` a deleted block's
@@ -1075,7 +1080,7 @@ impl ViewState {
             // color).
             let mut badge = false;
             let (glyph, mut marker_style) = if abs == start {
-                // The cursor glyph keeps its `>` shape but INHERITS the
+                // The cursor glyph keeps its `❯` shape but INHERITS the
                 // mark's color (user request): on a changed/deleted row
                 // it reads as the emphasis (Light + BOLD), so a one-line
                 // change mark is not hidden by the cursor. Mark-less
@@ -1090,7 +1095,7 @@ impl ViewState {
                 } else {
                     Color::LightCyan
                 };
-                (">", Style::default().fg(fg).add_modifier(Modifier::BOLD))
+                (CURSOR_GLYPH, Style::default().fg(fg).add_modifier(Modifier::BOLD))
             } else if in_sel_row {
                 // Selected rows carry a cyan bar (the composer's color, the
                 // same width as the yellow comment bar): the pending range
@@ -1769,17 +1774,17 @@ mod tests {
         assert!(text.contains("```"), "ghost borrowed the blank row below: {text:?}");
         // The borrowed row keeps its own identity in the mapping.
         assert_eq!(view.source_starts[3], code_row + 1);
-        // The `>` marker and the cursor band follow the ghost onto the
+        // The `❯` marker and the cursor band follow the ghost onto the
         // borrowed row — the marker points at the row that shows the line,
         // not at the last code line's content.
         assert_eq!(
             gutter_at(&view, None, code_row + 1),
-            ">",
+            "❯",
             "the cursor marker sits on the ghost row"
         );
         assert_ne!(
             gutter_at(&view, None, code_row),
-            ">",
+            "❯",
             "the shared content row loses the marker"
         );
     }
@@ -1961,7 +1966,7 @@ mod tests {
     fn marker_covers_the_whole_line_block() {
         // Line 0 is comment-covered and spans rows 0-1 (a wrapped line or a
         // blank row sharing the previous line). The cursor sits on row 0, so
-        // it shows the `>` marker; the continuation row keeps the ▌ — the
+        // it shows the `❯` marker; the continuation row keeps the ▌ — the
         // covered block reads as one continuous marker column.
         let view = ViewState {
             rows: vec![vec![], vec![], vec![]],
@@ -1982,7 +1987,7 @@ mod tests {
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[0].glyph, ">", "cursor row shows the > marker");
+        assert_eq!(gutter[0].glyph, "❯", "cursor row shows the ❯ marker");
         assert_eq!(gutter[1].glyph, "▌", "continuation row keeps the marker");
         assert_eq!(gutter[2].glyph, "│", "unrelated row below keeps the border");
     }
@@ -1991,7 +1996,7 @@ mod tests {
     fn selection_rows_get_background_and_the_cursor_a_marker() {
         // 1:1 rows; selection covers source lines 1-3, cursor at 3 (the
         // selection extent). Selected rows get the DarkGray background;
-        // the cursor row shows `>` in the gutter so it stays visible
+        // the cursor row shows `❯` in the gutter so it stays visible
         // inside the selection.
         let view = ViewState {
             rows: vec![vec![], vec![], vec![], vec![], vec![]],
@@ -2014,16 +2019,16 @@ mod tests {
         };
         assert!(!has_bg(0), "row outside the selection stays clean");
         assert!(has_bg(1) && has_bg(2), "selected rows are highlighted");
-        assert_eq!(gutter[3].glyph, ">", "cursor row carries the > marker");
+        assert_eq!(gutter[3].glyph, "❯", "cursor row carries the ❯ marker");
         assert!(has_bg(3), "the cursor row is highlighted too");
-        // Without a selection the cursor row still shows `>`.
+        // Without a selection the cursor row still shows `❯`.
         let (_, gutter) = view.visible_text(
             10,
             &[], &[], &[], &[], &[], None,
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[3].glyph, ">", "standalone cursor keeps its marker");
+        assert_eq!(gutter[3].glyph, "❯", "standalone cursor keeps its marker");
     }
 
     #[test]
@@ -2416,7 +2421,7 @@ mod tests {
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[0].glyph, ">", "cursor row shows the > marker");
+        assert_eq!(gutter[0].glyph, "❯", "cursor row shows the ❯ marker");
         assert_eq!(gutter[1].glyph, "▌", "marked paragraph row keeps the marker");
         assert_eq!(gutter[2].glyph, "▌", "marked paragraph row keeps the marker");
         assert_eq!(gutter[3].glyph, "▌", "changed group rows are marked");
@@ -2456,7 +2461,7 @@ mod tests {
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[0].glyph, ">", "cursor row shows the > marker");
+        assert_eq!(gutter[0].glyph, "❯", "cursor row shows the ❯ marker");
         assert_eq!(gutter[1].glyph, "▌", "first display row of the marked line");
         assert_eq!(gutter[2].glyph, "│", "wrap continuation rows carry no deletion mark");
         assert_eq!(gutter[3].glyph, "▌", "the merged block's first row carries the mark");
@@ -2517,13 +2522,13 @@ mod tests {
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[1].glyph, ">");
+        assert_eq!(gutter[1].glyph, "❯");
         assert_eq!(gutter[1].style.fg, Some(Color::LightRed));
     }
 
     #[test]
     fn cursor_marker_inherits_the_marks_color() {
-        // User request: the cursor's `>` keeps its shape but inherits
+        // User request: the cursor's `❯` keeps its shape but inherits
         // the mark's color — changed rows LightGreen, deleted-mark rows
         // LightRed, mark-less rows the classic LightCyan. A one-line
         // change mark therefore stays readable under the cursor.
@@ -2548,7 +2553,7 @@ mod tests {
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[1].glyph, ">", "the cursor glyph stays");
+        assert_eq!(gutter[1].glyph, "❯", "the cursor glyph stays");
         assert_eq!(gutter[1].style.fg, Some(Color::LightGreen));
         assert!(gutter[1].style.add_modifier.contains(Modifier::BOLD));
         // Cursor on a deleted-mark row.
@@ -2570,7 +2575,7 @@ mod tests {
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[2].glyph, ">");
+        assert_eq!(gutter[2].glyph, "❯");
         assert_eq!(gutter[2].style.fg, Some(Color::LightRed));
         assert!(gutter[2].style.add_modifier.contains(Modifier::BOLD));
         // Cursor on a mark-less row: the classic LightCyan.
@@ -2592,7 +2597,7 @@ mod tests {
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[3].glyph, ">");
+        assert_eq!(gutter[3].glyph, "❯");
         assert_eq!(gutter[3].style.fg, Some(Color::LightCyan));
         assert!(gutter[3].style.add_modifier.contains(Modifier::BOLD));
     }
@@ -2642,7 +2647,7 @@ mod tests {
         let view = ViewState {
             rows: vec![vec![]; 4],
             offset: 0,
-            cursor: 3, // an unmarked row keeps the > marker
+            cursor: 3, // an unmarked row keeps the ❯ marker
             source_starts: vec![0, 1, 2, 3],
             ..Default::default()
         };
@@ -2720,7 +2725,7 @@ mod tests {
             Color::Rgb(88, 91, 112),
             Style::default(),
         );
-        assert_eq!(gutter[0].glyph, ">", "cursor row shows the > marker");
+        assert_eq!(gutter[0].glyph, "❯", "cursor row shows the ❯ marker");
         assert_eq!(gutter[1].glyph, "▌", "the merged block is marked");
         assert_eq!(gutter[2].glyph, "▌", "the merged block is marked");
         assert_eq!(gutter[1].style.fg, Some(Color::Yellow), "marked rows are yellow");

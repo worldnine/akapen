@@ -9,7 +9,7 @@
 //! ┌ 本文 ──────────────────────────────┐
 //! │ …                                  │   ← 選んだ候補が中ほどに来るよう送る
 //! └ review (3/13) ─────────────────────┘   ← 本文の枠の下辺に題（view）
-//!  ▸   L72 · ja-no-weak-phrase · 弱い表現…   ← 一覧（候補の数だけ、上限あり）
+//!  ❯   L72 · ja-no-weak-phrase · 弱い表現…   ← 一覧（候補の数だけ、上限あり）
 //!  ─ textlint/ja-no-weak-phrase · L72 ──   ← 選んだ候補の出どころ
 //!    弱い表現: "かも" が使われています。      ← 理由の全文（折り返す）
 //! REVIEW  L72/192 · j/k move · a accept …  ← フッタが一覧のキーを案内する
@@ -31,6 +31,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Mode};
 use crate::overlay::Overlay;
 use crate::review::{Candidate, Finding};
+use crate::view::CURSOR_GLYPH;
 
 /// 一覧の行の上限。これより多い候補は一覧の中でスクロールする。
 pub(crate) const LIST_MAX: u16 = 10;
@@ -87,7 +88,7 @@ pub(crate) fn is_open(app: &App) -> bool {
     app.overlay == Some(Overlay::Review)
 }
 
-/// 理由の欄の文字の幅。一覧の頭（`▸ ✓ `）の下に揃える。
+/// 理由の欄の文字の幅。一覧の頭（`❯ ✓ `）の下に揃える。
 fn detail_width(width: u16) -> usize {
     width.saturating_sub(5).max(1) as usize
 }
@@ -397,12 +398,12 @@ pub(crate) fn draw(f: &mut Frame, app: &App, dock: Dock) {
     }
 }
 
-/// 一覧。1 行 = `▸ ✓ L42 · Filler 0.87 · <Unit の先頭>`（窓だった頃と同じ）。
+/// 一覧。1 行 = `❯ ✓ L42 · Filler 0.87 · <Unit の先頭>`（窓だった頃と同じ）。
 /// 残っている候補の `✓` の位置には、ガターと同じ白抜きの重さ（`E` など）が立つ。
 ///
 /// **選んだ行は本文のカーソル帯と同じ背景で塗る。** 一覧の行と本文の
 /// 行が同じ色で繋がって見え、「どの候補が本文のどこか」を目で結べる。
-/// `▸` は色が無い端末のための印として残す。
+/// `❯` は色が無い端末のための印として残す。
 fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     let dark_gray = Style::default().fg(Color::DarkGray);
     let yellow = Style::default().fg(Color::Yellow);
@@ -447,7 +448,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("L{}", candidate.lines.0)
         };
-        let lead = format!(" {}", if selected { "▸ " } else { "  " });
+        let lead = format!(" {} ", if selected { CURSOR_GLYPH } else { " " });
         let head = format!(" {place} · {tag} · ");
         let cols = match candidate.finding {
             Finding::Rule { .. } => crate::overlay::REVIEW_HEAD_COLS,
@@ -500,7 +501,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// 一覧の行で状態の 1 マス（白抜きの重さ / `✓` / `–`）が立つ桁 —
-/// 行頭の余白 1 と `▸ ` の 2 のあと。
+/// 行頭の余白 1 と `❯ ` の 2 のあと。
 const LIST_STATE_COL: u16 = 3;
 
 #[cfg(test)]

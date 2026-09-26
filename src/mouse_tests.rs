@@ -122,7 +122,7 @@
             .map(|s| s.content.as_ref())
             .collect();
         assert!(
-            row0.starts_with(">1 "),
+            row0.starts_with("❯1 "),
             "first row shows the gutter, got {row0:?}"
         );
         assert!(
@@ -130,7 +130,7 @@
             "continuation row indents by the gutter width, got {row1:?}"
         );
         assert!(
-            !row1.starts_with('>'),
+            !row1.starts_with('❯'),
             "no gutter markers on continuation rows, got {row1:?}"
         );
     }
@@ -231,10 +231,10 @@
                 app.offset,
                 app.offset + viewport as usize
             );
-            // And the rendered window agrees: the `>` glyph is on screen.
+            // And the rendered window agrees: the `❯` glyph is on screen.
             let (text, _) = build_rows(&app, viewport, 57);
             assert!(
-                text.lines.iter().any(|l| row_string(l).starts_with('>')),
+                text.lines.iter().any(|l| row_string(l).starts_with('❯')),
                 "the rendered window must contain the cursor glyph"
             );
         }
@@ -243,7 +243,7 @@
     #[test]
     fn keep_cursor_visible_prefers_the_band_start_when_taller_than_viewport() {
         // A card stack taller than the viewport: the whole band cannot
-        // fit, so the band's START (the `>` row) wins over its end.
+        // fit, so the band's START (the `❯` row) wins over its end.
         let mut app = test_app();
         app.comments[0].text = "x\n".repeat(30).trim_end().to_string();
         app.refresh_line_rows();

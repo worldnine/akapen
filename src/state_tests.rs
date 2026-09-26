@@ -1241,7 +1241,7 @@ use crate::comment::Selection;
         );
         // Row 1 (source lines 1-3 merged) carries the marker glyph.
         assert_eq!(gutter[1].glyph, "▌", "merged row shows the marker");
-        // Row 0 is unmarked; the cursor (line 0) shows `>` instead.
+        // Row 0 is unmarked; the cursor (line 0) shows `❯` instead.
         assert_ne!(gutter[0].glyph, "▌", "unmarked row shows no marker");
     }
 
@@ -2038,7 +2038,7 @@ use crate::comment::Selection;
         // (one paragraph row): the card is inserted after the paragraph's
         // row, so the merged followers' text stays ABOVE the card — their
         // source-line mapping must not shift into the card (the regression:
-        // the cursor landed on a card row, losing the `>` marker and the
+        // the cursor landed on a card row, losing the `❯` marker and the
         // selection highlight, and mouse clicks resolved to wrong lines).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("doc.md");
@@ -2100,7 +2100,7 @@ use crate::comment::Selection;
         assert_eq!(view.source_starts[4], 1 + card_h, "the blank shifts below the card");
         assert_eq!(view.source_starts[5], 2 + card_h, "lines below the card shift");
         // The cursor on a merged follower stays on the paragraph row: the
-        // `>` marker and the selection band are visible again (the
+        // `❯` marker and the selection band are visible again (the
         // regression: the cursor row resolved into the card).
         view.cursor = 1;
         let (_, gutter) = view.visible_text(
@@ -2114,7 +2114,7 @@ use crate::comment::Selection;
             Color::Rgb(88, 91, 112),
             ratatui::style::Style::default(),
         );
-        assert_eq!(gutter[0].glyph, ">", "cursor on the merged follower marks row 0");
+        assert_eq!(gutter[0].glyph, "❯", "cursor on the merged follower marks row 0");
     }
 
     #[test]
@@ -5212,7 +5212,7 @@ use crate::comment::Selection;
         let (text, _) = build_rows(&app, 30, 75);
         // Rows: line1 (cursor row) | deleted block (3 rows) | line2 (3 rows).
         assert_eq!(text.lines.len(), 7);
-        assert_eq!(text.lines[0].spans[0].content.as_ref(), ">");
+        assert_eq!(text.lines[0].spans[0].content.as_ref(), "❯");
         // Every deleted row — including wrap continuations — carries the
         // red `▌` on the red band, so the left-edge mark runs unbroken.
         for row in &text.lines[1..4] {
@@ -5242,13 +5242,13 @@ use crate::comment::Selection;
         assert_eq!(cont_gutter, first_gutter, "continuation rows keep the gutter width");
 
         // Focused: the whole block lights on the cursor band and the
-        // continuation rows keep the `▌` glyph (`>` stays on the first
+        // continuation rows keep the `▌` glyph (`❯` stays on the first
         // row only). A pure deletion — the anchor line is ordinary.
         app.cursor = 1;
         app.focused_deletion = Some(1);
         app.comparison_changed.clear();
         let (text, _) = build_rows(&app, 30, 75);
-        assert_eq!(text.lines[1].spans[0].content.as_ref(), ">");
+        assert_eq!(text.lines[1].spans[0].content.as_ref(), "❯");
         for row in &text.lines[2..4] {
             assert_eq!(row.spans[0].content.as_ref(), "▌");
             assert_eq!(row.spans[0].style.bg, Some(app.ui_selected_bg));
@@ -5319,11 +5319,11 @@ use crate::comment::Selection;
             app.status
         );
 
-        // The cursor's visual language moves onto the deleted rows: `>`
+        // The cursor's visual language moves onto the deleted rows: `❯`
         // on the first row, bright red text on the cursor band, and the
         // anchor line below renders as an ordinary line meanwhile.
         let (text, _) = build_rows(&app, 30, 75);
-        assert_eq!(text.lines[1].spans[0].content.as_ref(), ">");
+        assert_eq!(text.lines[1].spans[0].content.as_ref(), "❯");
         assert_eq!(text.lines[2].spans[0].content.as_ref(), "▌");
         let body = &text.lines[1].spans[2];
         assert_eq!(body.style.fg, Some(Color::LightRed));
@@ -5402,7 +5402,7 @@ use crate::comment::Selection;
         assert_eq!(
             text.lines[1].spans[0].content.as_ref(),
             "▌",
-            "no `>` on rewrite old rows — the real cursor is on the new line"
+            "no `❯` on rewrite old rows — the real cursor is on the new line"
         );
     }
 
@@ -5422,7 +5422,7 @@ use crate::comment::Selection;
         assert_eq!(body.style.bg, Some(app.ui_selected_bg));
         assert_eq!(
             text.lines[3].spans[0].content.as_ref(),
-            ">",
+            "❯",
             "without a focus the cursor glyph stays on the anchor line"
         );
     }
