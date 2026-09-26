@@ -203,7 +203,7 @@ fn row_text(buf: &Buffer, y: u16) -> String {
 }
 
 /// 本文のカーソルを文書の頭へ戻す（候補を選ぶと本文がその行へ送られ、
-/// カーソル帯や `>` がその行に乗るため）。
+/// カーソル帯や `❯` がその行に乗るため）。
 fn park_cursor(app: &mut App) {
     app.view.goto_source_line(0);
     app.cursor = 0;
@@ -405,7 +405,7 @@ fn severity_colours_the_underline_and_the_gutter_mark() {
 }
 
 /// 白抜きの地は重さの色のまま — 選択帯の上でも塗り替わらない。印の優先順
-/// （カーソルの `>`・選択の `▌` が上）は今のまま。
+/// （カーソルの `❯`・選択の `▌` が上）は今のまま。
 #[test]
 fn the_badge_keeps_its_ground_under_the_bands() {
     use ratatui::style::Color;

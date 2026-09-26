@@ -88,7 +88,7 @@ akapen が読むのはこの 1 つだけです。自分の linter をつなぐ�
 一覧の 1 行は、本文の先頭ではなく**理由**を見せます。
 
 ```text
-▸   L72 · ja-no-weak-phrase · 弱い表現: "かも" が使われています。
+❯   L72 · ja-no-weak-phrase · 弱い表現: "かも" が使われています。
     L98 · ja-no-redundant-expression · 【dict5】 "対応を行う"は冗長な表現です。…
 ```
 

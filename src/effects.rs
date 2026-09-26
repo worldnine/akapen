@@ -90,7 +90,7 @@ pub(crate) fn timeline_slide_out() -> Effect {
 /// The animated frame while browsing the past (`--fx`, the default): a
 /// custom shader repaints every border-glyph cell of the frame with the
 /// rotating purple→pink gradient (one smooth wave per lap — see
-/// [`time_machine_color_at`]). Markers (`▌`/`▐`), the cursor `>`,
+/// [`time_machine_color_at`]). Markers (`▌`/`▐`), the cursor `❯`,
 /// and message text are not border glyphs and keep their own colors; the
 /// scrollbar thumb and the message row are drawn after the effect
 /// anyway. `--no-fx` simply leaves this effect uncreated and the static
@@ -347,7 +347,7 @@ pub(crate) const LANDING_PULSE_MS: u32 = 400;
 /// border cells' current color (the rotation painted them just before)
 /// and brightens it by the pulse envelope, so the wave keeps flowing
 /// underneath and the rotation never pauses. Only border-glyph cells
-/// join (markers, the cursor `>`, and message text keep their own
+/// join (markers, the cursor `❯`, and message text keep their own
 /// colors), and the timeline bar's bottom border row stays calm while it
 /// is up — the same guards the border rotation uses.
 pub(crate) fn landing_pulse_effect(bright: Color) -> Effect {

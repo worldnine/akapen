@@ -1490,9 +1490,9 @@ mod footer_tests {
 
 // ---- marks モードの問いの 1 行プロンプト（`/`） ------------------------
 
-/// `ASK ▸ ` の見出し。`▸` は file picker のカーソルと同じ記号で、
+/// `ASK ❯ ` の見出し。`❯` はカーソルと同じ記号（[`crate::view::CURSOR_GLYPH`]）で、
 /// 「ここから先があなたの入力」を指す。
-const ASK_LEAD: &str = " ASK ▸ ";
+const ASK_LEAD: &str = " ASK ❯ ";
 
 /// 表示幅で `s` を `[start, start + cols)` に切る。返すのは切った文字列と、
 /// 実際に切れた開始桁（全角の途中では切れないので、要求より左に寄ることが

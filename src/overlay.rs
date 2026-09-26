@@ -17,6 +17,7 @@ use crate::app::{App, Mode, supports_view};
 use crate::clip_ellipsis;
 use crate::comment::{Comment, Selection};
 use crate::reload::file_externally_changed;
+use crate::view::CURSOR_GLYPH;
 use crate::render_pending_history;
 use crate::replace_view_preserving_cursor;
 use crate::export_all;
@@ -49,7 +50,7 @@ pub(crate) enum Overlay {
     ///
     /// **窓ではなく、本文の下に据え付ける**（[`crate::review_dock`]）。
     /// 被さる窓だと指摘箇所が窓の下に隠れて読めなかった（2026-09-23 の
-    /// 読み手の指摘）。キーは `Comments` と同じ作法（黄色いタイトル・`▸` の
+    /// 読み手の指摘）。キーは `Comments` と同じ作法（黄色いタイトル・`❯` の
     /// カーソル・j/k と Enter・Esc で閉じる）で、**既にある作法を覚えている
     /// 人が何も覚え直さずに使える**ようにしてある。
     ///
@@ -776,7 +777,7 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
         let n = app.comments.iter().filter(|c| c.file_path == *file).count();
         let current = i == app.current_file_index;
         let selected = i == app.overlay_cursor;
-        let cursor_mark = if selected { "▸ " } else { "  " };
+        let cursor_mark = if selected { CURSOR_GLYPH } else { " " };
         let name_style = if selected {
             cyan.add_modifier(Modifier::BOLD)
         } else if current {
@@ -815,7 +816,7 @@ pub(crate) fn draw_files_overlay(f: &mut Frame, app: &App) {
             + mode_tag.len();
         let name = clip_if_needed(&suffix, inner.saturating_sub(reserved));
         lines.push(Line::from(vec![
-            Span::styled(format!("{cursor_mark}{name}"), name_style),
+            Span::styled(format!("{cursor_mark} {name}"), name_style),
             Span::styled(changed_mark, Style::default().fg(Color::Yellow)),
             Span::styled(unseen_mark, Style::default().fg(Color::Yellow)),
             Span::styled(count_str, dark_gray),
@@ -1038,7 +1039,7 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
                 } else {
                     yellow
                 };
-                let cursor_mark = if selected { "▸ " } else { "  " };
+                let cursor_mark = if selected { CURSOR_GLYPH } else { " " };
                 // First line of comment text (indented). Range and body
                 // share one row — the colors already separate them
                 // (yellow range, gray body), so each comment stays on a
@@ -1062,7 +1063,7 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
                 let budget = inner.saturating_sub(used);
                 let body = clip_if_needed(body_first, budget);
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{cursor_mark}{range}"), loc_style),
+                    Span::styled(format!("{cursor_mark} {range}"), loc_style),
                     Span::styled(revision, Style::default().fg(Color::Magenta)),
                     Span::styled(format!("  {body}"), body_style),
                 ]));
@@ -1086,7 +1087,7 @@ pub(crate) fn draw_comments_overlay(f: &mut Frame, app: &App) {
 // ---- Review の候補の一覧（`R`） --------------------------------------
 //
 // `docs/design/marks-only-and-review-mode.md` 4 節。キーは `Comments` の
-// 一覧の作法の写しである（`▸` のカーソル・j/k と Enter・Esc で閉じる）。
+// 一覧の作法の写しである（`❯` のカーソル・j/k と Enter・Esc で閉じる）。
 // 違うのは行の中身と、accept / dismiss の 2 本のキーと、**窓ではなく
 // 本文の下に据え付ける**ことである — 描くのも高さを決めるのも
 // [`crate::review_dock`]。
@@ -1278,7 +1279,7 @@ pub(crate) const REVIEW_HEAD_COLS: usize = 40;
 // ---- marks モードの問いの選択（`m`） ----------------------------------
 //
 // `docs/design/marks-only-and-review-mode.md` 0 節。file picker と `?`
-// ヘルプの作法の写しである（枠・黄色いタイトル・`▸` のカーソル・j/k と
+// ヘルプの作法の写しである（枠・黄色いタイトル・`❯` のカーソル・j/k と
 // Enter・Esc で閉じる）。新しい語彙を足していないのは、**既にある作法を
 // 覚えている人が何も覚え直さずに使えるようにする**ためで、ここだけ違う
 // 操作にする理由が無い。
@@ -1441,7 +1442,7 @@ pub(crate) fn on_mark_for_overlay_key(app: &mut App, key: KeyCode, _modifiers: K
     }
 }
 
-/// popup を描く。file picker と同じ作法（黄色いタイトル ＋ 罫、`▸` の
+/// popup を描く。file picker と同じ作法（黄色いタイトル ＋ 罫、`❯` の
 /// カーソル、下段にキーの案内）。
 ///
 /// **いま聞いている問いは黄色**で、file picker が「いま開いているファイル」
@@ -1475,7 +1476,7 @@ pub(crate) fn draw_mark_for_overlay(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(Color::White)
         };
-        let cursor_mark = if selected { "▸" } else { " " };
+        let cursor_mark = if selected { CURSOR_GLYPH } else { " " };
         let name = format!("{label:<MARK_FOR_LABEL_COLS$}");
         let head = format!("{cursor_mark} {key} {name}");
         let room = inner.saturating_sub(head.width());

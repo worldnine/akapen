@@ -547,7 +547,7 @@ fn the_question_prompt_does_not_open_the_comment_composer() {
     // **空白を落とした形**で見る。
     let packed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        packed.contains("ASK▸費用"),
+        packed.contains("ASK❯費用"),
         "1 行プロンプトが出ていない:\n{screen}"
     );
     assert!(
@@ -573,7 +573,7 @@ fn the_comment_composer_still_opens_its_bubble() {
     let screen = buffer_text(terminal.backend().buffer());
 
     assert!(screen.contains("comment ·"), "吹き出しが消えた:\n{screen}");
-    assert!(!screen.contains("ASK ▸"), "問いのプロンプトが出ている:\n{screen}");
+    assert!(!screen.contains("ASK ❯"), "問いのプロンプトが出ている:\n{screen}");
 }
 
 /// TestBackend のセルを行ごとの文字列にする。

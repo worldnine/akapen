@@ -166,7 +166,7 @@ fn the_viewport_is_exactly_the_body_that_is_drawn() {
             assert_eq!(viewport, body.len(), "{mode:?} 高さ {h}");
             // 本文の最後の行は本文の字で、一覧ではない。
             let last = &rows[body.end as usize - 1];
-            assert!(!last.contains('▸') && !last.contains("L5"), "{mode:?} {h}: {last}");
+            assert!(!last.contains('❯') && !last.contains("L5"), "{mode:?} {h}: {last}");
             assert!(rows[dock.title.y as usize].contains("review (0/12)"), "{mode:?} {h}: 題\n{}", rows.join("\n"));
         }
     }
@@ -212,7 +212,7 @@ fn each_j_brings_the_candidate_into_the_middle_of_the_body() {
                 }
                 // 一覧でも選んだ行が見えている。
                 let row = &rows[(dock.list.y as usize)..(dock.list.y + dock.list.height) as usize];
-                assert!(row.iter().any(|r| r.contains('▸') && r.contains(&format!("L{}", line + 1))), "{mode:?} {h} {step}");
+                assert!(row.iter().any(|r| r.contains('❯') && r.contains(&format!("L{}", line + 1))), "{mode:?} {h} {step}");
             }
         }
     }

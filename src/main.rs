@@ -80,7 +80,7 @@ use crate::source::Source;
 use similar::{DiffTag, TextDiffConfig};
 use crate::view::{
     is_table_delimiter_line, lerp_color, scroll_offset_at, scroll_offset_drag, scroll_thumb,
-    GutterCell, ViewState,
+    GutterCell, ViewState, CURSOR_GLYPH,
 };
 
 
