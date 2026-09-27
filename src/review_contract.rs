@@ -2,7 +2,7 @@
 //!
 //! 設計書 `docs/design/marks-only-and-review-mode.md` 4 節「一番怖いところ」。
 //! 「空疎だから具体的に」と頼むと、LLM は数字や固有名詞を**作る**。
-//! 契約は「削る・縮める・統合するだけ」「事実を足さない」「足りなければ
+//! 契約は「削る・縮めるだけ」「事実を足さない」「足りなければ
 //! `[要: 具体例]` を残して人に返す」「範囲の外は触らない」の 4 つである。
 //!
 //! ```text
@@ -97,12 +97,17 @@ fn user_path(file: &str) -> Option<PathBuf> {
     Some(base.join(file))
 }
 
-/// 直し方の日本語。**契約の 3 つの動詞の中に収める** — `rewrite` も
-/// 「言い換える」ではなく「縮める・統合する」の側で言う。
+/// 直し方の日本語。**契約の動詞（削る・縮める）の中に収める。**
+///
+/// `rewrite`（`Hedge`）も言い換えさせず、削るか印を残すかで言う。ぼかしを
+/// 縮めて言い切ると、書き手が言っていない断定を足すことになる。実測でも
+/// 受け手は縮めずに削るか印を付けた（`examples/semantic/measurements/review-roundtrip.md`
+/// の 2 周目）。印の道を消さないのは、`Hedge` の問いの文面が「落とすと
+/// 取り違える」と言っているからである。
 fn action_words(action: Action) -> &'static str {
     match action {
         Action::Delete => "削る",
-        Action::Rewrite => "縮める・統合する。足りなければ印を残す",
+        Action::Rewrite => "削る。足りなければ印を残す",
         Action::Verify => "書き換えず、印を残す",
     }
 }
@@ -215,7 +220,7 @@ mod tests {
         let out = compose(body.clone(), &comments, Some(&rules), built_in(), built_in_lint());
         assert!(out.starts_with(built_in().trim_end()), "契約が先頭に無い");
         assert!(out.ends_with(&body), "本文が変わっている");
-        for must in ["削る・縮める・統合する", "事実・数字・固有名詞を足さない", "[要: 具体例]", "範囲の外"] {
+        for must in ["削る・縮めるの 2 つだけ", "事実・数字・固有名詞を足さない", "[要: 具体例]", "範囲の外"] {
             assert!(out.contains(must), "契約に {must} が無い");
         }
     }
@@ -229,6 +234,15 @@ mod tests {
         assert!(out.contains(&format!("- filler（削る）: {}", filler.text)));
         assert!(!out.contains("- preamble"), "使っていないルールまで並べている");
         assert!(!out.contains("- hedge"));
+    }
+
+    #[test]
+    fn a_hedge_is_trimmed_or_marked_never_restated() {
+        let comments = vec![comment(&crate::review::comment_text("hedge", 0.7))];
+        let rules = Rules::built_in().unwrap();
+        let out = compose(String::new(), &comments, Some(&rules), built_in(), built_in_lint());
+        assert!(out.contains("- hedge（削る。足りなければ印を残す）: "), "{out}");
+        assert!(!out.contains("統合"), "使うルールの無い動詞が残っている");
     }
 
     #[test]

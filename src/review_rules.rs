@@ -66,7 +66,10 @@ const USER_FILE: &str = "akapen/review-rules.json";
 pub(crate) enum Action {
     /// 削る。落としても読み手が何も失わない箇所（`Filler` / `Preamble`）。
     Delete,
-    /// 書き換える。落とすと意味が変わるが、言い方が悪い箇所（`Hedge`）。
+    /// 落とすと意味が変わるが、言い方が悪い箇所（`Hedge`）。送るときは
+    /// 言い換えさせず「削る。足りなければ印を残す」と言う
+    /// （`crate::review_contract` の `action_words`）。名前はルールファイルの
+    /// 値として残している。
     Rewrite,
     /// 人が確かめる。削るとも書き換えるとも決められない箇所。
     Verify,
