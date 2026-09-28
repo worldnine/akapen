@@ -13,6 +13,7 @@ mod app;
 mod chrome;
 mod comment;
 mod config;
+mod config_file;
 mod decoration;
 mod draw;
 mod edit_map;
@@ -95,8 +96,8 @@ fn main() -> Result<()> {
             println!(
                 "akapen — read markdown rendered, comment on source lines\n\
                  \n\
-                 usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply]
-                 \x20                         [--theme <name>]\n\
+                 usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply]\n\
+                 \x20                         [--theme <name>] [--theme-dark <name>] [--theme-light <name>]\n\
                  \x20                         [--ime <off|ascii|jp>] [--light|--dark]\n\
                  \x20                         [--callback <cmd>]\n\
                  \n\
@@ -106,7 +107,14 @@ fn main() -> Result<()> {
                  \x20 --reply           quote the snippet without file/line\n\
                  \x20                   references; external changes auto-reload\n\
                  \x20                   (instant reply to an agent message; see scripts/akp)\n\
-                 \x20 --theme <name>    syntect theme name or path to a .tmTheme file\n\
+                 \x20 --theme <name>    syntect theme name or path to a .tmTheme file,\n\
+                 \x20                   used on both light and dark backgrounds\n\
+                 \x20                   (beats --theme-dark/--theme-light)\n\
+                 \x20 --theme-dark <name>  the theme on a dark background\n\
+                 \x20                   (default Catppuccin Mocha)\n\
+                 \x20 --theme-light <name> the theme on a light background\n\
+                 \x20                   (default Solarized (light)). Which side\n\
+                 \x20                   applies follows --light/--dark or OSC 11\n\
                  \x20 --ime <off|ascii|jp> input-source control around the composer\n\
                  \x20                   (default ascii; needs swiftc on macOS)\n\
                  \x20 --light           force light mode (default: auto-detect\n\
@@ -132,8 +140,9 @@ fn main() -> Result<()> {
                  \x20                   (opening a file does not), and answers are\n\
                  \x20                   cached per document and question under\n\
                  \x20                   $XDG_CACHE_HOME/akapen/semantic.\n\
-                 \x20                   $AKAPEN_SEMANTIC_CMD is the default when\n\
-                 \x20                   this flag is absent (the flag wins)\n\
+                 \x20                   $AKAPEN_SEMANTIC_CMD, then semantic_cmd in\n\
+                 \x20                   the config file, is the default when this\n\
+                 \x20                   flag is absent (the flag wins)\n\
                  \x20 --marks-questions <file>  read the marks questions from this\n\
                  \x20                   JSON instead of the built-in five (also\n\
                  \x20                   $XDG_CONFIG_HOME/akapen/marks-questions.json)\n\
@@ -148,7 +157,8 @@ fn main() -> Result<()> {
                  \x20                   the document's absolute path appended; must\n\
                  \x20                   print LSP diagnostics JSON on stdout (any exit\n\
                  \x20                   code). See examples/lint/. Needs no\n\
-                 \x20                   --semantic-cmd. $AKAPEN_LINT_CMD is the\n\
+                 \x20                   --semantic-cmd. $AKAPEN_LINT_CMD, then\n\
+                 \x20                   lint_cmd in the config file, is the\n\
                  \x20                   default when this flag is absent\n\
                  \x20 --review-json     print the Review candidates as JSON and exit,\n\
                  \x20                   without starting the TUI (lines, rule, action\n\
@@ -163,8 +173,9 @@ fn main() -> Result<()> {
                  \x20                   time: x again in the list)\n\
                  \x20 --undercurl <auto|on|off> draw the Review underlines as curly\n\
                  \x20                   lines (default auto: on where the terminal\n\
-                 \x20                   is known to draw them). $AKAPEN_UNDERCURL\n\
-                 \x20                   is the default when this flag is absent\n\
+                 \x20                   is known to draw them). $AKAPEN_UNDERCURL,\n\
+                 \x20                   then undercurl in the config file, is the\n\
+                 \x20                   default when this flag is absent\n\
                  \x20 --mark-blend <f>  how far the MARKED background is lifted off\n\
                  \x20                   the page, 0.0..1.0 (default 0.27)\n\
                  \x20 --dim-blend <f>   how far a DIM foreground is moved toward the\n\
@@ -176,6 +187,13 @@ fn main() -> Result<()> {
                  \x20                   (default auto: only with --callback;\n\
                  \x20                   always = unconditionally, never = Esc\n\
                  \x20                   stays a pure cancel)\n\
+                 \n\
+                 config file: $XDG_CONFIG_HOME/akapen/config.toml (else\n\
+                 \x20 ~/.config/akapen/config.toml), every key optional:\n\
+                 \x20 semantic_cmd, lint_cmd, undercurl, and [theme] dark / light.\n\
+                 \x20 flags > environment > config file > defaults. Unknown keys,\n\
+                 \x20 wrong types and broken syntax stop at startup. See\n\
+                 \x20 examples/config.toml\n\
                  \n\
                  keys:\n\
                  \x20 view/source:  j/k scroll, Left/Right time travel, g/G top/bottom, PgUp/PgDn, Ctrl+u/Ctrl+d,\n\
@@ -489,9 +507,11 @@ fn run(config: Config) -> Result<()> {
     let light = config
         .light
         .unwrap_or_else(|| theme::detect_light().unwrap_or(false));
-    // The syntax theme: --theme wins; a missing or unresolvable name
-    // falls back to a default matching light/dark (highlight.rs).
-    let highlight = Highlighter::new(config.theme.as_deref(), light);
+    // The syntax theme: the side matching light/dark (--theme covers both,
+    // else --theme-dark / --theme-light, else the config file's [theme]);
+    // a missing or unresolvable name falls back to a default matching
+    // light/dark (highlight.rs).
+    let highlight = Highlighter::new(config.theme.for_background(light), light);
     let size = terminal.size()?;
 
     // Build FileState entries eagerly so spans/views are ready before the

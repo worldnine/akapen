@@ -531,7 +531,7 @@ mod handoff_tests {
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: Some("base16-ocean.dark".into()),
+            theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -549,7 +549,7 @@ mod handoff_tests {
             decorations: Vec::new(),
         };
         let source = Source::load(path.into()).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
@@ -597,7 +597,7 @@ mod handoff_tests {
             send_cmd: None,
             send_agent: false,
             reply,
-            theme: Some("base16-ocean.dark".into()),
+            theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -615,7 +615,7 @@ mod handoff_tests {
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so

@@ -49,14 +49,14 @@ use crate::review_rules::{Action, Rules};
 /// バイナリに焼き込んだ既定の契約。
 const BUILT_IN: &str = include_str!("../assets/review-contract.md");
 
-/// 読み手の契約を置く場所（設定ディレクトリからの相対）。
-const USER_FILE: &str = "akapen/review-contract.md";
+/// 読み手の契約を置く場所（[`crate::config_file::user_dir`] からの相対）。
+const USER_FILE: &str = "review-contract.md";
 
 /// lint の指摘に足す段落の既定。
 const BUILT_IN_LINT: &str = include_str!("../assets/review-contract-lint.md");
 
-/// lint 用の段落を置く場所（設定ディレクトリからの相対）。
-const USER_FILE_LINT: &str = "akapen/review-contract-lint.md";
+/// lint 用の段落を置く場所（[`crate::config_file::user_dir`] からの相対）。
+const USER_FILE_LINT: &str = "review-contract-lint.md";
 
 /// 契約の文面を読む。読み手のファイルがあればそれ、無ければ既定。
 ///
@@ -90,11 +90,7 @@ fn read_user(file: &str) -> Option<String> {
 }
 
 fn user_path(file: &str) -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
-    };
-    Some(base.join(file))
+    Some(crate::config_file::user_dir()?.join(file))
 }
 
 /// 直し方の日本語。**契約の動詞（削る・縮める）の中に収める。**

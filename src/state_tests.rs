@@ -72,7 +72,7 @@ use crate::comment::Selection;
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: Some("base16-ocean.dark".into()),
+            theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -90,7 +90,7 @@ use crate::comment::Selection;
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
@@ -123,7 +123,7 @@ use crate::comment::Selection;
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: Some("base16-ocean.dark".into()),
+            theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -141,7 +141,7 @@ use crate::comment::Selection;
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         // App::new no longer tokenizes (run() supplies the spans), so
@@ -830,7 +830,7 @@ use crate::comment::Selection;
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: None,
+            theme: Default::default(),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -848,7 +848,7 @@ use crate::comment::Selection;
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         app.mode = Mode::View;
@@ -887,7 +887,7 @@ use crate::comment::Selection;
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: None,
+            theme: Default::default(),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -905,7 +905,7 @@ use crate::comment::Selection;
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         app.mode = Mode::View;
@@ -931,7 +931,7 @@ use crate::comment::Selection;
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: None,
+            theme: Default::default(),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -949,7 +949,7 @@ use crate::comment::Selection;
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         let view = ViewState::render(&source, 75, &highlight, Default::default());
         let mut app = App::new(config, source, highlight, view, false);
         app.mode = Mode::View;
@@ -1938,7 +1938,7 @@ use crate::comment::Selection;
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: None,
+            theme: Default::default(),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -1956,7 +1956,7 @@ use crate::comment::Selection;
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         let comments = vec![Comment {
             file_path: "d.md".into(),
             start: 2,
@@ -2056,7 +2056,7 @@ use crate::comment::Selection;
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: None,
+            theme: Default::default(),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -2074,7 +2074,7 @@ use crate::comment::Selection;
             decorations: Vec::new(),
         };
         let source = Source::load(path).unwrap();
-        let highlight = Highlighter::new(config.theme.as_deref(), false);
+        let highlight = Highlighter::new(config.theme.for_background(false), false);
         // Comment on line 1 (0-based), the paragraph's second line.
         let comments = vec![Comment {
             file_path: "d.md".into(),
@@ -2364,7 +2364,7 @@ use crate::comment::Selection;
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: None,
+            theme: Default::default(),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -6223,7 +6223,7 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: None,
+        theme: Default::default(),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -6244,7 +6244,7 @@ fn decorations_paint_three_regions_on_one_terminal_line() {
         ],
     };
     let source = Source::load(path).unwrap();
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, crate::view_render_width(60), &highlight, Default::default());
     let styles = DecorationStyles::from_theme(&highlight, Default::default());
     let mark_bg = styles.mark_style().bg;
@@ -6349,7 +6349,7 @@ fn a_dimmed_list_item_dims_its_marker_too() {
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: None,
+        theme: Default::default(),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -6370,7 +6370,7 @@ fn a_dimmed_list_item_dims_its_marker_too() {
         }],
     };
     let source = Source::load(path).unwrap();
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, crate::view_render_width(60), &highlight, Default::default());
     let styles = DecorationStyles::from_theme(&highlight, Default::default());
     let mut app = App::new(config, source, highlight, view, false);
@@ -6429,7 +6429,7 @@ fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: None,
+        theme: Default::default(),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -6447,7 +6447,7 @@ fn the_marks_knob_splits_one_terminal_line_into_two_styles() {
         decorations: Vec::new(),
     };
     let source = Source::load(path).unwrap();
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, crate::view_render_width(80), &highlight, Default::default());
     let styles = DecorationStyles::from_theme(&highlight, Default::default());
     let mark_bg = styles.mark_style().bg;
@@ -6551,7 +6551,7 @@ fn a_marked_line_under_the_cursor_shows_the_deeper_amber_not_the_band() {
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: None,
+        theme: Default::default(),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -6575,7 +6575,7 @@ fn a_marked_line_under_the_cursor_shows_the_deeper_amber_not_the_band() {
         .lines()
         .position(|l| l.starts_with("採用する方式は差分配信である。"))
         .expect("the 結論 line is in demo.md");
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, crate::view_render_width(80), &highlight, Default::default());
     let styles = DecorationStyles::from_theme(&highlight, Default::default());
     let mark_bg = styles.mark_style().bg;
@@ -7473,7 +7473,7 @@ fn the_marks_projection_splits_one_source_line_into_two_styles() {
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: None,
+        theme: Default::default(),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -7491,7 +7491,7 @@ fn the_marks_projection_splits_one_source_line_into_two_styles() {
         decorations: Vec::new(),
     };
     let source = Source::load(path).unwrap();
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, crate::view_render_width(80), &highlight, Default::default());
     let styles = DecorationStyles::from_theme(&highlight, Default::default());
     let mark_bg = styles.mark_style().bg;

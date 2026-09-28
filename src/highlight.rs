@@ -17,10 +17,13 @@ use syntect::parsing::{Scope, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use two_face::theme::EmbeddedLazyThemeSet;
 
-/// Default syntax theme when `--theme` is absent or unknown (dark mode).
+/// Default syntax theme when the dark side has no theme (`--theme` /
+/// `--theme-dark` / the config file's `[theme] dark`, see
+/// [`crate::config::SyntaxThemes`]) or it is unknown (dark mode).
 pub const DEFAULT_THEME: &str = "Catppuccin Mocha";
-/// The light-mode counterpart — a light background must never fall back
-/// to a dark theme's pale foreground colors.
+/// The light-mode counterpart (`--theme-light` / `[theme] light`) — a
+/// light background must never fall back to a dark theme's pale
+/// foreground colors.
 pub const DEFAULT_THEME_LIGHT: &str = "Solarized (light)";
 
 /// Markdown scope aliases: syntect's/two-face's markdown grammars emit

@@ -54,7 +54,7 @@ pub(crate) fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: Some("base16-ocean.dark".into()),
+        theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -72,7 +72,7 @@ pub(crate) fn app_with_rules(dir: &std::path::Path, rules: Rules) -> App {
         decorations: Vec::new(),
     };
     let source = Source::load(path).unwrap();
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, 75, &highlight, Default::default());
     let mut app = App::new(config, source, highlight, view, false);
     app.marks_questions = Some(Questions::built_in().unwrap());
@@ -461,7 +461,7 @@ fn review_refuses_the_fixture_route() {
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: Some("base16-ocean.dark".into()),
+        theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -479,7 +479,7 @@ fn review_refuses_the_fixture_route() {
         decorations: Vec::new(),
     };
     let source = Source::load(path).unwrap();
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, 75, &highlight, Default::default());
     let mut app = App::new(config, source, highlight, view, false);
     app.review_rules = Some(Rules::built_in().unwrap());
@@ -502,7 +502,7 @@ fn a_session_without_the_layer_has_no_review_at_all() {
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: Some("base16-ocean.dark".into()),
+        theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -520,7 +520,7 @@ fn a_session_without_the_layer_has_no_review_at_all() {
         decorations: Vec::new(),
     };
     let source = Source::load(path).unwrap();
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, 75, &highlight, Default::default());
     let app = App::new(config, source, highlight, view, false);
     assert!(!app.review_enabled());

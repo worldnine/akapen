@@ -1,0 +1,23 @@
+# akapen の設定ファイルの例。
+#
+# 置き場: $XDG_CONFIG_HOME/akapen/config.toml（無ければ ~/.config/akapen/config.toml）
+# どのキーも省略できる。優先は フラグ > 環境変数 > この設定ファイル > 既定。
+# 知らないキー・型違い・壊れた構文は、起動時にファイルのパスを添えて止まる。
+
+# --semantic-cmd の既定（AKAPEN_SEMANTIC_CMD が無いときに使う）。シェルに渡る。
+# semantic_cmd = "python3 /path/to/akapen/examples/semantic/jev-annotate.py"
+
+# --lint-cmd の既定（AKAPEN_LINT_CMD が無いときに使う）。シェルに渡る。
+# lint_cmd = "python3 /path/to/akapen/examples/lint/textlint-diagnostics.py --config ~/.textlintrc"
+
+# --undercurl の既定（AKAPEN_UNDERCURL が無いときに使う）。auto | on | off
+# undercurl = "auto"
+
+# シンタックスハイライトのテーマ。端末の背景（--light / --dark か OSC 11 の判定）が
+# dark なら dark を、light なら light を使う。two-face の組み込みテーマ名か、
+# .tmTheme ファイルのパス（~/ で始まれば展開する）。
+# --theme-dark / --theme-light が各側を、--theme が両側を上書きする。
+[theme]
+dark  = "Catppuccin Mocha"
+light = "Catppuccin Latte"
+# dark = "~/.config/akapen/themes/tokyo-night.tmTheme"

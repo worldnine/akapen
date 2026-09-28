@@ -1,16 +1,22 @@
 //! Command-line configuration.
 //!
 //! `akapen <file...> [--send-cmd <cmd>] [--theme <syntect-theme>]
+//!              [--theme-dark <syntect-theme>] [--theme-light <syntect-theme>]
 //!              [--ime <off|ascii|jp>] [--light|--dark] [--esc-quit <auto|always|never>]
 //!              [--semantic <fixture.json> | --semantic-cmd <cmd>]
 //!              [--mark-blend <f>] [--dim-blend <f>]`
 //! Positional arguments are the files to open (one or more). Unknown flags
 //! are ignored (reviewr-style). `--help`/`--version` short-circuit before parsing.
+//!
+//! 設定ファイル（`$XDG_CONFIG_HOME/akapen/config.toml`、[`crate::config_file`]）が
+//! フラグと環境変数の下に入る。優先は**フラグ > 環境変数 > 設定ファイル > 既定**。
+//! テーマは `--theme`（両側）> `--theme-dark` / `--theme-light` > `[theme]` > 既定。
 
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
+use crate::config_file::ConfigFile;
 use crate::decoration::{Decoration, DecorationBlend, DecorationKind};
 use crate::ime::ImeMode;
 
@@ -95,9 +101,15 @@ pub struct Config {
     /// replies to an agent message (see scripts/akp), where the commented
     /// document is the agent's own output.
     pub reply: bool,
-    /// `--theme <name>`: syntect theme name for source-mode highlighting,
-    /// or a path to a `.tmTheme` file (e.g. tokyo-night.tmTheme).
-    pub theme: Option<String>,
+    /// シンタックスハイライトのテーマ。背景が dark のときと light のときの
+    /// 2 本で、どちらを使うかは起動時の判定（`--light` / `--dark` か OSC 11）が
+    /// 決める（[`SyntaxThemes::for_background`]）。
+    ///
+    /// 各側は `--theme-dark` / `--theme-light` > 設定ファイルの `[theme]` >
+    /// 既定。`--theme <name>` は**両側を上書きする**（どちらでもそれを使う。
+    /// 1 本だったころの意味のまま）。値は syntect のテーマ名か `.tmTheme` の
+    /// パス（e.g. tokyo-night.tmTheme）。
+    pub theme: SyntaxThemes,
     /// `--ime <off|ascii|jp>`: input-source control around the composer.
     pub ime: ImeMode,
     /// `--light` / `--dark`: force the light/dark UI colors (selection/
@@ -154,11 +166,11 @@ pub struct Config {
     /// document is not a configuration, it is a question about which
     /// one wins.
     ///
-    /// フラグが無いときは環境変数 [`SEMANTIC_CMD_ENV`] を既定にする
-    /// （[`Config::parse_with_env`]）。**排他はそのまま効く** —— 環境変数で
-    /// 設定していることを忘れて `--semantic <fixture>` を渡したときに
-    /// 黙ってどちらかが勝つのは、フラグ 2 つのときと同じで「どちらが勝つか」
-    /// という問いであり、設定ではない。
+    /// フラグが無いときは環境変数 [`SEMANTIC_CMD_ENV`]、それも無ければ設定
+    /// ファイルの `semantic_cmd` を既定にする（[`Config::parse_with_sources`]）。
+    /// **排他はそのまま効く** —— 環境変数や設定ファイルで設定していることを
+    /// 忘れて `--semantic <fixture>` を渡したときに黙ってどちらかが勝つのは、
+    /// フラグ 2 つのときと同じで「どちらが勝つか」という問いであり、設定ではない。
     ///
     /// The command is NOT run at startup — it runs once a document is
     /// on screen, on its own thread, because a process launch plus a
@@ -196,23 +208,26 @@ pub struct Config {
     /// しての linter」、[`crate::lint`]）。`sh -c` で走らせ、作業ディレクトリは
     /// 文書のあるディレクトリ、文書の絶対パスを最後の引数に足す。
     ///
-    /// フラグが無いときは環境変数 [`LINT_CMD_ENV`] を既定にする（空・空白は
-    /// 設定していないのと同じ）。**意味層（`--semantic-cmd`）は要らない。**
+    /// フラグが無いときは環境変数 [`LINT_CMD_ENV`]、それも無ければ設定ファイルの
+    /// `lint_cmd` を既定にする（空・空白は設定していないのと同じ）。
+    /// **意味層（`--semantic-cmd`）は要らない。**
     pub lint_cmd: Option<String>,
     /// `--undercurl <auto|on|off>`: Review の下線を波線（`CSI 4:3 m`）に
     /// するか（[`crate::undercurl`]）。フラグが無ければ環境変数
-    /// [`crate::undercurl::UNDERCURL_ENV`]、それも無ければ `auto`。
+    /// [`crate::undercurl::UNDERCURL_ENV`]、次に設定ファイルの `undercurl`、
+    /// どれも無ければ `auto`。
     pub undercurl: crate::undercurl::UndercurlMode,
     /// `--mark-blend <0.0..1.0>` / `--dim-blend <0.0..1.0>`: how strong
     /// the two range-decoration kinds are. `mark` lifts the mark
     /// background off the page toward the text color; `dim` moves a
     /// dimmed foreground toward the page.
     ///
-    /// The defaults live on [`DecorationBlend`], not here: a
-    /// configuration file, if akapen ever grows one, belongs BETWEEN the
-    /// default and this field (`CLI > config file > default`), and that
-    /// only works if the default is a value the layers overwrite rather
-    /// than an `Option` each layer re-invents.
+    /// The defaults live on [`DecorationBlend`], not here: the
+    /// configuration file ([`crate::config_file`], which does not carry
+    /// these yet) belongs BETWEEN the default and this field
+    /// (`CLI > config file > default`), and that only works if the default
+    /// is a value the layers overwrite rather than an `Option` each layer
+    /// re-invents.
     pub decoration_blend: DecorationBlend,
     /// `--decorations <json>`: a hidden development flag that paints
     /// range decorations onto the rendered view, so the layer can be seen
@@ -222,6 +237,32 @@ pub struct Config {
     /// and `end` byte offsets into the file. Empty (and inert) by
     /// default.
     pub decorations: Vec<Decoration>,
+}
+
+/// 背景ごとのシンタックスハイライトのテーマ（[`Config::theme`]）。
+///
+/// `None` は既定 —— [`crate::highlight::Highlighter::new`] が light/dark に
+/// 合ったもの（`Catppuccin Mocha` / `Solarized (light)`）を選ぶ。名前が
+/// 解決できないときも同じ既定へ落ちる。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyntaxThemes {
+    /// 背景が dark のとき。
+    pub dark: Option<String>,
+    /// 背景が light のとき。
+    pub light: Option<String>,
+}
+
+impl SyntaxThemes {
+    /// 両側に同じテーマ（`--theme <name>` と同じ形）。テスト用。
+    #[cfg(test)]
+    pub fn both(name: &str) -> Self {
+        Self { dark: Some(name.to_string()), light: Some(name.to_string()) }
+    }
+
+    /// 背景に合う側。
+    pub fn for_background(&self, light: bool) -> Option<&str> {
+        if light { self.light.as_deref() } else { self.dark.as_deref() }
+    }
 }
 
 /// The `--decorations` JSON shape. The wire format lives here, not on
@@ -300,24 +341,42 @@ impl Config {
         Self::parse_with_env(args, |_| None)
     }
 
-    /// Parse the process arguments (after argv[0]) with an environment.
+    /// 引数と環境だけで解釈する（**設定ファイルは無いものとする**）。テスト用。
+    #[cfg(test)]
+    pub fn parse_with_env<I, F>(args: I, env: F) -> Result<Action>
+    where
+        I: IntoIterator<Item = String>,
+        F: Fn(&str) -> Option<String>,
+    {
+        Self::parse_with_sources(args, env, || Ok(None))
+    }
+
+    /// Parse the process arguments (after argv[0]) with an environment and
+    /// a configuration file.
     ///
     /// All non-flag tokens are files; `--send-cmd`/`--theme`/`--ime` take a
     /// value; `-h`/`--help` and `-V`/`--version` short-circuit. At least
     /// one file is required.
     ///
-    /// `env` は環境変数 1 つを引く関数である。**実環境を読むのは
-    /// [`Config::from_env`] だけ**で、テストは好きな値を注入できる。
-    pub fn parse_with_env<I, F>(args: I, env: F) -> Result<Action>
+    /// `env` は環境変数 1 つを引く関数、`config_file` は設定ファイルを読む
+    /// 関数である。**実環境と実ファイルを読むのは [`Config::from_env`] だけ**で、
+    /// テストは好きな値を注入できる。
+    ///
+    /// `config_file` は**短絡の後で**呼ぶ。壊れた設定ファイルは起動時の
+    /// エラーだが、それで `--help` まで読めなくなると直し方を調べる道が無い。
+    pub fn parse_with_sources<I, F, C>(args: I, env: F, config_file: C) -> Result<Action>
     where
         I: IntoIterator<Item = String>,
         F: Fn(&str) -> Option<String>,
+        C: FnOnce() -> Result<Option<ConfigFile>>,
     {
         let mut files: Vec<PathBuf> = Vec::new();
         let mut send_cmd: Option<String> = None;
         let mut send_agent = false;
         let mut reply = false;
         let mut theme: Option<String> = None;
+        let mut theme_dark: Option<String> = None;
+        let mut theme_light: Option<String> = None;
         let mut ime = ImeMode::Ascii;
         let mut light: Option<bool> = None;
         let mut callback: Option<String> = None;
@@ -354,6 +413,8 @@ impl Config {
                 "--send-agent" => send_agent = true,
                 "--reply" => reply = true,
                 "--theme" => theme = it.next(),
+                "--theme-dark" => theme_dark = it.next(),
+                "--theme-light" => theme_light = it.next(),
                 "--decorations" => {
                     if let Some(v) = it.next() {
                         decorations = parse_decorations(&v)?;
@@ -389,36 +450,69 @@ impl Config {
                 _ => {} // unknown flags ignored, like reviewr
             }
         }
-        // `--semantic-cmd` を書いていなければ環境変数を既定にする。
-        // **フラグが勝つ。** 空・空白だけは「設定していない」と同じに扱う
-        // （`export AKAPEN_SEMANTIC_CMD=` で一時的に外せる）。
-        let mut semantic_cmd_from_env = false;
-        if semantic_cmd.is_none()
-            && let Some(v) = env(SEMANTIC_CMD_ENV)
-            && !v.trim().is_empty()
-        {
-            semantic_cmd = Some(v);
-            semantic_cmd_from_env = true;
+        if files.is_empty() {
+            bail!(
+                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--theme-dark <name>] [--theme-light <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>]"
+            );
         }
-        // `--lint-cmd` も同じ作法。フラグが勝ち、空・空白は「無い」と同じ。
-        if lint_cmd.is_none()
-            && let Some(v) = env(LINT_CMD_ENV)
-        {
-            lint_cmd = Some(v);
+        // 設定ファイルは短絡と usage の後で読む（`--help` を壊さない）。
+        let file = config_file()?;
+        let file = file.as_ref();
+        // テーマ。`--theme` は両側を上書きする（1 本だったころの意味のまま、
+        // `--theme-dark` / `--theme-light` より強い）。各側はフラグ > 設定
+        // ファイル > 既定（`None`、[`crate::highlight::Highlighter::new`]）。
+        let theme = SyntaxThemes {
+            dark: theme
+                .clone()
+                .or(theme_dark)
+                .or_else(|| file.and_then(|f| f.theme_dark.clone())),
+            light: theme
+                .or(theme_light)
+                .or_else(|| file.and_then(|f| f.theme_light.clone())),
+        };
+        // `--semantic-cmd` を書いていなければ環境変数を、それも無ければ
+        // 設定ファイルを既定にする。**フラグが勝ち、環境変数が設定ファイルに
+        // 勝つ。**
+        //
+        // 環境変数が**ある**なら、空・空白でも設定ファイルは見ない —— 空は
+        // 「層を外す」である（`export AKAPEN_SEMANTIC_CMD=` で一時的に外せる。
+        // 設定ファイルに書いてあっても外せないと、この道が消える）。
+        //
+        // `semantic_cmd_from` は出どころ。排他のエラーで言う。
+        let mut semantic_cmd_from: Option<String> = None;
+        if semantic_cmd.is_none() {
+            match env(SEMANTIC_CMD_ENV) {
+                Some(v) => {
+                    if !v.trim().is_empty() {
+                        semantic_cmd = Some(v);
+                        semantic_cmd_from = Some(SEMANTIC_CMD_ENV.to_string());
+                    }
+                }
+                None => {
+                    if let Some(f) = file
+                        && let Some(v) = &f.semantic_cmd
+                    {
+                        semantic_cmd = Some(v.clone());
+                        semantic_cmd_from = Some(format!("semantic_cmd in {}", f.path.display()));
+                    }
+                }
+            }
         }
-        let lint_cmd = lint_cmd.filter(|cmd| !cmd.trim().is_empty());
-        // `--undercurl` も同じ作法。フラグが勝つ。
+        // `--lint-cmd` も同じ作法。フラグ > 環境変数 > 設定ファイル。環境変数が
+        // あれば（空でも）設定ファイルは見ない。空・空白は「無い」と同じ。
+        let lint_cmd = lint_cmd
+            .or_else(|| env(LINT_CMD_ENV))
+            .or_else(|| file.and_then(|f| f.lint_cmd.clone()))
+            .filter(|cmd| !cmd.trim().is_empty());
+        // `--undercurl` も同じ作法。環境変数の値の読み方は今までどおり
+        // （知らない値は auto）で、あれば設定ファイルは見ない。
         let undercurl = undercurl
             .or_else(|| {
                 env(crate::undercurl::UNDERCURL_ENV)
                     .map(|v| crate::undercurl::UndercurlMode::parse(&v))
             })
+            .or_else(|| file.and_then(|f| f.undercurl))
             .unwrap_or_default();
-        if files.is_empty() {
-            bail!(
-                "usage: akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>] [--light|--dark] [--semantic <fixture.json> | --semantic-cmd <cmd>]"
-            );
-        }
         if send_cmd.is_some() && send_agent {
             bail!("--send-cmd and --send-agent are mutually exclusive");
         }
@@ -426,12 +520,13 @@ impl Config {
         // fixture and the command would each claim the same Atom list,
         // and whichever lost would still be what the user asked for.
         if semantic.is_some() && semantic_cmd.is_some() {
-            // 出どころを添える。環境変数由来のときは、打った覚えのない
-            // `--semantic-cmd` を名指しされることになるので、どこで設定した
-            // のかが言えないとユーザーは自分の shell を疑うところから始める。
-            if semantic_cmd_from_env {
+            // 出どころを添える。環境変数・設定ファイル由来のときは、打った
+            // 覚えのない `--semantic-cmd` を名指しされることになるので、どこで
+            // 設定したのかが言えないとユーザーは自分の shell を疑うところから
+            // 始める。
+            if let Some(from) = semantic_cmd_from {
                 bail!(
-                    "--semantic and --semantic-cmd are mutually exclusive (--semantic-cmd from {SEMANTIC_CMD_ENV})"
+                    "--semantic and --semantic-cmd are mutually exclusive (--semantic-cmd from {from})"
                 );
             }
             bail!("--semantic and --semantic-cmd are mutually exclusive");
@@ -454,7 +549,9 @@ impl Config {
                 bail!("--review-json needs --semantic-cmd (a fixture answers only one question)");
             }
             if semantic_cmd.is_none() {
-                bail!("--review-json needs --semantic-cmd (or {SEMANTIC_CMD_ENV})");
+                bail!(
+                    "--review-json needs --semantic-cmd (or {SEMANTIC_CMD_ENV}, or semantic_cmd in the config file)"
+                );
             }
         }
         Ok(Action::Run(Box::new(Config {
@@ -481,15 +578,21 @@ impl Config {
         })))
     }
 
-    /// Parse from the real process arguments **and the real environment**.
+    /// Parse from the real process arguments, **the real environment and
+    /// the real configuration file** ([`ConfigFile::discover`]).
     pub fn from_env() -> Result<Action> {
-        Self::parse_with_env(std::env::args().skip(1), |name| std::env::var(name).ok())
+        Self::parse_with_sources(
+            std::env::args().skip(1),
+            |name| std::env::var(name).ok(),
+            ConfigFile::discover,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Config, EscQuit, SEMANTIC_CMD_ENV};
+    use super::{Action, Config, EscQuit, SEMANTIC_CMD_ENV, SyntaxThemes};
+    use crate::config_file::ConfigFile;
     use std::path::Path;
     use crate::decoration::{Decoration, DecorationBlend, DecorationKind};
 
@@ -557,7 +660,7 @@ mod tests {
         assert_eq!(c.files.len(), 2);
         assert_eq!(c.files[0].to_str(), Some("a.md"));
         assert_eq!(c.files[1].to_str(), Some("b.md"));
-        assert_eq!(c.theme.as_deref(), Some("base16-ocean.dark"));
+        assert_eq!(c.theme, super::SyntaxThemes::both("base16-ocean.dark"));
     }
 
     #[test]
@@ -1020,5 +1123,232 @@ mod tests {
         let action = parse(&["x.md"]);
         assert!(!cfg(&action).review_json);
         assert!(cfg(&action).review_rules.is_none());
+    }
+
+    // ---- 設定ファイル（`config.toml`） -------------------------------
+
+    const FILE_PATH: &str = "/cfg/akapen/config.toml";
+
+    /// 設定ファイルの中身を注入して解釈する（実ファイルは読まない）。
+    fn parse_with_file(
+        args: &[&str],
+        env: impl Fn(&str) -> Option<String>,
+        toml: &str,
+    ) -> anyhow::Result<Action> {
+        let file = ConfigFile::parse(Path::new(FILE_PATH), toml, None).unwrap();
+        Config::parse_with_sources(args.iter().map(|s| (*s).to_string()), env, move || {
+            Ok(Some(file))
+        })
+    }
+
+    fn with_file(args: &[&str], toml: &str) -> Action {
+        parse_with_file(args, |_| None, toml).unwrap()
+    }
+
+    fn file_refusal(args: &[&str], env: impl Fn(&str) -> Option<String>, toml: &str) -> String {
+        match parse_with_file(args, env, toml) {
+            Ok(_) => panic!("{args:?} が通ってしまった"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_theme_sides_default_to_none_and_pick_by_background() {
+        let action = parse(&["x.md"]);
+        assert_eq!(cfg(&action).theme, SyntaxThemes::default(), "既定は Highlighter が選ぶ");
+        let themes = SyntaxThemes { dark: Some("D".into()), light: Some("L".into()) };
+        assert_eq!(themes.for_background(false), Some("D"));
+        assert_eq!(themes.for_background(true), Some("L"));
+    }
+
+    #[test]
+    fn the_theme_dark_and_light_flags_set_one_side_each() {
+        let action = parse(&["x.md", "--theme-dark", "Dracula"]);
+        assert_eq!(
+            cfg(&action).theme,
+            SyntaxThemes { dark: Some("Dracula".into()), light: None },
+            "もう片側は既定のまま"
+        );
+        let action = parse(&["x.md", "--theme-light", "Catppuccin Latte", "--theme-dark", "Nord"]);
+        assert_eq!(
+            cfg(&action).theme,
+            SyntaxThemes { dark: Some("Nord".into()), light: Some("Catppuccin Latte".into()) }
+        );
+    }
+
+    #[test]
+    fn the_theme_flag_covers_both_sides_and_beats_the_per_side_flags() {
+        // 1 本だったころの意味を変えない。どちらの背景でもそれを使う。
+        let action = parse(&["x.md", "--theme-dark", "Nord", "--theme", "Dracula"]);
+        assert_eq!(cfg(&action).theme, SyntaxThemes::both("Dracula"));
+        // 順番に依らない（後ろの `--theme-light` にも勝つ）。
+        let action = parse(&["x.md", "--theme", "Dracula", "--theme-light", "Catppuccin Latte"]);
+        assert_eq!(cfg(&action).theme, SyntaxThemes::both("Dracula"));
+    }
+
+    #[test]
+    fn the_config_file_theme_sits_under_the_flags() {
+        let toml = "[theme]\ndark = \"Catppuccin Mocha\"\nlight = \"Catppuccin Latte\"\n";
+        // 設定ファイルだけ。
+        let action = with_file(&["x.md"], toml);
+        assert_eq!(
+            cfg(&action).theme,
+            SyntaxThemes {
+                dark: Some("Catppuccin Mocha".into()),
+                light: Some("Catppuccin Latte".into())
+            }
+        );
+        // 片側のフラグはその側だけを上書きする。
+        let action = with_file(&["x.md", "--theme-light", "Solarized (light)"], toml);
+        assert_eq!(
+            cfg(&action).theme,
+            SyntaxThemes {
+                dark: Some("Catppuccin Mocha".into()),
+                light: Some("Solarized (light)".into())
+            }
+        );
+        // `--theme` は両側を上書きする。
+        let action = with_file(&["x.md", "--theme", "Dracula"], toml);
+        assert_eq!(cfg(&action).theme, SyntaxThemes::both("Dracula"));
+        // 片側だけ書いた設定ファイルは、もう片側を既定に残す。
+        let action = with_file(&["x.md"], "[theme]\nlight = \"Catppuccin Latte\"\n");
+        assert_eq!(
+            cfg(&action).theme,
+            SyntaxThemes { dark: None, light: Some("Catppuccin Latte".into()) }
+        );
+    }
+
+    #[test]
+    fn the_config_file_semantic_cmd_sits_under_the_flag_and_the_env() {
+        let toml = "semantic_cmd = \"from-the-file\"\n";
+        let action = with_file(&["x.md"], toml);
+        assert_eq!(cfg(&action).semantic_cmd.as_deref(), Some("from-the-file"));
+        let action =
+            parse_with_file(&["x.md"], one_var(SEMANTIC_CMD_ENV, "from-env"), toml).unwrap();
+        assert_eq!(cfg(&action).semantic_cmd.as_deref(), Some("from-env"), "環境変数が勝つ");
+        let action = parse_with_file(
+            &["x.md", "--semantic-cmd", "from-the-flag"],
+            one_var(SEMANTIC_CMD_ENV, "from-env"),
+            toml,
+        )
+        .unwrap();
+        assert_eq!(cfg(&action).semantic_cmd.as_deref(), Some("from-the-flag"), "フラグが勝つ");
+    }
+
+    #[test]
+    fn a_blank_env_still_takes_the_layer_off_over_the_config_file() {
+        // `export AKAPEN_SEMANTIC_CMD=` で一時的に外せる道は、設定ファイルに
+        // 書いてあっても残る。
+        for blank in ["", "   "] {
+            let action = parse_with_file(
+                &["x.md"],
+                move |n| (n == SEMANTIC_CMD_ENV).then(|| blank.to_string()),
+                "semantic_cmd = \"from-the-file\"\n",
+            )
+            .unwrap();
+            assert!(cfg(&action).semantic_cmd.is_none(), "{blank:?}");
+        }
+    }
+
+    #[test]
+    fn the_config_file_default_collides_with_a_fixture_and_names_the_file() {
+        // 環境変数の既定と同じ扱い。打った覚えのない `--semantic-cmd` を
+        // 名指しされる側なので、どのファイルのどのキーかを言う。
+        let err = file_refusal(
+            &["x.md", "--semantic", "d.json"],
+            |_| None,
+            "semantic_cmd = \"jev-annotate\"\n",
+        );
+        assert!(err.contains("mutually exclusive"), "{err}");
+        assert!(err.contains("semantic_cmd in /cfg/akapen/config.toml"), "{err}");
+        // 環境変数が勝っているときは、環境変数を言う。
+        let err = file_refusal(
+            &["x.md", "--semantic", "d.json"],
+            one_var(SEMANTIC_CMD_ENV, "jev-annotate"),
+            "semantic_cmd = \"jev-annotate\"\n",
+        );
+        assert!(err.contains(SEMANTIC_CMD_ENV), "{err}");
+        assert!(!err.contains(FILE_PATH), "{err}");
+    }
+
+    #[test]
+    fn the_config_file_default_counts_as_a_layer() {
+        let toml = "semantic_cmd = \"cat\"\n";
+        // 問いのファイル・ルールのファイルの検査は通る。
+        assert!(parse_with_file(&["x.md", "--marks-questions", "q.json"], |_| None, toml).is_ok());
+        assert!(parse_with_file(&["x.md", "--review-rules", "r.json"], |_| None, toml).is_ok());
+        // `--review-json` も設定ファイルだけで立つ。
+        let action = with_file(&["x.md", "--review-json"], toml);
+        assert!(cfg(&action).review_json);
+        assert_eq!(cfg(&action).semantic_cmd.as_deref(), Some("cat"));
+        // 空の値は書いていないのと同じなので、層にならない。
+        let err = file_refusal(&["x.md", "--review-json"], |_| None, "semantic_cmd = \"\"\n");
+        assert!(err.contains("--review-json needs --semantic-cmd"), "{err}");
+        assert!(err.contains("config file"), "{err}");
+    }
+
+    #[test]
+    fn the_config_file_lint_cmd_sits_under_the_flag_and_the_env() {
+        use super::LINT_CMD_ENV;
+        let toml = "lint_cmd = \"from-the-file\"\n";
+        let action = with_file(&["x.md"], toml);
+        assert_eq!(cfg(&action).lint_cmd.as_deref(), Some("from-the-file"));
+        let action = parse_with_file(&["x.md"], one_var(LINT_CMD_ENV, "from-env"), toml).unwrap();
+        assert_eq!(cfg(&action).lint_cmd.as_deref(), Some("from-env"), "環境変数が勝つ");
+        let action = with_file(&["x.md", "--lint-cmd", "flag"], toml);
+        assert_eq!(cfg(&action).lint_cmd.as_deref(), Some("flag"), "フラグが勝つ");
+        // 空の環境変数は、設定ファイルがあっても外す（`--semantic-cmd` と同じ）。
+        let action = parse_with_file(&["x.md"], one_var(LINT_CMD_ENV, ""), toml).unwrap();
+        assert!(cfg(&action).lint_cmd.is_none());
+    }
+
+    #[test]
+    fn the_config_file_undercurl_sits_under_the_flag_and_the_env() {
+        use crate::undercurl::{UNDERCURL_ENV, UndercurlMode};
+        let toml = "undercurl = \"off\"\n";
+        assert_eq!(cfg(&with_file(&["x.md"], toml)).undercurl, UndercurlMode::Off);
+        let action = parse_with_file(&["x.md"], one_var(UNDERCURL_ENV, "on"), toml).unwrap();
+        assert_eq!(cfg(&action).undercurl, UndercurlMode::On, "環境変数が勝つ");
+        let action = with_file(&["x.md", "--undercurl", "on"], toml);
+        assert_eq!(cfg(&action).undercurl, UndercurlMode::On, "フラグが勝つ");
+    }
+
+    #[test]
+    fn no_config_file_changes_nothing() {
+        // ファイルが無い（`Ok(None)`）のは、今までの `parse_with_env` と同じ。
+        let with = Config::parse_with_sources(
+            ["x.md"].iter().map(|s| s.to_string()),
+            |_| None,
+            || Ok(None),
+        )
+        .unwrap();
+        let c = cfg(&with);
+        assert_eq!(c.theme, SyntaxThemes::default());
+        assert!(c.semantic_cmd.is_none() && c.lint_cmd.is_none());
+        assert_eq!(c.undercurl, crate::undercurl::UndercurlMode::Auto);
+    }
+
+    #[test]
+    fn a_broken_config_file_is_a_startup_error_but_help_still_works() {
+        // 読めなかった設定ファイルのエラーはそのまま起動のエラーになる。
+        let broken =
+            || ConfigFile::parse(Path::new(FILE_PATH), "[theme]\ndrak = \"x\"\n", None).map(Some);
+        let args = ["x.md"].iter().map(|s| s.to_string());
+        let err = match Config::parse_with_sources(args, |_| None, broken) {
+            Ok(_) => panic!("壊れた設定ファイルで起動してしまった"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains(FILE_PATH) && err.contains("drak"), "{err}");
+        // 短絡（`--help` など）は設定ファイルを読まない — 直し方を調べる道を塞がない。
+        for args in [&["--help"][..], &["x.md", "--version"], &["--semantic-cache-clear"]] {
+            let action = Config::parse_with_sources(
+                args.iter().map(|s| s.to_string()),
+                |_| None,
+                || -> anyhow::Result<Option<ConfigFile>> {
+                    panic!("{args:?} で設定ファイルを読んだ")
+                },
+            );
+            assert!(!matches!(action, Ok(Action::Run(_))), "{args:?}");
+        }
     }
 }
