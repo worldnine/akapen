@@ -1862,7 +1862,7 @@ dependencies = [
 [[package]]
 name = "termtheme"
 version = "0.1.0"
-source = "git+https://github.com/worldnine/termtheme#12037b9dd2b96487e7172c890b93443d3ab98c6e"
+source = "git+https://github.com/worldnine/termtheme#512abfa92d5f9c2f552164af37b929eda1953da8"
 dependencies = [
  "crossterm",
  "libc",
