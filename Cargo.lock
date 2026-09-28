@@ -34,6 +34,7 @@ dependencies = [
  "syntect",
  "tachyonfx",
  "tempfile",
+ "termtheme",
  "toml",
  "two-face",
  "unicode-width",
@@ -1856,6 +1857,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "411c5bf740737c7918b8b1fe232dca4dc9f8e754b8ad5e20966814001ed0ac6b"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "termtheme"
+version = "0.1.0"
+source = "git+https://github.com/worldnine/termtheme#12037b9dd2b96487e7172c890b93443d3ab98c6e"
+dependencies = [
+ "crossterm",
+ "libc",
+ "ratatui",
+ "serde",
+ "signal-hook",
+ "syntect",
+ "two-face",
 ]
 
 [[package]]

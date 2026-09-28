@@ -1439,7 +1439,7 @@ mod footer_tests {
             send_cmd: None,
             send_agent: false,
             reply,
-            theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
+            theme: crate::config::ThemePair::both("base16-ocean.dark"),
             ime: ImeMode::Off,
             light: None,
             callback: None,

@@ -15,6 +15,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
+use termtheme::config::ThemeFlags;
+pub use termtheme::theme::ThemePair;
 
 use crate::config_file::ConfigFile;
 use crate::decoration::{Decoration, DecorationBlend, DecorationKind};
@@ -102,14 +104,16 @@ pub struct Config {
     /// document is the agent's own output.
     pub reply: bool,
     /// シンタックスハイライトのテーマ。背景が dark のときと light のときの
-    /// 2 本で、どちらを使うかは起動時の判定（`--light` / `--dark` か OSC 11）が
-    /// 決める（[`SyntaxThemes::for_background`]）。
+    /// 2 本で、どちらを使うかは背景の判定（`--light` / `--dark`、無ければ起動時の
+    /// OSC 11 と、開いているあいだのモード 2031 の知らせ）が決める
+    /// （[`ThemePair::for_background`]）。`None` の側は既定
+    /// （[`termtheme::theme::default_name`]）。
     ///
     /// 各側は `--theme-dark` / `--theme-light` > 設定ファイルの `[theme]` >
     /// 既定。`--theme <name>` は**両側を上書きする**（どちらでもそれを使う。
     /// 1 本だったころの意味のまま）。値は syntect のテーマ名か `.tmTheme` の
     /// パス（e.g. tokyo-night.tmTheme）。
-    pub theme: SyntaxThemes,
+    pub theme: ThemePair,
     /// `--ime <off|ascii|jp>`: input-source control around the composer.
     pub ime: ImeMode,
     /// `--light` / `--dark`: force the light/dark UI colors (selection/
@@ -237,32 +241,6 @@ pub struct Config {
     /// and `end` byte offsets into the file. Empty (and inert) by
     /// default.
     pub decorations: Vec<Decoration>,
-}
-
-/// 背景ごとのシンタックスハイライトのテーマ（[`Config::theme`]）。
-///
-/// `None` は既定 —— [`crate::highlight::Highlighter::new`] が light/dark に
-/// 合ったもの（`Catppuccin Mocha` / `Solarized (light)`）を選ぶ。名前が
-/// 解決できないときも同じ既定へ落ちる。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SyntaxThemes {
-    /// 背景が dark のとき。
-    pub dark: Option<String>,
-    /// 背景が light のとき。
-    pub light: Option<String>,
-}
-
-impl SyntaxThemes {
-    /// 両側に同じテーマ（`--theme <name>` と同じ形）。テスト用。
-    #[cfg(test)]
-    pub fn both(name: &str) -> Self {
-        Self { dark: Some(name.to_string()), light: Some(name.to_string()) }
-    }
-
-    /// 背景に合う側。
-    pub fn for_background(&self, light: bool) -> Option<&str> {
-        if light { self.light.as_deref() } else { self.dark.as_deref() }
-    }
 }
 
 /// The `--decorations` JSON shape. The wire format lives here, not on
@@ -461,15 +439,8 @@ impl Config {
         // テーマ。`--theme` は両側を上書きする（1 本だったころの意味のまま、
         // `--theme-dark` / `--theme-light` より強い）。各側はフラグ > 設定
         // ファイル > 既定（`None`、[`crate::highlight::Highlighter::new`]）。
-        let theme = SyntaxThemes {
-            dark: theme
-                .clone()
-                .or(theme_dark)
-                .or_else(|| file.and_then(|f| f.theme_dark.clone())),
-            light: theme
-                .or(theme_light)
-                .or_else(|| file.and_then(|f| f.theme_light.clone())),
-        };
+        let theme = ThemeFlags { both: theme, dark: theme_dark, light: theme_light }
+            .over(file.map(|f| &f.theme));
         // `--semantic-cmd` を書いていなければ環境変数を、それも無ければ
         // 設定ファイルを既定にする。**フラグが勝ち、環境変数が設定ファイルに
         // 勝つ。**
@@ -591,7 +562,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Config, EscQuit, SEMANTIC_CMD_ENV, SyntaxThemes};
+    use super::{Action, Config, EscQuit, SEMANTIC_CMD_ENV, ThemePair};
     use crate::config_file::ConfigFile;
     use std::path::Path;
     use crate::decoration::{Decoration, DecorationBlend, DecorationKind};
@@ -660,7 +631,7 @@ mod tests {
         assert_eq!(c.files.len(), 2);
         assert_eq!(c.files[0].to_str(), Some("a.md"));
         assert_eq!(c.files[1].to_str(), Some("b.md"));
-        assert_eq!(c.theme, super::SyntaxThemes::both("base16-ocean.dark"));
+        assert_eq!(c.theme, ThemePair::both("base16-ocean.dark"));
     }
 
     #[test]
@@ -1155,8 +1126,8 @@ mod tests {
     #[test]
     fn the_theme_sides_default_to_none_and_pick_by_background() {
         let action = parse(&["x.md"]);
-        assert_eq!(cfg(&action).theme, SyntaxThemes::default(), "既定は Highlighter が選ぶ");
-        let themes = SyntaxThemes { dark: Some("D".into()), light: Some("L".into()) };
+        assert_eq!(cfg(&action).theme, ThemePair::default(), "既定は Highlighter が選ぶ");
+        let themes = ThemePair { dark: Some("D".into()), light: Some("L".into()) };
         assert_eq!(themes.for_background(false), Some("D"));
         assert_eq!(themes.for_background(true), Some("L"));
     }
@@ -1166,13 +1137,13 @@ mod tests {
         let action = parse(&["x.md", "--theme-dark", "Dracula"]);
         assert_eq!(
             cfg(&action).theme,
-            SyntaxThemes { dark: Some("Dracula".into()), light: None },
+            ThemePair { dark: Some("Dracula".into()), light: None },
             "もう片側は既定のまま"
         );
         let action = parse(&["x.md", "--theme-light", "Catppuccin Latte", "--theme-dark", "Nord"]);
         assert_eq!(
             cfg(&action).theme,
-            SyntaxThemes { dark: Some("Nord".into()), light: Some("Catppuccin Latte".into()) }
+            ThemePair { dark: Some("Nord".into()), light: Some("Catppuccin Latte".into()) }
         );
     }
 
@@ -1180,10 +1151,10 @@ mod tests {
     fn the_theme_flag_covers_both_sides_and_beats_the_per_side_flags() {
         // 1 本だったころの意味を変えない。どちらの背景でもそれを使う。
         let action = parse(&["x.md", "--theme-dark", "Nord", "--theme", "Dracula"]);
-        assert_eq!(cfg(&action).theme, SyntaxThemes::both("Dracula"));
+        assert_eq!(cfg(&action).theme, ThemePair::both("Dracula"));
         // 順番に依らない（後ろの `--theme-light` にも勝つ）。
         let action = parse(&["x.md", "--theme", "Dracula", "--theme-light", "Catppuccin Latte"]);
-        assert_eq!(cfg(&action).theme, SyntaxThemes::both("Dracula"));
+        assert_eq!(cfg(&action).theme, ThemePair::both("Dracula"));
     }
 
     #[test]
@@ -1193,7 +1164,7 @@ mod tests {
         let action = with_file(&["x.md"], toml);
         assert_eq!(
             cfg(&action).theme,
-            SyntaxThemes {
+            ThemePair {
                 dark: Some("Catppuccin Mocha".into()),
                 light: Some("Catppuccin Latte".into())
             }
@@ -1202,19 +1173,19 @@ mod tests {
         let action = with_file(&["x.md", "--theme-light", "Solarized (light)"], toml);
         assert_eq!(
             cfg(&action).theme,
-            SyntaxThemes {
+            ThemePair {
                 dark: Some("Catppuccin Mocha".into()),
                 light: Some("Solarized (light)".into())
             }
         );
         // `--theme` は両側を上書きする。
         let action = with_file(&["x.md", "--theme", "Dracula"], toml);
-        assert_eq!(cfg(&action).theme, SyntaxThemes::both("Dracula"));
+        assert_eq!(cfg(&action).theme, ThemePair::both("Dracula"));
         // 片側だけ書いた設定ファイルは、もう片側を既定に残す。
         let action = with_file(&["x.md"], "[theme]\nlight = \"Catppuccin Latte\"\n");
         assert_eq!(
             cfg(&action).theme,
-            SyntaxThemes { dark: None, light: Some("Catppuccin Latte".into()) }
+            ThemePair { dark: None, light: Some("Catppuccin Latte".into()) }
         );
     }
 
@@ -1323,7 +1294,7 @@ mod tests {
         )
         .unwrap();
         let c = cfg(&with);
-        assert_eq!(c.theme, SyntaxThemes::default());
+        assert_eq!(c.theme, ThemePair::default());
         assert!(c.semantic_cmd.is_none() && c.lint_cmd.is_none());
         assert_eq!(c.undercurl, crate::undercurl::UndercurlMode::Auto);
     }

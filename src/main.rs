@@ -38,7 +38,6 @@ mod semantic;
 mod semantic_cache;
 mod snapshot;
 mod source;
-mod theme;
 mod timeline;
 mod undercurl;
 mod view;
@@ -56,7 +55,7 @@ use ratatui::Frame;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::cursor::{Hide, Show};
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
@@ -65,6 +64,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use tachyonfx::EffectRenderer;
+use termtheme::input::{self, Input};
+use termtheme::scheme::{DisableColorSchemeUpdates, EnableColorSchemeUpdates, QueryColorScheme};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::*;
@@ -114,11 +115,13 @@ fn main() -> Result<()> {
                  \x20                   (default Catppuccin Mocha)\n\
                  \x20 --theme-light <name> the theme on a light background\n\
                  \x20                   (default Solarized (light)). Which side\n\
-                 \x20                   applies follows --light/--dark or OSC 11\n\
+                 \x20                   applies follows --light/--dark or OSC 11,\n\
+                 \x20                   and the terminal's light/dark switches\n\
                  \x20 --ime <off|ascii|jp> input-source control around the composer\n\
                  \x20                   (default ascii; needs swiftc on macOS)\n\
                  \x20 --light           force light mode (default: auto-detect\n\
-                 \x20                   the terminal background via OSC 11)\n\
+                 \x20                   the terminal background via OSC 11, and\n\
+                 \x20                   follow its switches while open — mode 2031)\n\
                  \x20 --dark            force dark mode\n\
                  \x20 --no-fx           disable the animated time-machine frame\n\
                  \x20                   (the rotating gradient border while browsing the past)\n\
@@ -249,11 +252,14 @@ fn main() -> Result<()> {
 
 
 /// When stdin is not a terminal (xargs gives children /dev/null; scripts
-/// redirect it), rebind fd 0 to a real tty so crossterm's event reader
-/// can initialize. On macOS this must be the actual pty slave: /dev/tty
-/// is a synthetic node that kqueue (mio) rejects with EINVAL, and
-/// crossterm's own /dev/tty fallback therefore fails with "Failed to
-/// initialize input reader".
+/// redirect it), rebind fd 0 to a real tty so the input reader
+/// ([`termtheme::input`]) and the startup OSC 11 query
+/// ([`termtheme::background`], which reads the answer from stdin) both
+/// see the terminal. On macOS this must be the actual pty slave: /dev/tty
+/// is a synthetic node that kqueue (mio) rejects with EINVAL — crossterm's
+/// own /dev/tty fallback failed with "Failed to initialize input reader"
+/// when it was still the reader, and the watchdog's `stdin_hung_up` polls
+/// fd 0.
 fn ensure_terminal_stdin() {
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
@@ -264,7 +270,7 @@ fn ensure_terminal_stdin() {
         return;
     }
     // Other platforms (and macOS without a matching pty): the controlling
-    // terminal node itself — epoll etc. accept it, so crossterm works.
+    // terminal node itself — epoll etc. accept it.
     if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
         use std::os::fd::AsRawFd;
         // SAFETY: both fds are valid; dup2 replaces fd 0 with the tty.
@@ -308,21 +314,57 @@ fn rebind_to_controlling_pty() -> bool {
     false
 }
 
-/// Restores the terminal on drop: cursor, mouse capture, raw mode, and
-/// alternate screen. `run()` creates it immediately after
-/// the no-blink terminal init, so every early error return (a failed
-/// `terminal.size()`, an I/O error in `event_loop`) still leaves the
-/// shell usable. ratatui 0.30's `Terminal` has no Drop-based restore and
-/// the panic hook only fires on panics, so a plain `?` would otherwise
-/// exit the process with the terminal stuck in raw mode and echo off.
+/// Restores the terminal on drop: the color-scheme subscription, cursor,
+/// mouse capture, raw mode, and alternate screen. `run()` creates it
+/// immediately after the no-blink terminal init, so every early error
+/// return (a failed `terminal.size()`, an I/O error in `event_loop`) and a
+/// panic (the unwind drops it) still leave the shell usable. ratatui
+/// 0.30's `Terminal` has no Drop-based restore and the panic hook only
+/// fires on panics, so a plain `?` would otherwise exit the process with
+/// the terminal stuck in raw mode and echo off.
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // **購読を先に外す。** 購読は端末の状態で、プロセスが終わっても残る —
+        // 外さずに終わると、次に端末を使うもの（シェル、`--callback` で開く
+        // ashiato や akapen）に配色の知らせが届き、crossterm で読むものは
+        // そこで止まる（[`termtheme::scheme`]）。
+        unsubscribe_color_scheme();
         let _ = execute!(std::io::stdout(), Show);
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         ratatui::restore();
     }
+}
+
+/// 端末に配色の知らせ（モード 2031、[`termtheme::scheme`]）を頼む。知らせは
+/// イベントループの読み手が [`Input::ColorScheme`] として受け取り、
+/// [`App::follow_color_scheme`] が `light` から導いたものを作り直す。
+///
+/// **`--light` / `--dark` で固定しているときは頼まない**（固定は固定。知らせを
+/// 受けても使わない）。`query` は今の配色も聞く — 子プロセス（エディタ）から
+/// 戻ったときに、離れていたあいだの切り替えを拾う。起動時は聞かない（起動時の
+/// 判定は OSC 11 のまま）。2031 を知らない端末はどちらも黙って捨てる。
+///
+/// **読み手は crossterm であってはならない。** crossterm 0.29 は知らせの後ろの
+/// 入力を飲み込み、`event::poll` ごと止まる（herdr は `CSI ? 996 n` に即答する
+/// ので、crossterm で読んだまま頼むと起動直後に固まる）。
+pub(crate) fn subscribe_color_scheme(follow: bool, query: bool) {
+    if !follow {
+        return;
+    }
+    let _ = execute!(std::io::stdout(), EnableColorSchemeUpdates);
+    if query {
+        let _ = execute!(std::io::stdout(), QueryColorScheme);
+    }
+}
+
+/// 配色の知らせの購読を外す。**端末を手放す前に必ず呼ぶ** — 終わるとき
+/// （[`TerminalGuard`]、panic の unwind もここを通る）と、子プロセスに端末を
+/// 渡すとき（[`crate::reload::open_editor_at`]）。頼んでいなくても送ってよい
+/// （知らない・立っていないモードを下ろすだけ）。
+pub(crate) fn unsubscribe_color_scheme() {
+    let _ = execute!(std::io::stdout(), DisableColorSchemeUpdates);
 }
 
 /// Move the first file's per-file state into the live App fields —
@@ -369,6 +411,11 @@ pub(crate) struct NoBlinkBackend<W: std::io::Write + Send> {
     /// **Review の下線を波線にするか**（`--undercurl`、[`crate::undercurl::resolve`]）。
     /// 描画の出口（[`Backend::draw`]）だけが読む。
     pub(crate) undercurl: bool,
+    /// 最後に置いたカーソルの位置。[`Backend::get_cursor_position`] はこれを返し、
+    /// **端末に聞かない** — crossterm の `cursor::position()` は crossterm の入力の
+    /// 読み手を動かし、その間に届いたキーを crossterm の側に残して消す（配色の
+    /// 知らせが届けばそこで止まる）。入力を読むのは [`termtheme::input`] だけ。
+    cursor: ratatui::layout::Position,
 }
 
 impl NoBlinkBackend<std::io::Stdout> {
@@ -387,6 +434,7 @@ impl NoBlinkBackend<std::io::Stdout> {
             inner: CrosstermBackend::new(std::io::stdout()),
             out: std::io::stdout(),
             undercurl,
+            cursor: ratatui::layout::Position::ORIGIN,
         };
         Ok(ratatui::Terminal::new(backend)?)
     }
@@ -412,13 +460,17 @@ impl<W: std::io::Write + Send> Backend for NoBlinkBackend<W> {
         Ok(())
     }
     fn get_cursor_position(&mut self) -> Result<ratatui::layout::Position, Self::Error> {
-        self.inner.get_cursor_position()
+        // 端末に聞かない（`cursor` の doc）。全画面なので、置いた位置が今の位置。
+        Ok(self.cursor)
     }
     fn set_cursor_position<P: Into<ratatui::layout::Position>>(
         &mut self,
         position: P,
     ) -> Result<(), Self::Error> {
-        self.inner.set_cursor_position(position)
+        let position = position.into();
+        self.inner.set_cursor_position(position)?;
+        self.cursor = position;
+        Ok(())
     }
     fn clear(&mut self) -> Result<(), Self::Error> {
         self.inner.clear()
@@ -503,10 +555,14 @@ fn run(config: Config) -> Result<()> {
     // Light/dark resolution: --light/--dark win, else the terminal's
     // background is queried (OSC 11). Needs raw mode (init enables it)
     // and must run before the event loop consumes input; unanswerable
-    // terminals fall back to dark.
+    // terminals fall back to dark. Keys typed during the wait are handed
+    // to the input reader, not dropped; an answer later than the wait
+    // arrives there as `Input::Background` and is followed like a
+    // color-scheme notification. While open, mode 2031 notifications
+    // re-decide it (`subscribe_color_scheme` below).
     let light = config
         .light
-        .unwrap_or_else(|| theme::detect_light().unwrap_or(false));
+        .unwrap_or_else(|| termtheme::background::detect_light().unwrap_or(false));
     // The syntax theme: the side matching light/dark (--theme covers both,
     // else --theme-dark / --theme-light, else the config file's [theme]);
     // a missing or unresolvable name falls back to a default matching
@@ -609,6 +665,9 @@ fn run(config: Config) -> Result<()> {
     // set_cursor_position.
     let _ = execute!(std::io::stdout(), Hide);
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    // 開いたまま外観（ライト／ダーク）が切り替わっても追いつくように、配色の
+    // 知らせを頼む。外すのは `terminal_guard` の Drop とエディタの前。
+    subscribe_color_scheme(app.follows_color_scheme(), false);
     // **kitty keyboard protocol は押さない。** 押すと端末の auto-repeat が
     // `KeyEventKind::Repeat` に変わり、矢印の押しっぱなしが効かなくなる
     // （`docs/gotchas/terminal-keys.md`）。`f` はトグルなので要らない。
@@ -688,9 +747,10 @@ const HISTORY_RENDER_DEBOUNCE: Duration = Duration::from_millis(300);
 /// `/dev/tty`), so it is safe to poll every tick.
 ///
 /// Why this matters: when the session leader exits (window/pane closed),
-/// the kernel releases the controlling terminal. Crossterm never notices
-/// — the pty master can stay open (herdr keeps it for scrollback), so
-/// reads just block and draws keep succeeding, and no signal arrives.
+/// the kernel releases the controlling terminal. The input reader never
+/// notices — the pty master can stay open (herdr keeps it for
+/// scrollback), so reads just block and draws keep succeeding, and no
+/// signal arrives.
 /// Once the terminal is released, `/dev/tty` stops opening (ENXIO), the
 /// only reliable "session is dead" signal from inside the process.
 fn controlling_terminal_alive() -> bool {
@@ -698,15 +758,16 @@ fn controlling_terminal_alive() -> bool {
 }
 
 /// Whether stdin's writer is gone (POLLHUP): a pipe-based virtual
-/// terminal (e.g. a herdr plugin pane) whose owner closed. Reads would
-/// return EOF forever — crossterm never surfaces that as an event.
+/// terminal (e.g. a herdr plugin pane) whose owner closed. (The input
+/// reader also reports the EOF as an error once it reads it; this catches
+/// the hang-up before a read is attempted.)
 fn stdin_hung_up() -> bool {
     let mut pfd = libc::pollfd {
         fd: libc::STDIN_FILENO,
         events: 0,
         revents: 0,
     };
-    // SAFETY: poll(2) on fd 0, which is open here (crossterm owns it).
+    // SAFETY: poll(2) on fd 0, which is open here (the input reader reads it).
     let n = unsafe { libc::poll(&mut pfd, 1, 0) };
     n > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL)) != 0
 }
@@ -836,12 +897,26 @@ fn event_loop(terminal: &mut AppTerminal, app: &mut App) -> Result<()> {
         } else {
             TICK_MS
         };
-        if event::poll(Duration::from_millis(tick))? {
+        // 入力は termtheme の読み手で読む（crossterm の `event::poll` /
+        // `event::read` と混ぜない — 読み手が 2 つになると端末を取り合う）。
+        // crossterm と同じ `Event` に加えて、配色の知らせ（モード 2031）と
+        // 遅れて届いた OSC 11 の答えが来る。
+        if input::poll(Duration::from_millis(tick))? {
             for _ in 0..MAX_EVENTS_PER_FRAME {
-                if !event::poll(Duration::ZERO)? {
+                if !input::poll(Duration::ZERO)? {
                     break;
                 }
-                match event::read()? {
+                let event = match input::read()? {
+                    Input::Event(event) => event,
+                    other => {
+                        // 描き直しはこの回の終わりの `draw_frame`。
+                        if let Some(light) = other.light() {
+                            app.follow_color_scheme(light);
+                        }
+                        continue;
+                    }
+                };
+                match event {
                     // **`Repeat` は `Press` と同じに扱う。** いまの
                     // akapen は kitty keyboard protocol を押さないので
                     // repeat は押下の連打として届き、この腕には `Press`
@@ -4230,5 +4305,7 @@ mod history_animation_tests;
 /// the styles off the rows it emits.
 #[cfg(test)]
 mod source_decoration_tests;
+#[cfg(test)]
+mod color_scheme_tests;
 #[cfg(test)]
 mod review_render_tests;

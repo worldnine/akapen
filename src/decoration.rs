@@ -1684,9 +1684,7 @@ mod tests {
     /// `rgb(254,224,156)` を出し、その上の字が読めませんでした。
     #[test]
     fn every_embedded_theme_gets_the_amber_formula() {
-        use two_face::theme::EmbeddedLazyThemeSet;
-        for theme in EmbeddedLazyThemeSet::theme_names() {
-            let name = theme.as_name();
+        for name in termtheme::theme::embedded_names() {
             let highlighter = Highlighter::new(Some(name), false);
             let bg = DecorationStyles::from_theme(&highlighter, Default::default())
                 .mark_style()

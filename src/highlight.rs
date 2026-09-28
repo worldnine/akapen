@@ -5,104 +5,19 @@
 //!
 //! The whole file is tokenized once (cross-line context like fenced code
 //! blocks needs the full content); the UI then wraps and styles per line.
+//!
+//! テーマの解決（名前か `.tmTheme` のパス、側ごとの既定への落ち方、Markdown の
+//! scope の読み替え、既定の文字色）は termtheme の [`termtheme::theme`] にある。
+//! ここが持つのは文法の集合と、行への塗り分けだけ。
 
-use std::str::FromStr;
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Style};
 use tui_markdown::Attr;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{ScopeSelectors, Theme, ThemeItem, ThemeSet};
-use syntect::parsing::{Scope, SyntaxReference, SyntaxSet};
+use syntect::highlighting::Theme;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
-use two_face::theme::EmbeddedLazyThemeSet;
-
-/// Default syntax theme when the dark side has no theme (`--theme` /
-/// `--theme-dark` / the config file's `[theme] dark`, see
-/// [`crate::config::SyntaxThemes`]) or it is unknown (dark mode).
-pub const DEFAULT_THEME: &str = "Catppuccin Mocha";
-/// The light-mode counterpart (`--theme-light` / `[theme] light`) — a
-/// light background must never fall back to a dark theme's pale
-/// foreground colors.
-pub const DEFAULT_THEME_LIGHT: &str = "Solarized (light)";
-
-/// Markdown scope aliases: syntect's/two-face's markdown grammars emit
-/// scopes like `markup.raw.code-fence.rust.markdown-gfm` and
-/// `markup.heading.1.markdown`, while many third-party `.tmTheme` files
-/// (tokyo-night, etc.) define their markdown colors under older Sublime
-/// scope names (`markup.fenced_code.block.markdown`, `heading.1.markdown`).
-/// Theme selectors match by *prefix* (`is_prefix_of`), so when a theme has
-/// no rule for the emitted prefix, the legacy rule's style is duplicated
-/// onto that prefix — any theme colors markdown as its author intended,
-/// with no per-theme patching. The language component of a code-fence
-/// scope (`.rust`) is skipped by using the prefix before it.
-const MARKDOWN_SCOPE_ALIASES: &[(&str, &str)] = &[
-    // (prefix the grammar emits, legacy scope themes commonly define)
-    ("markup.raw.code-fence", "markup.fenced_code.block.markdown"),
-    ("markup.raw.code-fence", "markup.raw.block.markdown"),
-    ("markup.raw.inline", "markup.inline.raw.string.markdown"),
-    (
-        "meta.code-fence.definition",
-        "markup.fenced_code.block.markdown",
-    ),
-    ("markup.heading.1.markdown", "heading.1.markdown"),
-    ("markup.heading.2.markdown", "heading.2.markdown"),
-    ("markup.heading.3.markdown", "heading.3.markdown"),
-    ("markup.heading.4.markdown", "heading.4.markdown"),
-    ("markup.heading.5.markdown", "heading.5.markdown"),
-    ("markup.heading.6.markdown", "heading.6.markdown"),
-];
-
-/// Does any selector in `sel` mention a scope sharing a prefix with `target`?
-fn scope_selector_mentions(sel: &ScopeSelectors, target: &Scope) -> bool {
-    sel.selectors.iter().any(|s| {
-        s.path
-            .scopes
-            .iter()
-            .any(|sc| target.is_prefix_of(*sc) || sc.is_prefix_of(*target))
-    })
-}
-
-/// Fold legacy markdown scope names into the theme (see
-/// [`MARKDOWN_SCOPE_ALIASES`]) so themes that predate syntect's GFM
-/// grammar still color fenced code and inline code.
-fn apply_markdown_scope_aliases(theme: &mut Theme) {
-    for (new_name, legacy_name) in MARKDOWN_SCOPE_ALIASES {
-        let Ok(new_scope) = Scope::new(new_name) else {
-            continue;
-        };
-        let Ok(legacy_scope) = Scope::new(legacy_name) else {
-            continue;
-        };
-        // The theme already styles the new scope: leave it alone.
-        if theme
-            .scopes
-            .iter()
-            .any(|item| scope_selector_mentions(&item.scope, &new_scope))
-        {
-            continue;
-        }
-        // Duplicate the legacy rules under the new scope name.
-        let copies: Vec<ThemeItem> = theme
-            .scopes
-            .iter()
-            .filter(|item| scope_selector_mentions(&item.scope, &legacy_scope))
-            .map(|item| ThemeItem {
-                scope: ScopeSelectors::from_str(new_name).expect("alias selector"),
-                style: item.style,
-            })
-            .collect();
-        theme.scopes.extend(copies);
-    }
-}
-
-/// The default text color when the theme carries no foreground.
-const DEFAULT_FG_DARK: Color = Color::Rgb(0xcd, 0xd6, 0xf4);
-const DEFAULT_FG_LIGHT: Color = Color::Rgb(0x30, 0x30, 0x40);
-
-fn default_fg_fallback(light: bool) -> Color {
-    if light { DEFAULT_FG_LIGHT } else { DEFAULT_FG_DARK }
-}
 
 /// The broad two-face syntax set, deserialized once and shared (it is
 /// expensive to build). two-face carries newer grammar definitions than
@@ -110,22 +25,6 @@ fn default_fg_fallback(light: bool) -> Color {
 fn syntaxes() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
-}
-
-/// The two-face embedded theme set, deserialized once and shared.
-fn embedded_themes() -> &'static EmbeddedLazyThemeSet {
-    static THEMES: OnceLock<EmbeddedLazyThemeSet> = OnceLock::new();
-    THEMES.get_or_init(two_face::theme::extra)
-}
-
-/// Resolve a `--theme <name>` to an embedded two-face theme by its canonical
-/// name (e.g. `Catppuccin Mocha`, `Solarized (dark)`); `None` when unknown.
-fn theme_by_name(name: &str) -> Option<Theme> {
-    EmbeddedLazyThemeSet::theme_names()
-        .iter()
-        .copied()
-        .find(|t| t.as_name() == name)
-        .map(|t| embedded_themes().get(t).clone())
 }
 
 /// One styled text fragment: syntect's per-token color plus the display
@@ -165,7 +64,9 @@ pub struct TaggedLine {
 /// per file ([`syntax_for`]).
 pub struct Highlighter {
     theme: Theme,
-    default_fg_fallback: Color,
+    /// 背景がライトか。テーマが文字色を持たないときの文字色を選ぶ
+    /// （[`termtheme::theme::default_fg`]）。
+    light: bool,
 }
 
 /// Pick the grammar for `path` from syntect's bundled set (100+ languages):
@@ -182,39 +83,22 @@ pub fn syntax_for(path: &std::path::Path) -> &'static SyntaxReference {
 impl Highlighter {
     /// Build from a theme: an embedded two-face theme name, or a path to a
     /// `.tmTheme` file (e.g. a tokyo-night.tmTheme downloaded from a theme
-    /// repo). Unknown names and unreadable files fall back to
-    /// [`DEFAULT_THEME`] / [`DEFAULT_THEME_LIGHT`] matching `light`. The
-    /// default grammar is markdown ([`highlight`]); source mode passes
-    /// per-file grammars via [`Self::highlight_with`].
+    /// repo). Unknown names and unreadable files fall back to the default
+    /// matching `light` ([`termtheme::theme::DEFAULT_DARK`] /
+    /// [`termtheme::theme::DEFAULT_LIGHT`]), with the markdown scope
+    /// aliases folded in ([`termtheme::theme::resolve`]). The default
+    /// grammar is markdown ([`highlight`]); source mode passes per-file
+    /// grammars via [`Self::highlight_with`].
     pub fn new(theme_name: Option<&str>, light: bool) -> Self {
-        let mut theme = theme_name
-            .and_then(|name| {
-                if name.to_ascii_lowercase().ends_with(".tmtheme") {
-                    // A file path: load the theme directly from disk.
-                    ThemeSet::get_theme(name).ok()
-                } else {
-                    theme_by_name(name)
-                }
-            })
-            .unwrap_or_else(|| {
-                let name = if light { DEFAULT_THEME_LIGHT } else { DEFAULT_THEME };
-                theme_by_name(name).expect("default themes are embedded")
-            });
-        // Fold legacy markdown scope names in so third-party themes still
-        // color fenced/inline code (the newer grammars emit newer names).
-        apply_markdown_scope_aliases(&mut theme);
         Self {
-            theme,
-            default_fg_fallback: default_fg_fallback(light),
+            theme: termtheme::theme::resolve(theme_name, light),
+            light,
         }
     }
 
     /// The theme's default foreground (what plain text renders as).
     pub fn default_fg(&self) -> Color {
-        self.theme
-            .settings
-            .foreground
-            .map_or(self.default_fg_fallback, |c| Color::Rgb(c.r, c.g, c.b))
+        termtheme::theme::default_fg(&self.theme, self.light)
     }
 
     /// The parsed syntect theme (for serializing the code-highlighting
@@ -226,36 +110,9 @@ impl Highlighter {
     /// Resolve a single scope (e.g. `markup.heading.2.markdown`) against
     /// the theme exactly as syntect would: the best-matching rule wins, and
     /// rules apply in ascending specificity order. `None` when the theme
-    /// has no rule touching `scope`.
+    /// has no rule touching `scope` ([`termtheme::theme::scope_style`]).
     pub fn scope_style(&self, scope: &str) -> Option<Style> {
-        use ratatui::style::{Color as TuiColor, Modifier};
-        use syntect::highlighting::{FontStyle, Highlighter as SynHighlighter};
-        use syntect::parsing::Scope;
-        let scope = Scope::new(scope).ok()?;
-        let highlighter = SynHighlighter::new(&self.theme);
-        let m = highlighter.style_mod_for_stack(&[scope]);
-        if m.foreground.is_none() && m.background.is_none() && m.font_style.is_none() {
-            return None;
-        }
-        let mut style = Style::default();
-        if let Some(fg) = m.foreground {
-            style = style.fg(TuiColor::Rgb(fg.r, fg.g, fg.b));
-        }
-        if let Some(bg) = m.background {
-            style = style.bg(TuiColor::Rgb(bg.r, bg.g, bg.b));
-        }
-        if let Some(fs) = m.font_style {
-            if fs.contains(FontStyle::BOLD) {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            if fs.contains(FontStyle::ITALIC) {
-                style = style.add_modifier(Modifier::ITALIC);
-            }
-            if fs.contains(FontStyle::UNDERLINE) {
-                style = style.add_modifier(Modifier::UNDERLINED);
-            }
-        }
-        Some(style)
+        termtheme::theme::scope_style(&self.theme, scope)
     }
 
     /// Tokenize `content` with the given grammar into per-line spans
@@ -569,7 +426,8 @@ fn expand_tabs(s: &str, col: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_THEME, Highlighter, Span, syntax_for, wrap_spans, wrap_spans_tagged};
+    use super::{Highlighter, Span, syntax_for, wrap_spans, wrap_spans_tagged};
+    use termtheme::theme::DEFAULT_DARK;
     use std::path::Path;
     use ratatui::style::{Color, Style};
     use unicode_width::UnicodeWidthStr;
@@ -581,7 +439,7 @@ mod tests {
 
     #[test]
     fn highlights_markdown_into_colored_spans() {
-        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let h = Highlighter::new(Some(DEFAULT_DARK), false);
         let lines = h.highlight_with("# Heading\n\n**bold**\n", syntax_for(Path::new("x.md")));
         assert_eq!(lines.len(), 3);
         // Heading line tokenizes (markdown header), not a single plain span.
@@ -600,18 +458,18 @@ mod tests {
 
     #[test]
     fn unknown_theme_falls_back_matching_light_dark() {
-        use super::{DEFAULT_THEME_LIGHT, theme_by_name};
+        use termtheme::theme::{DEFAULT_LIGHT, by_name};
         // An unresolvable --theme on a light background must fall back to
         // the light default, not to dark pale-on-light unreadability.
         let dark = Highlighter::new(Some("no-such-theme"), false);
         let light = Highlighter::new(Some("no-such-theme"), true);
         assert_eq!(
             dark.theme().settings.background,
-            theme_by_name(DEFAULT_THEME).unwrap().settings.background
+            by_name(DEFAULT_DARK).unwrap().settings.background
         );
         assert_eq!(
             light.theme().settings.background,
-            theme_by_name(DEFAULT_THEME_LIGHT).unwrap().settings.background
+            by_name(DEFAULT_LIGHT).unwrap().settings.background
         );
     }
 
@@ -958,7 +816,7 @@ mod tests {
     /// tokenization.
     #[test]
     fn source_attribution_is_exact_and_verbatim() {
-        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let h = Highlighter::new(Some(DEFAULT_DARK), false);
         for (content, file) in [
             ("# 見出し\n\n本文 **強調** と `code`\n\n- 項目\n", "x.md"),
             ("fn main() {\n\tlet x = 1; // コメント\n}\n", "x.rs"),
@@ -991,7 +849,7 @@ mod tests {
     #[test]
     fn source_ranges_advance_through_the_document() {
         let content = "alpha\n\n日本語の行\nlast";
-        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let h = Highlighter::new(Some(DEFAULT_DARK), false);
         let lines = h.highlight_with(content, syntax_for(Path::new("x.md")));
         assert_eq!(lines.len(), 4, "one entry per source line");
         let mut prev_end = 0usize;
@@ -1019,7 +877,7 @@ mod tests {
     #[test]
     fn a_blank_source_line_is_an_empty_exact_span() {
         let content = "a\n\nb\n";
-        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let h = Highlighter::new(Some(DEFAULT_DARK), false);
         let lines = h.highlight_with(content, syntax_for(Path::new("x.md")));
         let attrs: Vec<_> = lines[1].attrs.iter().flatten().collect();
         assert!(!attrs.is_empty(), "the blank line is still attributed");
@@ -1036,7 +894,7 @@ mod tests {
     #[test]
     fn wrapped_source_fragments_stay_verbatim() {
         let content = "日本語の見出し\n絵文字 🎉🎉 と ＡＢＣ 全角\nplain ascii line\n";
-        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let h = Highlighter::new(Some(DEFAULT_DARK), false);
         let lines = h.highlight_with(content, syntax_for(Path::new("x.md")));
         for w in [3usize, 4, 5, 7, 12, 40] {
             for line in &lines {
@@ -1119,7 +977,7 @@ mod tests {
     /// than assumed.
     #[test]
     fn source_wrapping_reaches_the_superset_branch_only_through_tabs() {
-        let h = Highlighter::new(Some(DEFAULT_THEME), false);
+        let h = Highlighter::new(Some(DEFAULT_DARK), false);
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut checked = 0usize;
         let mut tab_lines = 0usize;

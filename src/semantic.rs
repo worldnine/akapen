@@ -56,7 +56,7 @@
 //! | `--semantic-cmd <コマンド>` | [`CommandProvider`] | 別スレッド | akapen の [`atomize`]（照合不要） |
 //!
 //! 外部コマンドはプロセス起動とネットワーク往復を挟むので、同期に呼ぶと
-//! `event::poll` で回っているイベントループが止まる。だから
+//! `input::poll`（termtheme の読み手）で回っているイベントループが止まる。だから
 //! [`SemanticSource`] が型として 2 つを分けている。fixture は [`Provider`]、
 //! 外部コマンドは問いを必須引数にする [`CommandProvider::analyze`] から同じ
 //! [`SemanticDocument`] を供給する。

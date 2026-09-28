@@ -14,7 +14,7 @@ use crate::comment::{Comment, Selection};
 use crate::config::{Config, EscQuit};
 use crate::decoration::{Decoration, DecorationStyles};
 use crate::focus::Focus;
-use crate::highlight::{Highlighter, Span as HiSpan, TaggedLine, wrap_spans};
+use crate::highlight::{Highlighter, Span as HiSpan, TaggedLine, syntax_for, wrap_spans};
 use crate::history::{DeletedBlock, DocumentHistory};
 use crate::ime;
 use crate::overlay::Overlay;
@@ -94,6 +94,11 @@ pub(crate) struct FileState {
     pub(crate) comparison_changed: HashSet<usize>,
     pub(crate) comparison_deleted_before: HashSet<usize>,
     pub(crate) comparison_deleted_blocks: Vec<DeletedBlock>,
+    /// `spans` と `view` が、いまの背景（[`App::ui_light`]）と違うテーマで塗られて
+    /// いる。裏にあるあいだに配色が切り替わった（[`App::set_light`]）ファイルで、
+    /// 開いたとき（[`App::switch_to_file`]）に塗り直す — 切り替えのたびに全部の
+    /// ファイルを塗り直さない。
+    pub(crate) theme_stale: bool,
 }
 
 /// One provider answer on its way back to the event loop.
@@ -485,9 +490,11 @@ pub(crate) struct App {
     /// and settles back when a history transition completes.
     pub(crate) ui_landing_pulse: Color,
     pub(crate) ui_scrollbar: Color,
-    /// The raw `--light` / dark flag the ui colors were resolved from,
-    /// kept for effects created after startup (the generation warp
-    /// picks its ring colors at flight time).
+    /// The light/dark decision the ui colors were resolved from — the
+    /// startup one (`--light` / `--dark`, else OSC 11), re-decided by a
+    /// mode 2031 notification while open ([`App::set_light`]). Kept for
+    /// effects created after startup (the generation warp picks its ring
+    /// colors at flight time) and draw-time colors (the tooltip band).
     pub(crate) ui_light: bool,
     /// Active scrollbar drag: `(start track row, start scroll offset)` —
     /// set on a thumb press, cleared on release (viewport-only scroll, so
@@ -656,7 +663,8 @@ pub(crate) struct App {
     /// them on, and `app.view` is not a safe stand-in — a file that has
     /// never been shown in view mode holds a `ViewState::default()`,
     /// whose styles are the dark-theme fallbacks. Theme-independent of
-    /// the file, so it is resolved once in [`App::new`].
+    /// the file, so it is resolved once in [`App::new`] — and again when
+    /// the terminal's color scheme flips the theme ([`App::set_light`]).
     pub(crate) decoration_styles: DecorationStyles,
 }
 
@@ -698,13 +706,9 @@ impl App {
         } else {
             Mode::Source
         };
-        let time_machine_fx = config
-            .fx
-            .then(|| crate::effects::time_machine_border_effect(light));
-        let starfield_fx = config.fx.then(|| crate::effects::starfield_effect(light));
         let decoration_styles =
             DecorationStyles::from_theme(&highlight, config.decoration_blend);
-        Self {
+        let mut app = Self {
             config,
             files,
             current_file_index: 0,
@@ -721,8 +725,10 @@ impl App {
             history_render_due: None,
             landing_pulse_fx: None,
             landing_pulse_until: None,
-            time_machine_fx,
-            starfield_fx,
+            // `light` から導く色と演出は、下の `paint_for_background` が入れる
+            // （配色が切り替わったときの [`App::set_light`] と同じ 1 か所）。
+            time_machine_fx: None,
+            starfield_fx: None,
             warp_fx: None,
             timeline_fx: None,
             timeline_exit_until: None,
@@ -779,16 +785,16 @@ impl App {
             file_changed: false,
             reload_pending: None,
             running: true,
-            ui_selected_bg: selected_bg(light),
-            ui_changed_bg: changed_bg(light),
-            ui_deleted_bg: deleted_bg(light),
-            ui_changed_emph_bg: crate::view::changed_emph_bg(light),
-            ui_deleted_emph_bg: crate::view::deleted_emph_bg(light),
-            ui_history_glow_bg: history_glow_bg(light),
-            ui_border: border_color(light),
-            ui_history_border: history_border_color(light),
-            ui_landing_pulse: landing_pulse_color(light),
-            ui_scrollbar: scrollbar_thumb(light),
+            ui_selected_bg: Color::Reset,
+            ui_changed_bg: Color::Reset,
+            ui_deleted_bg: Color::Reset,
+            ui_changed_emph_bg: Color::Reset,
+            ui_deleted_emph_bg: Color::Reset,
+            ui_history_glow_bg: Color::Reset,
+            ui_border: Color::Reset,
+            ui_history_border: Color::Reset,
+            ui_landing_pulse: Color::Reset,
+            ui_scrollbar: Color::Reset,
             ui_light: light,
             scrollbar_drag: None,
             semantic_source: None,
@@ -824,6 +830,91 @@ impl App {
             marks_lines: Vec::new(),
             semantic_decorations: Vec::new(),
             decoration_styles,
+        };
+        app.paint_for_background(light);
+        app
+    }
+
+    /// `light` から直に導く UI の色と、色を抱えて回り続ける演出（タイムマシンの
+    /// 枠・星空）を入れる。[`App::new`] と [`App::set_light`] の 1 か所。
+    ///
+    /// 構文のテーマ・混ぜた色・描画済みの行はここではない（[`App::set_light`]）。
+    fn paint_for_background(&mut self, light: bool) {
+        self.ui_selected_bg = selected_bg(light);
+        self.ui_changed_bg = changed_bg(light);
+        self.ui_deleted_bg = deleted_bg(light);
+        self.ui_changed_emph_bg = crate::view::changed_emph_bg(light);
+        self.ui_deleted_emph_bg = crate::view::deleted_emph_bg(light);
+        self.ui_history_glow_bg = history_glow_bg(light);
+        self.ui_border = border_color(light);
+        self.ui_history_border = history_border_color(light);
+        self.ui_landing_pulse = landing_pulse_color(light);
+        self.ui_scrollbar = scrollbar_thumb(light);
+        self.ui_light = light;
+        self.time_machine_fx = self
+            .config
+            .fx
+            .then(|| crate::effects::time_machine_border_effect(light));
+        self.starfield_fx = self.config.fx.then(|| crate::effects::starfield_effect(light));
+    }
+
+    /// 端末の配色（モード 2031 の知らせ）に追従するか。`--light` / `--dark` で
+    /// 固定しているときは追従しない（固定は固定）。
+    pub(crate) fn follows_color_scheme(&self) -> bool {
+        self.config.light.is_none()
+    }
+
+    /// 端末の配色が `light` になった（モード 2031 の知らせか、遅れて届いた
+    /// OSC 11 の答え）。固定していなければ [`App::set_light`] で作り直す。
+    /// 作り直したら `true`（描き直しはイベントループの次の描画）。
+    pub(crate) fn follow_color_scheme(&mut self, light: bool) -> bool {
+        self.follows_color_scheme() && self.set_light(light)
+    }
+
+    /// 背景の明暗を `light` に入れ替え、**`light` から導いているものを全部
+    /// 作り直す**。変わらなければ何もしない（`false`）。
+    ///
+    /// - 構文のテーマ: [`Config::theme`] のその側（`--theme` で両側が同じでも、
+    ///   解決できない名前の既定・既定の文字色は側ごとなので作り直す）
+    /// - テーマから混ぜた色（ページ色へ沈める・琥珀の地・下線の色、
+    ///   [`DecorationStyles`]）
+    /// - UI の色（選択・変更・枠・スクロールバー…）と、色を抱えた演出
+    ///   （[`App::paint_for_background`]）。飛んでいる最中の一度きりの演出
+    ///   （ワープ・着地の光・マーカー・読み出しの光）は古い色で組んであるので
+    ///   落とす（落ち着いた絵がすぐ出る）
+    /// - 描画済みの行: いまのファイルの source の行と view は今塗り直す。裏の
+    ///   ファイルは開くときに（[`FileState::theme_stale`]）
+    pub(crate) fn set_light(&mut self, light: bool) -> bool {
+        if light == self.ui_light {
+            return false;
+        }
+        self.highlight = Highlighter::new(self.config.theme.for_background(light), light);
+        self.decoration_styles =
+            DecorationStyles::from_theme(&self.highlight, self.config.decoration_blend);
+        self.paint_for_background(light);
+        self.warp_fx = None;
+        self.landing_pulse_fx = None;
+        self.marks_fx = None;
+        self.readout_fx = None;
+        self.repaint_current_file();
+        let current = self.current_file_index;
+        for (i, state) in self.file_states.iter_mut().enumerate() {
+            if i != current {
+                state.theme_stale = true;
+            }
+        }
+        true
+    }
+
+    /// いまのファイルの描画済みの行を、いまのテーマで塗り直す（source の行と
+    /// view）。折り返しは字だけで決まるので `base_rows` はそのまま。
+    fn repaint_current_file(&mut self) {
+        let path = self.current_file_path().to_path_buf();
+        self.spans = self
+            .highlight
+            .highlight_with(&self.source.content, syntax_for(&path));
+        if supports_view(&path) {
+            replace_view_preserving_cursor(self);
         }
     }
 
@@ -929,7 +1020,7 @@ impl App {
                 });
             }
             // 外部コマンド: 別スレッドへ。**ここで待たない。** イベント
-            // ループは `event::poll` のポーリングで回っているので、
+            // ループは `input::poll` のポーリングで回っているので、
             // プロセス起動とネットワーク往復を挟む呼び出しをこの場で
             // 待つと UI が固まる。
             Some(SemanticSource::Command(provider)) => {
@@ -2580,6 +2671,8 @@ impl App {
             std::mem::take(&mut self.comparison_deleted_before);
         old.comparison_deleted_blocks =
             std::mem::take(&mut self.comparison_deleted_blocks);
+        // 表に出ていたので、いまのテーマで塗られている。
+        old.theme_stale = false;
 
         // Close the composer if it was open.
         self.input.clear();
@@ -2612,6 +2705,7 @@ impl App {
             std::mem::take(&mut new.comparison_deleted_before);
         self.comparison_deleted_blocks =
             std::mem::take(&mut new.comparison_deleted_blocks);
+        let theme_stale = std::mem::take(&mut new.theme_stale);
 
         self.current_file_index = new_index;
         // Another document is live now. The budget is a reading
@@ -2633,6 +2727,11 @@ impl App {
         self.view_dirty = false;
         self.view_dirty_since = None;
 
+        // 裏にあるあいだに配色が切り替わった: source の行と view を塗り直す
+        // （view の塗り直しは下の幅の検査を兼ねる — いまの幅で描く）。
+        if theme_stale {
+            self.repaint_current_file();
+        }
         // A resize while this file was in the background left its saved
         // view at the old wrap width (Resize only re-renders the active
         // file). Source mode re-wraps itself every frame via
