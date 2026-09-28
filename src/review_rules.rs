@@ -57,8 +57,8 @@ const BUILT_IN: &str = include_str!("../assets/review-rules.json");
 /// ようにする。
 const FILE_VERSION: u32 = 1;
 
-/// 読み手のルールを置く場所（設定ディレクトリからの相対）。
-const USER_FILE: &str = "akapen/review-rules.json";
+/// 読み手のルールを置く場所（[`crate::config_file::user_dir`] からの相対）。
+const USER_FILE: &str = "review-rules.json";
 
 /// 候補をどう直すか。**akapen はここでは直さない** — 段階 2 で LLM へ
 /// 送るときの指示になる値で、段階 1 ではコメントの本文に現れるだけである。
@@ -247,15 +247,9 @@ impl Rules {
 }
 
 /// `$XDG_CONFIG_HOME/akapen/review-rules.json`、無ければ
-/// `~/.config/akapen/review-rules.json`。
-///
-/// [`crate::marks_questions`] と同じ作法である。
+/// `~/.config/akapen/review-rules.json`（[`crate::config_file::user_dir`]）。
 fn user_path() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
-    };
-    Some(base.join(USER_FILE))
+    Some(crate::config_file::user_dir()?.join(USER_FILE))
 }
 
 #[cfg(test)]

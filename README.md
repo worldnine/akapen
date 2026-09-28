@@ -34,7 +34,7 @@ Prefer an older version of a section? Walk back, comment — *"this draft was be
 - **Comment anywhere**: `v` to select, `c` to comment; comments appear as inline cards right under the lines they refer to.
 - **Reply mode**: `--reply` turns akapen into a red pen for the agent's *chat output* — the code examples and markdown it pasted into the conversation, which never touched a file.
 - **Session mode, always**: one file or twenty, `]`/`[` to switch; cursor, selection, and mode are remembered per file.
-- **Terminal-native**: plain ANSI chrome that follows your palette, two-face syntax themes (32 built-ins or any `.tmTheme`), light/dark auto-detect via OSC 11, CJK-correct width math.
+- **Terminal-native**: plain ANSI chrome that follows your palette, two-face syntax themes (32 built-ins or any `.tmTheme`, one for light and one for dark), light/dark auto-detect via OSC 11, CJK-correct width math.
 
 ## Try it
 
@@ -66,6 +66,7 @@ No external binaries required — rendering is built in. On macOS the optional I
 
 ```
 akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>]
+                 [--theme-dark <name>] [--theme-light <name>]
                  [--ime <off|ascii|jp>] [--light|--dark] [--callback <cmd>]
                  [--esc-quit <auto|always|never>] [--no-fx]
 ```
@@ -75,18 +76,49 @@ akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>]
 | `--send-cmd <cmd>` | `s` pipes the formatted export to this shell command's stdin |
 | `--send-agent` | `s` sends to the sole herdr agent in the current tab (needs `herdr` on PATH) |
 | `--reply` | reply mode: export as `> quote` + comment (no file/line references), auto-reload on external change, no diff — see [Reply mode](#reply-mode--mark-up-the-agents-chat-output-akp) |
-| `--theme <name>` | two-face theme name (default `Catppuccin Mocha`; `Solarized (light)` when light is detected) or a path to a `.tmTheme` file |
+| `--theme <name>` | two-face theme name or a path to a `.tmTheme` file, used on both light and dark backgrounds (beats `--theme-dark` / `--theme-light`) |
+| `--theme-dark <name>` | the theme on a dark background (default `Catppuccin Mocha`) |
+| `--theme-light <name>` | the theme on a light background (default `Solarized (light)`) |
 | `--ime <off\|ascii\|jp>` | macOS input-source control around the comment composer (default `ascii`) |
 | `--light` / `--dark` | force the UI palette (default: auto-detect the terminal background via OSC 11) |
 | `--no-fx` | disable the tachyonfx animations: the rotating purple→cyan gradient frame while browsing the past, and the toast fade-in/out (the static history border color and instant toasts stay) |
 | `--callback <cmd>` | shell command spawned on exit (e.g. return to a file picker) |
 | `--esc-quit <auto\|always\|never>` | whether `Esc` may quit (default `auto`: only with `--callback`; `always` = unconditionally, `never` = Esc stays a pure cancel) |
 
+Which side applies follows the light/dark decision (`--light` / `--dark`, else OSC 11). A name that doesn't resolve falls back to that side's default. Both sides can also live in the [config file](#config-file).
+
 Typical loop with a picker (see the companion tool [ashiato](https://github.com/worldnine/ashiato), an mtime-sorted file picker):
 
 ```sh
 ashiato . --open-cmd "akapen {} --send-agent"
 ```
+
+### Config file
+
+`$XDG_CONFIG_HOME/akapen/config.toml` (else `~/.config/akapen/config.toml`). Every key is optional; without the file akapen behaves exactly as before. An annotated example is in [`examples/config.toml`](examples/config.toml).
+
+```toml
+semantic_cmd = "python3 /path/to/akapen/examples/semantic/jev-annotate.py"
+lint_cmd     = "python3 /path/to/akapen/examples/lint/textlint-diagnostics.py --config ~/.textlintrc"
+undercurl    = "auto"          # auto | on | off
+
+[theme]
+dark  = "Catppuccin Mocha"     # two-face theme name or path to a .tmTheme file
+light = "Catppuccin Latte"
+```
+
+| Key | Same as | Precedence (first wins) |
+|---|---|---|
+| `semantic_cmd` | `--semantic-cmd` | flag > `$AKAPEN_SEMANTIC_CMD` > file |
+| `lint_cmd` | `--lint-cmd` | flag > `$AKAPEN_LINT_CMD` > file |
+| `undercurl` | `--undercurl` | flag > `$AKAPEN_UNDERCURL` > file > `auto` |
+| `[theme] dark` | `--theme-dark` | `--theme` > `--theme-dark` > file > `Catppuccin Mocha` |
+| `[theme] light` | `--theme-light` | `--theme` > `--theme-light` > file > `Solarized (light)` |
+
+- `[theme]` values starting with `~/` are expanded. `*_cmd` values go to the shell as written (the shell expands them, as with the environment variables).
+- Empty or blank values count as not written. An environment variable that is set — even to nothing — hides the file's value, so `AKAPEN_SEMANTIC_CMD= akapen doc.md` still turns the layer off for one run.
+- A `semantic_cmd` from the file behaves like one from the environment: it still collides with `--semantic <fixture>`, and the error names the file.
+- Unknown keys, wrong types, an unknown `undercurl` value and broken syntax stop akapen at startup, naming the file and the key — a typo is never silently ignored. The flip side: a config that uses a key this build doesn't know (written for a newer akapen) stops an older one. `--help` and `--version` never read the file.
 
 ## Keys
 

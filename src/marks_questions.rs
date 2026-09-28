@@ -71,8 +71,8 @@ const BUILT_IN: &str = include_str!("../assets/marks-questions.json");
 /// ようにする。
 const FILE_VERSION: u32 = 1;
 
-/// 読み手の問いを置く場所（設定ディレクトリからの相対）。
-const USER_FILE: &str = "akapen/marks-questions.json";
+/// 読み手の問いを置く場所（[`crate::config_file::user_dir`] からの相対）。
+const USER_FILE: &str = "marks-questions.json";
 
 /// 問い 1 つ。
 #[derive(Clone, Debug, PartialEq)]
@@ -213,15 +213,9 @@ impl Questions {
 }
 
 /// `$XDG_CONFIG_HOME/akapen/marks-questions.json`、無ければ
-/// `~/.config/akapen/marks-questions.json`。
-///
-/// [`crate::semantic_cache::SemanticCache::discover`] と同じ作法である。
+/// `~/.config/akapen/marks-questions.json`（[`crate::config_file::user_dir`]）。
 fn user_path() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
-    };
-    Some(base.join(USER_FILE))
+    Some(crate::config_file::user_dir()?.join(USER_FILE))
 }
 
 #[cfg(test)]

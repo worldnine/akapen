@@ -75,7 +75,7 @@ fn lint_app(dir: &std::path::Path, doc: &str, mode: Mode, decorations: Vec<Decor
         send_cmd: None,
         send_agent: false,
         reply: false,
-        theme: Some("base16-ocean.dark".into()),
+        theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
         ime: ImeMode::Off,
         light: None,
         callback: None,
@@ -93,7 +93,7 @@ fn lint_app(dir: &std::path::Path, doc: &str, mode: Mode, decorations: Vec<Decor
         decorations,
     };
     let source = Source::load(path).unwrap();
-    let highlight = Highlighter::new(config.theme.as_deref(), false);
+    let highlight = Highlighter::new(config.theme.for_background(false), false);
     let view = ViewState::render(&source, view_render_width(W), &highlight, Default::default());
     let mut app = App::new(config, source, highlight, view, false);
     app.spans = app.highlight.highlight_with(&app.source.content, syntax_for(&app.files[0]));

@@ -20,7 +20,9 @@ akapen --lint-cmd 'python3 /path/to/akapen/examples/lint/natural-japanese-diagno
 ```
 
 毎回書くのが面倒なら、環境変数 `AKAPEN_LINT_CMD` に同じ文字列を入れておけば既定に
-なります（`--lint-cmd` が勝ちます。空にすれば外れます）。`--semantic-cmd` は要り
+なります（`--lint-cmd` が勝ちます。空にすれば外れます）。設定ファイル
+（`~/.config/akapen/config.toml`）の `lint_cmd` にも書けます（環境変数の方が勝ちます。
+[README の「設定ファイル」](../../README.ja.md#設定ファイル)）。`--semantic-cmd` は要り
 ません。
 
 `R` を押すと linter が走り、答えが揃うまで一覧のタイトルは `review · analyzing…`

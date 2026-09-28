@@ -60,6 +60,7 @@ ashiato . --open-cmd "akapen {} --send-agent"   # ファイルピッカー → �
 
 ```
 akapen <file...> [--send-cmd <cmd>] [--send-agent] [--reply] [--theme <name>] [--ime <off|ascii|jp>]
+                    [--theme-dark <name>] [--theme-light <name>]
                     [--light|--dark] [--callback <cmd>] [--esc-quit <auto|always|never>] [--no-fx]
 ```
 
@@ -79,15 +80,19 @@ akapen <file...> [--send-cmd <cmd>] [--send-agent] [--reply] [--theme <name>] [-
   過去世代を閲覧している間、枠の一周に滑らかなグラデーションの波が流れます。
   トーストもフェードイン/アウトします。どちらも tachyonfx によるエフェクトで、
   派手さが不要な場合は `--no-fx` で静止した紫枠 + 即時トースト（従来どおり）に戻ります
-- シンタックスハイライトは **two-face** のテーマ（`--theme` で切替、既定 `Catppuccin Mocha`。
-  light モード時は自動検出・`--light` とも `Solarized (light)`。`--theme` の名前が
-  解決できない場合も light/dark に合った既定へフォールバック）。`--theme` には two-face の組み込みテーマ名
-  （`Catppuccin Mocha`, `base16-ocean.dark`, `Dracula`, `Nord`, `Solarized (dark)` など 32 種）か
+- シンタックスハイライトは **two-face** のテーマで、**dark 用と light 用の 2 本**を持てます。
+  背景の判定（`--light` / `--dark`、無ければ OSC 11）が dark なら dark 用、light なら
+  light 用を使います。各側は **`--theme-dark` / `--theme-light` > [設定ファイル](#設定ファイル)の
+  `[theme]` > 既定**（dark は `Catppuccin Mocha`、light は `Solarized (light)`）。
+  `--theme` は**両側を上書き**し、どちらの背景でもそれを使います（`--theme-dark` /
+  `--theme-light` より強い）。名前が解決できない場合は、その側の既定へフォールバック。
+  テーマには two-face の組み込みテーマ名
+  （`Catppuccin Mocha`, `Catppuccin Latte`, `base16-ocean.dark`, `Dracula`, `Nord`, `Solarized (dark)` など 32 種）か
   **`.tmTheme` ファイルのパス**（例: tokyo-night.tmTheme）を渡せます。
   light/dark の UI 色は **OSC 11 でターミナル背景を自動検出**（`--light` / `--dark` で
   明示指定が最優先、応答しないターミナルは dark）
 
-view mode の色も**すべて `--theme` のテーマから解決**されます: 見出し・リンク・引用・
+view mode の色も**すべて選ばれたテーマから解決**されます: 見出し・リンク・引用・
 インラインコードはテーマの markdown スコープ色、コードブロックは同じテーマを
 .tmTheme に往復させて描画します。テーマに該当スコープの色定義が無い構文だけが
 ANSI パレットの既定色にフォールバックします。ソースモードと同じテーマなので、
@@ -151,6 +156,42 @@ ANSI パレットの既定色にフォールバックします。ソースモー
     （例: `no comments below`・`view mode unavailable`・送信失敗）。赤トーストのときは
     **BEL ビープ**（`\x07`）も鳴ります — vim と同じ端末標準の「無効操作」シグナルで、
     ベル無効化・visual bell 化はユーザーの端末設定に委ねられます
+
+## 設定ファイル
+
+`$XDG_CONFIG_HOME/akapen/config.toml`（無ければ `~/.config/akapen/config.toml`）。
+どのキーも省略でき、ファイルが無ければ今までと完全に同じ動作です。注釈つきの例は
+[`examples/config.toml`](examples/config.toml)。
+
+```toml
+semantic_cmd = "python3 /path/to/akapen/examples/semantic/jev-annotate.py"
+lint_cmd     = "python3 /path/to/akapen/examples/lint/textlint-diagnostics.py --config ~/.textlintrc"
+undercurl    = "auto"          # auto | on | off
+
+[theme]
+dark  = "Catppuccin Mocha"     # two-face の名前か .tmTheme のパス
+light = "Catppuccin Latte"
+```
+
+| キー | 対応するフラグ | 優先（左が勝つ） |
+|---|---|---|
+| `semantic_cmd` | `--semantic-cmd` | フラグ > `$AKAPEN_SEMANTIC_CMD` > 設定ファイル |
+| `lint_cmd` | `--lint-cmd` | フラグ > `$AKAPEN_LINT_CMD` > 設定ファイル |
+| `undercurl` | `--undercurl` | フラグ > `$AKAPEN_UNDERCURL` > 設定ファイル > `auto` |
+| `[theme] dark` | `--theme-dark` | `--theme` > `--theme-dark` > 設定ファイル > `Catppuccin Mocha` |
+| `[theme] light` | `--theme-light` | `--theme` > `--theme-light` > 設定ファイル > `Solarized (light)` |
+
+- `[theme]` の値が `~/` で始まれば展開します。`*_cmd` は書いたままシェルに渡ります
+  （シェルが展開する。環境変数と同じ扱い）
+- 空・空白だけの値は、書いていないのと同じです。環境変数が**設定されていれば**
+  （空でも）設定ファイルの値は見ないので、`AKAPEN_SEMANTIC_CMD= akapen doc.md` で
+  1 回だけ層を外す道は残ります
+- 設定ファイルの `semantic_cmd` は環境変数と同じ扱いです。`--semantic <fixture>` とは
+  衝突してエラーになり、そのときはファイルのパスを添えます
+- **知らないキー・型違い・`undercurl` の知らない値・壊れた構文は、起動時に止まります**
+  （ファイルのパスとキーを出す）。タイプミスを黙って無視しないためです。その代わり、
+  新しい akapen のキーを書いた設定を古い akapen が読むと起動しません。`--help` と
+  `--version` は設定ファイルを読みません
 
 ## インストール / ビルド
 
@@ -470,7 +511,8 @@ src/app.rs         — セッションとファイルごとの状態
 src/history.rs     — Git / LOCAL / NOW の統合タイムラインとブロック対応付け
 src/snapshot.rs    — 圧縮ローカルスナップショット、baseline、上限付きGC
 src/overlay.rs     — ファイル・コメント・ヘルプのオーバーレイ
-src/config.rs      — CLI 引数パース（位置引数=files, --send-cmd, --theme, --ime, --light|--dark, --callback, --esc-quit）
+src/config.rs      — CLI 引数パース（位置引数=files, --send-cmd, --theme, --theme-dark/--theme-light, --ime, --light|--dark, --callback, --esc-quit）と、環境変数・設定ファイルとの重ね合わせ
+src/config_file.rs — 設定ファイル（config.toml）の読み込みと、設定ディレクトリ（$XDG_CONFIG_HOME/akapen）の解決
 src/render.rs      — ネイティブ markdown レンダリング（tui-markdown → 表示行 + ソース行マッピング）
 src/view.rs        — 表示行の保持・スクロール・カーソル
 src/source.rs      — ファイル読込、行分割、行番号・幅計算（unicode-width）
