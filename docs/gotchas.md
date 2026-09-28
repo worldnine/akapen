@@ -73,6 +73,7 @@
 
 ### [端末とキー入力](gotchas/terminal-keys.md)
 
+- 入力は termtheme の読み手で読む — crossterm の `event::poll` / `event::read` / `cursor::position()` を足すと、配色の知らせで固まる
 - `f` はトグル。hold は試して捨てた — kitty protocol を有効にすると auto-repeat が `Repeat` kind になり、既存のキー経路が崩れた
 
 ### [公開リポジトリとしての約束](gotchas/public-repo.md)

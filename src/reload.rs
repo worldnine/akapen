@@ -160,6 +160,11 @@ pub(crate) fn open_editor_at(app: &mut App, terminal: &mut AppTerminal, line: us
     // touch mouse capture. Drop the capture first, or every mouse move
     // while the editor runs is injected into its stdin as SGR escape
     // bytes (vim's cursor jumps around, nano renders garbage).
+    //
+    // 配色の知らせの購読も外す。立てたまま渡すと、エディタのあいだに外観が
+    // 切り替わったとき、知らせ（`CSI ? 997 ; 1 n`）がエディタの入力に入る
+    // （crossterm で読むエディタや akapen ならそこで止まる）。
+    crate::unsubscribe_color_scheme();
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
@@ -184,6 +189,9 @@ pub(crate) fn open_editor_at(app: &mut App, terminal: &mut AppTerminal, line: us
         Err(e) => init_error = Some(e),
     }
     let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture, Hide);
+    // 購読を張り直し、今の配色も聞く — エディタのあいだの切り替えは知らせが
+    // 来ないので、答え（知らせと同じ形）で拾う。答えはイベントループが読む。
+    crate::subscribe_color_scheme(app.follows_color_scheme(), true);
 
     if let Some(e) = init_error {
         app.flash_err(format!("terminal re-init failed: {e}"));
@@ -531,7 +539,7 @@ mod handoff_tests {
             send_cmd: None,
             send_agent: false,
             reply: false,
-            theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
+            theme: crate::config::ThemePair::both("base16-ocean.dark"),
             ime: ImeMode::Off,
             light: None,
             callback: None,
@@ -597,7 +605,7 @@ mod handoff_tests {
             send_cmd: None,
             send_agent: false,
             reply,
-            theme: crate::config::SyntaxThemes::both("base16-ocean.dark"),
+            theme: crate::config::ThemePair::both("base16-ocean.dark"),
             ime: ImeMode::Off,
             light: None,
             callback: None,

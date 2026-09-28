@@ -135,6 +135,18 @@ vim の IM 制御と同じ思想: コマンドモードは常に ASCII、compose
   （実測: 120 連続ホイールイベントで 58.2 秒 → 0.58 秒に改善した経緯がある）。
 - 再発時の切り分け: 「ゆっくりでも最終的に追いつく」= 配信遅延 /
   「永遠に追いつかない」= イベント消失。
+- **入力は termtheme の読み手（`termtheme::input::poll` / `read`）だけで読む。**
+  crossterm の `event::poll` / `event::read`・`cursor::position()`（ratatui の
+  `Terminal::clear()` がこれを呼ぶ）を 1 か所でも足すと、読み手が 2 つになって端末を
+  取り合い、配色の知らせ（モード 2031）を crossterm が読んだところで止まる
+  （`docs/gotchas/terminal-keys.md`）。`NoBlinkBackend::get_cursor_position` は置いた
+  位置を返し、端末に聞かない。
+- **配色の知らせの購読**（`subscribe_color_scheme` / `unsubscribe_color_scheme`）は、
+  外すのが終わるとき（`TerminalGuard` の Drop。panic の unwind も通る）とエディタに
+  端末を渡すとき、張り直すのがエディタから戻ったとき（今の配色も問い合わせる）。
+  `--light` / `--dark` では頼まない。知らせを受けたら `App::follow_color_scheme` が
+  `light` から導いたもの（テーマの側・混ぜた色・UI の色・描画済みの行・色を抱えた
+  演出）を作り直す。裏のファイルは `FileState::theme_stale` で開くときに塗り直す。
 
 ## 出力形式
 

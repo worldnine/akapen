@@ -34,7 +34,7 @@ agent が書く → 読む → 印をつける → s で送る → agent が直�
 - **どこにでもコメント**: `v` で選択、`c` でコメント。コメントは参照行の直下にインラインカードとして残る
 - **リプライモード**: `--reply` で akapen はエージェントの*会話出力*（ファイルに触れず貼られたコード例示・markdown）への即席赤ペンになる
 - **常にセッションモード**: 1 ファイルでも 20 ファイルでも同じキーバインド。`]`/`[` で切替、カーソル・選択・モードはファイルごとに保持
-- **ターミナルネイティブ**: ANSI パレット追従、two-face テーマ（組み込み32種または任意の `.tmTheme`）、OSC 11 で light/dark 自動検出、`unicode-width` による CJK 対応
+- **ターミナルネイティブ**: ANSI パレット追従、two-face テーマ（組み込み32種または任意の `.tmTheme`）、OSC 11 で light/dark 自動検出（開いたまま端末が切り替わっても追従、モード 2031）、`unicode-width` による CJK 対応
 
 ## 試す
 
@@ -91,6 +91,11 @@ akapen <file...> [--send-cmd <cmd>] [--send-agent] [--reply] [--theme <name>] [-
   **`.tmTheme` ファイルのパス**（例: tokyo-night.tmTheme）を渡せます。
   light/dark の UI 色は **OSC 11 でターミナル背景を自動検出**（`--light` / `--dark` で
   明示指定が最優先、応答しないターミナルは dark）
+- **開いたままの切り替えに追従**: `--light` / `--dark` を付けなければ、端末の配色の知らせ
+  （モード 2031）を購読します。開いているあいだに端末がライト／ダークを切り替えると
+  （macOS の外観の切り替えを知らせる端末やマルチプレクサの中で）、テーマの側・UI の色・
+  描画済みの行がそろって切り替わります。2031 を知らない端末では何も起きません（知らせが
+  来ないだけ）。エディタ（`e`）に端末を渡すあいだと終わるときは購読を外します
 
 view mode の色も**すべて選ばれたテーマから解決**されます: 見出し・リンク・引用・
 インラインコードはテーマの markdown スコープ色、コードブロックは同じテーマを
@@ -516,8 +521,7 @@ src/config_file.rs — 設定ファイル（config.toml）の読み込みと、�
 src/render.rs      — ネイティブ markdown レンダリング（tui-markdown → 表示行 + ソース行マッピング）
 src/view.rs        — 表示行の保持・スクロール・カーソル
 src/source.rs      — ファイル読込、行分割、行番号・幅計算（unicode-width）
-src/theme.rs       — OSC 11 背景色検出（ashiato の src/theme.rs とミラー）
-src/highlight.rs   — syntect による行ハイライト（拡張子から文法を選択、reviewr から移植）
+src/highlight.rs   — syntect による行ハイライト（拡張子から文法を選択、reviewr から移植）。テーマの解決・背景の判定（OSC 11）・配色の知らせ（モード 2031）・入力の読み手・[theme] の型は termtheme クレート
 src/comment.rs     — Comment 構造体、選択状態、コメント追加/削除/再編集、location()
 src/export.rs      — 出力ブロック整形 + クリップボード + send-cmd 送信
 src/ime.rs         — macOS 入力ソース制御（Swift ヘルパ）

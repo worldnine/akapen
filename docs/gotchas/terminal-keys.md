@@ -5,6 +5,38 @@
 
 ---
 
+### 入力は termtheme の読み手で読む — crossterm の `event::poll` / `event::read` / `cursor::position()` を足すと、配色の知らせで固まる
+
+akapen は `--light` / `--dark` が無ければ、端末に配色の知らせ（モード 2031、
+`CSI ? 2031 h`）を頼んでいます。知らせ（`CSI ? 997 ; 1 n` / `; 2 n`）を読むのは
+**termtheme の読み手（`termtheme::input::poll` / `read`）だけ**です。
+
+crossterm 0.29 の読み手は `CSI ?` で始まる列を `u` か `c` でしか閉じないので、
+知らせを受けると**後ろの入力を全部飲み込み、`event::poll(timeout)` も戻らず**、
+イベントループごと止まります。herdr は `CSI ? 996 n`（今の配色の問い合わせ）に
+即答するので、crossterm で読むものを 1 か所でも足すと、エディタから戻った
+直後（問い合わせを送る）に固まります。読み手が 2 つになると端末を取り合う
+ので、キーが消える形でも出ます。
+
+- crossterm の `event::poll` / `event::read` を使わない
+- `crossterm::cursor::position()` も crossterm の読み手を動かす。ratatui の
+  `Terminal::clear()` がこれを呼ぶ（全画面で消し直したいなら
+  `terminal.resize(area)`）。`NoBlinkBackend::get_cursor_position` は置いた
+  位置を返し、端末に聞かない
+- **端末を手放す前に購読を外す**（`unsubscribe_color_scheme`）。終わるとき
+  （`TerminalGuard` の Drop。panic の unwind も通る）とエディタに渡すとき。
+  外し忘れると、次に端末を使うもの（シェル、`--callback` で開く akapen）に
+  知らせが届く。戻ったら張り直し、今の配色も聞く（`subscribe_color_scheme`
+  の `query`）
+
+**確認したこと**: `git grep -n 'event::poll\|event::read\|cursor::position\|terminal.clear'`
+が `src/` でコメントにしか当たらないこと。2026-09-28、herdr 0.9.1 のペインで
+`script(1)` の下に akapen を開き、エディタ（`e`）を往復して `q` で終えた記録に、
+起動の `2031 h`（`996 n` は無い）→ エディタの前の `2031 l` → 戻った後の
+`2031 h` と `996 n` → 終わるときの `2031 l` がこの順で出ていること。`--dark`
+では `2031 h` が 1 度も出ないこと。知らせの作り直しのテストは
+`src/color_scheme_tests.rs`。
+
 ### `f` はトグル。hold は 2026-09-22 に試して捨てた — kitty protocol を有効にすると auto-repeat が `Repeat` kind になり、既存のキー経路が崩れた
 
 **akapen は kitty keyboard protocol を有効にしていません**（`f` はトグルで、

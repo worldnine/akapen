@@ -13,8 +13,9 @@
 # --undercurl の既定（AKAPEN_UNDERCURL が無いときに使う）。auto | on | off
 # undercurl = "auto"
 
-# シンタックスハイライトのテーマ。端末の背景（--light / --dark か OSC 11 の判定）が
-# dark なら dark を、light なら light を使う。two-face の組み込みテーマ名か、
+# シンタックスハイライトのテーマ。端末の背景（--light / --dark か、起動時の OSC 11 の
+# 判定と、開いているあいだのモード 2031 の知らせ）が dark なら dark を、light なら
+# light を使う。two-face の組み込みテーマ名か、
 # .tmTheme ファイルのパス（~/ で始まれば展開する）。
 # --theme-dark / --theme-light が各側を、--theme が両側を上書きする。
 [theme]

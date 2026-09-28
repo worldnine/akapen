@@ -34,7 +34,7 @@ Prefer an older version of a section? Walk back, comment — *"this draft was be
 - **Comment anywhere**: `v` to select, `c` to comment; comments appear as inline cards right under the lines they refer to.
 - **Reply mode**: `--reply` turns akapen into a red pen for the agent's *chat output* — the code examples and markdown it pasted into the conversation, which never touched a file.
 - **Session mode, always**: one file or twenty, `]`/`[` to switch; cursor, selection, and mode are remembered per file.
-- **Terminal-native**: plain ANSI chrome that follows your palette, two-face syntax themes (32 built-ins or any `.tmTheme`, one for light and one for dark), light/dark auto-detect via OSC 11, CJK-correct width math.
+- **Terminal-native**: plain ANSI chrome that follows your palette, two-face syntax themes (32 built-ins or any `.tmTheme`, one for light and one for dark), light/dark auto-detect via OSC 11 that keeps up when the terminal switches while akapen is open (mode 2031), CJK-correct width math.
 
 ## Try it
 
@@ -80,12 +80,12 @@ akapen <file...> [--send-cmd <cmd> | --send-agent] [--reply] [--theme <name>]
 | `--theme-dark <name>` | the theme on a dark background (default `Catppuccin Mocha`) |
 | `--theme-light <name>` | the theme on a light background (default `Solarized (light)`) |
 | `--ime <off\|ascii\|jp>` | macOS input-source control around the comment composer (default `ascii`) |
-| `--light` / `--dark` | force the UI palette (default: auto-detect the terminal background via OSC 11) |
+| `--light` / `--dark` | force the UI palette (default: auto-detect the terminal background via OSC 11, and follow the terminal's light/dark switches while open) |
 | `--no-fx` | disable the tachyonfx animations: the rotating purple→cyan gradient frame while browsing the past, and the toast fade-in/out (the static history border color and instant toasts stay) |
 | `--callback <cmd>` | shell command spawned on exit (e.g. return to a file picker) |
 | `--esc-quit <auto\|always\|never>` | whether `Esc` may quit (default `auto`: only with `--callback`; `always` = unconditionally, `never` = Esc stays a pure cancel) |
 
-Which side applies follows the light/dark decision (`--light` / `--dark`, else OSC 11). A name that doesn't resolve falls back to that side's default. Both sides can also live in the [config file](#config-file).
+Which side applies follows the light/dark decision (`--light` / `--dark`, else OSC 11 at startup). Without `--light` / `--dark`, akapen subscribes to the terminal's color-scheme notifications (mode 2031): when the terminal flips between light and dark while akapen is open (e.g. macOS switching its appearance, in a terminal or multiplexer that reports it), the theme side, the UI colors and the rendered lines all switch with it. Terminals that don't know mode 2031 simply never notify. A name that doesn't resolve falls back to that side's default. Both sides can also live in the [config file](#config-file).
 
 Typical loop with a picker (see the companion tool [ashiato](https://github.com/worldnine/ashiato), an mtime-sorted file picker):
 
