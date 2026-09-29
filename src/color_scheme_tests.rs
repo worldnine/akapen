@@ -257,3 +257,87 @@ fn the_session_backend_never_asks_the_terminal_where_the_cursor_is() {
     backend.set_cursor_position((7, 3)).unwrap();
     assert_eq!(backend.get_cursor_position().unwrap(), ratatui::layout::Position::new(7, 3));
 }
+
+/// 購読が書いた列を後で見る書き先（`Subscription::with_writer` に渡す）。
+#[derive(Clone, Default)]
+struct Written(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Written {
+    /// 前に取り出してから書かれた分。
+    fn take(&self) -> String {
+        String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
+    }
+}
+
+impl std::io::Write for Written {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn following_subscribes_once_and_hands_the_terminal_to_the_editor_and_back() {
+    // `run()` → エディタ（`open_editor_at` の suspend / resume）→ 終わり
+    // （`run()` の stop）で端末へ書く列。起動時は今の配色を聞かない。
+    let (mut app, _dir) = session(pair(), None, false);
+    let written = Written::default();
+    start_following_color_scheme(
+        &mut app,
+        termtheme::scheme::Subscription::with_writer(written.clone()),
+    );
+    assert_eq!(written.take(), "\x1b[?2031h");
+    app.scheme.suspend().unwrap();
+    assert_eq!(written.take(), "\x1b[?2031l", "エディタの前に外す");
+    app.scheme.resume().unwrap();
+    assert_eq!(written.take(), "\x1b[?2031h\x1b[?996n", "戻ったら張り直して聞く");
+    app.scheme.stop().unwrap();
+    assert_eq!(written.take(), "\x1b[?2031l", "終わるときに外す");
+    drop(app);
+    assert_eq!(written.take(), "", "外した後の Drop は書かない");
+}
+
+#[test]
+fn an_app_that_is_dropped_while_subscribed_unsubscribes() {
+    // 早い戻りと panic の unwind: `run()` の stop を通らずに `App` が落ちる。
+    let (mut app, _dir) = session(pair(), None, true);
+    let written = Written::default();
+    start_following_color_scheme(
+        &mut app,
+        termtheme::scheme::Subscription::with_writer(written.clone()),
+    );
+    written.take();
+    drop(app);
+    assert_eq!(written.take(), "\x1b[?2031l");
+}
+
+#[test]
+fn light_and_dark_flags_never_subscribe() {
+    // `--light` / `--dark`: 張らないので、エディタの前後も終わるときも書かない。
+    for fixed in [false, true] {
+        let (mut app, _dir) = session(pair(), Some(fixed), fixed);
+        let written = Written::default();
+        start_following_color_scheme(
+            &mut app,
+            termtheme::scheme::Subscription::with_writer(written.clone()),
+        );
+        app.scheme.suspend().unwrap();
+        app.scheme.resume().unwrap();
+        app.scheme.stop().unwrap();
+        assert!(!app.scheme.is_subscribed());
+        drop(app);
+        assert_eq!(written.take(), "", "--{}", if fixed { "light" } else { "dark" });
+    }
+}
+
+#[test]
+fn an_app_built_outside_run_does_not_touch_the_terminal() {
+    // テストや TUI を立てない道の `App` は、購読が何もしない形のまま。
+    let (app, _dir) = session(pair(), None, false);
+    assert!(!app.scheme.is_subscribed());
+    assert!(format!("{:?}", app.scheme).contains("\"fixed\""));
+}

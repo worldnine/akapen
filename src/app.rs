@@ -496,6 +496,14 @@ pub(crate) struct App {
     /// effects created after startup (the generation warp picks its ring
     /// colors at flight time) and draw-time colors (the tooltip band).
     pub(crate) ui_light: bool,
+    /// 配色の知らせ（モード 2031）の購読。`run()` が固定でなければ stdout へ
+    /// 張り（[`crate::start_following_color_scheme`]）、エディタに端末を渡す
+    /// あいだは外し（[`crate::reload::open_editor_at`] の `suspend` / `resume`）、
+    /// 終わるときに外す（`run()` の `stop`。早い戻りと panic の unwind では
+    /// `App` の Drop — `App` は `TerminalGuard` より後に作るので、先に落ちて
+    /// 端末の戻しより前に外れる）。**作った時点は `Subscription::fixed()`** —
+    /// テストや TUI を立てない道は端末に 1 バイトも書かない。
+    pub(crate) scheme: termtheme::scheme::Subscription,
     /// Active scrollbar drag: `(start track row, start scroll offset)` —
     /// set on a thumb press, cleared on release (viewport-only scroll, so
     /// the cursor keeps its absolute position).
@@ -796,6 +804,7 @@ impl App {
             ui_landing_pulse: Color::Reset,
             ui_scrollbar: Color::Reset,
             ui_light: light,
+            scheme: termtheme::scheme::Subscription::fixed(),
             scrollbar_drag: None,
             semantic_source: None,
             semantic_doc: None,
