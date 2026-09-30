@@ -141,10 +141,12 @@ vim の IM 制御と同じ思想: コマンドモードは常に ASCII、compose
   取り合い、配色の知らせ（モード 2031）を crossterm が読んだところで止まる
   （`docs/gotchas/terminal-keys.md`）。`NoBlinkBackend::get_cursor_position` は置いた
   位置を返し、端末に聞かない。
-- **配色の知らせの購読**（`subscribe_color_scheme` / `unsubscribe_color_scheme`）は、
-  外すのが終わるとき（`TerminalGuard` の Drop。panic の unwind も通る）とエディタに
-  端末を渡すとき、張り直すのがエディタから戻ったとき（今の配色も問い合わせる）。
-  `--light` / `--dark` では頼まない。知らせを受けたら `App::follow_color_scheme` が
+- **配色の知らせの購読**（termtheme の `scheme::Subscription`、`App::scheme`）は、
+  外すのが終わるとき（`run()` の `stop`。`--callback` より前。早い戻りと panic の
+  unwind では `App` の Drop）・エディタに端末を渡すとき（`suspend`）・SIGTERM と
+  SIGINT で殺されたとき（`unsubscribe_and_die`）、張り直すのがエディタから戻った
+  とき（`resume`。今の配色も問い合わせる）。`--light` / `--dark` では頼まない
+  （`Subscription::fixed()` のまま、どこでも何も書かない）。知らせを受けたら `App::follow_color_scheme` が
   `light` から導いたもの（テーマの側・混ぜた色・UI の色・描画済みの行・色を抱えた
   演出）を作り直す。裏のファイルは `FileState::theme_stale` で開くときに塗り直す。
 

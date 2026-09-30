@@ -163,8 +163,9 @@ pub(crate) fn open_editor_at(app: &mut App, terminal: &mut AppTerminal, line: us
     //
     // 配色の知らせの購読も外す。立てたまま渡すと、エディタのあいだに外観が
     // 切り替わったとき、知らせ（`CSI ? 997 ; 1 n`）がエディタの入力に入る
-    // （crossterm で読むエディタや akapen ならそこで止まる）。
-    crate::unsubscribe_color_scheme();
+    // （crossterm で読むエディタや akapen ならそこで止まる）。`resume` まで
+    // 購読は何も書かない（シグナルで死んでも、端末はエディタのもの）。
+    let _ = app.scheme.suspend();
     let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
@@ -191,7 +192,8 @@ pub(crate) fn open_editor_at(app: &mut App, terminal: &mut AppTerminal, line: us
     let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture, Hide);
     // 購読を張り直し、今の配色も聞く — エディタのあいだの切り替えは知らせが
     // 来ないので、答え（知らせと同じ形）で拾う。答えはイベントループが読む。
-    crate::subscribe_color_scheme(app.follows_color_scheme(), true);
+    // 固定（`--light` / `--dark`）なら何も書かない。
+    let _ = app.scheme.resume();
 
     if let Some(e) = init_error {
         app.flash_err(format!("terminal re-init failed: {e}"));

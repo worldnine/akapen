@@ -65,7 +65,6 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use tachyonfx::EffectRenderer;
 use termtheme::input::{self, Input};
-use termtheme::scheme::{DisableColorSchemeUpdates, EnableColorSchemeUpdates, QueryColorScheme};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::*;
@@ -314,23 +313,22 @@ fn rebind_to_controlling_pty() -> bool {
     false
 }
 
-/// Restores the terminal on drop: the color-scheme subscription, cursor,
-/// mouse capture, raw mode, and alternate screen. `run()` creates it
-/// immediately after the no-blink terminal init, so every early error
-/// return (a failed `terminal.size()`, an I/O error in `event_loop`) and a
-/// panic (the unwind drops it) still leave the shell usable. ratatui
-/// 0.30's `Terminal` has no Drop-based restore and the panic hook only
-/// fires on panics, so a plain `?` would otherwise exit the process with
-/// the terminal stuck in raw mode and echo off.
+/// Restores the terminal on drop: cursor, mouse capture, raw mode, and
+/// alternate screen. `run()` creates it immediately after the no-blink
+/// terminal init, so every early error return (a failed `terminal.size()`,
+/// an I/O error in `event_loop`) and a panic (the unwind drops it) still
+/// leave the shell usable. ratatui 0.30's `Terminal` has no Drop-based
+/// restore and the panic hook only fires on panics, so a plain `?` would
+/// otherwise exit the process with the terminal stuck in raw mode and echo
+/// off.
+///
+/// 配色の知らせの購読（[`App::scheme`]）はここでは外さない — 外すのは
+/// `run()` の `stop`（早い戻りと panic の unwind では、この guard より後に
+/// 作る `App` が先に落ちて外す）。どの道でも**購読が先、端末の戻しが後**。
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        // **購読を先に外す。** 購読は端末の状態で、プロセスが終わっても残る —
-        // 外さずに終わると、次に端末を使うもの（シェル、`--callback` で開く
-        // ashiato や akapen）に配色の知らせが届き、crossterm で読むものは
-        // そこで止まる（[`termtheme::scheme`]）。
-        unsubscribe_color_scheme();
         let _ = execute!(std::io::stdout(), Show);
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         ratatui::restore();
@@ -339,32 +337,61 @@ impl Drop for TerminalGuard {
 
 /// 端末に配色の知らせ（モード 2031、[`termtheme::scheme`]）を頼む。知らせは
 /// イベントループの読み手が [`Input::ColorScheme`] として受け取り、
-/// [`App::follow_color_scheme`] が `light` から導いたものを作り直す。
+/// [`App::follow_color_scheme`] が `light` から導いたものを作り直す。`out` は
+/// 書き先（`run()` は `Subscription::stdout()`、テストは書いた列を見る書き先）。
 ///
 /// **`--light` / `--dark` で固定しているときは頼まない**（固定は固定。知らせを
-/// 受けても使わない）。`query` は今の配色も聞く — 子プロセス（エディタ）から
-/// 戻ったときに、離れていたあいだの切り替えを拾う。起動時は聞かない（起動時の
-/// 判定は OSC 11 のまま）。2031 を知らない端末はどちらも黙って捨てる。
+/// 受けても使わない）— [`App::scheme`] は `Subscription::fixed()` のままで、
+/// エディタの前後も終わるときも何も書かない。起動時は今の配色を聞かない
+/// （起動時の判定は OSC 11 のまま）。2031 を知らない端末は黙って捨てる。
 ///
 /// **読み手は crossterm であってはならない。** crossterm 0.29 は知らせの後ろの
 /// 入力を飲み込み、`event::poll` ごと止まる（herdr は `CSI ? 996 n` に即答する
 /// ので、crossterm で読んだまま頼むと起動直後に固まる）。
-pub(crate) fn subscribe_color_scheme(follow: bool, query: bool) {
-    if !follow {
+pub(crate) fn start_following_color_scheme(app: &mut App, out: termtheme::scheme::Subscription) {
+    if !app.follows_color_scheme() {
         return;
     }
-    let _ = execute!(std::io::stdout(), EnableColorSchemeUpdates);
-    if query {
-        let _ = execute!(std::io::stdout(), QueryColorScheme);
+    app.scheme = out;
+    let _ = app.scheme.start();
+}
+
+/// SIGTERM・SIGINT で殺されたとき: 配色の知らせの購読を外してから、既定の
+/// 扱いで投げ直す（シェルが見る終わり方 128 + signum のまま死ぬ）。
+///
+/// ハンドラの中では `Drop` が走らないので、[`App::scheme`] は外れない —
+/// 外さずに死ぬと、次に端末を使うもの（シェル、そこで開く akapen や
+/// ashiato）に知らせが届き、crossterm で読むものはそこで止まる。
+/// **async-signal-safe なことだけをする**: 外すのは
+/// [`termtheme::scheme::unsubscribe_in_signal_handler`]（張っているときだけ
+/// `write(2)` 1 回。エディタに端末を渡しているあいだは何もしない）。
+/// 端末のほかの戻し（代替画面・マウス・raw モード）はしない — 入れる前と
+/// 同じく、殺されたときは戻らない。raw モードでは Ctrl+C はキーとして届く
+/// ので、ここへ来るのは外から送られたときだけ。
+extern "C" fn unsubscribe_and_die(sig: libc::c_int) {
+    termtheme::scheme::unsubscribe_in_signal_handler();
+    // SAFETY: 既定の扱いに戻して投げ直す。どちらも async-signal-safe。
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
     }
 }
 
-/// 配色の知らせの購読を外す。**端末を手放す前に必ず呼ぶ** — 終わるとき
-/// （[`TerminalGuard`]、panic の unwind もここを通る）と、子プロセスに端末を
-/// 渡すとき（[`crate::reload::open_editor_at`]）。頼んでいなくても送ってよい
-/// （知らない・立っていないモードを下ろすだけ）。
-pub(crate) fn unsubscribe_color_scheme() {
-    let _ = execute!(std::io::stdout(), DisableColorSchemeUpdates);
+/// [`unsubscribe_and_die`] を SIGTERM・SIGINT に入れる。**無視されている
+/// シグナルは無視のまま**にする（`sh -c 'akapen … &'` の SIGINT のように、
+/// 親が無視させたものを、死ぬシグナルに変えない）。子（エディタ）は exec で
+/// 既定の扱いに戻るので、ハンドラを受け継がない。
+fn install_signal_handlers() {
+    let handler: extern "C" fn(libc::c_int) = unsubscribe_and_die;
+    for sig in [libc::SIGTERM, libc::SIGINT] {
+        // SAFETY: `unsubscribe_and_die` はハンドラとして正しい形で、
+        // async-signal-safe なことだけをする。
+        unsafe {
+            if libc::signal(sig, handler as libc::sighandler_t) == libc::SIG_IGN {
+                libc::signal(sig, libc::SIG_IGN);
+            }
+        }
+    }
 }
 
 /// Move the first file's per-file state into the live App fields —
@@ -559,7 +586,7 @@ fn run(config: Config) -> Result<()> {
     // to the input reader, not dropped; an answer later than the wait
     // arrives there as `Input::Background` and is followed like a
     // color-scheme notification. While open, mode 2031 notifications
-    // re-decide it (`subscribe_color_scheme` below).
+    // re-decide it (`start_following_color_scheme` below).
     let light = config
         .light
         .unwrap_or_else(|| termtheme::background::detect_light().unwrap_or(false));
@@ -666,16 +693,23 @@ fn run(config: Config) -> Result<()> {
     let _ = execute!(std::io::stdout(), Hide);
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     // 開いたまま外観（ライト／ダーク）が切り替わっても追いつくように、配色の
-    // 知らせを頼む。外すのは `terminal_guard` の Drop とエディタの前。
-    subscribe_color_scheme(app.follows_color_scheme(), false);
+    // 知らせを頼む。外すのはエディタの前と、下の `stop`（早い戻り・panic では
+    // `app` の Drop）、殺されたときはシグナルハンドラ。ハンドラは張る前に入れる。
+    install_signal_handlers();
+    start_following_color_scheme(&mut app, termtheme::scheme::Subscription::stdout());
     // **kitty keyboard protocol は押さない。** 押すと端末の auto-repeat が
     // `KeyEventKind::Repeat` に変わり、矢印の押しっぱなしが効かなくなる
     // （`docs/gotchas/terminal-keys.md`）。`f` はトグルなので要らない。
     let res = event_loop(&mut terminal, &mut app);
-    // The guard's Drop performs the whole shutdown (cursor, mouse capture,
-    // raw mode, alternate screen). Drop it explicitly BEFORE spawning the
-    // callback so the callback inherits a clean terminal; on early error
-    // returns the same Drop runs at scope exit instead.
+    // **購読を先に外す。** 購読は端末の状態で、プロセスが終わっても残る —
+    // `app` はまだ生きている（callback が `app.config` を読む）ので、外さずに
+    // callback を起こすと、そこで開く ashiato や akapen に配色の知らせが届き、
+    // crossterm で読むものはそこで止まる（[`termtheme::scheme`]）。
+    let _ = app.scheme.stop();
+    // The guard's Drop performs the rest of the shutdown (cursor, mouse
+    // capture, raw mode, alternate screen). Drop it explicitly BEFORE
+    // spawning the callback so the callback inherits a clean terminal; on
+    // early error returns the same Drop runs at scope exit instead.
     drop(terminal_guard);
     if let Some(cmd) = &app.config.callback {
         let _ = Command::new("sh").arg("-c").arg(cmd).spawn();
